@@ -160,6 +160,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
 
     return AgentInfo(
         name=name,
+        name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description"),
         description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
         prompt=agent_data.get("prompt"),
@@ -873,8 +874,6 @@ def _build_base_permissions(user_perms, cli_overrides):
             f"{Truncate.GLOB}": "allow",
         },
         "question": "deny",
-        "plan_enter": "deny",
-        "plan_exit": "deny",
         "read": {
             "*": "allow",
             "*.env": "ask",

@@ -38,6 +38,8 @@
   },
   "form": {
     "name": "Name",
+    "nameCn": "Chinese Name",
+    "nameCnPlaceholder": "Chinese display name",
     "description": "Description (English)",
     "descriptionHint": "Used for delegation and model context; English by convention",
     "descriptionPlaceholder": "Short English description for delegation",

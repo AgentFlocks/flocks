@@ -54,7 +54,7 @@ TODO_ITEM_JSON_SCHEMA: Dict[str, Any] = {
 }
 
 
-TODOWRITE_DESCRIPTION = """Use this tool to create and manage a structured task list for your current SecOps session. This helps track progress, organize complex tasks, and demonstrate thoroughness.
+TODO_DESCRIPTION = """Use this tool to read or manage a structured task list for your current SecOps session. This helps track progress, organize complex tasks, and demonstrate thoroughness.
 
 When to Use This Tool:
 1. Complex multi-step tasks (3+ distinct steps)
@@ -79,8 +79,14 @@ Usage:
 - Mark complete IMMEDIATELY after finishing
 - Only ONE task in_progress at a time
 
-Valid input example:
+Read example:
 {
+  "action": "read"
+}
+
+Write example:
+{
+  "action": "write",
   "todos": [
     {"id": "investigate", "content": "Investigate the alert", "activeForm": "Investigating the alert", "status": "in_progress"},
     {"id": "verify", "content": "Verify the fix", "status": "pending"}
@@ -89,13 +95,9 @@ Valid input example:
 
 Invalid input example:
 {
+  "action": "write",
   "todos": ["1. Investigate the alert", "2. Verify the fix"]
 }"""
-
-
-TODOREAD_DESCRIPTION = """Use this tool to read your current todo list.
-
-Returns the current state of all todo items for this session."""
 
 
 def _validation_error_message(index: int, error: ValidationError) -> str:
@@ -156,15 +158,22 @@ def _verification_nudge_needed(todos: List[TodoInfo]) -> bool:
 
 
 @ToolRegistry.register_function(
-    name="todowrite",
-    description=TODOWRITE_DESCRIPTION,
+    name="todo",
+    description=TODO_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
+            name="action",
+            type=ParameterType.STRING,
+            description="Action to perform: read current todos or write the full todo list",
+            required=True,
+            enum=["read", "write"],
+        ),
+        ToolParameter(
             name="todos",
             type=ParameterType.ARRAY,
-            description="Array of todo items with id, content, and status fields",
-            required=True,
+            description="For action=write: array of todo items with id, content, and status fields",
+            required=False,
             json_schema={
                 "type": "array",
                 "items": TODO_ITEM_JSON_SCHEMA,
@@ -173,28 +182,58 @@ def _verification_nudge_needed(todos: List[TodoInfo]) -> bool:
         ),
     ]
 )
-async def todowrite_tool(
+async def todo_tool(
     ctx: ToolContext,
-    todos: List[Dict[str, Any]],
+    action: str,
+    todos: List[Dict[str, Any]] | None = None,
 ) -> ToolResult:
     """
-    Update the todo list
+    Read or update the todo list.
     
     Args:
         ctx: Tool context
-        todos: List of todo items
+        action: read or write
+        todos: List of todo items for write
         
     Returns:
-        ToolResult with updated todos
+        ToolResult with current or updated todos
     """
-    # Request permission
     await ctx.ask(
-        permission="todowrite",
+        permission="todo",
         patterns=["*"],
         always=["*"],
         metadata={}
     )
-    
+
+    if action == "read":
+        current_todos = await Todo.get(ctx.session_id)
+        serialized_todos = _serialize_todos(current_todos)
+        pending_count = sum(
+            1 for todo in current_todos if todo.status in ACTIVE_TODO_STATUSES
+        )
+
+        return ToolResult(
+            success=True,
+            output=json.dumps(serialized_todos, ensure_ascii=False, indent=2),
+            title=f"{pending_count} todos",
+            metadata={
+                "action": "read",
+                "todos": serialized_todos
+            }
+        )
+
+    if action != "write":
+        return ToolResult(
+            success=False,
+            error=f"Unsupported todo action: {action!r}. Expected 'read' or 'write'.",
+        )
+
+    if todos is None:
+        return ToolResult(
+            success=False,
+            error="todos is required when action='write'",
+        )
+
     old_todos = await Todo.get(ctx.session_id)
     normalized_todos = _normalize_todos(todos)
     if _all_terminal(normalized_todos):
@@ -219,49 +258,10 @@ async def todowrite_tool(
         output=json.dumps(output_payload, ensure_ascii=False, indent=2),
         title=f"{pending_count} todos",
         metadata={
+            "action": "write",
             "todos": new_serialized,
             "oldTodos": old_serialized,
             "newTodos": new_serialized,
             "verificationNudgeNeeded": verification_nudge_needed,
-        }
-    )
-
-
-@ToolRegistry.register_function(
-    name="todoread",
-    description=TODOREAD_DESCRIPTION,
-    category=ToolCategory.SYSTEM,
-    parameters=[]
-)
-async def todoread_tool(
-    ctx: ToolContext,
-) -> ToolResult:
-    """
-    Read the current todo list
-    
-    Args:
-        ctx: Tool context
-        
-    Returns:
-        ToolResult with current todos
-    """
-    # Request permission
-    await ctx.ask(
-        permission="todoread",
-        patterns=["*"],
-        always=["*"],
-        metadata={}
-    )
-    
-    todos = await Todo.get(ctx.session_id)
-    serialized_todos = _serialize_todos(todos)
-    pending_count = sum(1 for todo in todos if todo.status in ACTIVE_TODO_STATUSES)
-    
-    return ToolResult(
-        success=True,
-        output=json.dumps(serialized_todos, ensure_ascii=False, indent=2),
-        title=f"{pending_count} todos",
-        metadata={
-            "todos": serialized_todos
         }
     )

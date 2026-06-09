@@ -1,4 +1,5 @@
 name: rex
+name_cn: Rex 主智能体
 description: >-
   Powerful AI orchestrator for security operations. Analyzes threats,
   plans strategically, and delegates to specialized agents.

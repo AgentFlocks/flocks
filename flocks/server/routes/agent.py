@@ -61,6 +61,7 @@ class AgentResponse(BaseModel):
     Includes required 'permission' and 'options' fields.
     """
     name: str
+    nameCn: Optional[str] = None
     description: Optional[str] = None
     descriptionCn: Optional[str] = None
     mode: str = "primary"
@@ -114,6 +115,7 @@ def agent_to_response(
 
     return AgentResponse(
         name=agent.name,
+        nameCn=agent.name_cn,
         description=agent.description,
         descriptionCn=agent.description_cn,
         mode=agent.mode,
@@ -146,6 +148,7 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         delegatable = mode != "primary"
     return AgentInfoModel(
         name=agent_data["name"],
+        name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description") or "",
         description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
         prompt=agent_data.get("prompt") or "",
@@ -172,6 +175,7 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
         delegatable = mode != "primary"
     return AgentResponse(
         name=agent_data["name"],
+        nameCn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description"),
         descriptionCn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
         prompt=agent_data.get("prompt"),
@@ -338,6 +342,7 @@ async def get_agent_prompt(name: str):
 class AgentCreateRequest(BaseModel):
     """Request to create a custom agent"""
     name: str = Field(..., description="Agent name")
+    nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
     prompt: str = Field(..., description="System prompt")
@@ -352,6 +357,7 @@ class AgentCreateRequest(BaseModel):
 
 class AgentUpdateRequest(BaseModel):
     """Request to update a custom agent"""
+    nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
     prompt: Optional[str] = Field(None, description="System prompt")
@@ -390,6 +396,7 @@ async def create_agent(req: AgentCreateRequest):
 
         agent_data: Dict[str, Any] = {
             "name": req.name,
+            "name_cn": req.nameCn,
             "description": req.description,
             "description_cn": req.descriptionCn,
             "prompt": req.prompt,
@@ -436,6 +443,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         # YAML agents may also have an overlay entry (skills/tools only) which
         # lacks the "name" key; those should fall through to the YAML path.
         if agent_data is not None and agent_data.get("name"):
+            if req.nameCn is not None:
+                agent_data["name_cn"] = req.nameCn
             if req.description is not None:
                 agent_data["description"] = req.description
             if req.descriptionCn is not None:
@@ -468,6 +477,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         # --- Fall back to YAML plugin agent ---
         if find_yaml_agent(name) is not None:
             updates: Dict[str, Any] = {}
+            if req.nameCn is not None:
+                updates["name_cn"] = req.nameCn
             if req.description is not None:
                 updates["description"] = req.description
             if req.descriptionCn is not None:
@@ -500,6 +511,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
             if agent:
+                if req.nameCn is not None:
+                    agent.name_cn = req.nameCn
                 if req.description is not None:
                     agent.description = req.description
                 if req.descriptionCn is not None:

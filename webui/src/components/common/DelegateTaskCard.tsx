@@ -22,18 +22,26 @@ export function isDelegateTool(toolName: string): boolean {
 }
 
 export function shouldRenderDelegateTaskCard(part: MessagePart): boolean {
+  // 1. Explicit delegate tool: render the card.
   if (part.tool && isDelegateTool(part.tool)) {
     return true;
   }
 
   const state: Partial<ToolState> = part.state || {};
   const input = state.input || {};
-  if (typeof input.subagent_type === 'string' && input.subagent_type.trim()) {
-    return true;
-  }
 
-  const output = typeof state.output === 'string' ? state.output : undefined;
+  // 2. Unknown/missing tool: only upgrade if the part *also* carries
+  //    delegate-shaped input. This prevents MCP tools (e.g. wecom_mcp,
+  //    threatbook_mcp) from being misclassified just because their output
+  //    happens to contain a `<task_metadata>` block.
   if (!part.tool || part.tool === 'unknown') {
+    const hasDelegateInput =
+      (typeof input.subagent_type === 'string' && input.subagent_type.trim()) ||
+      (typeof input.category === 'string' && input.category.trim());
+    if (!hasDelegateInput) {
+      return false;
+    }
+    const output = typeof state.output === 'string' ? state.output : undefined;
     return !!extractSessionId(state.metadata, output);
   }
   return false;
@@ -64,11 +72,13 @@ function extractSessionId(
   meta: Record<string, any> | undefined,
   output: string | undefined,
 ): string | undefined {
+  // Top-level meta only trusts the canonical `sessionId` key. Variant
+  // casings (sessionID / session_id) are accepted only in the nested
+  // `metadata` envelope to avoid matching arbitrary tool metadata that
+  // happens to use snake_case or PascalCase.
   const innerMeta = meta?.metadata as Record<string, any> | undefined;
   const sessionId =
     meta?.sessionId ??
-    meta?.sessionID ??
-    meta?.session_id ??
     innerMeta?.sessionId ??
     innerMeta?.sessionID ??
     innerMeta?.session_id;
@@ -82,7 +92,7 @@ function extractSessionId(
   return match?.[1]?.trim() || undefined;
 }
 
-function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): DelegateInfo {
+export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): DelegateInfo {
   const input = state.input || {};
   const agentRaw = input.subagent_type || input.category || 'unknown';
   const agentName = typeof agentRaw === 'string'
@@ -112,13 +122,22 @@ function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): D
   const stepCount = (meta?.stepCount ?? innerMeta?.stepCount ?? 0) as number;
   const currentText = (meta?.currentText ?? innerMeta?.currentText ?? '') as string;
   const elapsed = (meta?.elapsed ?? innerMeta?.elapsed ?? 0) as number;
+  const isBackground = !!input.run_in_background || Boolean(meta?.background ?? innerMeta?.background);
+  const runtimeStatus = meta?.status ?? innerMeta?.status;
+  const backgroundStatus = isBackground
+    ? (typeof runtimeStatus === 'string' && runtimeStatus.trim()
+      ? runtimeStatus
+      : state.status === 'completed' && childSessionId
+        ? 'running'
+        : undefined)
+    : undefined;
 
   return {
     agentName,
     description: input.description || subTaskLabel,
-    isBackground: !!input.run_in_background,
+    isBackground,
     childSessionId,
-    status: state.status || 'pending',
+    status: backgroundStatus || state.status || 'pending',
     error: state.error,
     output,
     durationMs,
@@ -330,7 +349,10 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
 
           {/* View detail button — always visible */}
           <button
-            onClick={() => info.childSessionId && setSheetOpen(true)}
+            onClick={() => {
+              if (!info.childSessionId) return;
+              setSheetOpen(true);
+            }}
             disabled={!info.childSessionId}
             className={`mt-2 flex items-center gap-1 text-[11px] font-medium transition-colors group ${
               info.childSessionId

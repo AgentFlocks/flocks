@@ -189,6 +189,27 @@ class SessionLoop:
             })
 
     @classmethod
+    async def _publish_session_status(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        status: str,
+    ) -> None:
+        if not callbacks.event_publish_callback:
+            return
+        try:
+            await callbacks.event_publish_callback("session.status", {
+                "sessionID": session_id,
+                "status": {"type": status},
+            })
+        except Exception as exc:
+            log.debug("loop.session_status.publish_failed", {
+                "session_id": session_id,
+                "status": status,
+                "error": str(exc),
+            })
+
+    @classmethod
     async def _publish_session_notice(
         cls,
         callbacks: "LoopCallbacks",
@@ -341,6 +362,7 @@ class SessionLoop:
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())
+        await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
         
         # Mark orphaned running tool parts as error (e.g. from server restart).
         # Wrapped in try/except so cleanup failures never block the session loop.
@@ -384,6 +406,7 @@ class SessionLoop:
             
             # Set status to idle
             SessionStatus.set(session_id, SessionStatusIdle())
+            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
             
             # Touch session (update timestamp)
             await Session.touch(session.project_id, session_id)

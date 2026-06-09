@@ -13,12 +13,13 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from flocks.channel.base import ChatType, OutboundContext
+from flocks.channel.base import ChatType, InboundMessage, OutboundContext
 from flocks.channel.builtin.dingtalk.client import (
     DingTalkApiError,
     ensure_api_success,
@@ -923,6 +924,36 @@ class TestStreamHelpers:
             message, channel_id="dingtalk", account_id="default",
         ) is None
 
+    def test_chatbot_message_to_inbound_extracts_file_download_code_from_content_extension(self):
+        from flocks.channel.builtin.dingtalk.stream import (
+            chatbot_message_to_inbound,
+        )
+        message = SimpleNamespace(
+            text=None,
+            extensions={
+                "content": {
+                    "fileName": "report.pdf",
+                    "downloadCode": "DL_FILE_1",
+                    "fileId": "file_1",
+                },
+            },
+            conversation_id="cid_file",
+            conversation_type="1",
+            sender_id="u1",
+            sender_staff_id="staff_001",
+            sender_nick="Alice",
+            message_id="msg_file_1",
+            message_type="file",
+        )
+
+        inbound = chatbot_message_to_inbound(
+            message, channel_id="dingtalk", account_id="default",
+        )
+
+        assert inbound is not None
+        assert inbound.media_url == "DL_FILE_1"
+        assert inbound.text == ""
+
 
 # ------------------------------------------------------------------
 # Resilience regressions: R1 (silent stall) + R3 (back-pressure)
@@ -1409,3 +1440,392 @@ class TestBindEndpoint:
             },
         )
         assert resp.status_code == 200, resp.text
+
+
+# ------------------------------------------------------------------
+# Inbound media download (download_code exchange + size guard)
+# ------------------------------------------------------------------
+
+class TestDingTalkInboundMedia:
+    @pytest.mark.asyncio
+    async def test_exchange_then_download(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.dingtalk import inbound_media as mod
+
+        captured = {}
+
+        async def fake_exchange(*, config, account_id, download_code):
+            captured["code"] = download_code
+            captured["account"] = account_id
+            return "https://example.com/file.png", "report.png"
+
+        class FakeResponse:
+            headers = {"content-length": "10"}
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self, _size):
+                yield b"hello-img"
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeClient:
+            def stream(self, *_a, **_k):
+                return FakeStream()
+
+        async def fake_download(_url, _max_bytes):
+            return b"hello-img", None
+
+        monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
+        monkeypatch.setattr(mod, "_download_remote_bytes_limited", fake_download)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m1",
+                sender_id="u1",
+                media_url="download-code-1",
+            ),
+            config={},
+            max_bytes=20,
+        )
+
+        assert captured == {"code": "download-code-1", "account": "acc1"}
+        assert media is not None
+        assert media.filename == "report.png"
+        assert media.mime == "image/png"
+        assert Path(media.url.removeprefix("file://")).read_bytes() == b"hello-img"
+
+    @pytest.mark.asyncio
+    async def test_file_message_content_filename_is_preserved(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.dingtalk import inbound_media as mod
+
+        async def fake_exchange(*, config, account_id, download_code):
+            return "https://example.com/download", None
+
+        async def fake_download(_url, _max_bytes):
+            return b"%PDF", None
+
+        monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
+        monkeypatch.setattr(mod, "_download_remote_bytes_limited", fake_download)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m_file",
+                sender_id="u1",
+                media_url="download-code-file",
+                raw=SimpleNamespace(
+                    extensions={
+                        "content": {
+                            "fileName": "安全报告.pdf",
+                            "downloadCode": "download-code-file",
+                        },
+                    },
+                ),
+            ),
+            config={},
+        )
+
+        assert media is not None
+        assert media.filename == "安全报告.pdf"
+        assert media.mime == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_direct_url_skips_exchange(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.dingtalk import inbound_media as mod
+
+        called = {"exchange": False}
+
+        async def fake_exchange(*, config, account_id, download_code):
+            called["exchange"] = True
+            return "", None
+
+        class FakeResponse:
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self, _size):
+                yield b"raw"
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeClient:
+            def stream(self, *_a, **_k):
+                return FakeStream()
+
+        async def fake_download(_url, _max_bytes):
+            return b"raw", None
+
+        monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
+        monkeypatch.setattr(mod, "_download_remote_bytes_limited", fake_download)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m2",
+                sender_id="u1",
+                media_url="https://example.com/raw.png",
+            ),
+            config={},
+            max_bytes=20,
+        )
+        assert called["exchange"] is False
+        assert media is not None
+        assert media.source["download_code"] is None
+        assert media.filename.endswith(".png")
+
+    @pytest.mark.asyncio
+    async def test_rejects_oversized(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.dingtalk import inbound_media as mod
+
+        async def fake_exchange(*, config, account_id, download_code):
+            return "https://example.com/big", None
+
+        async def fake_download(_url, _max_bytes):
+            raise mod.DingTalkInboundMediaTooLarge("too large")
+
+        monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
+        monkeypatch.setattr(mod, "_download_remote_bytes_limited", fake_download)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m3",
+                sender_id="u1",
+                media_url="code",
+            ),
+            config={},
+            max_bytes=10,
+        )
+        assert media is None
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_exchange_failure_returns_none(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.dingtalk import inbound_media as mod
+        from flocks.channel.builtin.dingtalk.client import DingTalkApiError
+
+        async def fake_exchange(*, config, account_id, download_code):
+            raise DingTalkApiError("missing credentials")
+
+        monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m4",
+                sender_id="u1",
+                media_url="code",
+            ),
+            config={},
+        )
+        assert media is None
+
+
+# ------------------------------------------------------------------
+# Outbound media: prepare + send_media integration
+# ------------------------------------------------------------------
+
+class TestDingTalkSendMedia:
+    @pytest.mark.asyncio
+    async def test_prepare_dingtalk_media_reads_local_file(self, tmp_path):
+        from flocks.channel.builtin.dingtalk.media import (
+            prepare_dingtalk_media,
+        )
+
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"%PDF-1.4\nhello")
+
+        async def fake_upload(*, config, account_id, data, filename):
+            return ("media_1", "code_1")
+
+        from flocks.channel.builtin.dingtalk import media as mod
+        from unittest.mock import patch
+        with patch.object(mod, "upload_dingtalk_media", side_effect=fake_upload):
+            prepared = await prepare_dingtalk_media(
+                config={}, account_id="acc", media_url=path.as_uri(),
+            )
+        assert prepared.media_id == "media_1"
+        assert prepared.download_code == "code_1"
+        assert prepared.media_type == "file"
+        assert prepared.filename == "report.pdf"
+        assert prepared.data == b"%PDF-1.4\nhello"
+
+    @pytest.mark.asyncio
+    async def test_send_media_uploads_and_sends_file(self, tmp_path):
+        from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
+        from flocks.channel.builtin.dingtalk import media as media_mod
+
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"data")
+
+        ch = DingTalkChannel()
+        ch._config = {
+            "appKey": "ak",
+            "appSecret": "as",
+            "robotCode": "rc",
+        }
+
+        async def fake_prepare(*, config, account_id, media_url, **kwargs):
+            return media_mod.PreparedDingTalkMedia(
+                data=b"data",
+                filename="doc.pdf",
+                mime="application/pdf",
+                media_type="file",
+                media_id="media_1",
+                download_code="dl_1",
+            )
+
+        async def fake_send_message_app(*, config, to, text, account_id):
+            return {"message_id": "t1", "chat_id": "u1"}
+
+        sent = []
+
+        async def fake_api_request_for_account(method, path, *, config, account_id, json_body):
+            sent.append({"method": method, "path": path, "body": json_body})
+            return {"processQueryKey": "mid_1"}
+
+        from unittest.mock import patch
+        with patch.object(media_mod, "prepare_dingtalk_media", side_effect=fake_prepare), \
+             patch("flocks.channel.builtin.dingtalk.send.send_message_app",
+                   side_effect=fake_send_message_app), \
+             patch("flocks.channel.builtin.dingtalk.client.api_request_for_account",
+                   side_effect=fake_api_request_for_account):
+            result = await ch.send_media(
+                OutboundContext(
+                    channel_id="dingtalk",
+                    to="u1",
+                    media_url=path.as_uri(),
+                )
+            )
+
+        assert result.success is True
+        assert result.message_id == "mid_1"
+        assert sent and sent[0]["path"] == "/v1.0/robot/oToMessages/batchSend"
+        body = sent[0]["body"]
+        assert body["msgKey"] == "file"
+        import json as _json
+        params = _json.loads(body["msgParam"])
+        assert params["downloadCode"] == "dl_1"
+        assert params["fileName"] == "doc.pdf"
+
+    @pytest.mark.asyncio
+    async def test_send_media_with_text_sends_text_after_file(self, tmp_path):
+        from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
+        from flocks.channel.builtin.dingtalk import media as media_mod
+
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"data")
+        ch = DingTalkChannel()
+        ch._config = {
+            "appKey": "ak", "appSecret": "as", "robotCode": "rc",
+        }
+
+        async def fake_prepare(*, config, account_id, media_url, **kwargs):
+            return media_mod.PreparedDingTalkMedia(
+                data=b"d", filename="doc.pdf", mime="application/pdf",
+                media_type="file", media_id="m1", download_code="dc1",
+            )
+
+        order: list[str] = []
+
+        async def fake_send_message_app(*, config, to, text, account_id):
+            order.append(f"text:{text}")
+            return {"message_id": "txt_1", "chat_id": "u1"}
+
+        async def fake_api_request_for_account(method, path, *, config, account_id, json_body):
+            order.append(f"media:{json_body['msgKey']}")
+            return {"processQueryKey": "mid_1"}
+
+        from unittest.mock import patch
+        with patch.object(media_mod, "prepare_dingtalk_media", side_effect=fake_prepare), \
+             patch("flocks.channel.builtin.dingtalk.send.send_message_app",
+                   side_effect=fake_send_message_app), \
+             patch("flocks.channel.builtin.dingtalk.client.api_request_for_account",
+                   side_effect=fake_api_request_for_account):
+            result = await ch.send_media(
+                OutboundContext(
+                    channel_id="dingtalk",
+                    to="u1",
+                    text="这是附件说明",
+                    media_url=path.as_uri(),
+                )
+            )
+
+        assert result.success is True
+        # media-first then text
+        assert order[0].startswith("media:")
+        assert order[1].startswith("text:")
+
+    @pytest.mark.asyncio
+    async def test_send_media_image_url_uses_inline_image_msgkey(self, tmp_path):
+        from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
+        from flocks.channel.builtin.dingtalk import media as media_mod
+
+        ch = DingTalkChannel()
+        ch._config = {
+            "appKey": "ak", "appSecret": "as", "robotCode": "rc",
+        }
+
+        async def fake_prepare(*, config, account_id, media_url, **kwargs):
+            return media_mod.PreparedDingTalkMedia(
+                data=b"d", filename="x.png", mime="image/png",
+                media_type="image", media_id="m1", download_code="dc1",
+            )
+
+        async def fake_api_request_for_account(method, path, *, config, account_id, json_body):
+            return {"processQueryKey": "img_1"}
+
+        from unittest.mock import patch
+        with patch.object(media_mod, "prepare_dingtalk_media", side_effect=fake_prepare), \
+             patch("flocks.channel.builtin.dingtalk.client.api_request_for_account",
+                   side_effect=fake_api_request_for_account):
+            result = await ch.send_media(
+                OutboundContext(
+                    channel_id="dingtalk",
+                    to="u1",
+                    media_url="https://example.com/photo.png",
+                )
+            )
+
+        assert result.success is True
+        assert result.message_id == "img_1"
+
+    @pytest.mark.asyncio
+    async def test_send_media_missing_target_returns_error(self, tmp_path):
+        from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
+
+        ch = DingTalkChannel()
+        ch._config = {"appKey": "ak", "appSecret": "as"}
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="dingtalk",
+                to="",
+                media_url="file:///x",
+            )
+        )
+        assert result.success is False
+        assert "requires 'to'" in result.error

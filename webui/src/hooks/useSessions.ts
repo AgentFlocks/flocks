@@ -66,26 +66,9 @@ export function applyMessagePartUpdate(
   const messageIndex = prev.findIndex(m => m.id === partInfo.messageID);
 
   if (messageIndex < 0) {
-    // Message not found — reuse the last in-progress assistant message if available
-    let lastAssistantIndex = -1;
-    for (let i = prev.length - 1; i >= 0; i--) {
-      if (prev[i].role === 'assistant' && !prev[i].finish) {
-        lastAssistantIndex = i;
-        break;
-      }
-    }
-
-    if (lastAssistantIndex >= 0) {
-      const updated = [...prev];
-      const message = { ...updated[lastAssistantIndex] };
-      const parts = [...(message.parts || [])];
-      parts.push(partInfo);
-      message.parts = parts;
-      updated[lastAssistantIndex] = message;
-      return updated;
-    }
-
-    // No in-progress assistant message — create a placeholder
+    // Message metadata can arrive after part updates over SSE. Keep the part
+    // attached to its own messageID instead of borrowing a nearby assistant,
+    // otherwise chunks from a new turn can render inside the previous reply.
     return [...prev, {
       id: partInfo.messageID,
       sessionID: partInfo.sessionID,
@@ -319,7 +302,7 @@ export function useSessionMessages(sessionId?: string) {
         }
 
         // Add new message
-        return [...prev, {
+        const nextMessage = {
           id: messageInfo.id,
           sessionID: messageInfo.sessionID,
           role: messageInfo.role,
@@ -328,6 +311,21 @@ export function useSessionMessages(sessionId?: string) {
           agent: messageInfo.agent,
           model: messageInfo.model,
           timestamp: messageInfo.time?.created || Date.now(),
+        };
+
+        if (messageInfo.role === 'user') {
+          const childIndex = prev.findIndex(
+            (m) => m.role === 'assistant' && m.parentID === messageInfo.id,
+          );
+          if (childIndex >= 0) {
+            const updated = [...prev];
+            updated.splice(childIndex, 0, nextMessage);
+            return updated;
+          }
+        }
+
+        return [...prev, {
+          ...nextMessage,
         }];
       });
     },

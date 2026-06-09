@@ -14,6 +14,7 @@ import flocks.task.manager as task_manager_module
 import flocks.task.plugin_sync as plugin_sync_module
 from flocks.server.routes import question as question_routes
 from flocks.config.config import Config
+from flocks.session.message import ToolPart, ToolStateCompleted
 from flocks.storage.storage import Storage
 from flocks.task.background import BackgroundManager, BackgroundTask, LaunchInput
 from flocks.task.executor import TaskExecutor
@@ -550,6 +551,108 @@ async def test_background_task_uses_unpinned_model_as_runtime_override(
     assert loop_run.await_args.kwargs["model_id"] == "claude-haiku-4-5"
     assert loop_run.await_args.kwargs["callbacks"] is not None
     assert task.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_background_task_completion_injects_parent_context(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_message = AsyncMock()
+    update_part = AsyncMock()
+    parent_loop_run = AsyncMock(return_value=SimpleNamespace(action="stop"))
+    parent_part = ToolPart(
+        id="part-parent-tool",
+        sessionID="ses-parent",
+        messageID="msg-parent",
+        type="tool",
+        callID="call-parent",
+        tool="delegate_task",
+        state=ToolStateCompleted(
+            status="completed",
+            input={
+                "description": "inspect cache",
+                "prompt": "Inspect cache",
+                "subagent_type": "explore",
+                "run_in_background": True,
+            },
+            output="Background task launched",
+            title="inspect cache",
+            metadata={
+                "sessionId": "ses-child",
+                "taskId": "bg_parent_inject",
+                "status": "running",
+                "background": True,
+            },
+            time={"start": 1, "end": 2},
+        ),
+    )
+    monkeypatch.setattr(background_module.Message, "create", create_message)
+    monkeypatch.setattr(background_module.Message, "parts", AsyncMock(return_value=[parent_part]))
+    monkeypatch.setattr(background_module.Message, "update_part", update_part)
+    monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_parent_inject",
+        status="completed",
+        description="inspect cache",
+        prompt="",
+        agent="explore",
+        parent_session_id="ses-parent",
+        parent_message_id="msg-parent",
+        parent_call_id="call-parent",
+        parent_agent="rex",
+        parent_model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+        session_id="ses-child",
+        output="cache keys are built in three files",
+    )
+
+    await manager._inject_parent_completion(task)
+
+    create_message.assert_awaited_once()
+    kwargs = create_message.await_args.kwargs
+    assert kwargs["session_id"] == "ses-parent"
+    assert kwargs["synthetic"] is True
+    assert kwargs["part_metadata"]["kind"] == "background_task_result"
+    assert '<task id="bg_parent_inject" session_id="ses-child" state="completed">' in kwargs["content"]
+    assert "cache keys are built in three files" in kwargs["content"]
+    update_part.assert_awaited_once()
+    update_kwargs = update_part.await_args.kwargs
+    assert update_kwargs["part_id"] == "part-parent-tool"
+    assert update_kwargs["state"].status == "completed"
+    assert update_kwargs["state"].metadata["status"] == "completed"
+    assert update_kwargs["state"].output == "cache keys are built in three files"
+    await asyncio.sleep(0)
+    parent_loop_run.assert_awaited_once()
+    assert parent_loop_run.await_args.kwargs["session_id"] == "ses-parent"
+    assert parent_loop_run.await_args.kwargs["agent_name"] == "rex"
+
+
+@pytest.mark.asyncio
+async def test_background_task_completion_does_not_resume_running_parent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent_loop_run = AsyncMock(return_value=SimpleNamespace(action="stop"))
+    monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
+    monkeypatch.setattr(background_module.SessionLoop, "is_running", lambda _session_id: True)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_parent_running",
+        status="completed",
+        description="inspect cache",
+        prompt="",
+        agent="explore",
+        parent_session_id="ses-parent",
+        parent_agent="rex",
+        session_id="ses-child",
+        output="done",
+    )
+
+    manager._schedule_parent_resume(task)
+    await asyncio.sleep(0)
+
+    parent_loop_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

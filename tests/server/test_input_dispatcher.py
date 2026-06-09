@@ -111,14 +111,14 @@ class TestDispatchUserInput:
         event = UserInputEvent(
             source_type="webui",
             sessionID="ses_test",
-            text="/plan investigate routing",
-            parts=[{"type": "text", "text": "/plan investigate routing"}],
+            text="/bug investigate routing",
+            parts=[{"type": "text", "text": "/bug investigate routing"}],
         )
 
         result = await dispatch_user_input(event, sink)
 
         assert result.action == "llm"
-        assert llm == [("/plan investigate routing", "/plan investigate routing")]
+        assert llm == [("/bug investigate routing", "/bug investigate routing")]
         assert not direct
 
     @pytest.mark.asyncio
@@ -242,7 +242,7 @@ class TestSessionRoutesUseDispatcher:
             ),
         )
         request = session_routes.PromptRequest(
-            parts=[{"type": "text", "text": "/plan investigate"}],
+            parts=[{"type": "text", "text": "/bug investigate"}],
         )
 
         resp = await session_routes.send_session_message_async(session_id, request)
@@ -250,7 +250,7 @@ class TestSessionRoutesUseDispatcher:
         await asyncio.sleep(0)
         dispatch_mock.assert_awaited_once()
         event = dispatch_mock.await_args.args[2]
-        assert event.text == "/plan investigate"
+        assert event.text == "/bug investigate"
 
     @pytest.mark.asyncio
     async def test_command_route_routes_through_dispatcher(self, monkeypatch):
@@ -273,15 +273,15 @@ class TestSessionRoutesUseDispatcher:
                 )
             ),
         )
-        request = session_routes.CommandRequest(command="plan", arguments="investigate")
+        request = session_routes.CommandRequest(command="bug", arguments="investigate")
 
         resp = await session_routes.send_session_command(session_id, request)
         assert resp["status"] == "accepted"
         await asyncio.sleep(0)
         dispatch_mock.assert_awaited_once()
         event = dispatch_mock.await_args.args[2]
-        assert event.text == "/plan investigate"
-        assert event.display_text == "/plan investigate"
+        assert event.text == "/bug investigate"
+        assert event.display_text == "/bug investigate"
 
 
 class TestPromptQueueRoutes:

@@ -1,4 +1,5 @@
 name: ndr-analyst
+name_cn: NDR 分析智能体
 description: >-
   NDR network traffic analyst: analyzes flow logs and alerts, identifies attack techniques,
   and determines whether attacks succeeded.
@@ -22,8 +23,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - websearch
   - webfetch

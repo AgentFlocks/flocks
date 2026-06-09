@@ -35,7 +35,7 @@ import type { ReadTool } from "@/tool/read"
 import type { WriteTool } from "@/tool/write"
 import { BashTool } from "@/tool/bash"
 import type { GlobTool } from "@/tool/glob"
-import { TodoWriteTool } from "@/tool/todo"
+import { TodoTool } from "@/tool/todo"
 import type { GrepTool } from "@/tool/grep"
 import type { EditTool } from "@/tool/edit"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
@@ -193,23 +193,6 @@ export function Session() {
   createEffect(() => {
     if (route.initialPrompt && prompt) {
       prompt.set(route.initialPrompt)
-    }
-  })
-
-  let lastSwitch: string | undefined = undefined
-  sdk.event.on("message.part.updated", (evt) => {
-    const part = evt.properties.part
-    if (part.type !== "tool") return
-    if (part.sessionID !== route.sessionID) return
-    if (part.state.status !== "completed") return
-    if (part.id === lastSwitch) return
-
-    if (part.tool === "plan_exit") {
-      local.agent.set("build")
-      lastSwitch = part.id
-    } else if (part.tool === "plan_enter") {
-      local.agent.set("plan")
-      lastSwitch = part.id
     }
   })
 
@@ -1534,7 +1517,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "apply_patch"}>
           <ApplyPatch {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "todowrite"}>
+        <Match when={props.part.tool === "todo"}>
           <TodoWrite {...toolprops} />
         </Match>
         <Match when={props.part.tool === "question"}>
@@ -2184,7 +2167,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   )
 }
 
-function TodoWrite(props: ToolProps<typeof TodoWriteTool>) {
+function TodoWrite(props: ToolProps<typeof TodoTool>) {
   const todos = () => props.metadata.newTodos ?? props.metadata.todos ?? props.input.todos ?? []
   return (
     <Switch>

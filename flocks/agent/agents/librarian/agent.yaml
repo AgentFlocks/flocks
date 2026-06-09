@@ -1,4 +1,5 @@
 name: librarian
+name_cn: 资料检索智能体
 description: >-
   Specialized codebase understanding agent for multi-repository analysis,
   searching remote codebases, retrieving official documentation, and finding
@@ -28,5 +29,5 @@ prompt_metadata:
     - "Why does [external dependency] behave this way?"
     - Find examples of [library] usage
     - Working with unfamiliar npm/pip/cargo packages
-  key_trigger: "External library/source mentioned -> fire `librarian` background"
+  key_trigger: "External library/source mentioned -> delegate to `librarian`"
 # prompt injected by prompt_builder.py (year-aware)

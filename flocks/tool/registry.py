@@ -1447,11 +1447,11 @@ class ToolRegistry:
             # agent/ — agent delegation/coordination
             ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", ["schedule_task_center", "todo", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # system/ — questions, model config, memory, MCP management, session management, slash commands
+            ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context
@@ -1473,7 +1473,13 @@ class ToolRegistry:
         # This is done in bulk here so individual @register_function call
         # sites don't need to pass native=True, and user plugin files using
         # the same decorator won't be misclassified.
-        builtin_native_exceptions = {"lsp", "task"}
+        builtin_native_exceptions = {
+            "lsp",
+            "task",
+            "list_providers",
+            "add_provider",
+            "add_model",
+        }
         for name in set(cls._tools.keys()) - before:
             if name in builtin_native_exceptions:
                 cls._tools[name].info.native = False

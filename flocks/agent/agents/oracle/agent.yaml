@@ -1,4 +1,5 @@
 name: oracle
+name_cn: 架构顾问智能体
 description: >-
   Read-only consultation agent. Reasoning specialist for debugging
   hard problems and high-difficulty architecture design.

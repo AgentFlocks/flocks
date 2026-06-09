@@ -59,8 +59,7 @@ def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
     for name in [
         "doc_parser",
         "lsp",
-        "todoread",
-        "todowrite",
+        "todo",
         "memory_search",
         "memory_get",
         "memory_write",

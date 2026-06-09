@@ -113,7 +113,7 @@ export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): s
   }
   return [
     '本次是 Workflow 接入引导，不需要创建 device 插件。',
-    '请引导用户前往工作流集成页面，根据实际场景选择 Syslog、Kafka 或 Webhook。',
+    '请引导用户前往工作流发布页面，根据实际场景选择 Syslog、Kafka 或 Webhook。',
   ].join('\n');
 }
 
@@ -144,7 +144,7 @@ export function buildCustomDeviceWelcomeMessage(mode: CustomDeviceAccessMode): s
       '资料确认后，Rex 将沉淀 WebCLI 资产，并按需生成可在设备接入页识别和配置的 device 插件。',
     ].join('\n');
   }
-  return 'Workflow 接入不在这里创建插件，请前往工作流集成页面，根据需要配置 Syslog、Kafka 或 Webhook。';
+  return 'Workflow 接入不在这里创建插件，请前往工作流发布页面，根据需要配置 Syslog、Kafka 或 Webhook。';
 }
 
 export function buildCustomDevicePrompt(

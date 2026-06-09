@@ -25,14 +25,17 @@ function makeMsg(overrides: Partial<Message> & { id: string }): Message {
 
 describe('applyMessagePartUpdate', () => {
   describe('message not found', () => {
-    it('appends part to the last in-progress assistant message when messageID does not match', () => {
+    it('creates a placeholder for the part message instead of reusing a previous assistant', () => {
       const partInfo = { id: 'p1', messageID: 'msg-unknown', sessionID: 'sess-1', type: 'text', text: 'hello' };
       const prev: Message[] = [
-        makeMsg({ id: 'msg-1', role: 'assistant', parts: [] }),
+        makeMsg({ id: 'msg-1', role: 'assistant', parts: [], finish: null } as any),
       ];
       const result = applyMessagePartUpdate(prev, partInfo);
-      expect(result[0].parts).toHaveLength(1);
-      expect((result[0].parts as any[])[0].id).toBe('p1');
+      expect(result).toHaveLength(2);
+      expect(result[0].id).toBe('msg-1');
+      expect(result[0].parts).toHaveLength(0);
+      expect(result[1].id).toBe('msg-unknown');
+      expect((result[1].parts as any[])[0].id).toBe('p1');
     });
 
     it('skips finished assistant messages when looking for in-progress message', () => {
@@ -250,6 +253,47 @@ describe('updateMessagePart scheduling', () => {
     expect(msg).toBeDefined();
     expect((msg!.parts as any[])[0].text).toBe('before-1');
     expect((msg!.parts as any[])[1].text).toBe('after');
+  });
+
+  it('inserts late user metadata before an already streamed assistant child', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'old-assistant',
+        role: 'assistant',
+        parts: [{ id: 'old-text', type: 'text', text: 'old reply' } as any],
+        finish: 'stop',
+      } as any));
+      result.current.updateMessagePart({
+        id: 'new-text',
+        messageID: 'new-assistant',
+        sessionID: 'sess-1',
+        type: 'text',
+        text: 'new reply',
+      });
+      result.current.updateMessage({
+        id: 'new-assistant',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        parentID: 'new-user',
+        time: { created: 200 },
+      });
+      result.current.updateMessage({
+        id: 'new-user',
+        sessionID: 'sess-1',
+        role: 'user',
+        time: { created: 100 },
+      });
+    });
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual([
+      'old-assistant',
+      'new-user',
+      'new-assistant',
+    ]);
+    expect((result.current.messages[2].parts as any[])[0].text).toBe('new reply');
   });
 
   it('truncateAfterMessage keeps the target by default', async () => {

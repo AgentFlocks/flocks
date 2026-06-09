@@ -19,7 +19,6 @@ from flocks.tool.delegate_task_constants import (
     CATEGORY_PROMPT_APPENDS,
     CATEGORY_DESCRIPTIONS,
 )
-from flocks.task.background import get_background_manager, LaunchInput, ResumeInput
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
@@ -38,21 +37,37 @@ async def _subagent_session_permissions(agent_name: str) -> list:
     from flocks.agent.registry import Agent
     from flocks.session.session import PermissionRule as SessionPermissionRule
 
-    agent = await Agent.get(agent_name)
+    def deny_nested_delegation() -> list:
+        return [
+            SessionPermissionRule(permission="delegate_task", action="deny", pattern="*"),
+            SessionPermissionRule(permission="task", action="deny", pattern="*"),
+        ]
+
+    try:
+        agent = await Agent.get(agent_name)
+    except Exception as exc:
+        log.debug("delegate_task.subagent_permission_agent_load_failed", {
+            "agent": agent_name,
+            "error": str(exc),
+        })
+        agent = None
     rules: list = []
     if agent_name != "prometheus":
         rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
 
-    if agent and agent.permission:
-        for rule in agent.permission:
-            level = rule.level.value if hasattr(rule.level, "value") else str(rule.level)
+    agent_permissions = getattr(agent, "permission", None)
+    if agent and agent_permissions:
+        for rule in agent_permissions:
+            raw_level = getattr(rule, "level", None) or getattr(rule, "action", None) or "allow"
+            level = raw_level.value if hasattr(raw_level, "value") else str(raw_level)
             rules.append(
                 SessionPermissionRule(
-                    permission=rule.permission or "*",
+                    permission=getattr(rule, "permission", None) or "*",
                     action=level,
-                    pattern=rule.pattern or "*",
+                    pattern=getattr(rule, "pattern", None) or "*",
                 )
             )
+        rules.extend(deny_nested_delegation())
         return rules
 
     if agent_name == "prometheus":
@@ -63,6 +78,7 @@ async def _subagent_session_permissions(agent_name: str) -> list:
         ])
     elif not rules:
         rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
+    rules.extend(deny_nested_delegation())
     return rules
 
 
@@ -223,6 +239,7 @@ def _derive_task_description(
         return f"continue task {session_id}"
     return "delegate task"
 
+
 # ------------------------------------------------------------------
 # Tool definition
 # ------------------------------------------------------------------
@@ -238,12 +255,16 @@ Usage notes:
 - Provide a clear description (3-5 words)
 - Provide detailed prompt with context
 - Pass session_id to continue a previous agent with full context
-- run_in_background=false: (default) waits for completion and returns results inline
+- Background subagent execution is disabled. Do not set run_in_background=true.
+- Foreground execution is always used: the tool waits for completion and returns results inline.
+- For independent parallel work needed this turn, emit multiple sibling
+  foreground delegate_task/task tool calls in the same assistant response.
+  The runtime executes them concurrently and the webui renders each as its
+  own DelegateTaskCard.
 
 REQUIRED: prompt.
 LOAD_SKILLS is optional and defaults to [].
 DESCRIPTION is optional and will be auto-derived when omitted.
-RUN_IN_BACKGROUND defaults to false (sync). if true, need: returns task_id immediately, collect results later with background_output
 USE EITHER subagent_type OR category — NEVER both simultaneously.
 """
 
@@ -268,14 +289,8 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
         ToolParameter(
             name="prompt",
             type=ParameterType.STRING,
-            description="REQUIRED. Full detailed prompt for the agent.",
+            description="Full detailed prompt for the subagent.",
             required=True,
-        ),
-        ToolParameter(
-            name="run_in_background",
-            type=ParameterType.BOOLEAN,
-            description="Optional. true=async (returns task_id immediately), false=sync (blocks until done). Defaults to false.",
-            required=False,
         ),
         ToolParameter(
             name="category",
@@ -301,21 +316,43 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
             description="Optional command name for tracking",
             required=False,
         ),
+        ToolParameter(
+            name="model",
+            type=ParameterType.STRING,
+            description="Optional model override (provider/model or model)",
+            required=False,
+        ),
     ],
 )
 async def delegate_task_tool(
     ctx: ToolContext,
-    prompt: str,
+    prompt: Optional[str] = None,
     load_skills: Optional[List[str]] = None,
     description: Optional[str] = None,
-    run_in_background: Optional[bool] = False,
+    # Internal-only: not exposed in the public schema. The registry rejects
+    # `run_in_background=True` at the schema layer for any caller, but legacy
+    # in-process call paths (e.g. `task.py` alias) may still pass it through.
+    # This guard is the second line of defense.
+    run_in_background: bool = False,
     category: Optional[str] = None,
     subagent_type: Optional[str] = None,
     session_id: Optional[str] = None,
     command: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> ToolResult:
-    if run_in_background is None:
-        run_in_background = False
+    if run_in_background:
+        return ToolResult(
+            success=False,
+            error=(
+                "Background subagent execution is disabled. "
+                "Use foreground delegate_task/task calls; emit multiple sibling calls "
+                "in the same assistant turn for parallel work."
+            ),
+        )
+
+    if not prompt:
+        return ToolResult(success=False, error="prompt is required")
+
     load_skills = [str(name).strip() for name in (load_skills or []) if str(name).strip()]
     description = _derive_task_description(description, prompt, subagent_type, category, session_id)
     if category and subagent_type:
@@ -351,30 +388,10 @@ async def delegate_task_tool(
     category_configs = {**DEFAULT_CATEGORIES, **(cfg.categories or {})}
     category_prompt_append = None
     category_model = None
+    explicit_model = _parse_model(model)
     agent_to_use: Optional[str] = None
 
     if session_id:
-        if run_in_background:
-            manager = get_background_manager()
-            task = await manager.resume(
-                ResumeInput(
-                    session_id=session_id,
-                    prompt=prompt,
-                    parent_session_id=ctx.session_id,
-                    parent_message_id=ctx.message_id,
-                    parent_agent=ctx.agent,
-                )
-            )
-            ctx.metadata({"title": f"Continue: {description}", "metadata": {"sessionId": task.session_id}})
-            output = (
-                "Background task continued.\n\n"
-                f"Task ID: {task.id}\n"
-                f"Description: {task.description}\n"
-                f"Agent: {task.agent}\n"
-                f"Status: {task.status}\n\n"
-                f'<task_metadata>\nsession_id: {task.session_id}\n</task_metadata>'
-            )
-            return ToolResult(success=True, output=output, title=description, metadata={"sessionId": task.session_id})
         # Sync continuation
         session = await Session.get_by_id(session_id)
         if not session:
@@ -406,7 +423,7 @@ async def delegate_task_tool(
         if not config:
             available = ", ".join(category_configs.keys())
             return ToolResult(success=False, error=f'Unknown category "{category}". Available: {available}')
-        raw_model = _parse_model(config.get("model") if isinstance(config, dict) else getattr(config, "model", None))
+        raw_model = explicit_model or _parse_model(config.get("model") if isinstance(config, dict) else getattr(config, "model", None))
         category_model = _validate_category_model(raw_model, category)
         if raw_model and not category_model:
             log.info("delegate_task.using_parent_model", {
@@ -434,6 +451,7 @@ async def delegate_task_tool(
                     error=f'Agent "{subagent_type}" cannot be delegated to (it may be a primary agent or restricted).',
                 )
         agent_to_use = subagent_type
+        category_model = explicit_model
 
     system_parts = []
     if skill_result["content"]:
@@ -443,38 +461,12 @@ async def delegate_task_tool(
     system_content = "\n\n".join(system_parts) if system_parts else ""
     full_prompt = f"{system_content}\n\n{prompt}" if system_content else prompt
 
-    if run_in_background:
-        manager = get_background_manager()
-        task = await manager.launch(
-            LaunchInput(
-                description=description,
-                prompt=full_prompt,
-                agent=agent_to_use,
-                parent_session_id=ctx.session_id,
-                parent_message_id=ctx.message_id,
-                parent_agent=ctx.agent,
-                model=category_model,
-                model_pinned=False,
-                category=category,
-            )
-        )
-        ctx.metadata({"title": description, "metadata": {"sessionId": task.session_id}})
-        output = (
-            "Background task launched successfully.\n\n"
-            f"Task ID: {task.id}\n"
-            f"Description: {task.description}\n"
-            f"Agent: {task.agent}\n"
-            f"Status: {task.status}\n\n"
-            f'<task_metadata>\nsession_id: {task.session_id}\n</task_metadata>'
-        )
-        return ToolResult(success=True, output=output, title=description, metadata={"sessionId": task.session_id})
-
     # Sync execution
     parent_session = await Session.get_by_id(ctx.session_id)
     if not parent_session:
         return ToolResult(success=False, error="Parent session not found")
 
-    created = await Session.create(
+    create_kwargs = dict(
         project_id=parent_session.project_id,
         directory=parent_session.directory,
         title=f"{description} (@{agent_to_use} subagent)",
@@ -483,6 +475,13 @@ async def delegate_task_tool(
         permission=await _subagent_session_permissions(agent_to_use),
         category="task",
     )
+    if category_model and category_model.get("providerID") and category_model.get("modelID"):
+        create_kwargs.update(
+            provider=category_model["providerID"],
+            model=category_model["modelID"],
+            model_pinned=bool(explicit_model),
+        )
+    created = await Session.create(**create_kwargs)
     await Message.create(
         session_id=created.id,
         role=MessageRole.USER,

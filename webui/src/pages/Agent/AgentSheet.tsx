@@ -16,12 +16,14 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import EntitySheet, { useEntitySheet } from '@/components/common/EntitySheet';
 import PillGroup from '@/components/common/PillGroup';
-import { providerAPI, defaultModelAPI } from '@/api/provider';
+import { providerAPI, defaultModelAPI, modelV2API } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
+import type { ModelDefinitionV2 } from '@/types';
 
 interface AvailableModel {
   providerID: string;
+  providerName: string;
   modelID: string;
   label: string;
 }
@@ -30,6 +32,7 @@ interface AvailableModel {
 
 interface AgentFormData {
   name: string;
+  nameCn: string;
   description: string;
   descriptionCn: string;
   prompt: string;
@@ -57,6 +60,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
 
   const [formData, setFormData] = useState<AgentFormData>({
     name: agent?.name ?? '',
+    nameCn: agent?.nameCn ?? '',
     description: agent?.description ?? '',
     descriptionCn: agent?.descriptionCn ?? '',
     prompt: agent?.prompt ?? '',
@@ -68,6 +72,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   });
   const [loading, setLoading] = useState(false);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [defaultModel, setDefaultModel] = useState<{ providerID: string; modelID: string } | null>(null);
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
@@ -78,17 +83,30 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   const isPrimary = formData.mode === 'primary';
 
   useEffect(() => {
-    providerAPI.list().then((r) => {
-      const connectedSet = new Set<string>(r.data.connected ?? []);
-      const list: AvailableModel[] = [];
-      for (const provider of r.data.all) {
-        if (!connectedSet.has(provider.id)) continue;
-        for (const [modelId, modelInfo] of Object.entries(provider.models ?? {})) {
-          list.push({ providerID: provider.id, modelID: modelId, label: (modelInfo as any).name || modelId });
-        }
-      }
+    Promise.all([
+      providerAPI.list(),
+      modelV2API.listDefinitions({ enabled_only: true }),
+    ]).then(([providersRes, modelsRes]) => {
+      const connectedSet = new Set<string>(providersRes.data.connected ?? []);
+      const providerById = new Map(
+        providersRes.data.all
+          .filter((provider) => connectedSet.has(provider.id))
+          .map((provider) => [provider.id, provider]),
+      );
+      const enabledModels = (modelsRes.data.models ?? []) as ModelDefinitionV2[];
+      const list: AvailableModel[] = enabledModels.flatMap((model) => {
+        const provider = providerById.get(model.provider_id);
+        if (!provider) return [];
+        return [{
+          providerID: provider.id,
+          providerName: provider.name || provider.id,
+          modelID: model.id,
+          label: model.name || model.id,
+        }];
+      });
       setAvailableModels(list);
-    }).catch(() => {});
+    }).catch(() => setAvailableModels([]))
+      .finally(() => setModelsLoaded(true));
 
     defaultModelAPI.getResolved().then((r) => {
       const d = r.data;
@@ -112,6 +130,16 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       }
     }).catch(() => {}).finally(() => setSkillsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!modelsLoaded || !formData.modelKey) return;
+    const selectedStillAvailable = availableModels.some(
+      (model) => `${model.providerID}::${model.modelID}` === formData.modelKey,
+    );
+    if (!selectedStillAvailable) {
+      setFormData((prev) => ({ ...prev, modelKey: '' }));
+    }
+  }, [availableModels, formData.modelKey, modelsLoaded]);
 
   const isNative = !!agent?.native;
   const submitDisabled = false;
@@ -137,6 +165,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
         await agentAPI.updateModel(agent!.name, model ?? null, formData.temperature);
       } else {
         await agentAPI.update(agent!.name, {
+          nameCn: formData.nameCn,
           description: formData.description || undefined,
           descriptionCn: formData.descriptionCn || undefined,
           prompt: formData.prompt,
@@ -204,6 +233,12 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
             setFormData((prev) => ({
               ...prev,  // preserve tools, skills, modelKey
               name: config.name || prev.name,
+              nameCn:
+                (typeof config.name_cn === 'string'
+                  ? config.name_cn
+                  : typeof config.nameCn === 'string'
+                    ? config.nameCn
+                    : prev.nameCn),
               description: config.description ?? prev.description,
               descriptionCn:
                 (typeof config.description_cn === 'string'
@@ -303,6 +338,10 @@ function AgentFormContent({
     acc[m.providerID].push(m);
     return acc;
   }, {});
+  const providerLabelById = availableModels.reduce<Record<string, string>>((acc, m) => {
+    acc[m.providerID] = m.providerName;
+    return acc;
+  }, {});
 
   const defaultModelLabel = defaultModel
     ? `${defaultModel.modelID} (${defaultModel.providerID})`
@@ -357,6 +396,25 @@ function AgentFormContent({
             {formData.name}
           </div>
         )}
+      </div>
+
+      {/* Chinese display name */}
+      <div>
+        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
+          {t('form.nameCn')}
+        </label>
+        <input
+          type="text"
+          value={formData.nameCn}
+          onChange={(e) => update({ nameCn: e.target.value })}
+          disabled={nativeReadOnly}
+          className={`w-full px-4 py-2 border rounded-lg text-sm ${
+            nativeReadOnly
+              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
+              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+          }`}
+          placeholder={t('form.nameCnPlaceholder')}
+        />
       </div>
 
       {/* Description (English) + Chinese UI */}
@@ -449,7 +507,7 @@ function AgentFormContent({
           >
             <option value="">— {defaultModelLabel} —</option>
             {Object.entries(modelsByProvider).map(([pID, pModels]) => (
-              <optgroup key={pID} label={pID}>
+              <optgroup key={pID} label={providerLabelById[pID] || pID}>
                 {pModels.map((m) => (
                   <option key={`${m.providerID}::${m.modelID}`} value={`${m.providerID}::${m.modelID}`}>
                     {m.label}
@@ -652,6 +710,7 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
 
 **重要约束：**
 - Agent 名称必须是 kebab-case 格式
+- 如果用户提供中文名称，请写入 name_cn 字段
 - mode 固定为 subagent
 - 文件必须写入 ~/.flocks/plugins/agents/
 - 不要与内置 Agent 名称冲突

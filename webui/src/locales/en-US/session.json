@@ -53,6 +53,18 @@
       "custom": "Custom"
     }
   },
+  "modelPicker": {
+    "title": "Choose Model",
+    "hint": "Overrides the model used when sending this chat message",
+    "empty": "No available models",
+    "count": "{{count}}",
+    "vision": "Vision",
+    "free": "Free",
+    "noCost": "No cost",
+    "contextWindow": "Context window: {{value}}",
+    "contextUnknown": "Context window: Unknown",
+    "addModel": "Add model"
+  },
   "welcome": {
     "title": "Start a new conversation",
     "description": "AI-native security operations assistant — threat analysis, incident response, and security orchestration",
@@ -71,6 +83,8 @@
     "emptyText": "No execution records",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
+    "contextUsageUnknown": "Context usage unknown",
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",
@@ -145,6 +159,7 @@
       "error": "Failed",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
+      "todoStages": "Todo stages",
       "errorLabel": "Error",
       "elapsed": "Elapsed",
       "workflowStage": "Current stage: {{phase}}",

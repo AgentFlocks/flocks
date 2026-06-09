@@ -53,6 +53,18 @@
       "custom": "自定义"
     }
   },
+  "modelPicker": {
+    "title": "选择模型",
+    "hint": "作为本次对话发送时的模型覆盖",
+    "empty": "暂无可用模型",
+    "count": "{{count}} 个",
+    "vision": "视觉",
+    "free": "免费",
+    "noCost": "暂无费用",
+    "contextWindow": "上下文窗口：{{value}}",
+    "contextUnknown": "上下文窗口：未知",
+    "addModel": "添加模型"
+  },
   "welcome": {
     "title": "开始新的对话",
     "description": "AI 原生的安全运营助手，帮您进行威胁分析、应急响应、安全编排等任务",
@@ -71,6 +83,8 @@
     "emptyText": "暂无执行记录",
     "suggestions": "示例问题",
     "stopTitle": "停止执行",
+    "contextUsageTitle": "上下文已用：{{used}} / {{total}}（{{percent}}%）",
+    "contextUsageUnknown": "上下文使用量未知",
     "edit": "编辑",
     "editRawHint": "当前显示的是原始未渲染内容，保存后会直接更新这条消息文本。",
     "editRawTitle": "编辑原始内容",
@@ -145,6 +159,7 @@
       "error": "失败",
       "inputParams": "输入参数",
       "outputResult": "输出结果",
+      "todoStages": "Todo 阶段",
       "errorLabel": "错误",
       "elapsed": "耗时",
       "workflowStage": "当前阶段：{{phase}}",

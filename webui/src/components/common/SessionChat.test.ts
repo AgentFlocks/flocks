@@ -7,17 +7,20 @@ import type { Message } from '@/types';
 
 import {
   areChatMessagePartsRenderEqual,
-  buildTodoWriteSummary,
+  buildTodoSummary,
+  ChatToolPart,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageGroupClassName,
+  getRenderableFileUrl,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
   getUserAvatarContainerClassName,
   getUserAvatarSpacerClassName,
   listUploadedDocumentPaths,
+  shouldRenderMessage,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
@@ -43,6 +46,13 @@ const tMock = (key: string) => ({
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
+  'chat.tool.pending': '等待中',
+  'chat.tool.running': '执行中',
+  'chat.tool.completed': '已完成',
+  'chat.tool.error': '失败',
+  'chat.tool.inputParams': '输入参数',
+  'chat.tool.outputResult': '输出结果',
+  'chat.tool.todoStages': 'Todo 阶段',
   'smartAssistant': '智能助手',
 }[key] ?? key);
 const pendingQuestionsHookMock = {
@@ -115,7 +125,18 @@ vi.mock('@/api/session', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  localStorage.clear();
+  if (typeof window.localStorage?.clear !== 'function') {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        clear: vi.fn(),
+        getItem: vi.fn(),
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
+    });
+  }
+  window.localStorage.clear();
   Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
     configurable: true,
     value: vi.fn(),
@@ -277,6 +298,19 @@ describe('getStandaloneThinkingBubbleClassName', () => {
   });
 });
 
+describe('getRenderableFileUrl', () => {
+  it('converts local file URLs to the guarded file download endpoint', () => {
+    expect(getRenderableFileUrl('file:///tmp/channel%20image.png')).toBe(
+      '/api/file/download?path=%2Ftmp%2Fchannel%20image.png',
+    );
+  });
+
+  it('leaves browser-readable URLs unchanged', () => {
+    expect(getRenderableFileUrl('https://example.com/image.png')).toBe('https://example.com/image.png');
+    expect(getRenderableFileUrl('data:image/png;base64,abc')).toBe('data:image/png;base64,abc');
+  });
+});
+
 describe('getUserAvatarContainerClassName', () => {
   it('moves the user avatar to the bubble side without affecting bubble spacing', () => {
     const className = getUserAvatarContainerClassName(false);
@@ -338,6 +372,36 @@ describe('SessionChat standalone thinking indicator', () => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
       expect(container.textContent).not.toContain('思考中...');
     });
+  });
+});
+
+describe('shouldRenderMessage', () => {
+  it('keeps active empty assistant messages eligible for the thinking indicator', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-active',
+      role: 'assistant',
+      parts: [],
+      finish: null,
+    }))).toBe(true);
+  });
+
+  it('hides stopped empty assistant messages after abort before first content', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-stopped',
+      role: 'assistant',
+      parts: [],
+      finish: 'stop',
+    }))).toBe(false);
+  });
+
+  it('keeps empty assistant error messages visible', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-error',
+      role: 'assistant',
+      parts: [],
+      finish: 'error',
+      error: { code: 'SessionError', message: 'Provider failed' },
+    }))).toBe(true);
   });
 });
 
@@ -475,12 +539,13 @@ describe('truncateToolDisplayText', () => {
   });
 });
 
-describe('buildTodoWriteSummary', () => {
-  it('renders progress from structured todowrite input', () => {
-    expect(buildTodoWriteSummary({
+describe('buildTodoSummary', () => {
+  it('renders progress from structured todo input', () => {
+    expect(buildTodoSummary({
       input: {
+        action: 'write',
         todos: [
-          { id: '1', content: '定位 todowrite 摘要问题', status: 'in_progress' },
+          { id: '1', content: '定位 todo 摘要问题', status: 'in_progress' },
           { id: '2', content: '补充回归测试', status: 'completed' },
           { id: '3', content: '验证 Web UI 展示', status: 'pending' },
         ],
@@ -489,18 +554,71 @@ describe('buildTodoWriteSummary', () => {
   });
 
   it('prefers current metadata todos when available', () => {
-    expect(buildTodoWriteSummary({
+    expect(buildTodoSummary({
       metadata: {
         oldTodos: [
-          { id: '1', content: '定位 todowrite 摘要问题', status: 'pending' },
+          { id: '1', content: '定位 todo 摘要问题', status: 'pending' },
           { id: '2', content: '补充回归测试', status: 'pending' },
         ],
         newTodos: [
-          { id: '1', content: '定位 todowrite 摘要问题', status: 'completed' },
+          { id: '1', content: '定位 todo 摘要问题', status: 'completed' },
           { id: '3', content: '验证 Web UI 展示', status: 'completed' },
         ],
       },
     })).toBe('Completed 2/2');
+  });
+
+  it('renders a readable fallback for todo actions without structured entries', () => {
+    expect(buildTodoSummary({
+      input: {
+        action: 'write',
+        todos: [],
+      },
+    })).toBe('Update todos');
+  });
+});
+
+describe('ChatToolPart todo rendering', () => {
+  it('renders todo progress and stages without object-object summaries', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'todo-part',
+          type: 'tool',
+          tool: 'todo',
+          callID: 'call-todo',
+          state: {
+            status: 'completed',
+            input: {
+              action: 'write',
+              todos: [
+                { id: '1', content: '定位 todo 摘要问题', activeForm: '定位 todo 摘要问题中', status: 'in_progress' },
+                { id: '2', content: '补充回归测试', status: 'completed' },
+                { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+              ],
+            },
+            output: '{}',
+            title: '2 todos',
+            metadata: {
+              action: 'write',
+              newTodos: [
+                { id: '1', content: '定位 todo 摘要问题', activeForm: '定位 todo 摘要问题中', status: 'in_progress' },
+                { id: '2', content: '补充回归测试', status: 'completed' },
+                { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+              ],
+            },
+          },
+        } as any,
+      }),
+    );
+
+    expect(container.textContent).toContain('Progress 1/3 · In progress 1');
+    expect(container.textContent).toContain('Todo 阶段');
+    expect(container.textContent).toContain('定位 todo 摘要问题中');
+    expect(container.textContent).toContain('completed');
+    expect(container.textContent).not.toContain('输入参数');
+    expect(container.textContent).not.toContain('输出结果');
+    expect(container.textContent).not.toContain('[object Object]');
   });
 });
 
@@ -545,7 +663,7 @@ describe('areChatMessagePartsRenderEqual', () => {
     const sharedToolPart = {
       id: 'tool-1',
       type: 'tool',
-      tool: 'todowrite',
+      tool: 'todo',
       state: { status: 'running', metadata: { step: 1 } },
     } as Message['parts'][number];
 
