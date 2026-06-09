@@ -98,6 +98,19 @@ describe('IntegrationTab trigger workspace', () => {
     workflowAPI.get.mockResolvedValue({ data: workflow });
     workflowAPI.getConfig.mockResolvedValue({ data: { exists: false, path: '/tmp/config.json', config: {} } });
     workflowAPI.getService.mockResolvedValue({ data: null });
+    workflowAPI.publish.mockResolvedValue({
+      data: {
+        workflowId: 'wf-1',
+        workflowName: 'Demo Workflow',
+        serviceUrl: 'http://127.0.0.1:8080',
+        invokeUrl: 'http://127.0.0.1:8080/invoke',
+        apiKey: 'secret',
+        status: 'running',
+        publishedAt: Date.now(),
+        driver: 'local',
+      },
+    });
+    workflowAPI.unpublish.mockResolvedValue({ data: { ok: true } });
     workflowAPI.syncConfig.mockResolvedValue({ data: { ok: true, path: '/tmp/config.json', config: {} } });
     workflowAPI.getTriggers.mockResolvedValue({ data: [] });
     workflowAPI.createTrigger.mockResolvedValue({ data: { trigger: { id: 'hook-created' } } });
@@ -115,10 +128,10 @@ describe('IntegrationTab trigger workspace', () => {
     workflowAPI.getPollerStatus.mockResolvedValue({ data: { state: 'stopped' } });
   });
 
-  it('does not render broad publish controls without config.json template', async () => {
+  it('does not render broad publish controls without a publish config template', async () => {
     render(<IntegrationTab workflow={workflow} />);
 
-    expect(await screen.findByText('当前工作流还没有 config.json 发布模板。')).toBeInTheDocument();
+    expect(await screen.findByText('当前工作流还没有发布配置模板。')).toBeInTheDocument();
     expect(workflowAPI.getConfig).toHaveBeenCalledWith('wf-1');
     expect(workflowAPI.syncConfig).not.toHaveBeenCalled();
     expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
@@ -127,7 +140,7 @@ describe('IntegrationTab trigger workspace', () => {
     expect(screen.queryByText('Workflow Poller')).not.toBeInTheDocument();
   });
 
-  it('uses config.json template to render only API publishing', async () => {
+  it('uses publish config template to render only API publishing', async () => {
     workflowAPI.getConfig.mockResolvedValue({
       data: {
         exists: true,
@@ -148,6 +161,57 @@ describe('IntegrationTab trigger workspace', () => {
     expect(await screen.findByText('发布为 API')).toBeInTheDocument();
     expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Webhook' })).not.toBeInTheDocument();
+  });
+
+  it('treats api trigger entries as publish templates instead of runtime triggers', async () => {
+    const user = userEvent.setup();
+    workflowAPI.getService.mockResolvedValue({
+      data: {
+        workflowId: 'wf-1',
+        workflowName: 'Demo Workflow',
+        serviceUrl: 'http://127.0.0.1:8080',
+        invokeUrl: 'http://127.0.0.1:8080/invoke',
+        apiKey: 'secret',
+        status: 'running',
+        publishedAt: Date.now(),
+        driver: 'local',
+      },
+    });
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          triggers: [
+            {
+              id: 'api-default',
+              type: 'api',
+              name: 'Demo API',
+              enabled: true,
+              source: { method: 'POST', path: '/api/workflow/wf-1/run' },
+            },
+          ],
+        },
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} />);
+
+    expect(await screen.findByText('发布为 API')).toBeInTheDocument();
+    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
+    expect(screen.queryByText('Demo API')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '停止服务' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.unpublish).toHaveBeenCalledWith('wf-1');
+    });
+    expect(workflowAPI.createTrigger).not.toHaveBeenCalled();
+    expect(workflowAPI.updateTrigger).not.toHaveBeenCalled();
   });
 
   it('uses syslog template as start/stop only without config editor', async () => {
@@ -178,7 +242,7 @@ describe('IntegrationTab trigger workspace', () => {
 
     expect(await screen.findByText('触发能力')).toBeInTheDocument();
     expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
-    expect(screen.getByText('配置来自 config.json')).toBeInTheDocument();
+    expect(screen.getByText('模板来自配置库')).toBeInTheDocument();
     expect(screen.queryByText('协议')).not.toBeInTheDocument();
     expect(screen.queryByText('Inputs（JSON）')).not.toBeInTheDocument();
 
@@ -216,7 +280,7 @@ describe('IntegrationTab trigger workspace', () => {
 
     render(<IntegrationTab workflow={workflow} />);
 
-    expect(await screen.findByText('config.json 中没有声明可发布的 API 或触发能力。')).toBeInTheDocument();
+    expect(await screen.findByText('发布配置中没有声明可发布的 API 或触发能力。')).toBeInTheDocument();
     expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
     expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
   });

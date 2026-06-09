@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ConfirmProvider } from '@/components/common/ConfirmDialog';
 import WorkflowDetail from './index';
 
 const { mockGetWorkflow } = vi.hoisted(() => ({
@@ -87,9 +88,11 @@ function makeWorkflow() {
 function renderDetail() {
   return render(
     <MemoryRouter initialEntries={['/workflows/wf-1']}>
-      <Routes>
-        <Route path="/workflows/:id" element={<WorkflowDetail />} />
-      </Routes>
+      <ConfirmProvider>
+        <Routes>
+          <Route path="/workflows/:id" element={<WorkflowDetail />} />
+        </Routes>
+      </ConfirmProvider>
     </MemoryRouter>,
   );
 }

@@ -96,6 +96,11 @@
     "regenerate": "重新生成",
     "thinking": "思考中...",
     "streaming": "继续输出中...",
+    "process": {
+      "title": "过程（{{count}} 项）",
+      "reasoningCount": "{{count}} 段思考",
+      "toolCount": "{{count}} 次工具调用"
+    },
     "you": "你",
     "sending": "发送中...",
     "contextCompressed": "上下文已压缩",

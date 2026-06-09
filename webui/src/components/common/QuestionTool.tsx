@@ -74,14 +74,36 @@ function optionDescription(opt: QuestionOption | string): string {
   return typeof opt === 'string' ? '' : (opt.description ?? '');
 }
 
-function isQuestionAnswered(q: QuestionItem, answer: string[]): boolean {
+function isQuestionAnswered(q: QuestionItem, answer: string[], allowBlankAsNone = false): boolean {
   const type = resolveType(q);
   if (type === 'choice') return answer.length > 0;
   if (type === 'confirm') return answer.length > 0;
-  if (type === 'text' || type === 'password') return (answer[0] ?? '').trim().length > 0;
-  if (type === 'number') return (answer[0] ?? '').trim().length > 0;
+  if (type === 'text' || type === 'password' || type === 'number') {
+    return allowBlankAsNone || (answer[0] ?? '').trim().length > 0;
+  }
   if (type === 'file') return answer.length > 0;
   return false;
+}
+
+function normalizeAnswerForSubmit(q: QuestionItem, answer: string[], allowBlankAsNone = false): string[] {
+  const type = resolveType(q);
+  if (allowBlankAsNone && type === 'text') {
+    const value = (answer[0] ?? '').trim();
+    return [value || 'none'];
+  }
+  return answer;
+}
+
+function isInlineTextFollowUp(prev: QuestionItem | undefined, q: QuestionItem | undefined): boolean {
+  if (!q) return false;
+  if (!prev || resolveType(prev) !== 'choice' || resolveType(q) !== 'text') return false;
+  const marker = `${q.header ?? ''} ${q.question ?? ''} ${q.placeholder ?? ''}`.toLowerCase();
+  return /自定义|补充|说明|备注|其他|其它|custom|other|additional|note|comment/.test(marker);
+}
+
+function inlineTextHeader(q: QuestionItem, fallback: string): string {
+  const header = (q.header ?? '').replace(/^step\s*\d+\s*/i, '').trim();
+  return header || fallback;
 }
 
 // ============================================================================
@@ -400,11 +422,16 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
     });
   };
 
-  const canSubmit = questions.every((q, i) => isQuestionAnswered(q, answers[i] ?? []));
+  const canSubmit = questions.every((q, i) => (
+    isQuestionAnswered(q, answers[i] ?? [], isInlineTextFollowUp(questions[i - 1], q))
+  ));
 
   const handleSubmit = async () => {
+    const normalizedAnswers = questions.map((q, i) => (
+      normalizeAnswerForSubmit(q, answers[i] ?? [], isInlineTextFollowUp(questions[i - 1], q))
+    ));
     setSubmitting(true);
-    try { await onAnswer(answers); } finally { setSubmitting(false); }
+    try { await onAnswer(normalizedAnswers); } finally { setSubmitting(false); }
   };
 
   const handleReject = async () => {
@@ -428,9 +455,16 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
       {/* Questions */}
       <div className={`${px} ${py} space-y-5`}>
         {questions.map((q, qIdx) => {
+          if (isInlineTextFollowUp(questions[qIdx - 1], q)) return null;
+
           const type = resolveType(q);
           const answer = answers[qIdx] ?? [];
           const inputProps = { q, answer, onChange: (v: string[]) => setAnswer(qIdx, v), disabled: submitting, compact };
+          const inlineFollowUp = type === 'choice' && isInlineTextFollowUp(q, questions[qIdx + 1])
+            ? questions[qIdx + 1]
+            : undefined;
+          const inlineFollowUpIdx = inlineFollowUp ? qIdx + 1 : -1;
+          const inlineFollowUpAnswer = inlineFollowUp ? (answers[inlineFollowUpIdx] ?? []) : [];
 
           return (
             <div key={qIdx}>
@@ -442,6 +476,25 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
               <div className={`${textSm} font-medium text-gray-800 mb-2`}>{q.question}</div>
 
               {type === 'choice'   && <ChoiceInput   {...inputProps} />}
+              {inlineFollowUp && (
+                <div className="mt-2 rounded-lg border border-purple-100 bg-white px-3 py-2.5">
+                  <div className={`${compact ? 'text-[11px]' : 'text-xs'} font-medium text-slate-700`}>
+                    {inlineTextHeader(inlineFollowUp, t('question.customAnswer'))}
+                  </div>
+                  <div className={`${compact ? 'text-[11px]' : 'text-xs'} mt-1 text-slate-500 leading-relaxed`}>
+                    {inlineFollowUp.question}
+                  </div>
+                  <div className="mt-2">
+                    <TextInput
+                      q={{ ...inlineFollowUp, placeholder: inlineFollowUp.placeholder || 'none' }}
+                      answer={inlineFollowUpAnswer}
+                      onChange={(v) => setAnswer(inlineFollowUpIdx, v)}
+                      disabled={submitting}
+                      compact={compact}
+                    />
+                  </div>
+                </div>
+              )}
               {type === 'text'     && <TextInput     {...inputProps} />}
               {type === 'number'   && <NumberInput   {...inputProps} />}
               {type === 'password' && <PasswordInput {...inputProps} />}

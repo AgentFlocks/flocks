@@ -271,7 +271,14 @@ export interface WorkflowIntegrationConfigResponse {
   ok?: boolean;
   exists?: boolean;
   path: string;
+  storageKey?: string;
+  source?: 'storage' | 'file_migrated' | 'generated' | string;
   config: WorkflowIntegrationConfig;
+  runtime?: {
+    publish?: Record<string, any>;
+    triggers?: WorkflowTriggerRecord[];
+    [key: string]: any;
+  };
 }
 
 /** Saved syslog listener config (per workflow). */
@@ -428,6 +435,9 @@ export const workflowAPI = {
 
   getConfig: (id: string) =>
     client.get<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`),
+
+  updateConfig: (id: string, config: WorkflowIntegrationConfig) =>
+    client.put<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`, config),
 
   syncConfig: (id: string) =>
     client.post<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config/sync`),

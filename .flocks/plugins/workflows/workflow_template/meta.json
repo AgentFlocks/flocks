@@ -1,0 +1,15 @@
+{
+  "id": "workflow_template",
+  "name": "Hidden Workflow Publish Template",
+  "description": "Internal template for workflow authoring and config-driven publish pages.",
+  "category": "template",
+  "status": "hidden",
+  "hidden": true,
+  "templateOnly": true,
+  "visibility": "hidden",
+  "excludeFromUI": true,
+  "excludeFromPrompt": true,
+  "createdBy": null,
+  "createdAt": 0,
+  "updatedAt": 0
+}

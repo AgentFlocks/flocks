@@ -8,6 +8,7 @@ import type { Message } from '@/types';
 import {
   areChatMessagePartsRenderEqual,
   buildTodoSummary,
+  ChatMessageBubble,
   ChatToolPart,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
@@ -19,6 +20,8 @@ import {
   getStandaloneThinkingBubbleClassName,
   getUserAvatarContainerClassName,
   getUserAvatarSpacerClassName,
+  isIntermediateStepPart,
+  isQuestionToolPart,
   listUploadedDocumentPaths,
   shouldRenderMessage,
   shouldRefetchFinishedMessage,
@@ -36,25 +39,31 @@ const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
-const tMock = (key: string) => ({
-  'chat.placeholder': '请输入消息',
-  'chat.emptyText': '暂无消息',
-  'chat.sending': '发送中...',
-  'chat.thinking': '思考中...',
-  'chat.streaming': '继续输出中...',
-  'chat.compacting': '压缩中...',
-  'chat.mention.title': '选择 Agent',
-  'chat.mention.navigate': '导航',
-  'chat.mention.select': '选择',
-  'chat.tool.pending': '等待中',
-  'chat.tool.running': '执行中',
-  'chat.tool.completed': '已完成',
-  'chat.tool.error': '失败',
-  'chat.tool.inputParams': '输入参数',
-  'chat.tool.outputResult': '输出结果',
-  'chat.tool.todoStages': 'Todo 阶段',
-  'smartAssistant': '智能助手',
-}[key] ?? key);
+const tMock = (key: string, options?: Record<string, unknown>) => {
+  const count = Number(options?.count ?? 0);
+  return ({
+    'chat.placeholder': '请输入消息',
+    'chat.emptyText': '暂无消息',
+    'chat.sending': '发送中...',
+    'chat.thinking': '思考中...',
+    'chat.streaming': '继续输出中...',
+    'chat.compacting': '压缩中...',
+    'chat.mention.title': '选择 Agent',
+    'chat.mention.navigate': '导航',
+    'chat.mention.select': '选择',
+    'chat.process.title': `过程（${count} 项）`,
+    'chat.process.reasoningCount': `${count} 段思考`,
+    'chat.process.toolCount': `${count} 次工具调用`,
+    'chat.tool.pending': '等待中',
+    'chat.tool.running': '执行中',
+    'chat.tool.completed': '已完成',
+    'chat.tool.error': '失败',
+    'chat.tool.inputParams': '输入参数',
+    'chat.tool.outputResult': '输出结果',
+    'chat.tool.todoStages': 'Todo 阶段',
+    'smartAssistant': '智能助手',
+  }[key] ?? key);
+};
 const pendingQuestionsHookMock = {
   pendingQuestions: {},
   handleQuestionAsked: vi.fn(),
@@ -392,6 +401,227 @@ describe('shouldRenderMessage', () => {
       parts: [],
       finish: 'stop',
     }))).toBe(false);
+  });
+});
+
+describe('ChatMessageBubble intermediate process grouping', () => {
+  const processMessage = makeMessage({
+    id: 'assistant-process',
+    role: 'assistant',
+    parts: [
+      { id: 'reason-1', type: 'reasoning', text: 'hidden thought details' },
+      {
+        id: 'tool-1',
+        type: 'tool',
+        tool: 'read_file',
+        state: {
+          status: 'completed',
+          input: { path: '/tmp/demo.txt' },
+          output: 'ok',
+        },
+      },
+      { id: 'text-1', type: 'text', text: 'final answer' },
+    ] as Message['parts'],
+  });
+
+  it('identifies reasoning and tool parts as intermediate process parts', () => {
+    expect(isIntermediateStepPart(processMessage.parts[0])).toBe(true);
+    expect(isIntermediateStepPart(processMessage.parts[1])).toBe(true);
+    expect(isIntermediateStepPart(processMessage.parts[2])).toBe(false);
+    expect(isQuestionToolPart(processMessage.parts[1])).toBe(false);
+    expect(isIntermediateStepPart({
+      id: 'question-1',
+      type: 'tool',
+      tool: 'question',
+      state: { status: 'running' },
+    } as Message['parts'][number])).toBe(false);
+  });
+
+  it('does not group intermediate parts unless the workflow display option is enabled', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: processMessage,
+      compact: true,
+    }));
+
+    expect(screen.queryByText('过程（2 项）')).not.toBeInTheDocument();
+    expect(screen.getByText('read file')).toBeInTheDocument();
+    expect(screen.getByText('final answer')).toBeInTheDocument();
+  });
+
+  it('groups intermediate parts behind one process button while preserving inner tool folding', async () => {
+    const user = userEvent.setup();
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: processMessage,
+      compact: true,
+      collapseIntermediateSteps: true,
+    }));
+
+    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
+    expect(screen.getByText('1 段思考 · 1 次工具调用')).toBeInTheDocument();
+    expect(screen.getByText('final answer')).toBeInTheDocument();
+    expect(screen.queryByText('read file')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '过程（2 项） 1 段思考 · 1 次工具调用' }));
+
+    expect(screen.getByText('read file')).toBeInTheDocument();
+    const toolDetails = container.querySelector('details');
+    expect(toolDetails?.hasAttribute('open')).toBe(false);
+
+    const toolSummary = container.querySelector('summary');
+    expect(toolSummary).not.toBeNull();
+    await user.click(toolSummary as HTMLElement);
+    expect(toolDetails?.hasAttribute('open')).toBe(true);
+  });
+
+  it('uses a stable full-width assistant bubble while process details are collapsed', () => {
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: processMessage,
+      compact: true,
+      collapseIntermediateSteps: true,
+    }));
+
+    const bubble = Array.from(container.querySelectorAll('div'))
+      .find((el) => String(el.className).includes('rounded-[20px]'));
+    expect(bubble?.className).toContain('w-full');
+  });
+
+  it('keeps ordinary compact assistant bubbles content-sized', () => {
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: processMessage,
+      compact: true,
+    }));
+
+    const bubble = Array.from(container.querySelectorAll('div'))
+      .find((el) => String(el.className).includes('rounded-[20px]'));
+    expect(bubble?.className).not.toContain('w-full');
+  });
+
+  it('preserves message order by grouping only contiguous process parts', async () => {
+    const user = userEvent.setup();
+    const orderedMessage = makeMessage({
+      id: 'assistant-ordered-process',
+      role: 'assistant',
+      parts: [
+        { id: 'reason-1', type: 'reasoning', text: 'first thought' },
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'read_file',
+          state: { status: 'completed', input: { path: '/tmp/a.txt' }, output: 'a' },
+        },
+        { id: 'text-1', type: 'text', text: 'first summary' },
+        {
+          id: 'tool-2',
+          type: 'tool',
+          tool: 'write_file',
+          state: { status: 'completed', input: { path: '/tmp/b.txt' }, output: 'b' },
+        },
+        { id: 'text-2', type: 'text', text: 'second summary' },
+      ] as Message['parts'],
+    });
+
+    render(React.createElement(ChatMessageBubble, {
+      message: orderedMessage,
+      compact: true,
+      collapseIntermediateSteps: true,
+    }));
+
+    const processButtons = screen.getAllByRole('button', { name: /过程/ });
+    expect(processButtons).toHaveLength(2);
+    expect(processButtons[0]).toHaveTextContent('过程（2 项）');
+    expect(processButtons[1]).toHaveTextContent('过程（1 项）');
+
+    const firstSummary = screen.getByText('first summary');
+    const secondSummary = screen.getByText('second summary');
+    expect(processButtons[0].compareDocumentPosition(firstSummary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(firstSummary.compareDocumentPosition(processButtons[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(processButtons[1].compareDocumentPosition(secondSummary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText('write file')).not.toBeInTheDocument();
+
+    await user.click(processButtons[1]);
+    expect(screen.getByText('write file')).toBeInTheDocument();
+  });
+
+  it('keeps adjacent process parts in one button when only invisible parts separate them', () => {
+    const messageWithInvisibleSeparators = makeMessage({
+      id: 'assistant-process-empty-separators',
+      role: 'assistant',
+      parts: [
+        { id: 'reason-1', type: 'reasoning', text: 'first thought' },
+        { id: 'empty-text-1', type: 'text', text: '' },
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'read_file',
+          state: { status: 'completed', input: { path: '/tmp/a.txt' }, output: 'a' },
+        },
+        { id: 'empty-reason-1', type: 'reasoning', text: '' },
+        {
+          id: 'tool-2',
+          type: 'tool',
+          tool: 'write_file',
+          state: { status: 'completed', input: { path: '/tmp/b.txt' }, output: 'b' },
+        },
+        { id: 'text-1', type: 'text', text: 'visible result' },
+      ] as Message['parts'],
+    });
+
+    render(React.createElement(ChatMessageBubble, {
+      message: messageWithInvisibleSeparators,
+      compact: true,
+      collapseIntermediateSteps: true,
+    }));
+
+    const processButtons = screen.getAllByRole('button', { name: /过程/ });
+    expect(processButtons).toHaveLength(1);
+    expect(processButtons[0]).toHaveTextContent('过程（3 项）');
+    expect(screen.getByText('1 段思考 · 2 次工具调用')).toBeInTheDocument();
+    expect(screen.getByText('visible result')).toBeInTheDocument();
+  });
+
+  it('keeps question tools visible instead of folding them into process groups', () => {
+    const questionMessage = makeMessage({
+      id: 'assistant-question-process',
+      role: 'assistant',
+      parts: [
+        { id: 'reason-1', type: 'reasoning', text: 'prepare question' },
+        { id: 'text-1', type: 'text', text: 'ready to ask' },
+        {
+          id: 'question-tool-1',
+          type: 'tool',
+          tool: 'question',
+          callID: 'call-question-1',
+          state: { status: 'running' },
+        },
+      ] as Message['parts'],
+    });
+
+    render(React.createElement(ChatMessageBubble, {
+      message: questionMessage,
+      compact: true,
+      collapseIntermediateSteps: true,
+      pendingQuestions: {
+        'call-question-1': {
+          requestId: 'request-question-1',
+          questions: [
+            {
+              header: '输入模式',
+              question: '告警将以哪种方式进入 stream_alert_denoise?',
+              type: 'choice',
+              options: ['Syslog 实时流', 'API 批次调用'],
+            },
+          ],
+        },
+      },
+      onQuestionAnswer: vi.fn(),
+      onQuestionReject: vi.fn(),
+    }));
+
+    expect(screen.getByRole('button', { name: /过程（1 项）/ })).toBeInTheDocument();
+    expect(screen.getByText('ready to ask')).toBeInTheDocument();
+    expect(screen.getByText('告警将以哪种方式进入 stream_alert_denoise?')).toBeInTheDocument();
+    expect(screen.getByText('Syslog 实时流')).toBeInTheDocument();
+    expect(screen.queryByText('question')).not.toBeInTheDocument();
   });
 });
 

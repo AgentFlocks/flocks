@@ -154,6 +154,7 @@ class SkillMetadata(BaseModel):
     os: Optional[List[str]] = None
     homepage: Optional[str] = None
     emoji: Optional[str] = None
+    ui_hidden: Optional[bool] = None
 
 
 class SkillInfo(BaseModel):
@@ -163,6 +164,7 @@ class SkillInfo(BaseModel):
     location: str = Field(..., description="Path to SKILL.md file")
     source: Optional[str] = Field(default=None, description="Discovery source")
     category: Optional[str] = Field(default=None, description="Skill category (e.g. 'system')")
+    ui_hidden: bool = Field(default=False, description="Whether the skill should be omitted from skill management UI")
     native: bool = Field(default=False, description=(
         "True only for project-installed skills (<cwd>/.flocks/plugins/skills/). "
         "All other locations (.flocks/skills/, ~/.flocks/plugins/skills/, .claude/) "
@@ -225,6 +227,7 @@ class Skill:
             name = (data.get("name") or "").strip()
             description = (data.get("description") or "").strip()
             category = (data.get("category") or "").strip().lower() or None
+            ui_hidden = cls._as_bool(data.get("ui_hidden"))
 
             if not cls._is_valid_name(name) or not cls._is_valid_description(description):
                 return None
@@ -242,6 +245,7 @@ class Skill:
                         skill_metadata = SkillMetadata.model_validate(raw_flocks)
                         install_specs = skill_metadata.install or None
                         requires = skill_metadata.requires or None
+                        ui_hidden = ui_hidden or bool(skill_metadata.ui_hidden)
                     except Exception as exc:
                         log.warn("skill.metadata.parse.error", {
                             "filepath": filepath,
@@ -258,6 +262,7 @@ class Skill:
                 location=filepath,
                 source=source,
                 category=category,
+                ui_hidden=ui_hidden,
                 native=is_native,
                 metadata=skill_metadata,
                 install_specs=install_specs,
@@ -311,6 +316,14 @@ class Skill:
     @staticmethod
     def _is_valid_description(description: str) -> bool:
         return 1 <= len(description) <= 1024
+
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     @classmethod
     def _scan_directory(

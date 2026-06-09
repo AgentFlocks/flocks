@@ -81,6 +81,7 @@ class SkillResponse(BaseModel):
     source: Optional[str] = Field(None, description="Discovery source")
     content: Optional[str] = Field(None, description="Full SKILL.md content")
     category: Optional[str] = Field(None, description="Skill category (e.g. 'system')")
+    ui_hidden: bool = Field(False, description="Whether the skill is omitted from user-facing skill UI")
     # Extended fields
     eligible: Optional[bool] = Field(None, description="Whether all requirements are met")
     missing: Optional[List[str]] = Field(None, description="Missing bins/env vars")
@@ -246,6 +247,7 @@ def _skill_to_response(
         source=skill.source,
         content=content,
         category=skill.category,
+        ui_hidden=skill.ui_hidden,
         eligible=skill.eligible,
         missing=skill.missing,
         requires=requires_resp,
@@ -443,6 +445,7 @@ async def create_skill(req: SkillCreateRequest, _user=Depends(require_user)):
             location=str(skill_path),
             source="user",
             content=full_content,
+            ui_hidden=False,
             disabled=False,
         )
     except HTTPException:
@@ -512,6 +515,7 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
             location=location,
             source=skill.source,
             content=full_content,
+            ui_hidden=skill.ui_hidden,
             # Reflect the post-update disabled state so the UI doesn't
             # report ``disabled=False`` when the user actually renamed a
             # disabled skill (Skill.rename_disabled migrates the flag).

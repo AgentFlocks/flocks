@@ -145,6 +145,7 @@
     "yes": "Yes",
     "no": "No",
     "needsAnswer": "Needs your response",
+    "customAnswer": "Custom / additional note",
     "confirm": "Confirm",
     "skip": "Skip"
   },

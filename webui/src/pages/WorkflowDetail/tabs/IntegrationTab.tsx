@@ -83,16 +83,27 @@ function templateHasApi(config?: WorkflowIntegrationConfig | null): boolean {
   if (Object.keys(publish).length > 0 && publish.enabled !== false) {
     return true;
   }
+  if (templateTriggerEntries(config).some((item) => isTemplateApiMode((item as JsonObject).type))) {
+    return true;
+  }
   const modes = templateModes(config);
   return Array.from(modes).some((mode) => TEMPLATE_API_MODES.has(mode));
 }
 
-function templateTriggers(config?: WorkflowIntegrationConfig | null): WorkflowTrigger[] {
+function templateTriggerEntries(config?: WorkflowIntegrationConfig | null): unknown[] {
   if (!config) return [];
   const raw = config as JsonObject;
-  const triggers = Array.isArray(raw.triggers) ? raw.triggers : Array.isArray(raw.integrations) ? raw.integrations : [];
-  return triggers
+  return Array.isArray(raw.triggers) ? raw.triggers : Array.isArray(raw.integrations) ? raw.integrations : [];
+}
+
+function isTemplateApiMode(value: unknown): boolean {
+  return TEMPLATE_API_MODES.has(normalizeMode(value));
+}
+
+function templateTriggers(config?: WorkflowIntegrationConfig | null): WorkflowTrigger[] {
+  return templateTriggerEntries(config)
     .filter((item): item is WorkflowTrigger => Boolean(item && typeof item === 'object' && (item as WorkflowTrigger).type))
+    .filter((item) => !isTemplateApiMode(item.type))
     .map((item, index) => ({
       ...item,
       id: item.id || `${item.type}-${index + 1}`,
@@ -708,7 +719,7 @@ function TemplateTriggersSection({
                       </span>
                     </div>
                     <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(trigger)}</div>
-                    <div className="mt-1 text-[11px] text-gray-400">配置来自 config.json</div>
+                    <div className="mt-1 text-[11px] text-gray-400">模板来自配置库</div>
                   </div>
                   <WorkflowStatusBadge status={templateStatusLabel(status)} />
                 </div>
@@ -1619,7 +1630,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated }: Integrat
         if (cancelled) return;
         setHasTemplate(false);
         setConfig(null);
-        setConfigError(extractErrorMessage(err, '加载发布模板失败'));
+        setConfigError(extractErrorMessage(err, '加载发布配置失败'));
       })
       .finally(() => {
         if (!cancelled) {
@@ -1636,7 +1647,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated }: Integrat
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="p-4 flex items-center gap-2 text-xs text-gray-500">
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          正在读取发布模板...
+          正在读取发布配置...
         </div>
       </div>
     );
@@ -1657,7 +1668,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated }: Integrat
         {!view.hasApi && view.triggers.length === 0 ? (
           <div className="p-4">
             <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
-              config.json 中没有声明可发布的 API 或触发能力。
+              发布配置中没有声明可发布的 API 或触发能力。
             </div>
           </div>
         ) : null}
@@ -1675,7 +1686,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated }: Integrat
       ) : null}
       <div className="p-4">
         <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
-          当前工作流还没有 config.json 发布模板。
+          当前工作流还没有发布配置模板。
         </div>
       </div>
     </div>

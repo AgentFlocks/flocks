@@ -373,9 +373,9 @@ export default function WorkflowDetail() {
       )}
 
       {/* 主体区域：画布 + 拖动分隔条 + 右侧面板 */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="relative isolate flex flex-1 min-h-0 overflow-hidden">
         {/* 左侧画布区域（含三 Tab） */}
-        <div className="flex flex-col flex-1 min-w-0">
+        <div className="relative z-0 flex flex-col flex-1 min-w-0 overflow-hidden">
           {/* Canvas Tab 栏 */}
           <div className="flex items-center border-b border-gray-200 bg-white flex-shrink-0 px-2">
             {CANVAS_TABS.map((tab) => (
@@ -433,7 +433,7 @@ export default function WorkflowDetail() {
             {/* MD 描述 */}
             {canvasTab === 'md' && (
               <div className="absolute inset-0 flex flex-col bg-white">
-                <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-gray-200 px-4 py-2.5">
+                <div className="flex flex-shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-gray-200 px-4 py-2.5">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <FileText className="h-4 w-4 flex-shrink-0 text-gray-500" />
@@ -447,7 +447,7 @@ export default function WorkflowDetail() {
                     <p className="mt-0.5 truncate text-[11px] text-gray-400">workflow.edit.md</p>
                   </div>
 
-                  <div className="flex flex-shrink-0 items-center gap-2">
+                  <div className="flex min-w-0 flex-shrink items-center gap-2 overflow-x-auto pb-0.5">
                     <div className="flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
                       <button
                         type="button"
@@ -592,7 +592,7 @@ export default function WorkflowDetail() {
         {panelOpen && (
           <div
             onMouseDown={onDragStart}
-            className="w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 relative group"
+            className="relative z-20 w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group"
             title={t('detail.dragAdjust')}
           >
             <div className="absolute inset-y-0 -left-1.5 -right-1.5" />

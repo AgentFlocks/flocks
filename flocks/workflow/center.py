@@ -28,6 +28,7 @@ from flocks.sandbox.docker import docker_container_state, exec_docker
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.models import Workflow
+from flocks.workflow.visibility import is_hidden_workflow
 
 log = Log.create(service="workflow.center")
 
@@ -186,6 +187,14 @@ async def _scan_workflow_dir(
     for workflow_path in sorted(workflow_root.glob("*/workflow.json")):
         try:
             raw = json.loads(workflow_path.read_text(encoding="utf-8"))
+            meta_path = workflow_path.parent / "meta.json"
+            meta = (
+                json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta_path.is_file()
+                else None
+            )
+            if is_hidden_workflow(raw, meta):
+                continue
             Workflow.from_dict(raw)
         except Exception as exc:
             log.warning(

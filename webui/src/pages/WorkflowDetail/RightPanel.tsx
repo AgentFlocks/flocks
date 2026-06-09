@@ -134,7 +134,7 @@ export default function RightPanel({
 
   return (
     <div
-      className="flex flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out"
+      className="relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out"
       style={{ width: open ? width : 0 }}
     >
       {/* Tab bar */}

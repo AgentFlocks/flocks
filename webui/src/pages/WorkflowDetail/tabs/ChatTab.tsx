@@ -16,6 +16,7 @@ import {
 } from '../sessionStorage';
 
 const FALLBACK_POLL_MS = 30_000;
+const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
 
 // ─────────────────────────────────────────────
 // ChatTab
@@ -66,7 +67,6 @@ export default function ChatTab({
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowEditDocPath = `${workflowDir}workflow.edit.md`;
-  const workflowGuidePath = `${workflowDir}rex_integration_guide.md`;
 
   const {
     sessionId: hookSessionId,
@@ -79,13 +79,14 @@ export default function ChatTab({
     title: t('detail.chat.sessionTitle', { name: workflow.name }),
     category: 'workflow',
     contextMessage: t('detail.chat.contextMessage', {
+      id: workflow.id,
       name: workflow.name,
       category: workflow.category,
       dir: workflowDir,
       editDocPath: workflowEditDocPath,
       mdPath: `${workflowDir}workflow.md`,
       jsonPath: `${workflowDir}workflow.json`,
-      guidePath: workflowGuidePath,
+      configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
     }),
   });
 
@@ -359,6 +360,7 @@ export default function ChatTab({
           live={!!sessionId}
           placeholder={t('detail.chat.inputPlaceholder')}
           className="h-full"
+          display={{ collapseIntermediateSteps: true }}
           nodeRef={nodeRef}
           onNodeRefDismiss={onNodeRefDismiss}
           onStreamingDone={handleStreamingDone}
@@ -457,12 +459,12 @@ function WorkflowGuideDock({
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowEditDocPath = `${workflowDir}workflow.edit.md`;
-  const workflowGuidePath = `${workflowDir}rex_integration_guide.md`;
   const promptParams = {
+    id: workflow.id,
     name: workflow.name,
     dir: workflowDir,
     editDocPath: workflowEditDocPath,
-    guidePath: workflowGuidePath,
+    configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
   const guideActions = [
     {
