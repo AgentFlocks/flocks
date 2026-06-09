@@ -20,6 +20,7 @@ import {
   getUserAvatarContainerClassName,
   getUserAvatarSpacerClassName,
   listUploadedDocumentPaths,
+  shouldRenderMessage,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
@@ -371,6 +372,26 @@ describe('SessionChat standalone thinking indicator', () => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
       expect(container.textContent).not.toContain('思考中...');
     });
+  });
+});
+
+describe('shouldRenderMessage', () => {
+  it('keeps active empty assistant messages eligible for the thinking indicator', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-active',
+      role: 'assistant',
+      parts: [],
+      finish: null,
+    }))).toBe(true);
+  });
+
+  it('hides stopped empty assistant messages after abort before first content', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-stopped',
+      role: 'assistant',
+      parts: [],
+      finish: 'stop',
+    }))).toBe(false);
   });
 });
 

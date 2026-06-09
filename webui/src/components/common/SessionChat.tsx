@@ -436,6 +436,17 @@ export function getRenderableFileUrl(url: string): string {
   }
 }
 
+export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'finish'>): boolean {
+  if (
+    message.role === 'assistant' &&
+    (message.parts?.length ?? 0) === 0 &&
+    !!message.finish
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function getUserAvatarContainerClassName(compact: boolean): string {
   return `pointer-events-none absolute left-full top-0 ml-2.5 translate-y-1/2 flex items-center justify-end ${
     compact ? 'h-7' : 'h-8'
@@ -820,6 +831,7 @@ export default function SessionChat({
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
   const initialMessageSentRef = useRef('');
   const abortingRef = useRef(false);
+  const sessionBusyRef = useRef(false);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
   const statusCheckedRef = useRef<string | null>(null);
@@ -938,16 +950,44 @@ export default function SessionChat({
 
       if (type === 'session.cleared' && properties.sessionID === sessionId) {
         abortingRef.current = false;
+        sessionBusyRef.current = false;
         abortedMessageIdRef.current = null;
         setIsStreaming(false);
         refetch();
-      } else if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
-        setIsStreaming(false);
-        const lastAsstMsg = [...messagesRef.current].reverse().find(
-          (message) => message.role === 'assistant' && !message.finish,
-        );
-        if (lastAsstMsg?.parts?.length) {
-          markMessageStopped(lastAsstMsg.id);
+      } else if (
+        (type === 'session.status' && properties.sessionID === sessionId)
+        || (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle')
+      ) {
+        const statusType = type === 'session.status' ? properties.status?.type : properties.status;
+        if (statusType === 'busy') {
+          sessionBusyRef.current = true;
+          if (!abortingRef.current) setIsStreaming(true);
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+        } else if (statusType === 'compacting') {
+          sessionBusyRef.current = true;
+          if (!abortingRef.current) setIsStreaming(true);
+          setIsCompacting(true);
+          isCompactingRef.current = true;
+          setCompactingMessage(properties.status?.message || t('chat.compacting'));
+          // Reset progress state on each new compaction cycle so a stale
+          // run's stages do not leak into a fresh "Compacting..." panel.
+          setCompactionStages([]);
+        } else if (statusType === 'idle') {
+          const wasCompacting = isCompactingRef.current;
+          sessionBusyRef.current = false;
+          setIsStreaming(false);
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+          setCompactingMessage('');
+          setCompactionStages([]);
+          if (wasCompacting) refetch();
+          const lastAsstMsg = [...messagesRef.current].reverse().find(
+            (message) => message.role === 'assistant' && !message.finish,
+          );
+          if (lastAsstMsg?.parts?.length) {
+            markMessageStopped(lastAsstMsg.id);
+          }
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -961,7 +1001,9 @@ export default function SessionChat({
           // would replace the visible partial response with an empty message.
           if (shouldRefetch) {
             refetch();
-            setIsStreaming(false);
+            if (!sessionBusyRef.current) {
+              setIsStreaming(false);
+            }
           }
           abortingRef.current = false;
           abortedMessageIdRef.current = null;
@@ -989,22 +1031,6 @@ export default function SessionChat({
         const requestId: string | undefined = properties.requestID;
         if (requestId) {
           removeByRequestId(requestId);
-        }
-      } else if (type === 'session.status' && properties.sessionID === sessionId) {
-        if (properties.status?.type === 'compacting') {
-          setIsCompacting(true);
-          isCompactingRef.current = true;
-          setCompactingMessage(properties.status.message || t('chat.compacting'));
-          // Reset progress state on each new compaction cycle so a stale
-          // run's stages do not leak into a fresh "Compacting..." panel.
-          setCompactionStages([]);
-        } else {
-          const wasCompacting = isCompactingRef.current;
-          setIsCompacting(false);
-          isCompactingRef.current = false;
-          setCompactingMessage('');
-          setCompactionStages([]);
-          if (wasCompacting) refetch();
         }
       } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
         const stage = properties.stage as CompactionStage | undefined;
@@ -1035,6 +1061,7 @@ export default function SessionChat({
         setIsCompacting(false);
         setCompactionStages([]);
         abortingRef.current = false;
+        sessionBusyRef.current = false;
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
     },
@@ -1132,6 +1159,7 @@ export default function SessionChat({
     setPendingAgentName(agentName || 'rex');
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
+    sessionBusyRef.current = false;
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
     clearPendingQuestions();
@@ -1164,12 +1192,16 @@ export default function SessionChat({
         const res = await client.get('/api/session/status');
         const status = res.data[sessionId];
         if (status?.type === 'busy') {
+          sessionBusyRef.current = true;
           setIsStreaming(true);
         } else if (status?.type === 'compacting') {
+          sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
           setCompactingMessage(status.message || t('chat.compacting'));
+        } else {
+          sessionBusyRef.current = false;
         }
       } catch {
         if (messages.length > 0) {
@@ -2031,6 +2063,10 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
+      if (!shouldRenderMessage(msg)) {
+        skipIndices.add(idx);
+        continue;
+      }
       if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
         skipIndices.add(idx);
         continue;

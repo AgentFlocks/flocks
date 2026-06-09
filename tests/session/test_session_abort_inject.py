@@ -117,6 +117,50 @@ class TestAbortPropagation:
         runner.abort()
         assert runner.is_aborted is True
 
+    @pytest.mark.asyncio
+    async def test_session_loop_run_publishes_busy_and_idle_status_events(self):
+        session_info = _make_session_info("status_event_session")
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+
+        with patch(
+            "flocks.session.session_loop.Session.get_by_id",
+            AsyncMock(return_value=session_info),
+        ), patch(
+            "flocks.session.session_loop.Message.list",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.orphan_tools.abort_orphan_running_parts",
+            AsyncMock(return_value=0),
+        ), patch(
+            "flocks.session.session_loop.SessionLoop._run_loop",
+            AsyncMock(return_value=LoopResult(action="stop")),
+        ), patch(
+            "flocks.session.session_loop.Session.touch",
+            AsyncMock(),
+        ), patch(
+            "flocks.bus.bus.Bus.publish",
+            AsyncMock(),
+        ):
+            result = await SessionLoop.run(
+                session_id=session_info.id,
+                provider_id="test-provider",
+                model_id="test-model",
+                agent_name="rex",
+                callbacks=callbacks,
+            )
+
+        assert result.action == "stop"
+        status_events = [
+            call.args
+            for call in event_callback.await_args_list
+            if call.args and call.args[0] == "session.status"
+        ]
+        assert status_events == [
+            ("session.status", {"sessionID": session_info.id, "status": {"type": "busy"}}),
+            ("session.status", {"sessionID": session_info.id, "status": {"type": "idle"}}),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # SessionLoop abort tests
@@ -575,5 +619,3 @@ class TestLoopContext:
             agent_name="test",
         )
         assert ctx.step == 0
-
-
