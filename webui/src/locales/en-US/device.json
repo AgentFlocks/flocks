@@ -194,9 +194,11 @@
       "webcliNext": "You can continue to add page actions, capture targets, and authentication details. The final result should be a WebCLI device plugin that the device page can recognize; a CLI can remain as an optional debugging entry."
     },
     "rex": {
-      "apiHint": "After you finish the plugin with Rex, return to the device page and check whether the corresponding device plugin appears. If API docs are inconvenient to paste, upload them directly in this conversation.",
-      "webcliHint": "After you finish with Rex, confirm that the WebCLI device plugin has been generated. Then return to the device page to continue reviewing and configuring it; the CLI should remain only as an optional debugging entry.",
+      "apiHint": "Upload API docs or describe the endpoints. Rex will clarify key gaps before generating the device plugin.",
+      "webcliHint": "Provide the product URL and target pages/actions. Rex will clarify login, permissions, and risky operations before generating assets.",
       "placeholder": "Continue adding interface details, authentication information, or debugging notes",
+      "apiPlaceholder": "Provide the product API documentation",
+      "webcliPlaceholder": "Provide the website URL",
       "pending": "Rex is getting ready..."
     },
     "workflow": {

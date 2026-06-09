@@ -75,6 +75,8 @@ export interface NodeRef {
 export interface SessionChatDisplay {
   /** Compact mode for panels/dialogs (default: true). Set false for full-page. */
   compact?: boolean;
+  /** Let embedded chats use the full available message width. */
+  fullWidth?: boolean;
   /** Show copy action on assistant messages */
   showActions?: boolean;
   /** Show timestamp below each message */
@@ -708,6 +710,7 @@ export default function SessionChat({
   const { t, i18n } = useTranslation('session');
   const toast = useToast();
   const compact = display?.compact ?? true;
+  const fullWidth = display?.fullWidth ?? false;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
@@ -2043,7 +2046,9 @@ export default function SessionChat({
     ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3'
     : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
 
-  const msgListClass = compact ? '' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
+  const msgListClass = compact
+    ? fullWidth ? 'w-full px-4' : ''
+    : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -2228,7 +2233,7 @@ export default function SessionChat({
       {/* Follow-up input */}
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
-          <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
+          <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]') : ''}`}>
             <QueuedPromptPanel
               items={queuedPrompts}
               expanded={queueExpanded}

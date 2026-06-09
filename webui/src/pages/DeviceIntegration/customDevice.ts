@@ -50,6 +50,10 @@ function buildBaseDeviceSessionContext(): string[] {
     '你必须先阅读并参考项目中现有 device 插件结构，例如 `.flocks/plugins/tools/device/*/_provider.yaml` 与对应 YAML/script handler。',
     '请重点参考现有 `_provider.yaml` 中 `description`、`description_cn`、`notes` 的写法，因为这些内容会直接影响设备页展示效果。',
     '不要把用户在表单里填写的账号、密码、Token、Cookie 直接写入插件；这些都应该通过 `credential_fields` 暴露为设备实例配置项。',
+    '在正式开始构建设备插件之前，必须先做需求澄清：盘点已知信息、列出缺失/不确定信息，并向用户提出必要问题。',
+    '当需要用户补充关键信息或澄清不确定项时，使用 `question` 工具明确。',
+    '除非用户已经提供了足够的信息，否则不要直接写文件或生成插件；优先通过简短问题确认产品名、厂商、版本、认证方式、目标能力、API/页面文档、测试环境和高风险写操作范围。',
+    '澄清问题应聚焦关键阻塞项，一次提出 3 到 6 个最重要的问题；可以给用户一个可直接复制填写的资料清单。',
   ];
 }
 
@@ -115,10 +119,30 @@ export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): s
 
 export function buildCustomDeviceWelcomeMessage(mode: CustomDeviceAccessMode): string {
   if (mode === 'api') {
-    return '请补充 API 文档链接或直接上传文档文件，并说明目标能力，我会用 tool-builder skill 帮你生成可在设备页使用的 device 插件。';
+    return [
+      '请提供待接入设备的 API 资料。',
+      '',
+      '建议包含以下内容：',
+      '1. 产品、厂商与版本信息',
+      '2. API 文档链接或文档附件',
+      '3. Base URL 或典型部署地址',
+      '4. 认证方式与凭据类型',
+      '',
+      '资料确认后，Rex 将生成可在设备接入页识别和配置的 device 插件。',
+    ].join('\n');
   }
   if (mode === 'webcli') {
-    return '请补充产品 URL、目标接口和认证提示，我会用 web2cli skill 先生成并集成 CLI/skill 资产；如果是安全设备接入，再额外生成 device 插件。默认使用 cookie/auth-state，并可选配置 username/password 供认证恢复使用。';
+    return [
+      '请提供待接入设备的 Web 控制台资料。',
+      '',
+      '建议包含以下内容：',
+      '1. 产品、厂商与版本信息',
+      '2. 登录 URL 或目标页面 URL',
+      '3. 需要沉淀的页面行为或接口',
+      '4. 认证限制、权限要求与可用登录态',
+      '',
+      '资料确认后，Rex 将沉淀 WebCLI 资产，并按需生成可在设备接入页识别和配置的 device 插件。',
+    ].join('\n');
   }
   return 'Workflow 接入不在这里创建插件，请前往工作流集成页面，根据需要配置 Syslog、Kafka 或 Webhook。';
 }

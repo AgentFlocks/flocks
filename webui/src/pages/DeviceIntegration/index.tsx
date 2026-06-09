@@ -22,6 +22,8 @@ import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
 // ============================================================================
 
 const DEFAULT_GROUP_ID = 'default-room';
+const DEVICE_DRAWER_WIDTH = 560;
+const DEVICE_DRAWER_WIDTH_CSS = `${DEVICE_DRAWER_WIDTH}px`;
 
 /** Pull the backend's human-readable error detail (e.g. "机房名称已存在")
  *  out of an axios error, falling back to a generic message. */
@@ -196,6 +198,8 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
   }, [templates, selectedVendor]);
 
   const inModeSelection = showCustomModes && !selectedVendor;
+  const shouldShowVendorSecondary = (vendor: DeviceVendor) =>
+    vendor.nameCn.trim().toLocaleLowerCase() !== vendor.nameEn.trim().toLocaleLowerCase();
 
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
@@ -204,11 +208,11 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
           aria-label={t('wizard.closeAriaLabel')}
           onClick={onClose}
         className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
-        style={{ top: 64, right: 440 }}
+        style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
       />
       <div
-        className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-        style={{ width: 440, top: 64 }}
+        className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+        style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -257,46 +261,49 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
           {!selectedVendor && !inModeSelection ? (
             <>
               <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-2.5">
                 <button
                   onClick={() => setShowCustomModes(true)}
-                  className="flex flex-col items-center gap-2.5 p-5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 hover:border-blue-300 hover:bg-blue-50 transition-all duration-150 group"
+                  className="flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-2.5 py-3 hover:border-blue-300 hover:bg-blue-50 transition-all duration-150 group"
                 >
-                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold bg-blue-100 text-blue-700">
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center text-base font-bold bg-blue-100 text-blue-700">
                     自
                   </div>
-                  <div className="text-center">
-                    <p className="text-sm font-semibold text-zinc-800">{t('wizard.customCardTitle')}</p>
-                    <p className="text-xs text-zinc-400">{t('wizard.customCardSubtitle')}</p>
-                    <p className="text-[10px] text-blue-600 mt-0.5 font-medium">
+                  <div className="min-w-0 text-center">
+                    <p className="text-sm font-semibold text-zinc-800 truncate">{t('wizard.customCardTitle')}</p>
+                    <p className="text-[11px] text-zinc-400 truncate">{t('wizard.customCardSubtitle')}</p>
+                    <p className="text-[10px] text-blue-600 mt-0.5 font-medium truncate">
                       {t('wizard.customCardCta')}
                     </p>
                   </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-blue-400 transition-colors" />
+                  <ChevronRight className="w-3 h-3 text-blue-400 transition-colors" />
                 </button>
                 {availableVendors.map((vendor) => {
                   const count = vendorTotalCounts[vendor.id] ?? 0;
                   const productCount = templates.filter(
                     (t) => (t.vendor || '__unspecified__') === vendor.id,
                   ).length;
+                  const primaryName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
+                  const secondaryName = i18n.language.startsWith('zh') ? vendor.nameEn : vendor.nameCn;
+                  const showSecondary = shouldShowVendorSecondary(vendor);
                   return (
                     <button
                       key={vendor.id}
                       onClick={() => setSelectedVendor(vendor)}
-                      className="flex flex-col items-center gap-2.5 p-5 rounded-xl border border-zinc-200 bg-white hover:border-blue-300 hover:bg-blue-50/40 transition-all duration-150 group"
+                      className="flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-2.5 py-3 hover:border-blue-300 hover:bg-blue-50/40 transition-all duration-150 group"
                     >
-                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold ${vendor.color}`}>
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-base font-bold ${vendor.color}`}>
                         {vendor.nameCn[0]}
                       </div>
-                      <div className="text-center">
-                        <p className="text-sm font-semibold text-zinc-800">{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</p>
-                        <p className="text-xs text-zinc-400">{vendor.nameEn}</p>
+                      <div className="min-w-0 text-center">
+                        <p className="text-sm font-semibold text-zinc-800 truncate">{primaryName}</p>
+                        {showSecondary && <p className="text-[11px] text-zinc-400 truncate">{secondaryName}</p>}
                         <p className="text-[10px] text-zinc-400 mt-0.5">
                           {t('wizard.productCount', { count: productCount })}
                           {count > 0 && <span className="text-blue-600 font-medium"> · {t('wizard.instanceCount', { count })}</span>}
                         </p>
                       </div>
-                      <ChevronRight className="w-3.5 h-3.5 text-zinc-300 group-hover:text-blue-400 transition-colors" />
+                      <ChevronRight className="w-3 h-3 text-zinc-300 group-hover:text-blue-400 transition-colors" />
                     </button>
                   );
                 })}
@@ -692,11 +699,11 @@ function DeviceConfigPanel({
           aria-label={t('config.closeAriaLabel')}
           onClick={onClose}
           className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
-          style={{ top: 64, right: 480 }}
+          style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
         />
         <div
-          className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-          style={{ width: 480, top: 64 }}
+          className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+          style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
