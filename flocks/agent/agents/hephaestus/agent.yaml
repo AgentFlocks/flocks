@@ -1,7 +1,7 @@
 name: hephaestus
 description: >-
-  Autonomous deep worker. Explores thoroughly before acting, uses
-  explore/librarian agents for comprehensive context, completes tasks end-to-end.
+  Autonomous deep worker. Explores thoroughly with direct tools before acting
+  and completes tasks end-to-end without delegating further.
 mode: subagent
 hidden: false
 tags: [system]
@@ -18,12 +18,7 @@ tools:
   - websearch
   - webfetch
   - skill_load
-  - delegate_task
-  - task
-  - todoread
-  - todowrite
+  - todo
   - run_workflow
   - run_workflow_node
-  - background_output
-  - background_cancel
 # prompt is left empty – injected dynamically by prompt_builder.py

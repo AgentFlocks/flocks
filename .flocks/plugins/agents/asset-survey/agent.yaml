@@ -23,8 +23,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - websearch
   - webfetch
   - threatbook_mcp_hrti_query

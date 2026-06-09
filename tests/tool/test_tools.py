@@ -1,11 +1,11 @@
 """
-Test Tool System - Comprehensive test suite for all 25 tools
+Test Tool System - Comprehensive test suite for tools
 
 Tests cover:
 - Tool registration and discovery
 - P0 Core tools (6): read, write, edit, bash, grep, glob
-- P1 tools (6): webfetch, todoread, todowrite, question, plan_enter, plan_exit
-- P2 tools (5): task, lsp, skill, background_output, background_cancel
+- P1 tools (4): webfetch, todo, question, websearch
+- P2 tools: task, lsp, skill
 - P3 tools (2): websearch, apply_patch
 - Permission system integration
 - Error handling
@@ -35,7 +35,6 @@ from flocks.tool import (
     ParameterType,
 )
 from flocks.tool.code import bash as bash_module
-import flocks.tool.task.plan as plan_module
 import flocks.tool.system.question as question_module
 
 
@@ -143,18 +142,17 @@ class TestToolRegistry:
         """Test that registry initializes with built-in tools"""
         # Registry should be initialized when flocks.tool is imported
         tools = ToolRegistry.all_tool_ids()
-        assert len(tools) >= 23, f"Expected at least 23 tools, got {len(tools)}: {tools}"
+        assert len(tools) >= 21, f"Expected at least 21 tools, got {len(tools)}: {tools}"
     
     def test_expected_tools_registered(self):
         """Test all expected tools are registered"""
         expected_tools = [
             # P0 Core tools (6)
             "read", "write", "edit", "bash", "grep", "glob",
-            # P1 tools (6)
-            "webfetch", "todoread", "todowrite", "question", "plan_enter", "plan_exit",
-            # P2 tools (5)
+            # P1 tools
+            "webfetch", "todo", "question",
+            # P2 tools
             "task", "lsp", "skill_load",
-            "background_output", "background_cancel",
             # P3 tools (2)
             "websearch", "apply_patch",
         ]
@@ -239,7 +237,7 @@ class TestReadTool:
         )
         
         assert not result.success
-        assert "could not find" in result.error.lower()
+        assert "not found" in result.error.lower()
     
     @pytest.mark.asyncio
     async def test_read_permission_requested(self, tool_context_with_permission, test_files):
@@ -591,7 +589,7 @@ class TestTodoTools:
     """Test the todo tools"""
     
     @pytest.mark.asyncio
-    async def test_todowrite_create_todos(self, tool_context):
+    async def test_todo_write_create_todos(self, tool_context):
         """Test creating todos"""
         todos = [
             {"id": "1", "content": "First task", "status": "pending"},
@@ -599,9 +597,10 @@ class TestTodoTools:
         ]
         
         result = await ToolRegistry.execute(
-            "todowrite",
+            "todo",
             ctx=tool_context,
-            todos=todos
+            action="write",
+            todos=todos,
         )
         
         assert result.success
@@ -611,33 +610,36 @@ class TestTodoTools:
         assert payload["newTodos"][1]["activeForm"] == "Working on second task"
         assert payload["verificationNudgeNeeded"] is False
 
-    def test_todowrite_schema_requires_structured_items(self):
+    def test_todo_schema_requires_structured_items(self):
         """Tool schema should expose object items, not string arrays."""
-        schema = ToolRegistry.get_schema("todowrite")
+        schema = ToolRegistry.get_schema("todo")
 
         assert schema is not None
+        assert schema.properties["action"]["enum"] == ["read", "write"]
         assert schema.properties["todos"]["type"] == "array"
         assert schema.properties["todos"]["items"]["type"] == "object"
         assert schema.properties["todos"]["items"]["required"] == ["id", "content", "status"]
         assert "activeForm" in schema.properties["todos"]["items"]["properties"]
     
     @pytest.mark.asyncio
-    async def test_todoread_get_todos(self, tool_context):
+    async def test_todo_read_get_todos(self, tool_context):
         """Test reading todos"""
         # First write some todos
         todos = [
             {"id": "1", "content": "Test task", "status": "pending"},
         ]
         await ToolRegistry.execute(
-            "todowrite",
+            "todo",
             ctx=tool_context,
-            todos=todos
+            action="write",
+            todos=todos,
         )
         
         # Then read them
         result = await ToolRegistry.execute(
-            "todoread",
-            ctx=tool_context
+            "todo",
+            ctx=tool_context,
+            action="read",
         )
         
         assert result.success
@@ -645,11 +647,12 @@ class TestTodoTools:
         assert payload[0]["content"] == "Test task"
 
     @pytest.mark.asyncio
-    async def test_todowrite_rejects_string_arrays(self, tool_context):
+    async def test_todo_write_rejects_string_arrays(self, tool_context):
         """Invalid todo payloads should fail loudly instead of returning []."""
         result = await ToolRegistry.execute(
-            "todowrite",
+            "todo",
             ctx=tool_context,
+            action="write",
             todos=[
                 "1. First task",
                 "2. Second task",
@@ -660,7 +663,7 @@ class TestTodoTools:
         assert "todos[0] must be an object" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_todowrite_persists_to_session_todo_store(self, clean_todo_storage):
+    async def test_todo_write_persists_to_session_todo_store(self, clean_todo_storage):
         """todo tools should use the shared session todo store."""
         from flocks.session.features.todo import Todo
 
@@ -674,7 +677,7 @@ class TestTodoTools:
             {"id": "persist", "content": "Persist todo", "status": "pending"},
         ]
 
-        result = await ToolRegistry.execute("todowrite", ctx=ctx, todos=todos)
+        result = await ToolRegistry.execute("todo", ctx=ctx, action="write", todos=todos)
 
         assert result.success
         stored = await Todo.get(session_id)
@@ -683,7 +686,7 @@ class TestTodoTools:
         assert stored[0].content == "Persist todo"
 
     @pytest.mark.asyncio
-    async def test_todowrite_clears_storage_when_all_todos_are_terminal(self, clean_todo_storage):
+    async def test_todo_write_clears_storage_when_all_todos_are_terminal(self, clean_todo_storage):
         """Completed/cancelled-only todo lists should be cleared from persistence."""
         from flocks.session.features.todo import Todo
 
@@ -695,14 +698,16 @@ class TestTodoTools:
         )
 
         await ToolRegistry.execute(
-            "todowrite",
+            "todo",
             ctx=ctx,
+            action="write",
             todos=[{"id": "1", "content": "Still open", "status": "in_progress"}],
         )
 
         result = await ToolRegistry.execute(
-            "todowrite",
+            "todo",
             ctx=ctx,
+            action="write",
             todos=[
                 {"id": "1", "content": "Done task", "status": "completed"},
                 {"id": "2", "content": "Cancelled task", "status": "cancelled"},
@@ -715,11 +720,12 @@ class TestTodoTools:
         assert await Todo.get(session_id) == []
 
     @pytest.mark.asyncio
-    async def test_todowrite_sets_verification_nudge_for_completed_batches(self, tool_context):
+    async def test_todo_write_sets_verification_nudge_for_completed_batches(self, tool_context):
         """Large completed batches without verification work should return a nudge."""
         result = await ToolRegistry.execute(
-            "todowrite",
+            "todo",
             ctx=tool_context,
+            action="write",
             todos=[
                 {"id": "1", "content": "Implement feature", "status": "completed"},
                 {"id": "2", "content": "Fix bug", "status": "completed"},
@@ -740,98 +746,6 @@ class TestQuestionTool:
         tool = ToolRegistry.get("question")
         assert tool is not None
         assert tool.info.name == "question"
-
-
-class TestPlanTools:
-    """Test the plan tools"""
-    
-    @pytest.mark.asyncio
-    async def test_plan_enter_exists(self):
-        """Test that plan_enter tool is registered"""
-        tool = ToolRegistry.get("plan_enter")
-        assert tool is not None
-    
-    @pytest.mark.asyncio
-    async def test_plan_exit_exists(self):
-        """Test that plan_exit tool is registered"""
-        tool = ToolRegistry.get("plan_exit")
-        assert tool is not None
-
-    @pytest.mark.asyncio
-    async def test_plan_enter_sets_call_id_for_question_handler(self, monkeypatch):
-        """plan_enter should attach the current tool call id to question context."""
-        seen: Dict[str, Any] = {}
-        switch_calls: List[Dict[str, str]] = []
-
-        async def fake_handler(session_id: str, questions: List[Dict[str, Any]]) -> List[List[str]]:
-            seen["session_id"] = session_id
-            seen["message_id"] = question_module.get_current_message_id()
-            seen["call_id"] = question_module.get_current_call_id()
-            seen["questions"] = questions
-            return [["Yes"]]
-
-        async def fake_switch(session_id: str, from_agent: str, to_agent: str, message: str) -> None:
-            switch_calls.append({
-                "session_id": session_id,
-                "from_agent": from_agent,
-                "to_agent": to_agent,
-                "message": message,
-            })
-
-        monkeypatch.setattr(question_module, "_question_handler", fake_handler)
-        monkeypatch.setattr(plan_module, "_agent_switch_callback", fake_switch)
-
-        result = await ToolRegistry.execute(
-            "plan_enter",
-            ctx=ToolContext(
-                session_id="test-session-001",
-                message_id="test-message-001",
-                agent="test",
-                call_id="call-plan-enter-001",
-            ),
-        )
-
-        assert result.success
-        assert seen["session_id"] == "test-session-001"
-        assert seen["message_id"] == "test-message-001"
-        assert seen["call_id"] == "call-plan-enter-001"
-        assert len(switch_calls) == 1
-        assert switch_calls[0]["to_agent"] == "plan"
-
-    @pytest.mark.asyncio
-    async def test_plan_exit_skips_question_confirmation(self, monkeypatch):
-        """plan_exit should switch modes directly without opening a question."""
-        switch_calls: List[Dict[str, str]] = []
-
-        async def fail_handler(session_id: str, questions: List[Dict[str, Any]]) -> List[List[str]]:
-            pytest.fail("plan_exit should not invoke the question handler")
-
-        async def fake_switch(session_id: str, from_agent: str, to_agent: str, message: str) -> None:
-            switch_calls.append({
-                "session_id": session_id,
-                "from_agent": from_agent,
-                "to_agent": to_agent,
-                "message": message,
-            })
-
-        monkeypatch.setattr(question_module, "_question_handler", fail_handler)
-        monkeypatch.setattr(plan_module, "_agent_switch_callback", fake_switch)
-
-        result = await ToolRegistry.execute(
-            "plan_exit",
-            ctx=ToolContext(
-                session_id="test-session-002",
-                message_id="test-message-002",
-                agent="plan",
-                call_id="call-plan-exit-001",
-            ),
-        )
-
-        assert result.success
-        assert "switched back to rex agent" in result.output
-        assert len(switch_calls) == 1
-        assert switch_calls[0]["to_agent"] == "rex"
-        assert "complete" in switch_calls[0]["message"]
 
 
 class TestWebFetchTool:
@@ -1136,7 +1050,7 @@ class TestErrorHandling:
         )
         
         assert not result.success
-        assert "could not find" in result.error.lower()
+        assert "not found" in result.error.lower()
 
     @pytest.mark.asyncio
     async def test_builtin_tool_rejects_unknown_parameter(self, tool_context, temp_dir):
@@ -1698,16 +1612,16 @@ class TestTodoToolsAdvanced:
         todos = [
             {"id": "1", "content": "Task 1", "status": "pending"},
         ]
-        await ToolRegistry.execute("todowrite", ctx=tool_context, todos=todos)
+        await ToolRegistry.execute("todo", ctx=tool_context, action="write", todos=todos)
         
         # Update status to in_progress
         todos[0]["status"] = "in_progress"
-        result = await ToolRegistry.execute("todowrite", ctx=tool_context, todos=todos)
+        result = await ToolRegistry.execute("todo", ctx=tool_context, action="write", todos=todos)
         assert result.success
         
         # Update status to completed
         todos[0]["status"] = "completed"
-        result = await ToolRegistry.execute("todowrite", ctx=tool_context, todos=todos)
+        result = await ToolRegistry.execute("todo", ctx=tool_context, action="write", todos=todos)
         assert result.success
     
     @pytest.mark.asyncio
@@ -1720,11 +1634,11 @@ class TestTodoToolsAdvanced:
             {"id": "4", "content": "Task 4", "status": "pending"},
         ]
         
-        result = await ToolRegistry.execute("todowrite", ctx=tool_context, todos=todos)
+        result = await ToolRegistry.execute("todo", ctx=tool_context, action="write", todos=todos)
         assert result.success
         
         # Read and verify
-        read_result = await ToolRegistry.execute("todoread", ctx=tool_context)
+        read_result = await ToolRegistry.execute("todo", ctx=tool_context, action="read")
         assert read_result.success
         assert "Task 1" in read_result.output
         assert "Task 4" in read_result.output

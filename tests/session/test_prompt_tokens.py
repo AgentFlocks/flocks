@@ -14,10 +14,12 @@ Covers:
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from flocks.agent.agent import AgentInfo
 from flocks.session.prompt import (
     PROMPT_DEFAULT,
     PromptTemplate,
@@ -235,6 +237,69 @@ class TestSystemPromptRuntimeMetadata:
         assert "## Runtime Metadata" in block
 
 
+class TestBuildSystemPrompts:
+    @pytest.mark.asyncio
+    async def test_builtin_system_subagent_child_uses_minimal_prompt(self):
+        agent = AgentInfo(
+            name="rex-junior",
+            mode="subagent",
+            tags=["system"],
+            prompt="You are Rex Junior.",
+        )
+        with (
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "flocks.session.session.Session.get_by_id",
+                AsyncMock(return_value=SimpleNamespace(parent_id="ses-parent")),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-child",
+                session_directory="/tmp/project",
+                agent_name="rex-junior",
+                agent_prompt="You are Rex Junior.",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+                tool_catalog_prompt_factory=lambda: "SHOULD_NOT_APPEAR",
+            )
+
+        assert len(prompts) == 2
+        assert prompts[0] == "You are Rex Junior."
+        assert "## Environment" in prompts[1]
+        assert "Current working directory: /tmp/project" in prompts[1]
+        assert "Platform:" in prompts[1]
+        assert "Today's date:" in prompts[1]
+        assert "SHOULD_NOT_APPEAR" not in "\n".join(prompts)
+        assert PROMPT_DEFAULT.strip() not in "\n".join(prompts)
+
+    @pytest.mark.asyncio
+    async def test_builtin_system_subagent_root_uses_full_prompt(self):
+        agent = AgentInfo(
+            name="rex-junior",
+            mode="subagent",
+            tags=["system"],
+            prompt="You are Rex Junior.",
+        )
+        with (
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "flocks.session.session.Session.get_by_id",
+                AsyncMock(return_value=SimpleNamespace(parent_id=None)),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-root",
+                session_directory="/tmp/project",
+                agent_name="rex-junior",
+                agent_prompt="You are Rex Junior.",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        assert len(prompts) > 2
+        assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+
+
 # ---------------------------------------------------------------------------
 # SystemPrompt.provider() — returns List[str]
 # ---------------------------------------------------------------------------
@@ -281,6 +346,15 @@ class TestSystemPromptProvider:
             assert isinstance(result, list)
         except (AttributeError, TypeError):
             pytest.skip("provider(None) not supported by this implementation")
+
+    def test_provider_prompts_do_not_reference_retired_todo_tools(self):
+        prompt_dir = Path(__file__).resolve().parents[2] / "flocks" / "session" / "prompt"
+        retired = ("TodoWrite", "TodoRead", "todowrite", "todoread")
+
+        for prompt_path in prompt_dir.glob("*.txt"):
+            content = prompt_path.read_text(encoding="utf-8")
+            for name in retired:
+                assert name not in content, f"{prompt_path.name} references retired tool {name}"
 
 
 class TestPromptToolInstructions:

@@ -152,6 +152,7 @@
       "error": "失败",
       "inputParams": "输入参数",
       "outputResult": "输出结果",
+      "todoStages": "Todo 阶段",
       "errorLabel": "错误",
       "elapsed": "耗时",
       "workflowStage": "当前阶段：{{phase}}",

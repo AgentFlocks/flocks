@@ -512,10 +512,20 @@ class ACPAgent:
                     "newText": new_text,
                 })
             
-            # Handle todowrite - send plan update
-            if tool_name == "todowrite":
+            # Handle todo writes - send plan update
+            if tool_name == "todo":
                 try:
-                    todos = json.loads(output)
+                    metadata = state.get("metadata") or {}
+                    parsed_output = json.loads(output) if output else []
+                    todos = (
+                        metadata.get("newTodos")
+                        or metadata.get("todos")
+                        or (
+                            parsed_output.get("newTodos")
+                            if isinstance(parsed_output, dict)
+                            else parsed_output
+                        )
+                    )
                     if isinstance(todos, list):
                         entries = []
                         for todo in todos:

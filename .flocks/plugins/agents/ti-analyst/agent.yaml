@@ -24,8 +24,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - threatbook_mcp_ip_query
   - threatbook_mcp_ip_attribution

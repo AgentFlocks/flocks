@@ -93,13 +93,13 @@ async def test_missing_flocks_executable():
     from flocks.tool.skill.flocks_skills import flocks_skills
 
     with patch("flocks.tool.skill.flocks_skills._flocks_executable", return_value=None):
-        result = await flocks_skills(ctx, subcommand="list")
+        result = await flocks_skills(ctx, subcommand="status")
     assert result.success is False
     assert "not found" in (result.error or "").lower()
 
 
 @pytest.mark.asyncio
-async def test_list_success():
+async def test_status_success():
     from flocks.tool.skill.flocks_skills import flocks_skills
 
     ctx = make_ctx()
@@ -108,13 +108,13 @@ async def test_list_success():
         patch("flocks.tool.skill.flocks_skills._flocks_executable", return_value="/usr/bin/flocks"),
         patch("flocks.tool.skill.flocks_skills.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
     ):
-        result = await flocks_skills(ctx, subcommand="list")
+        result = await flocks_skills(ctx, subcommand="status")
 
     assert result.success is True
     assert "find-ioc" in (result.output or "")
     cmd_args = mock_exec.call_args[0]
     assert "skills" in cmd_args
-    assert "list" in cmd_args
+    assert "status" in cmd_args
     ctx.ask.assert_not_called()
 
 
@@ -136,6 +136,24 @@ async def test_find_passes_args():
     assert "phishing" in cmd_args
     assert "analysis" in cmd_args
     ctx.ask.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remove_appends_yes_for_non_interactive_tool_calls():
+    from flocks.tool.skill.flocks_skills import flocks_skills
+
+    ctx = make_ctx()
+    proc = make_proc(stdout=b"removed\n", returncode=0)
+    with (
+        patch("flocks.tool.skill.flocks_skills._flocks_executable", return_value="/usr/bin/flocks"),
+        patch("flocks.tool.skill.flocks_skills.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+    ):
+        result = await flocks_skills(ctx, subcommand="remove", args="old-skill")
+
+    assert result.success is True
+    cmd_args = mock_exec.call_args[0]
+    assert cmd_args == ("/usr/bin/flocks", "skills", "remove", "old-skill", "--yes")
+    ctx.ask.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -225,7 +243,7 @@ async def test_long_output_is_truncated():
         patch("flocks.tool.skill.flocks_skills._flocks_executable", return_value="/usr/bin/flocks"),
         patch("flocks.tool.skill.flocks_skills.asyncio.create_subprocess_exec", return_value=proc),
     ):
-        result = await flocks_skills(ctx, subcommand="list")
+        result = await flocks_skills(ctx, subcommand="status")
 
     assert result.success is True
     assert len(result.output or "") <= _MAX_OUTPUT + 100  # allow for truncation notice
