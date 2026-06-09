@@ -393,6 +393,16 @@ describe('shouldRenderMessage', () => {
       finish: 'stop',
     }))).toBe(false);
   });
+
+  it('keeps empty assistant error messages visible', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-error',
+      role: 'assistant',
+      parts: [],
+      finish: 'error',
+      error: { code: 'SessionError', message: 'Provider failed' },
+    }))).toBe(true);
+  });
 });
 
 describe('SessionChat agent mentions', () => {
@@ -606,6 +616,8 @@ describe('ChatToolPart todo rendering', () => {
     expect(container.textContent).toContain('Todo 阶段');
     expect(container.textContent).toContain('定位 todo 摘要问题中');
     expect(container.textContent).toContain('completed');
+    expect(container.textContent).not.toContain('输入参数');
+    expect(container.textContent).not.toContain('输出结果');
     expect(container.textContent).not.toContain('[object Object]');
   });
 });

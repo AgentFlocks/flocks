@@ -453,7 +453,7 @@ def run_setup() -> int:
 
 
 def run_doctor() -> int:
-    """Read-only diagnostics. Exit 0 iff everything looks healthy."""
+    """Read-only diagnostics. Exit 0 iff a browser target and daemon exist."""
     import platform
     import sys
 
@@ -470,6 +470,16 @@ def run_doctor() -> int:
     def row(label: str, ok: bool, detail: str = "") -> None:
         mark = "ok  " if ok else "FAIL"
         print(f"  [{mark}] {label}{(' — ' + detail) if detail else ''}")
+
+    target_available = browser_running or bool(endpoint_name)
+    if connections:
+        next_action = "ready; use `flocks browser -c 'print(page_info())'`"
+    elif target_available and daemon:
+        next_action = "attach; run `flocks browser -c 'print(page_info())'` before setup"
+    elif target_available:
+        next_action = "setup; run `flocks browser --setup`"
+    else:
+        next_action = "start Chrome/Chromium/Edge or provide BU_CDP_URL/BU_CDP_WS, then run `flocks browser --setup`"
 
     print(f"{BROWSER_LABEL} doctor")
     print(f"  platform          {platform.system()} {platform.release()}")
@@ -497,4 +507,5 @@ def run_doctor() -> int:
             print(f"        {conn['name']} — active page: {title} — {url}")
         else:
             print(f"        {conn['name']} — active page: (no real page)")
-    return 0 if ((browser_running or endpoint_name) and daemon) else 1
+    print(f"  next action       {next_action}")
+    return 0 if (target_available and daemon) else 1
