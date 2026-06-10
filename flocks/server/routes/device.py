@@ -32,6 +32,7 @@ from flocks.tool.device.intake import (
     DeviceNotFoundError,
     create_device,
     delete_device,
+    ensure_user_device_instances,
     test_device,
     update_device,
 )
@@ -172,13 +173,14 @@ async def route_delete_group(group_id: str):
 # ===========================================================================
 
 @router.get("", response_model=List[DeviceIntegration])
-async def route_list_devices(group_id: Optional[str] = None):
+async def route_list_devices(group_id: Optional[str] = None, refresh: bool = False):
+    await ensure_user_device_instances(refresh_templates=refresh)
     return await list_devices(group_id)
 
 
 @router.get("/templates", response_model=List[DeviceTemplate])
-async def route_list_device_templates():
-    return list_device_templates()
+async def route_list_device_templates(refresh: bool = False):
+    return list_device_templates(refresh=refresh)
 
 
 @router.post(

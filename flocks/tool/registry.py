@@ -1766,7 +1766,7 @@ def _tool_event_should_reload(event: object) -> bool:
 class ToolFileWatcher:
     """Watch plugin tool directories and auto-reload plugin tools on change.
 
-    Monitors the ``api/`` and ``python/`` subdirectories under:
+    Monitors the ``api/``, ``device/``, and ``python/`` subdirectories under:
     - ``~/.flocks/plugins/tools/``       (user-level)
     - ``<cwd>/.flocks/plugins/tools/``   (project-level)
 
@@ -1776,7 +1776,7 @@ class ToolFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 1.0
-    _WATCH_SUBDIRS = ("api", "python")
+    _WATCH_SUBDIRS = ("api", "device", "python")
 
     def __init__(self) -> None:
         self._observer: Optional[object] = None
