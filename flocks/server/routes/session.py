@@ -95,8 +95,7 @@ class SessionResponse(BaseModel):
     """
     Session response - Flocks compatible
     
-    Matches Flocks Session.Info format exactly.
-    No agent/model/provider at top level - these come from messages.
+    Matches Flocks Session.Info format.
     """
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
     
@@ -112,6 +111,9 @@ class SessionResponse(BaseModel):
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
+    provider: Optional[str] = Field(None, description="Pinned provider ID")
+    model: Optional[str] = Field(None, description="Pinned model ID")
+    model_pinned: bool = Field(False, description="Whether provider/model are pinned for this session")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
     ownerUsername: Optional[str] = Field(None, description="Session owner username")
     canWrite: bool = Field(False, description="Whether current user can continue this session")
@@ -122,9 +124,6 @@ class SessionResponse(BaseModel):
 def _session_to_response(session: SessionModel) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
-    
-    Note: agent/model/provider are NOT included at session level.
-    They are retrieved from the latest user message in the session.
     """
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
@@ -149,6 +148,9 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
+        provider=session.provider,
+        model=session.model,
+        model_pinned=session.model_pinned,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
         canWrite=can_write,
@@ -561,6 +563,9 @@ class SessionUpdateRequest(BaseModel):
     
     title: Optional[str] = Field(None, description="New title")
     time: Optional[Dict[str, Any]] = Field(None, description="Time updates (archived)")
+    provider: Optional[str] = Field(None, description="Pinned provider ID")
+    model: Optional[str] = Field(None, description="Pinned model ID")
+    model_pinned: Optional[bool] = Field(None, description="Whether provider/model are pinned for this session")
 
 
 @router.patch(
@@ -590,6 +595,12 @@ async def update_session(
         updates["title"] = request.title
     if request.time and request.time.get("archived") is not None:
         updates["archived"] = request.time["archived"]
+    if request.provider is not None:
+        updates["provider"] = request.provider
+    if request.model is not None:
+        updates["model"] = request.model
+    if request.model_pinned is not None:
+        updates["model_pinned"] = request.model_pinned
     
     session = await Session.update(
         project_id=existing.project_id,

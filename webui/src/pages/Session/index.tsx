@@ -83,6 +83,10 @@ function writeLastSelectedSessionId(sessionId: string | null) {
   }
 }
 
+function makeModelKey(providerID: string, modelID: string): string {
+  return `${providerID}::${modelID}`;
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const navigate = useNavigate();
@@ -162,7 +166,7 @@ export default function SessionPage() {
       const provider = providerById.get(model.provider_id);
       if (!provider) return [];
       return [{
-        key: `${provider.id}::${model.id}`,
+        key: makeModelKey(provider.id, model.id),
         providerID: provider.id,
         providerName: provider.name || provider.id,
         modelID: model.id,
@@ -202,7 +206,7 @@ export default function SessionPage() {
       .sort((a, b) => a.providerName.localeCompare(b.providerName));
   }, [chatModelOptions, providers]);
   const selectedModelOption = useMemo(
-    () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? chatModelOptions[0] ?? null,
+    () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? (selectedModelKey ? null : chatModelOptions[0] ?? null),
     [chatModelOptions, selectedModelKey],
   );
   const selectedPromptModel = selectedModelOption
@@ -347,13 +351,26 @@ export default function SessionPage() {
   }, [showModelOptions]);
 
   useEffect(() => {
-    if (selectedModelKey || chatModelOptions.length === 0) return;
+    if (chatModelOptions.length === 0) {
+      setSelectedModelKey(null);
+      return;
+    }
+
+    const pinnedKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
+      ? makeModelKey(selectedSession.provider, selectedSession.model)
+      : null;
+    if (pinnedKey && chatModelOptions.some((option) => option.key === pinnedKey)) {
+      setSelectedModelKey(pinnedKey);
+      return;
+    }
+
     let cancelled = false;
+    setSelectedModelKey(null);
     defaultModelAPI.getResolved()
       .then((response) => {
         if (cancelled) return;
         const { provider_id: providerID, model_id: modelID } = response.data;
-        const defaultKey = `${providerID}::${modelID}`;
+        const defaultKey = makeModelKey(providerID, modelID);
         const fallbackKey = chatModelOptions[0]?.key ?? null;
         setSelectedModelKey(chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
       })
@@ -363,7 +380,13 @@ export default function SessionPage() {
     return () => {
       cancelled = true;
     };
-  }, [chatModelOptions, selectedModelKey]);
+  }, [
+    chatModelOptions,
+    selectedSession?.model,
+    selectedSession?.model_pinned,
+    selectedSession?.provider,
+    selectedSessionId,
+  ]);
 
   useEffect(() => {
     if (loadingEnabledModels || chatModelOptions.length === 0 || !selectedModelKey) return;
@@ -409,6 +432,7 @@ export default function SessionPage() {
       const response = await client.post('/api/session', { title: 'New Session' });
       addSession(response.data);
       setSelectedAgent('rex');
+      setSelectedModelKey(null);
       setSelectedSessionId(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
@@ -416,6 +440,23 @@ export default function SessionPage() {
       setCreating(false);
     }
   }, [creating, addSession, toast, t]);
+
+  const handleSelectModel = useCallback(async (option: ChatModelOption) => {
+    setSelectedModelKey(option.key);
+    setShowModelOptions(false);
+    if (!selectedSessionId) return;
+
+    try {
+      await sessionApi.update(selectedSessionId, {
+        provider: option.providerID,
+        model: option.modelID,
+        model_pinned: true,
+      });
+      refetchSessions();
+    } catch (err: any) {
+      toast.error(t('chat.error', 'Error'), err.message);
+    }
+  }, [refetchSessions, selectedSessionId, toast, t]);
 
   useEffect(() => {
     if (loadingSessions) return;
@@ -457,6 +498,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       setSelectedAgent('rex');
+      setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
@@ -1063,10 +1105,7 @@ export default function SessionPage() {
                               <button
                                 key={option.key}
                                 type="button"
-                                onClick={() => {
-                                  setSelectedModelKey(option.key);
-                                  setShowModelOptions(false);
-                                }}
+                                onClick={() => void handleSelectModel(option)}
                                 className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
                                     ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa]'

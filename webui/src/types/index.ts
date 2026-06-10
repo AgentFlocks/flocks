@@ -17,6 +17,9 @@ export interface Session {
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  provider?: string;
+  model?: string;
+  model_pinned?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
