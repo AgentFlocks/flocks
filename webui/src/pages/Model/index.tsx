@@ -1833,7 +1833,7 @@ function useModelForm() {
   const [supportsVision, setSupportsVision] = useState(false);
   const [supportsTools, setSupportsTools] = useState(true);
   const [supportsStreaming, setSupportsStreaming] = useState(true);
-  const [supportsReasoning, setSupportsReasoning] = useState(false);
+  const [supportsReasoning, setSupportsReasoning] = useState(true);
   const [inputPrice, setInputPrice] = useState('0');
   const [outputPrice, setOutputPrice] = useState('0');
   const [currency, setCurrency] = useState('USD');
@@ -1842,7 +1842,7 @@ function useModelForm() {
     setModelId(''); setName('');
     setContextWindow('128000'); setMaxOutput('128000');
     setSupportsVision(false); setSupportsTools(true);
-    setSupportsStreaming(true); setSupportsReasoning(false);
+    setSupportsStreaming(true); setSupportsReasoning(true);
     setInputPrice('0'); setOutputPrice('0'); setCurrency('USD');
   }, []);
 
@@ -2160,10 +2160,9 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
 
   if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
     if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
-    if (lowered.includes('kimi-k2.5') || lowered.includes('kimi-k2.6')) return false;
   }
 
-  return false;
+  return true;
 }
 
 function allowsBuiltInVisionToggle(modelId: string): boolean {
