@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   sessionId: null as string | null,
   resetSession: vi.fn(),
   listDevices: vi.fn(),
+  syncDevices: vi.fn(),
   getDevice: vi.fn(),
   listGroups: vi.fn(),
   createGroup: vi.fn(),
@@ -160,6 +161,7 @@ vi.mock('@/hooks/useSessionChat', () => ({
 vi.mock('@/api/device', () => ({
   deviceAPI: {
     list: (...args: unknown[]) => mocks.listDevices(...args),
+    sync: (...args: unknown[]) => mocks.syncDevices(...args),
     get: (...args: unknown[]) => mocks.getDevice(...args),
     revealCredentials: (...args: unknown[]) => mocks.revealDeviceCredentials(...args),
     listGroups: (...args: unknown[]) => mocks.listGroups(...args),
@@ -211,6 +213,7 @@ describe('DeviceIntegrationPage', () => {
     vi.clearAllMocks();
     mocks.sessionId = null;
     mocks.listDevices.mockResolvedValue({ data: [] });
+    mocks.syncDevices.mockResolvedValue({ data: { created: 0 } });
     mocks.getDevice.mockResolvedValue({
       data: {
         id: 'device-1',
@@ -238,6 +241,29 @@ describe('DeviceIntegrationPage', () => {
     mocks.listDeviceTools.mockResolvedValue({ data: [] });
     mocks.updateDeviceTool.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
+  });
+
+  it('refreshes devices and templates when the window regains focus', async () => {
+    render(<DeviceIntegrationPage />);
+
+    await screen.findByText('设备接入');
+    await waitFor(() => {
+      expect(mocks.listDevices).toHaveBeenCalledTimes(1);
+    });
+    mocks.listDevices.mockClear();
+    mocks.listTemplates.mockClear();
+    mocks.listGroups.mockClear();
+
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => {
+      expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
+    });
+    await waitFor(() => {
+      expect(mocks.listDevices).toHaveBeenCalledWith();
+      expect(mocks.listTemplates).toHaveBeenCalledWith({ refresh: true });
+      expect(mocks.listGroups).toHaveBeenCalled();
+    });
   });
 
   it('shows custom device option and access modes', async () => {

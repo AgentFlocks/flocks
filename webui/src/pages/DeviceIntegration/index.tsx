@@ -1302,6 +1302,7 @@ export default function DeviceIntegrationPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [panel, setPanel] = useState<PanelMode>(null);
+  const lastRefreshRef = useRef(0);
   // null = "全部机房" aggregate view; string = specific group id
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   // Group ids whose section is collapsed in the "全部机房" view. Default
@@ -1332,8 +1333,11 @@ export default function DeviceIntegrationPage() {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
+      if (refreshTemplates) {
+        await deviceAPI.sync({ refresh: true });
+      }
       const [devRes, tplRes, grpRes] = await Promise.all([
-        deviceAPI.list(refreshTemplates ? { refresh: true } : undefined),
+        deviceAPI.list(),
         deviceAPI.listTemplates(refreshTemplates ? { refresh: true } : undefined),
         deviceAPI.listGroups(),
       ]);
@@ -1352,6 +1356,31 @@ export default function DeviceIntegrationPage() {
   }, []);
 
   useEffect(() => { void fetchData(); }, [fetchData]);
+
+  const refreshOnResume = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRefreshRef.current < 1000) return;
+    lastRefreshRef.current = now;
+    void fetchData(true, true);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOnResume();
+      }
+    };
+    const handleWindowFocus = () => {
+      refreshOnResume();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [refreshOnResume]);
 
   // Count instances per storage_key (for wizard display)
   const instanceCounts = useMemo(() => {

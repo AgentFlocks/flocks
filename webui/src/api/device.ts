@@ -173,6 +173,9 @@ export const deviceAPI = {
   listTemplates: (params?: { refresh?: boolean }) =>
     client.get<DeviceTemplate[]>('/api/devices/templates', { params }),
 
+  sync: (params?: { refresh?: boolean }) =>
+    client.post<{ created: number }>('/api/devices/sync', null, { params }),
+
   createCustomTemplate: (data: CustomDeviceTemplateCreate) =>
     client.post<DeviceTemplate>('/api/devices/templates/custom', data),
 
