@@ -6,9 +6,11 @@ description: 根据自然语言描述生成 flocks 内置工作流（workflow.md
 
 # Workflow Builder
 
-分七个阶段构建工作流：**场景确认与流程设计** → **简化 JSON 预览循环** → **完整 workflow.md** → **完整 workflow.json** → **逐节点测试** → **集成测试** → **性能评估与优化**。
+创建模式按以下顺序构建工作流：**场景确认与流程设计** → **workflow.md 草稿与确认循环** → **workflow.json 生成与验证** → **逐节点测试** → **集成测试** → **性能评估与优化**。
 
 > **产物**：`workflow.json` 中所有可执行节点均为 `type="python"` 并自带 `code`。最终交付物固定为：`workflow.md`、`workflow.json`。
+>
+> **顺序强制**：创建工作流时，`workflow.md` 是唯一的人类意图源。必须先创建并确认 `workflow.md`，再基于已确认的 `workflow.md` 生成 `workflow.json`。在 `workflow.md` 写入并确认前，严禁写入或覆盖 `workflow.json`。
 
 ## 参考资料（按需读取）
 
@@ -30,15 +32,13 @@ description: 根据自然语言描述生成 flocks 内置工作流（workflow.md
 [ ] 1.   场景深度确认：与用户对话，明确业务场景与核心目标
 [ ] 1.   输出思考维度分析 + Mermaid 流程简图，与用户沟通对齐
 [ ] 1.   获取样例数据（用户上传或自动构造后确认）
-[ ] 2.   生成简化版预览 JSON（仅节点名称+描述，无代码）
-[ ] 2.   写入简化 workflow.json 文件，供页面展示流程图
-[ ] 2.   向用户展示并收集修改建议（循环直至满意）
-[ ] 3.   生成完整 workflow.md（人读描述）
-[ ] 3.   写入 workflow.md 文件
-[ ] 3.   向用户展示流程摘要并请求确认
-[ ] 4.   读取 reference.md
-[ ] 4.   生成完整 workflow.json（含代码）
-[ ] 4.   写入 workflow.json 文件
+[ ] 2.   生成 workflow.md 草稿（人读描述，包含流程、节点、输入输出、处理逻辑）
+[ ] 2.   写入 workflow.md 文件，供页面编辑器展示
+[ ] 2.   向用户展示流程摘要并收集修改建议（循环直至满意）
+[ ] 2.   确认 workflow.md 已是最新意图源
+[ ] 3.   读取 reference.md
+[ ] 3.   基于已确认 workflow.md 生成完整 workflow.json（含代码）
+[ ] 3.   写入 workflow.json 文件
 [ ] 4.   验证 JSON 格式 + Python 语法
 [ ] 4.   保存样例数据到 /api/workflow/{id}/sample-inputs
 [ ] 5.   逐节点测试：节点 1 - <node_id>
@@ -131,96 +131,13 @@ flowchart TD
 
 ---
 
-## 2. 第二阶段：简化版 JSON 预览与确认循环
+## 2. 第二阶段：生成并确认 workflow.md（人读意图源）
 
-> 目标：在投入完整代码编写之前，让用户在页面上直观地看到流程图，并就节点/边的设计提出修改建议。
+> 目标：先把工作流的业务意图、节点结构、输入输出和处理逻辑写成可读、可编辑的 `workflow.md`。页面左侧编辑器以 `workflow.md` 表达工作流，用户应先在这里确认意图；只有确认后才能生成 `workflow.json`。
 
-### 2.1 生成简化版 workflow.json
+### 2.1 核心要求
 
-生成一份**只有结构、没有代码**的简化 JSON 文件：
-
-- 每个节点使用 `type="logic"`（只需 `description`，无需 `code`）
-- 包含节点的 `id`、`name`（可读名称）、`description`（功能说明）
-- 包含完整的 `edges`（`from`、`to`、`label`）
-- **不包含任何 Python 代码**
-
-简化 JSON 最小结构示例：
-
-```json
-{
-  "id": "alert_triage",
-  "name": "告警分级调查",
-  "description": "自动化 NDR 告警调查工作流",
-  "start": "receive_alert",
-  "nodes": [
-    {
-      "id": "receive_alert",
-      "type": "logic",
-      "name": "接收告警",
-      "description": "接收输入告警，提取 IP、端口、协议等关键字段"
-    },
-    {
-      "id": "check_ip_type",
-      "type": "branch",
-      "name": "判断 IP 类型",
-      "description": "判断源 IP 是内网地址还是外网地址，分支处理"
-    },
-    {
-      "id": "query_threat_intel",
-      "type": "logic",
-      "name": "查询威胁情报",
-      "description": "调用威胁情报工具查询外部 IP 的恶意评分、标签"
-    },
-    {
-      "id": "generate_report",
-      "type": "logic",
-      "name": "生成分析报告",
-      "description": "汇总所有上下文，由 LLM 生成结构化调查报告"
-    }
-  ],
-  "edges": [
-    { "from": "receive_alert", "to": "check_ip_type", "order": 0 },
-    { "from": "check_ip_type", "to": "query_threat_intel", "label": "外网", "order": 0 },
-    { "from": "query_threat_intel", "to": "generate_report", "order": 0 }
-  ]
-}
-```
-
-### 2.2 写入文件并展示
-
-1. 将简化 JSON 写入规范目录下的 `workflow.json`（**必须使用绝对路径**，见第 9 节）：用户级为 `~/.flocks/plugins/workflows/<id>/`，项目级为 `<workspace>/.flocks/plugins/workflows/<id>/`
-2. 在消息中告知用户：「已更新流程图，请在工作流页面查看。对节点名称、描述或流程结构有什么修改建议？」
-
-### 2.3 用户反馈循环（循环直至满意）
-
-收集用户的修改建议，按照以下循环执行，**直到用户确认满意**：
-
-```
-接收用户反馈
-  ↓
-分析修改需求（增/删节点、改描述、调整边关系）
-  ↓
-更新简化 JSON
-  ↓
-重新写入文件
-  ↓
-向用户展示更新摘要，询问是否满意
-  ↓
-[满意] → 进入第三阶段
-[还有修改] → 重新循环
-```
-
-> **提示**：前端检测到 `workflow.json` 更新后会自动刷新流程图，用户无需手动刷新。
-
----
-
-## 3. 第三阶段：生成完整 workflow.md（人读描述）
-
-> 以第一阶段确认的流程结构为基础，生成**操作手册级别**的详细流程文档。
-
-### 核心要求
-
-每个步骤必须包含：
+`workflow.md` 必须让人读得懂，也必须足够结构化，便于后续稳定生成 `workflow.json`。每个步骤必须包含：
 
 - **输入/输出**：数据来源、格式、用途。
 - **处理逻辑**：具体操作步骤、判定条件、循环方式、异常处理。
@@ -231,25 +148,47 @@ flowchart TD
 - **决策分支**：写清条件、各分支处理、跳转规则。
 - **报告结构**（若涉及）：除非用户要求简化，需包含摘要、分析、发现、建议、来源（模板见 [reference.md § 报告生成](references/reference.md#7-报告生成最佳实践)）。
 
-### ⚠️ 两步交付
+### 2.2 写入 workflow.md
 
 1. 先用 `write` 工具将 `workflow.md` **写入文件**（路径与第 9 节一致，例如 `.../plugins/workflows/<id>/workflow.md`）。
    - **⚠️ 路径必须使用绝对路径**：全局目录可用 `python3 -c "import os; print(os.path.expanduser('~/.flocks/plugins/workflows/<id>'))"`；项目目录可先解析 workspace（从 cwd 向上第一个含 `.flocks` 的目录）再拼接 `/.flocks/plugins/workflows/<id>`。
    - **严禁**使用未展开的相对路径（如 `.flocks/plugins/workflows/<id>/` 相对仓库根随手写入错误位置），否则 WebUI 可能无法从实际扫描目录读到文件。
-2. 写入成功后，用 `Question` 工具向用户展示流程摘要并请求确认（"确认工作流" / "修改工作流"）。确认后进入第四阶段生成 `workflow.json`。
+2. 写入成功后，在消息中说明：「已创建 `workflow.md`，请在左侧编辑器查看并确认。需要调整节点、输入输出或处理逻辑时，请先改 `workflow.md`。」
+3. 需要用户确认是否进入 `workflow.json` 生成时，必须使用 `Question` 工具或等待页面 diff 的接受/拒绝结果；不要用普通文本提问替代确认。
+
+### 2.3 用户反馈循环（循环直至满意）
+
+收集用户对 `workflow.md` 的修改建议，按照以下循环执行，**直到用户确认满意**：
+
+```
+接收用户反馈
+  ↓
+分析修改需求（功能描述、节点职责、输入输出、处理逻辑、分支关系）
+  ↓
+更新 workflow.md
+  ↓
+重新写入文件
+  ↓
+向用户展示更新摘要，并用 Question 工具或页面 diff 请用户确认
+  ↓
+[满意] → 进入第三阶段，基于已确认 workflow.md 生成 workflow.json
+[还有修改] → 继续循环
+```
+
+> **禁止事项**：不要为了提前展示流程图而先写一个简化 `workflow.json`。当前创建流程必须让 `workflow.md` 先落盘并完成确认，`workflow.json` 只能作为已确认 `workflow.md` 的机器执行产物。
 
 ---
 
-## 4. 第四阶段：生成完整 workflow.json（机器执行）
+## 3. 第三阶段：生成完整 workflow.json（机器执行）
 
-根据 `workflow.md` 生成严格可执行的 `workflow.json`。**生成前建议读取 [references/reference.md](references/reference.md)**。
+根据已确认的 `workflow.md` 生成严格可执行的 `workflow.json`。**生成前必须读取最新磁盘上的 `workflow.md`，并建议读取 [references/reference.md](references/reference.md)**。
 
-### 4.0 节点生成策略
+### 3.0 节点生成策略
 
 - **主路径**：每个可执行步骤 → `type="python"` 节点，必须同时包含 `code`（执行逻辑）+ `description`（文档说明）。
 - **兜底**：`logic` 节点仅在用户明确要求"不写代码"或快速原型时使用，运行时由 codegen 兜底。
 
-### 4.1 运行时硬约束
+### 3.1 运行时硬约束
 
 **顶层字段：**
 
@@ -273,7 +212,7 @@ flowchart TD
 
 - JSON 中用 `"from"` 而非 `"from_"`；`from`/`to` 引用存在的 node id；`order` ≥ 0。
 
-### 4.2 映射规则
+### 3.2 映射规则
 
 - `workflow.md` 每步对应一个节点，`id` 用 snake_case。
 - md 中写的输出字段，必须在 `outputs[...]` 中体现。
@@ -281,7 +220,7 @@ flowchart TD
 - 下游节点如需 `tool.run(..., **inputs)`，用 `edge.mapping`/`edge.const` 规整输入到匹配工具参数形状。
 - 详细 Mapping 指南见 [reference.md § Edge Mapping](references/reference.md#4-edge-mapping-详细指南)。
 
-### 4.3 分支/循环与 Join
+### 3.3 分支/循环与 Join
 
 - **branch/loop 选边**：`bool` 值 label 用 `"true"`/`"false"`；`str` 值精确匹配；无命中回退到空 label 默认边。上游必须把 `select_key` 所需字段写入 payload。
 - **分支汇合（强制）**：
@@ -291,7 +230,7 @@ flowchart TD
   - 推荐模式：join 节点（python, `join=true`）归一化多分支输出 → 再传给后续步骤
 - **嵌套工作流**：见 [references/composition.md](references/composition.md)。
 
-### 4.4 代码实现
+### 3.4 代码实现
 
 **辅助函数：**
 
@@ -347,7 +286,20 @@ elif isinstance(obj, str):
 - **文件输出**：有文件输出时写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/`（详见全局文件输出约定）
 - **数据传递**：`inputs` 和 `outputs` 字典，运行时浅合并 `payload = {**inputs, **outputs}`
 
-> **⚠️** 生成后必须使用 `write` 写入到文件，并验证：1) `json.load` 确认 JSON 格式正确；2) 对每个 `type="python"` 节点的 `code` 执行 `compile(code, "<node_id>", "exec")` 确认 Python 语法正确。若语法报错，修复后重新写入。
+> **⚠️** 生成后必须使用 `write` 写入到文件。写入完成后进入第四阶段验证，验证通过前不得进入逐节点测试。
+
+---
+
+## 4. 第四阶段：验证 workflow.json 与保存样例
+
+`workflow.json` 写入后必须完成以下验证与准备工作：
+
+1. 用 `json.load` 确认 JSON 格式正确。
+2. 对每个 `type="python"` 节点的 `code` 执行 `compile(code, "<node_id>", "exec")` 确认 Python 语法正确。
+3. 若格式或语法报错，修复后重新写入 `workflow.json` 并再次验证。
+4. 将阶段 1 收集的样例数据保存到 `POST /api/workflow/{id}/sample-inputs`，body 为 `{ "sampleInputs": <样例 JSON 对象> }`。
+
+只有以上步骤全部通过后，才能进入第五阶段逐节点测试。
 
 ---
 
@@ -523,7 +475,7 @@ Body: { "inputs": <样例数据> }
 - **单节点改动** → 使用 `edit` 工具精准替换目标字段
 - **多节点改动 / 结构重组** → 整体覆写
 
-**遵守所有 workflow.json 约束**（见第 4 节规范）。
+**遵守所有 workflow.json 约束**（见第 3 节规范）。
 
 ### 8.4 验证与写回
 

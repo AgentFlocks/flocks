@@ -1,0 +1,222 @@
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import CreateChatTab from './CreateChatTab';
+
+const {
+  capturedSessionChatProps,
+  mockCreateAndSend,
+  mockSendPrompt,
+  mockSetSelectedModelKey,
+} = vi.hoisted(() => ({
+  capturedSessionChatProps: [] as any[],
+  mockCreateAndSend: vi.fn(),
+  mockSendPrompt: vi.fn(),
+  mockSetSelectedModelKey: vi.fn(),
+}));
+
+const selectedPromptModel = { providerID: 'provider-1', modelID: 'model-1' };
+const selectedModelOption = {
+  key: 'provider-1:model-1',
+  providerID: 'provider-1',
+  providerName: 'Provider',
+  modelID: 'model-1',
+  label: 'model-1',
+  pricingLabel: '',
+  contextLabel: '',
+  contextWindowTokens: 128000,
+  supportsVision: true,
+};
+
+vi.mock('@/hooks/useDefaultModelVision', () => ({
+  useDefaultModelVision: () => false,
+}));
+
+vi.mock('@/hooks/useSessionChat', () => ({
+  useSessionChat: () => ({
+    sessionId: null,
+    error: null,
+    createAndSend: mockCreateAndSend,
+    retry: vi.fn(),
+  }),
+}));
+
+vi.mock('@/api/workflow', () => ({
+  workflowAPI: {
+    list: vi.fn().mockResolvedValue({ data: [] }),
+  },
+}));
+
+vi.mock('@/components/common/ChatPromptSelectors', () => ({
+  useChatAgentOptions: () => ({
+    agents: [{ name: 'rex', description: 'Rex', mode: 'primary', native: true }],
+    loading: false,
+  }),
+  useChatModelOptions: () => ({
+    groupedOptions: [],
+    loading: false,
+    selectedModelOption,
+    selectedPromptModel,
+    setSelectedModelKey: mockSetSelectedModelKey,
+  }),
+  ChatAgentDisplay: ({ selectedAgent }: { selectedAgent: string }) => (
+    <div>Agent:{selectedAgent}</div>
+  ),
+  ChatModelPicker: () => <div>ModelPicker</div>,
+}));
+
+vi.mock('@/components/common/SessionChat', () => ({
+  buildInstructionDisplayText: (label: string) => `@@flocks-instruction:${label}`,
+  default: (props: any) => {
+    capturedSessionChatProps.push(props);
+    return (
+      <div data-testid="session-chat">
+        {typeof props.welcomeContent === 'function'
+          ? props.welcomeContent(vi.fn())
+          : props.welcomeContent}
+        {props.toolbarSlot}
+        {props.centerToolbarSlot}
+        {props.conversationBottomSlot?.({ sendPrompt: mockSendPrompt, sending: false })}
+      </div>
+    );
+  },
+}));
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) => {
+      const translations: Record<string, any> = {
+        'create.chat.sessionTitle': '新建工作流',
+        'create.chat.inputPlaceholder': '描述您想创建的工作流...',
+        'create.chat.contextMessage': '用户希望创建一个 Flocks 工作流，请使用 workflow-builder skill 来完成。',
+        'create.chat.welcomeMessage': '欢迎创建工作流',
+        'create.chat.emptyStateTitle': '暂无执行记录',
+        'create.chat.guidePanelTitle': 'Rex 辅助创建',
+        'create.chat.guidePanelDesc': '选择一个引导或创建案例，Rex 会按 workflow-builder skill 先确认场景。',
+        'create.chat.guideSectionTitle': '创建引导',
+        'create.chat.caseSectionTitle': '创建案例',
+        'create.chat.guideActions': [
+          {
+            label: '如何创建工作流',
+            description: '从零开始梳理业务目标、输入输出、节点流程、样例和生成步骤。',
+            prompt: '请按 workflow-builder skill 引导我从零创建一个 Flocks 工作流。',
+          },
+          {
+            label: '编辑工作流节点',
+            description: '调整节点职责、输入输出、代码或连接关系。',
+            prompt: '请帮我编辑工作流节点。',
+          },
+        ],
+        'create.chat.exampleQuestions': [
+          '帮我创建一个 IP 威胁情报查询工作流，输入 IP 地址，查询多个情报源并汇总生成报告',
+          '创建一个域名分析工作流，对域名进行 WHOIS 查询、DNS 解析和历史记录交叉分析',
+        ],
+        'create.chat.exampleQuestionLabels': [
+          '创建 IP 情报工作流',
+          '创建域名分析工作流',
+        ],
+        'detail.chat.welcome.guideCollapse': '收起',
+        'detail.chat.welcome.guideExpand': '展开',
+      };
+      const value = translations[key] ?? key;
+      return options?.returnObjects ? value : String(value);
+    },
+  }),
+}));
+
+function renderCreateChatTab() {
+  return render(
+    <MemoryRouter>
+      <CreateChatTab onWorkflowCreated={vi.fn()} />
+    </MemoryRouter>,
+  );
+}
+
+describe('WorkflowCreate CreateChatTab', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    capturedSessionChatProps.length = 0;
+    mockCreateAndSend.mockResolvedValue('session-1');
+  });
+
+  it('renders creation guides and case examples in a centered guide panel', async () => {
+    const user = userEvent.setup();
+    renderCreateChatTab();
+
+    expect(capturedSessionChatProps[0].suggestions).toBeUndefined();
+    expect(screen.getByText('暂无执行记录')).toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助创建')).toBeInTheDocument();
+    expect(screen.getByText('创建引导')).toBeInTheDocument();
+    expect(screen.getByText('创建案例')).toBeInTheDocument();
+    expect(screen.getByTestId('create-workflow-guide-scroll')).toHaveClass('overflow-y-auto');
+    expect(screen.getByRole('button', { name: /如何创建工作流/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /编辑工作流节点/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /创建 IP 情报工作流/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /创建域名分析工作流/ })).toBeInTheDocument();
+    expect(screen.queryByText('帮我创建一个 IP 威胁情报查询工作流，输入 IP 地址，查询多个情报源并汇总生成报告')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /如何创建工作流/ }));
+
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith({
+        text: '请按 workflow-builder skill 引导我从零创建一个 Flocks 工作流。',
+        imageParts: [],
+        agent: 'rex',
+        model: selectedPromptModel,
+        displayText: '@@flocks-instruction:如何创建工作流',
+      });
+    });
+    expect(mockSendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('shows the guide dock above the composer once creation starts', () => {
+    renderCreateChatTab();
+
+    const slot = capturedSessionChatProps[0].conversationBottomSlot?.({
+      sendPrompt: mockSendPrompt,
+      setInput: vi.fn(),
+      focusInput: vi.fn(),
+      sending: true,
+      streaming: false,
+      sessionId: null,
+    });
+    const { container } = render(<>{slot}</>);
+
+    expect(within(container).getByRole('button', { name: /如何创建工作流/ })).toBeDisabled();
+    expect(within(container).getByRole('button', { name: /创建 IP 情报工作流/ })).toBeDisabled();
+  });
+
+  it('reuses the workflow workbench chat controls', async () => {
+    renderCreateChatTab();
+
+    expect(screen.getByText('Agent:rex')).toBeInTheDocument();
+    expect(screen.getByText('ModelPicker')).toBeInTheDocument();
+    expect(capturedSessionChatProps[0].agentName).toBe('rex');
+    expect(capturedSessionChatProps[0].mentionAgents.map((agent: any) => agent.name)).toEqual(['rex']);
+    expect(capturedSessionChatProps[0].model).toEqual(selectedPromptModel);
+    expect(capturedSessionChatProps[0].supportsVision).toBe(true);
+    expect(capturedSessionChatProps[0].contextWindowTokens).toBe(128000);
+    expect(capturedSessionChatProps[0].composerTextareaMinHeight).toBe(48);
+    expect(capturedSessionChatProps[0].composerTextareaMaxHeight).toBe(120);
+
+    await capturedSessionChatProps[0].onCreateAndSend(
+      '创建一个工作流',
+      [],
+      undefined,
+      undefined,
+      { displayText: '@@flocks-instruction:IP 情报' },
+    );
+
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith({
+        text: '创建一个工作流',
+        imageParts: [],
+        agent: 'rex',
+        model: selectedPromptModel,
+        displayText: '@@flocks-instruction:IP 情报',
+      });
+    });
+  });
+});

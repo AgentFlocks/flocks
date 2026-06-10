@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, Plus, Clock, ChevronsLeft, ChevronsRight, Info } from 'lucide-react';
+import { AlertCircle, Bot, Clock, Info, Plus } from 'lucide-react';
 import SessionChat, {
   NodeRef,
   buildInstructionDisplayText,
@@ -14,6 +14,7 @@ import {
   useChatAgentOptions,
   useChatModelOptions,
 } from '@/components/common/ChatPromptSelectors';
+import ChatGuideDock, { type ChatGuideAction } from '@/components/common/ChatGuideDock';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import type { ImagePartData } from '@/utils/imageUpload';
@@ -32,6 +33,8 @@ const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
 const WORKFLOW_CHAT_AGENT_NAME = 'rex';
 const WORKFLOW_CHAT_AGENT_NAMES = [WORKFLOW_CHAT_AGENT_NAME];
 const WORKFLOW_GUIDE_FILE_NAME = 'guide.md';
+
+type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
 
 function workflowRevisionKey(workflow: Workflow): string {
   return [
@@ -240,6 +243,15 @@ export default function ChatTab({
     [onFirstMessageSent, selectedPromptModel, createSession, createAndSendSession],
   );
 
+  const handleWelcomeGuidePrompt = useCallback(
+    (prompt: string, label: string) => {
+      void handleCreateAndSend(prompt, [], undefined, undefined, {
+        displayText: buildInstructionDisplayText(label),
+      });
+    },
+    [handleCreateAndSend],
+  );
+
   const handleNewSession = useCallback(() => {
     setShowHistory(false);
     setActiveSessionId(null);
@@ -436,7 +448,7 @@ export default function ChatTab({
               onAddModel={() => navigate('/models')}
             />
           }
-          conversationBottomSlot={({ sendPrompt, sending }) => (
+          conversationBottomSlot={({ sendPrompt, sending, streaming }) => (
             <>
               <WorkflowLaunchRequestRunner
                 launchRequest={launchRequest}
@@ -445,13 +457,15 @@ export default function ChatTab({
                   displayText: label ? buildInstructionDisplayText(label) : undefined,
                 })}
               />
-              <WorkflowGuideDock
-                workflow={workflow}
-                disabled={sending}
-                onStartPrompt={(prompt, label) => sendPrompt(prompt, {
-                  displayText: buildInstructionDisplayText(label),
-                })}
-              />
+              {sessionId || sending || streaming ? (
+                <WorkflowGuideDock
+                  workflow={workflow}
+                  disabled={sending || streaming}
+                  onStartPrompt={(prompt, label) => sendPrompt(prompt, {
+                    displayText: buildInstructionDisplayText(label),
+                  })}
+                />
+              ) : null}
             </>
           )}
           welcomeContent={!sessionId ? (
@@ -459,6 +473,7 @@ export default function ChatTab({
               workflow={workflow}
               error={error}
               onRetry={() => { hasCreatedRef.current = false; resetSession(); }}
+              onStartPrompt={handleWelcomeGuidePrompt}
             />
           ) : undefined}
         />
@@ -475,40 +490,52 @@ function WorkflowWelcome({
   workflow,
   error,
   onRetry,
+  onStartPrompt,
 }: {
   workflow: Workflow;
   error: string | null;
   onRetry: () => void;
+  onStartPrompt: (prompt: string, label: string) => void;
 }) {
   const { t } = useTranslation('workflow');
+  const guideGroups = buildWorkflowGuideGroups(t, workflow);
 
   return (
-    <div className="w-full max-w-md space-y-4 text-left">
-      <div className="text-xs text-gray-700 space-y-2">
-        <p className="font-semibold text-gray-900">{t('detail.chat.welcome.title', { name: workflow.name })}</p>
-        <p className="text-gray-500 leading-relaxed">
-          {t('detail.chat.welcome.descPart1')}
-          <span className="font-medium text-gray-700">{t('detail.chat.welcome.mdTabLabel')}</span>
-          {t('detail.chat.welcome.descPart2')}
-        </p>
-      </div>
-
-      <div className="rounded-lg border border-red-100 bg-red-50 p-3 text-xs text-red-800 space-y-1.5 leading-relaxed">
-        <p className="font-medium">{t('detail.chat.welcome.canHelp')}</p>
-        <ul className="space-y-1 text-red-700">
-          <li>• {t('detail.chat.welcome.bullet1')}</li>
-          <li>• {t('detail.chat.welcome.bullet2')}</li>
-          <li>• {t('detail.chat.welcome.bullet3')}</li>
-          <li>• {t('detail.chat.welcome.bullet4')}</li>
-        </ul>
-        <p className="pt-1 text-red-600 border-t border-red-200">
-          {t('detail.chat.welcome.tipPart1')}<span className="font-medium">{t('detail.chat.welcome.mdTabLabel')}</span>
-          {t('detail.chat.welcome.tipPart2')}
-        </p>
+    <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
+      <p className="mb-8 text-center text-sm font-medium text-gray-400">
+        {t('detail.run.noHistory')}
+      </p>
+      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
+        <div className="flex-shrink-0">
+          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+            <Bot className="h-5 w-5" />
+          </div>
+          <h3 className="mt-4 text-sm font-semibold text-gray-900">
+            {t('detail.chat.welcome.editPanelTitle')}
+          </h3>
+          <p className="mx-auto mt-2 max-w-[320px] text-xs leading-relaxed text-gray-500">
+            {t('detail.chat.welcome.editPanelDesc', { name: workflow.name })}
+          </p>
+        </div>
+        <div
+          data-testid="workflow-edit-guide-scroll"
+          className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]"
+        >
+          <WorkflowGuideSection
+            title={t('detail.chat.welcome.editSectionTitle')}
+            actions={guideGroups.editActions}
+            onStartPrompt={onStartPrompt}
+          />
+          <WorkflowGuideSection
+            title={t('detail.chat.welcome.configSectionTitle')}
+            actions={guideGroups.configActions}
+            onStartPrompt={onStartPrompt}
+          />
+        </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+        <div className="mt-4 flex w-full max-w-[420px] items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
           <AlertCircle className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{error}</span>
           <button onClick={onRetry} className="underline hover:no-underline flex-shrink-0">
@@ -517,6 +544,47 @@ function WorkflowWelcome({
         </div>
       )}
     </div>
+  );
+}
+
+function WorkflowGuideSection({
+  title,
+  actions,
+  onStartPrompt,
+}: {
+  title: string;
+  actions: ChatGuideAction[];
+  onStartPrompt: (prompt: string, label: string) => void;
+}) {
+  if (actions.length === 0) return null;
+
+  return (
+    <section>
+      <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
+      <div className="flex flex-col gap-1.5">
+        {actions.map((action) => (
+          <button
+            key={action.label}
+            type="button"
+            onClick={() => onStartPrompt(action.prompt, action.label)}
+            className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
+            title={action.description}
+          >
+            <span className="truncate">{action.label}</span>
+            <span
+              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors group-hover:text-rose-400"
+              title={action.description}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+            >
+              <Info className="h-3.5 w-3.5" aria-hidden="true" />
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -541,30 +609,13 @@ function WorkflowLaunchRequestRunner({
   return null;
 }
 
-function WorkflowGuideDock({
-  workflow,
-  disabled,
-  onStartPrompt,
-}: {
-  workflow: Workflow;
-  disabled?: boolean;
-  onStartPrompt: (text: string, label: string) => void;
-}) {
-  const { t } = useTranslation('workflow');
-  const [collapsed, setCollapsed] = useState(false);
-  const [guideTooltip, setGuideTooltip] = useState<{
-    title: string;
-    description: string;
-    x: number;
-    y: number;
-  } | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+function buildWorkflowPromptParams(workflow: Workflow) {
   const workflowDir = workflow.source === 'global'
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowMdPath = `${workflowDir}workflow.md`;
   const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
-  const promptParams = {
+  return {
     id: workflow.id,
     name: workflow.name,
     dir: workflowDir,
@@ -572,6 +623,36 @@ function WorkflowGuideDock({
     guidePath: workflowGuidePath,
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
+}
+
+function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
+  const promptParams = buildWorkflowPromptParams(workflow);
+  return [
+    {
+      label: t('detail.chat.welcome.editRequirementShort'),
+      description: t('detail.chat.welcome.editRequirementDesc'),
+      prompt: t('detail.chat.welcome.editRequirementPrompt', promptParams),
+    },
+    {
+      label: t('detail.chat.welcome.editNodeShort'),
+      description: t('detail.chat.welcome.editNodeDesc'),
+      prompt: t('detail.chat.welcome.editNodePrompt', promptParams),
+    },
+    {
+      label: t('detail.chat.welcome.editFlowShort'),
+      description: t('detail.chat.welcome.editFlowDesc'),
+      prompt: t('detail.chat.welcome.editFlowPrompt', promptParams),
+    },
+    {
+      label: t('detail.chat.welcome.editRegenerateShort'),
+      description: t('detail.chat.welcome.editRegenerateDesc'),
+      prompt: t('detail.chat.welcome.editRegeneratePrompt', promptParams),
+    },
+  ];
+}
+
+function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
+  const promptParams = buildWorkflowPromptParams(workflow);
   const buildQuestionPrompt = (focus: string, instruction: string) => t(
     'detail.chat.welcome.guideQuestionPrompt',
     {
@@ -580,8 +661,7 @@ function WorkflowGuideDock({
       instruction,
     },
   );
-  const guideButtonClassName = 'border-zinc-200 bg-white text-zinc-700 hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-600';
-  const guideActions = [
+  return [
     {
       label: t('detail.chat.welcome.guidePrimaryShort'),
       description: t('detail.chat.welcome.guidePrimaryDesc'),
@@ -641,99 +721,38 @@ function WorkflowGuideDock({
       prompt: t('detail.chat.welcome.auditPrompt', promptParams),
     },
   ];
+}
 
-  const showGuideTooltip = useCallback((target: HTMLElement, title: string, description: string) => {
-    const rect = target.getBoundingClientRect();
-    setGuideTooltip({
-      title,
-      description,
-      x: rect.left + rect.width / 2,
-      y: rect.top - 8,
-    });
-  }, []);
+function buildWorkflowGuideGroups(t: TranslateFn, workflow: Workflow) {
+  const editActions = buildWorkflowEditActions(t, workflow);
+  const configActions = buildWorkflowConfigActions(t, workflow);
+  return {
+    editActions,
+    configActions,
+    allActions: [...editActions, ...configActions],
+  };
+}
 
-  const handleGuideWheel = useCallback((event: WheelEvent) => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
-      ? event.deltaX
-      : event.deltaY;
-    if (delta === 0) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    el.scrollLeft += delta;
-  }, []);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || collapsed) return undefined;
-
-    el.addEventListener('wheel', handleGuideWheel, { passive: false });
-    return () => {
-      el.removeEventListener('wheel', handleGuideWheel);
-    };
-  }, [collapsed, handleGuideWheel]);
+function WorkflowGuideDock({
+  workflow,
+  disabled,
+  onStartPrompt,
+}: {
+  workflow: Workflow;
+  disabled?: boolean;
+  onStartPrompt: (text: string, label: string) => void;
+}) {
+  const { t } = useTranslation('workflow');
+  const guideActions = buildWorkflowGuideGroups(t, workflow).allActions;
 
   return (
-    <div className="flex w-full min-w-0 items-stretch gap-1.5">
-      <button
-        type="button"
-        onClick={() => setCollapsed((value) => !value)}
-        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition-colors hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-500"
-        title={collapsed ? t('detail.chat.welcome.guideExpand') : t('detail.chat.welcome.guideCollapse')}
-      >
-        {collapsed ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}
-      </button>
-
-      <div
-        ref={scrollRef}
-        className={`min-w-0 flex-1 overscroll-contain overflow-x-auto overflow-y-hidden transition-all duration-200 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
-          collapsed ? 'basis-0 max-w-0 opacity-0 pointer-events-none' : 'basis-auto max-w-full opacity-100'
-        }`}
-      >
-        <div className="flex w-max gap-1.5 pr-1">
-          {guideActions.map((action) => {
-            return (
-              <button
-                key={action.label}
-                type="button"
-                disabled={disabled}
-                onClick={() => onStartPrompt(action.prompt, action.label)}
-                className={`inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${guideButtonClassName}`}
-                title={action.label}
-              >
-                <span className="whitespace-nowrap text-xs font-semibold leading-none">{action.label}</span>
-                <span
-                  className="group/info inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500"
-                  title={action.description}
-                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                  onPointerEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
-                  onMouseEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
-                  onMouseOver={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
-                  onMouseLeave={() => setGuideTooltip(null)}
-                  onPointerLeave={() => setGuideTooltip(null)}
-                >
-                  <Info className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {guideTooltip && (
-        <div
-          className="pointer-events-none fixed z-[80] w-48 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md"
-          style={{ left: guideTooltip.x, top: guideTooltip.y }}
-        >
-          <div className="mb-0.5 font-semibold text-zinc-800">{guideTooltip.title}</div>
-          <div>{guideTooltip.description}</div>
-          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
-        </div>
-      )}
-    </div>
+    <ChatGuideDock
+      actions={guideActions}
+      disabled={disabled}
+      collapseTitle={t('detail.chat.welcome.guideCollapse')}
+      expandTitle={t('detail.chat.welcome.guideExpand')}
+      onStartPrompt={onStartPrompt}
+    />
   );
 }
 

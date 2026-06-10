@@ -73,8 +73,8 @@ vi.mock('react-i18next', () => ({
         'detail.regenerateEditDoc': '重新生成',
         'detail.editDocSave': '保存',
         'detail.editDocSaving': '保存中',
-        'detail.generateWorkflow': '重新生成工作流',
-        'detail.generateWorkflowTitle': '重新生成工作流',
+        'detail.generateWorkflow': '生成工作流',
+        'detail.generateWorkflowTitle': '基于 workflow.md 生成 workflow.json',
       };
       return translations[key] ?? key;
     },
@@ -226,10 +226,10 @@ describe('Flocks help button', () => {
 
     await screen.findByTestId('flow-canvas');
     await user.click(screen.getByRole('button', { name: 'MD 描述' }));
-    await user.click(screen.getByRole('button', { name: '重新生成工作流' }));
+    await user.click(screen.getByRole('button', { name: '生成工作流' }));
 
     expect(screen.getByTestId('right-panel')).toHaveAttribute('data-active-tab', 'chat');
-    expect(screen.getByTestId('right-panel')).toHaveAttribute('data-launch-label', '重新生成工作流');
+    expect(screen.getByTestId('right-panel')).toHaveAttribute('data-launch-label', '生成工作流');
   });
 
   it('shows AI markdown diff inline above the editor and can reject it', async () => {

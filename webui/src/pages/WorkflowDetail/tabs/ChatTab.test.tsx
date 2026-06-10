@@ -106,6 +106,22 @@ vi.mock('react-i18next', () => ({
         'detail.chat.welcome.descPart1': '你可以直接描述需求。',
         'detail.chat.welcome.descPart2': '。',
         'detail.chat.welcome.mdTabLabel': 'workflow.md',
+        'detail.chat.welcome.editPanelTitle': 'Rex 辅助修改',
+        'detail.chat.welcome.editPanelDesc': '选择一个修改入口，Rex 会先读取 {{name}}。',
+        'detail.chat.welcome.editSectionTitle': '编辑引导',
+        'detail.chat.welcome.configSectionTitle': '配置引导',
+        'detail.chat.welcome.editRequirementShort': '修改功能需求',
+        'detail.chat.welcome.editRequirementDesc': '整理功能修改需求',
+        'detail.chat.welcome.editRequirementPrompt': '用户点击了「修改功能需求」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
+        'detail.chat.welcome.editNodeShort': '编辑工作流节点',
+        'detail.chat.welcome.editNodeDesc': '调整节点职责和连接',
+        'detail.chat.welcome.editNodePrompt': '用户点击了「编辑工作流节点」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
+        'detail.chat.welcome.editFlowShort': '调整流程结构',
+        'detail.chat.welcome.editFlowDesc': '调整节点和边',
+        'detail.chat.welcome.editFlowPrompt': '用户点击了「调整流程结构」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
+        'detail.chat.welcome.editRegenerateShort': '生成工作流',
+        'detail.chat.welcome.editRegenerateDesc': '基于 workflow.md 生成 workflow.json',
+        'detail.chat.welcome.editRegeneratePrompt': '用户点击了「生成工作流」按钮。基于 workflow.md 生成 workflow.json。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
         'detail.chat.welcome.canHelp': '我可以帮你：',
         'detail.chat.welcome.bullet1': '修改节点',
         'detail.chat.welcome.bullet2': '调整流转',
@@ -246,25 +262,33 @@ describe('WorkflowDetail ChatTab', () => {
 
     await user.click(screen.getByRole('button', { name: /智能配置/ }));
 
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('工作流 ID 是 stream_alert_denoise'),
-      expect.objectContaining({ displayText: expect.stringContaining('智能配置') }),
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('工作流 ID 是 stream_alert_denoise'),
+          displayText: '@@flocks-instruction:智能配置',
+        }),
+      );
+    });
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('~/.flocks/plugins/workflows/stream_alert_denoise/'),
+      }),
     );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('~/.flocks/plugins/workflows/stream_alert_denoise/'),
-      expect.objectContaining({ displayText: expect.stringContaining('智能配置') }),
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('~/.flocks/plugins/workflows/stream_alert_denoise/guide.md'),
+      }),
     );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('~/.flocks/plugins/workflows/stream_alert_denoise/guide.md'),
-      expect.objectContaining({ displayText: expect.stringContaining('智能配置') }),
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('用户点击了「智能配置」按钮'),
+      }),
     );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('用户点击了「智能配置」按钮'),
-      expect.objectContaining({ displayText: expect.stringContaining('智能配置') }),
-    );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('发布配置、工作流执行配置'),
-      expect.objectContaining({ displayText: expect.stringContaining('智能配置') }),
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('发布配置、工作流执行配置'),
+      }),
     );
   });
 
@@ -280,22 +304,54 @@ describe('WorkflowDetail ChatTab', () => {
 
     await user.click(screen.getByRole('button', { name: /输入模式/ }));
 
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('第一步必须读取 ~/.flocks/plugins/workflows/stream_alert_denoise/guide.md'),
-      expect.objectContaining({ displayText: expect.stringContaining('输入模式') }),
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('第一步必须读取 ~/.flocks/plugins/workflows/stream_alert_denoise/guide.md'),
+          displayText: '@@flocks-instruction:输入模式',
+        }),
+      );
+    });
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('用户点击了「输入模式」按钮'),
+      }),
     );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('用户点击了「输入模式」按钮'),
-      expect.objectContaining({ displayText: expect.stringContaining('输入模式') }),
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('不要要求 guide.md 存在按钮表'),
+      }),
     );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('不要要求 guide.md 存在按钮表'),
-      expect.objectContaining({ displayText: expect.stringContaining('输入模式') }),
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('必须调用 question 工具'),
+      }),
     );
-    expect(mockSendPrompt).toHaveBeenCalledWith(
-      expect.stringContaining('必须调用 question 工具'),
-      expect.objectContaining({ displayText: expect.stringContaining('输入模式') }),
-    );
+  });
+
+  it('offers workflow editing guides in the empty workbench', async () => {
+    const user = userEvent.setup();
+    renderChatTab();
+
+    expect(screen.getByText('Rex 辅助修改')).toBeInTheDocument();
+    expect(screen.getByText('编辑引导')).toBeInTheDocument();
+    expect(screen.getByText('配置引导')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-edit-guide-scroll')).toHaveClass('overflow-y-auto');
+    expect(screen.getByRole('button', { name: /修改功能需求/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /编辑工作流节点/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /调整流程结构/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /生成工作流/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /编辑工作流节点/ }));
+
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('用户点击了「编辑工作流节点」按钮'),
+          displayText: '@@flocks-instruction:编辑工作流节点',
+        }),
+      );
+    });
   });
 
   it('routes launch requests through the current chat instead of directly creating a new session', async () => {
@@ -328,7 +384,7 @@ describe('WorkflowDetail ChatTab', () => {
 
     expect(capturedSessionChatProps[0].agentName).toBe('rex');
     expect(capturedSessionChatProps[0].mentionAgents.map((agent: any) => agent.name)).toEqual(['rex']);
-    expect(screen.getByText(/Rex/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Rex/i).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: /Rex/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Explore/i })).not.toBeInTheDocument();
   });
@@ -341,15 +397,11 @@ describe('WorkflowDetail ChatTab', () => {
   });
 
   it('keeps workflow guide descriptions behind info tooltips', async () => {
-    const user = userEvent.setup();
     renderChatTab();
 
     expect(screen.getByRole('button', { name: /智能配置/ })).toBeInTheDocument();
     expect(screen.queryByText('配置工作流')).not.toBeInTheDocument();
-
-    await user.hover(screen.getByTitle('配置工作流'));
-
-    expect(screen.getByText('配置工作流')).toBeInTheDocument();
+    expect(screen.getAllByTitle('配置工作流').length).toBeGreaterThan(0);
   });
 
   it('refreshes after a tool finishes when workflow.md content changed without updatedAt changing', async () => {

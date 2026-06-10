@@ -77,17 +77,17 @@
     "generateEditDoc": "Generate workflow.md",
     "regenerateEditDoc": "Regenerate",
     "generateEditDocTitle": "Generate a structured workflow.md from the flow and nodes",
-    "generateWorkflow": "Regenerate Workflow",
-    "generateWorkflowTitle": "Ask the right AI editor to regenerate workflow files from workflow.md and workflow.json",
-    "regenerateWorkflowConfirmTitle": "Regenerate workflow?",
-    "regenerateWorkflowConfirmDesc": "Workflow files have changed. Regenerate the workflow?",
-    "regenerateWorkflowConfirmYes": "Confirm",
+    "generateWorkflow": "Generate Workflow",
+    "generateWorkflowTitle": "Ask the workbench to generate or update workflow.json from the current workflow.md",
+    "regenerateWorkflowConfirmTitle": "Generate workflow?",
+    "regenerateWorkflowConfirmDesc": "workflow.md was saved. Generate or update workflow.json from the current content now?",
+    "regenerateWorkflowConfirmYes": "Generate",
     "regenerateWorkflowConfirmNo": "Decline",
     "editDocEmpty": "No workflow.md",
     "editDocEmptyHint": "Generate a structured, editable workflow.md that can also guide workflow generation.",
     "editDocPlaceholder": "Edit workflow.md here...",
     "editDocTextareaLabel": "Edit workflow.md",
-    "generateWorkflowPrompt": "This new task was triggered by the user clicking the \"Regenerate Workflow\" button. Regenerate/update the formal Flocks workflow files from the current workflow.md and existing workflow files.\n\nWorkflow name: {{name}}\nWorkflow directory: {{dir}}\nMD file: {{mdPath}}\nJSON definition file: {{jsonPath}}\n\nPlease proceed as follows:\n1. Load the workflow-builder skill first.\n2. Read the existing workflow.md and workflow.json, and use the current flow diagram structure to understand the existing implementation.\n3. Treat the current editor content of workflow.md as the main source of intent. If the file on disk differs from the content below, prefer the content below.\n4. Preserve existing nodes, triggers, sample inputs, and metadata that are still reasonable.\n5. First provide a short generation plan. Before writing files, show a diff and wait for my confirmation.\n6. The generated workflow.json must be valid JSON, and nodes plus edges must form a complete flow diagram.\n7. When finished, explain which files changed and how I should test them.\n\nCurrent editor content of workflow.md:\n~~~markdown\n{{editDocContent}}\n~~~",
+    "generateWorkflowPrompt": "This new task was triggered by the user clicking the \"Generate Workflow\" button. The button means: generate or update the machine-executable workflow.json from the current workflow.md; unless I explicitly ask for it, do not regenerate or rewrite workflow.md.\n\nWorkflow name: {{name}}\nWorkflow directory: {{dir}}\nMD file: {{mdPath}}\nJSON definition file: {{jsonPath}}\n\nPlease proceed as follows:\n1. Load the workflow-builder skill first.\n2. Read the existing workflow.md and workflow.json, and use the current flow diagram structure to understand the existing implementation.\n3. Treat the current editor content of workflow.md as the main source of intent. If the file on disk differs from the content below, prefer the content below.\n4. Only generate/update workflow.json, preserving existing triggers, sample inputs, and metadata that are still reasonable.\n5. First provide a short generation plan. Before writing workflow.json, show a diff and wait for my confirmation.\n6. The generated workflow.json must be valid JSON, and nodes plus edges must form a complete flow diagram.\n7. When finished, explain what changed in workflow.json and how I should test it.\n\nCurrent editor content of workflow.md:\n~~~markdown\n{{editDocContent}}\n~~~",
     "canvasTabs": {
       "flow": "Flow Diagram",
       "md": "workflow.md",
@@ -362,6 +362,22 @@
         "descPart1": "Describe your changes directly, or start with Flocks Help to clarify the setup. When a change is needed, AI will use workflow.md first. Review the left ",
         "mdTabLabel": "\"workflow.md\"",
         "descPart2": " view to confirm the flow is correct before syncing the JSON definition file.",
+        "editPanelTitle": "Rex Assisted Editing",
+        "editPanelDesc": "Choose an editing entry. Rex will read this workflow's workflow.md and workflow.json, then guide you through confirming and updating \"{{name}}\".",
+        "editSectionTitle": "Editing Guides",
+        "configSectionTitle": "Configuration Guides",
+        "editRequirementShort": "Edit Requirement",
+        "editRequirementDesc": "Turn the requested functional change into a structured requirement that can update workflow.md.",
+        "editRequirementPrompt": "The user clicked \"Edit Requirement\". Follow the workflow-builder skill to modify the functional requirement of this existing Flocks workflow. The workflow ID is {{id}}, workflow directory is {{dir}}, MD file is {{mdPath}}, and JSON file is {{dir}}workflow.json. First read workflow.md and workflow.json, summarize the current function, inputs, outputs, node flow, and known constraints; then use the question tool to ask one key question at a time to confirm the target, scope, input/output changes, acceptance criteria, and whether publish/trigger config is affected. Do not write files before showing a plan and diff and getting confirmation.",
+        "editNodeShort": "Edit Nodes",
+        "editNodeDesc": "Adjust node responsibility, inputs, outputs, execution code, field mapping, or connections.",
+        "editNodePrompt": "The user clicked \"Edit Nodes\". Follow the workflow-builder skill to edit nodes in this existing Flocks workflow. The workflow ID is {{id}}, workflow directory is {{dir}}, MD file is {{mdPath}}, and JSON file is {{dir}}workflow.json. First read workflow.md and workflow.json, list the current nodes and edges briefly; then use the question tool to confirm which node to change, the goal, input/output changes, upstream/downstream edge impact, and sample-data impact. Show a plan and diff before modifying files.",
+        "editFlowShort": "Adjust Flow",
+        "editFlowDesc": "Add, remove, or move nodes, and adjust branches, loops, joins, and data flow.",
+        "editFlowPrompt": "The user clicked \"Adjust Flow\". Follow the workflow-builder skill to adjust this existing Flocks workflow structure. The workflow ID is {{id}}, workflow directory is {{dir}}, MD file is {{mdPath}}, and JSON file is {{dir}}workflow.json. First read workflow.md and workflow.json and output the current Mermaid flow diagram; then use the question tool to confirm which nodes to add/remove/move, branch conditions, loop or join logic, field flow, and sample impact. Do not write files before confirmation; when a change is needed, show the workflow.md/workflow.json plan and diff first.",
+        "editRegenerateShort": "Generate Workflow",
+        "editRegenerateDesc": "Generate workflow.json from the current workflow.md or fix mismatch between docs and JSON.",
+        "editRegeneratePrompt": "The user clicked \"Generate Workflow\". This button means: follow the workflow-builder skill to generate or repair workflow.json for this existing Flocks workflow from the current workflow.md. The workflow ID is {{id}}, workflow directory is {{dir}}, MD file is {{mdPath}}, and JSON file is {{dir}}workflow.json. First read workflow.md and workflow.json, compare the human intent with the machine definition, then provide a short generation plan and use the question tool if the scope needs confirmation. The goal is to generate/update workflow.json, not to regenerate or rewrite workflow.md. Before writing workflow.json, show a diff and wait for confirmation.",
         "guideTitle": "Flocks Help is ready",
         "guideDesc": "Click once and I will read this workflow's guide.md, then lead you through the single most useful next step.",
         "guidePrimary": "Start Smart Setup",
@@ -418,17 +434,55 @@
     },
     "rightPanel": {
       "tabOverview": "Details",
-      "tabChat": "Chat"
+      "tabChat": "Workbench",
+      "tabIntegration": "Publish"
     },
     "overview": {
-      "chatHint": "Describe your requirements in the \"Chat\" tab, workflow details will be filled automatically after generation",
+      "chatHint": "Describe your requirements in the \"Workbench\" tab, workflow details will be filled automatically after generation",
       "execDescription": "Execution Flow Description"
+    },
+    "publish": {
+      "emptyTitle": "Waiting for workflow",
+      "emptyHint": "After the workflow is generated, configure API, Syslog, Kafka, Webhook, or scheduled publishing here."
     },
     "chat": {
       "sessionTitle": "New Workflow",
       "preparing": "Preparing workflow assistant...",
       "inputPlaceholder": "Describe the workflow you want to create... (Enter to send)",
       "contextMessage": "The user wants to create a Flocks workflow, please use the workflow-builder skill to complete it.",
+      "emptyStateTitle": "No execution records yet",
+      "guidePanelTitle": "Rex Assisted Creation",
+      "guidePanelDesc": "Choose a guide or creation case. Rex will follow the workflow-builder skill to confirm scenario, inputs, outputs, node flow, and sample data before writing files.",
+      "generateWorkflowPrompt": "The user clicked the \"Generate Workflow\" button. This button means: generate the formal Flocks workflow from the current workflow.md in the left editor, with workflow.json as the core machine-executable artifact.\n\nPlease follow the workflow-builder skill:\n1. Load and follow the workflow-builder skill first.\n2. Treat the workflow.md content below as the primary source of intent; do not interpret this as a request to rewrite workflow.md.\n3. If no workflow directory exists yet, first confirm/generate a suitable workflow ID and directory from workflow.md, then write workflow.md and workflow.json. If a directory already exists, read the existing workflow.json and update the machine definition from workflow.md.\n4. The generated workflow.json must be valid JSON, and nodes plus edges must form a complete flow diagram.\n5. Before writing workflow.json, show a diff and wait for my confirmation.\n6. When finished, explain what changed in workflow.json and how I should test it.\n\nCurrent editor content of workflow.md:\n~~~markdown\n{{editDocContent}}\n~~~",
+      "guideSectionTitle": "Creation Guides",
+      "caseSectionTitle": "Creation Cases",
+      "guideActions": [
+        {
+          "label": "How to Create",
+          "description": "Start from business goal, inputs, outputs, node flow, sample data, and generation steps.",
+          "prompt": "Please follow the workflow-builder skill to guide me through creating a Flocks workflow from scratch. Do not write files yet. Use the question tool to ask one most important question at a time and help me clarify the business scenario, trigger mode, inputs, outputs, required tools/APIs, node steps, branch conditions, sample data, and acceptance criteria. After I confirm, you must generate and write workflow.md first, let me confirm it in the left editor or diff, then generate the complete workflow.json from the confirmed workflow.md and proceed to testing."
+        },
+        {
+          "label": "Requirement Brief",
+          "description": "Turn a fuzzy idea into a structured requirement suitable for workflow.md generation.",
+          "prompt": "Please help me clarify the workflow functional requirements so they can be used to generate workflow.md and workflow.json. Use the question tool to ask one question at a time and collect: what problem the workflow solves, input format, output format, user, automatic/manual trigger, required tools or services, exceptions and edge cases, and how success should be validated."
+        },
+        {
+          "label": "Design Node Flow",
+          "description": "Break the requirement into nodes, edges, branches, loops, and a sample-data checklist.",
+          "prompt": "Please use the workflow-builder skill to help me design the workflow node flow. First confirm the business goal plus inputs and outputs, then provide reasoning dimensions, node list, edge relationships, branch/loop logic, exception handling, and a Mermaid flow diagram. Do not write workflow.json until I confirm."
+        },
+        {
+          "label": "Edit Nodes",
+          "description": "For an existing draft or generated workflow, adjust node responsibility, IO, code, or connections.",
+          "prompt": "Please help me edit workflow nodes. First read the current workflow.md draft on the left and any existing workflow.json if available, then use the question tool to confirm which node I want to change, the goal, input/output changes, whether upstream/downstream edges are affected, and sample-data impact. Show a plan and diff before modifying files."
+        },
+        {
+          "label": "Prepare Sample",
+          "description": "Generate or validate one representative sample input for later node-by-node testing.",
+          "prompt": "Please follow the workflow-builder skill to help me prepare workflow sample input. First confirm the accepted data format and key fields. If I do not have a sample, construct a minimal valid JSON sample and use the question tool to ask me to confirm it. After confirmation, use it for later node tests and integration tests."
+        }
+      ],
       "welcomeMessage": "Hello! I'm your Workflow Creation Assistant 🚀\n\nPlease describe the workflow you'd like to create, for example:\n\n- **Threat Intelligence**: IP / Domain / File Hash lookups\n- **Data Processing**: Multi-source collection, cleaning, correlation\n- **Automated Response**: Security alert handling, incident response\n\nThe more detail you provide, the more accurate the generated workflow will be. You can also click the example questions below to get started quickly!",
       "exampleQuestions": [
         "Create an IP threat intelligence query workflow that takes an IP address, queries multiple intelligence sources, and generates a summary report",
@@ -436,6 +490,13 @@
         "Design a file hash detection workflow that cross-validates hash values across multiple threat intelligence platforms",
         "Build a phishing site detection workflow that analyzes URL features, page content, and SSL certificate information",
         "Create a security incident response workflow that automatically collects, correlates, and analyzes security alerts to generate remediation recommendations"
+      ],
+      "exampleQuestionLabels": [
+        "Create IP Intel Workflow",
+        "Create Domain Analysis Workflow",
+        "Create File Hash Workflow",
+        "Create Phishing Detection Workflow",
+        "Create Incident Response Workflow"
       ]
     }
   },
