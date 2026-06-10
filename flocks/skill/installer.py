@@ -77,6 +77,20 @@ def _resolve_install_root(scope: str) -> Path:
     return _user_skills_root()
 
 
+def _normalize_github_repo_path(repo_path: str) -> str:
+    """Normalize GitHub web paths to owner/repo[/skill-dir]."""
+    parts = repo_path.strip("/").split("/")
+    if len(parts) < 4 or parts[2] not in {"blob", "tree"}:
+        return repo_path.strip("/")
+
+    owner, repo, view_kind, _branch, *subpath_parts = parts
+    if view_kind == "blob" and subpath_parts[-1:] == ["SKILL.md"]:
+        subpath_parts = subpath_parts[:-1]
+
+    subpath = "/".join(subpath_parts)
+    return f"{owner}/{repo}/{subpath}".rstrip("/")
+
+
 def _resolve_source(source: str) -> dict:
     """
     Parse source string into a typed dict with keys: kind, value.
@@ -105,7 +119,10 @@ def _resolve_source(source: str) -> dict:
         return {"kind": "clawhub", "value": source[len("clawhub:"):]}
 
     if source.startswith("github:"):
-        return {"kind": "github", "value": source[len("github:"):]}
+        return {
+            "kind": "github",
+            "value": _normalize_github_repo_path(source[len("github:"):]),
+        }
 
     if source.startswith(("http://", "https://")):
         skills_sh_match = re.match(
@@ -123,7 +140,8 @@ def _resolve_source(source: str) -> dict:
         if gh_match:
             repo = gh_match.group(1).rstrip("/")
             subpath = (gh_match.group(2) or "").strip("/")
-            return {"kind": "github", "value": f"{repo}/{subpath}" if subpath else repo}
+            repo_path = f"{repo}/{subpath}" if subpath else repo
+            return {"kind": "github", "value": _normalize_github_repo_path(repo_path)}
         return {"kind": "url", "value": source}
 
     if source.startswith(("/", "./", "../", "~/")):
