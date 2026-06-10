@@ -5,6 +5,7 @@ state sync, and connectivity probing for device integrations.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -38,6 +39,7 @@ from flocks.tool.device.store import (
 from flocks.tool.device.sync import sync_service_tool_state
 
 _AUTO_INSTANCE_IGNORED_KEY = "device.auto_instance_ignored_storage_keys"
+_AUTO_INSTANCE_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 class DeviceIntakeError(Exception):
@@ -93,6 +95,16 @@ def _user_device_template_storage_keys(*, refresh_templates: bool = False) -> se
     }
 
 
+def _auto_instance_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    lock = _AUTO_INSTANCE_LOCKS.get(loop_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _AUTO_INSTANCE_LOCKS[loop_id] = lock
+    return lock
+
+
 async def ensure_user_device_instances(*, refresh_templates: bool = False) -> int:
     """Create default device rows for user-level device plugin templates.
 
@@ -103,6 +115,13 @@ async def ensure_user_device_instances(*, refresh_templates: bool = False) -> in
     added an instance. Auto-provision one editable instance per user-level
     template when no instance for the same storage_key exists yet.
     """
+    async with _auto_instance_lock():
+        return await _ensure_user_device_instances_unlocked(
+            refresh_templates=refresh_templates,
+        )
+
+
+async def _ensure_user_device_instances_unlocked(*, refresh_templates: bool = False) -> int:
     await ensure_default_group()
     existing_storage_keys = {device.storage_key for device in await list_devices()}
     ignored_storage_keys = await _load_auto_instance_ignored_storage_keys()

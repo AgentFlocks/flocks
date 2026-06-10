@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -176,6 +177,23 @@ def test_device_plugin_index_normalizes_plugin_id_name(monkeypatch, tmp_path):
     assert templates[0].name == "onesig"
     assert templates[0].storage_key == "onesig_v2_5_3_D20250710_api_v2_5_3_D20250710"
     assert templates[0].version == "2.5.3 D20250710"
+
+
+def test_device_template_refresh_reloads_plugin_tools(monkeypatch, tmp_path):
+    from flocks.tool.device import plugin_index
+
+    _reset_env(monkeypatch, tmp_path)
+    calls: list[str] = []
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry,
+        "refresh_plugin_tools",
+        classmethod(lambda cls: calls.append("refresh") or []),
+    )
+
+    assert plugin_index.list_device_templates(refresh=True) == []
+    assert calls == ["refresh"]
 
 
 def test_create_custom_device_template_writes_user_plugin(monkeypatch, tmp_path):
@@ -356,3 +374,58 @@ async def test_device_list_auto_creates_user_device_plugin_instance(monkeypatch,
     assert manual_create.status_code == 201
     assert len(after_manual_create.json()) == 1
     assert after_manual_create.json()[0]["name"] == "Custom Demo Manual"
+
+
+@pytest.mark.asyncio
+async def test_auto_creating_user_device_instances_is_serialized(monkeypatch, tmp_path):
+    from flocks.storage.storage import Storage
+    from flocks.tool.device import intake, plugin_index
+    from flocks.tool.device.store import list_devices
+
+    home, _data, _project = _reset_env(monkeypatch, tmp_path)
+    await Storage.init()
+
+    root = home / ".flocks" / "plugins" / "tools" / "device" / "custom_demo"
+    _write_provider(
+        root,
+        {
+            "name": "Custom Demo",
+            "service_id": "custom_demo_api",
+            "version": "0.1.0",
+            "integration_type": "device",
+            "vendor": "custom_vendor",
+            "credential_fields": [],
+        },
+    )
+    _write_tool(root, "custom_demo_ping")
+
+    async def fake_sync_service_tool_state(service_id: str) -> None:
+        return None
+
+    original_insert_device = intake.insert_device
+    insert_attempts = 0
+
+    async def slow_insert_device(**kwargs):
+        nonlocal insert_attempts
+        insert_attempts += 1
+        await asyncio.sleep(0)
+        await original_insert_device(**kwargs)
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(plugin_index.hub_catalog, "system_plugin_root", lambda plugin_type, plugin_id: None)
+    monkeypatch.setattr(plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(lambda cls: []))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "list_tools", classmethod(lambda cls: []))
+    monkeypatch.setattr(intake, "insert_device", slow_insert_device)
+    monkeypatch.setattr(intake, "sync_service_tool_state", fake_sync_service_tool_state)
+
+    created_counts = await asyncio.gather(
+        intake.ensure_user_device_instances(refresh_templates=True),
+        intake.ensure_user_device_instances(refresh_templates=True),
+    )
+    devices = await list_devices()
+
+    assert sorted(created_counts) == [0, 1]
+    assert insert_attempts == 1
+    assert len(devices) == 1
+    assert devices[0].storage_key == "custom_demo_api_v0_1_0"

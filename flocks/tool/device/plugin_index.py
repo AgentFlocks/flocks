@@ -34,7 +34,7 @@ _SAFE_SERVICE_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
     """Return device templates from Hub catalog plus local descriptor discovery."""
     if refresh:
-        discover_api_service_descriptors(refresh=True)
+        _refresh_device_plugin_runtime()
 
     by_key: dict[str, DeviceTemplate] = {}
     for entry in hub_catalog.list_catalog(plugin_type="device"):
@@ -73,7 +73,7 @@ def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
     # Defensive pass for project/user device plugins that may not have Hub
     # records yet. This also explicitly exercises the descriptor API so version
     # and storage_key stay aligned with the runtime credential namespace.
-    for descriptor in discover_api_service_descriptors(refresh=refresh):
+    for descriptor in discover_api_service_descriptors(refresh=False):
         root = descriptor.provider_yaml.parent
         provider = _read_provider_yaml(root)
         if _integration_type(provider) != "device":
@@ -135,13 +135,21 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
     )
     hub_local.save_installed_record(record)
 
-    discover_api_service_descriptors(refresh=True)
-    ToolRegistry.refresh_plugin_tools()
+    _refresh_device_plugin_runtime()
 
-    for template in list_device_templates(refresh=True):
+    for template in list_device_templates(refresh=False):
         if template.plugin_id == plugin_id:
             return template
     raise RuntimeError(f"created device plugin '{plugin_id}' was not indexed")
+
+
+def _refresh_device_plugin_runtime() -> None:
+    """Refresh both device descriptors and runtime tool registrations."""
+    discover_api_service_descriptors(refresh=True)
+    try:
+        ToolRegistry.refresh_plugin_tools()
+    except Exception as exc:  # pragma: no cover - defensive runtime isolation
+        log.warn("device.templates.tool_refresh_failed", {"error": str(exc)})
 
 
 def _template_from_plugin_root(
