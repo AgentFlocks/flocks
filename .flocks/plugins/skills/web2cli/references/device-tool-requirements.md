@@ -1,14 +1,15 @@
-# 生成后的 WebCLI 如何接入 Device 插件
+# Web2CLI Device Tool 生成要求
 
-> 本文说明：`web2cli` 已经抓到页面请求、并整理出可复用调用逻辑后，怎样把它沉淀成可在设备页识别、配置和调用的 device 插件。
+> 本文说明：`web2cli` 已经抓到页面请求后，怎样生成可在设备页识别、配置和调用的 device tool。
 
 ## 结论
 
-`cli-in-device.md` 不是 `cli-in-skill.md` 的替代物，而是安全设备场景下的进一步封装：
+`device-tool-requirements.md` 说明安全设备场景下如何生成 device plugin 主实现。它不是 `skill-integration.md` 的替代物，也不要求先生成一套独立 CLI 再额外封装 device：
 
-- 所有 `web2cli` 结果都必须先完成 skill 集成
-- 如果目标是安全设备接入，再继续按本文档额外生成 device 插件
-- 最终交付关系是：`skill` 必选，`device 插件` 为安全设备场景下的额外交付
+- 所有 `web2cli` 结果都必须完成 skill 集成
+- 安全设备接入场景下，主实现是 `device plugin`，不是 skill `scripts/` 下的 CLI
+- 对应 skill 必须保留 `SKILL.md`、`references/browser-workflow.md` 和 `references/cli-reference.md`，用于记录触发条件、浏览器经验、认证恢复、device tool 能力和验证方法
+- `references/cli-reference.md` 是通用接口文档入口，可记录 CLI，也可记录 device tool 的参数、输出和回归方式
 
 ## 何时使用
 
@@ -24,7 +25,7 @@
 - 目标不是设备接入，而是某个通用网站的操作自动化、查询脚本或内部工具
 - 暂时只需要沉淀浏览器经验、CLI 参数和认证恢复流程，不需要设备页识别
 
-如果当前任务来自“设备接入”页面，并且目标是安全设备接入，WebCLI 在完成 skill 集成后，还应当额外生成标准 device 插件：
+如果当前任务来自“设备接入”页面，并且目标是安全设备接入，WebCLI 应生成标准 device 插件作为主实现：
 
 ```text
 $HOME/.flocks/plugins/tools/device/<plugin_id>/
