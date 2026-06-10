@@ -93,6 +93,27 @@ class TestResolveSource:
         assert r["kind"] == "github"
         assert "owner/repo" in r["value"]
 
+    def test_github_blob_url_with_skill_directory_subpath(self):
+        r = _resolve_source(
+            "https://github.com/mattpocock/skills/blob/main/skills/engineering/diagnose"
+        )
+        assert r["kind"] == "github"
+        assert r["value"] == "mattpocock/skills/skills/engineering/diagnose"
+
+    def test_github_blob_url_to_skill_md_uses_parent_directory(self):
+        r = _resolve_source(
+            "https://github.com/mattpocock/skills/blob/main/skills/engineering/diagnose/SKILL.md"
+        )
+        assert r["kind"] == "github"
+        assert r["value"] == "mattpocock/skills/skills/engineering/diagnose"
+
+    def test_github_scheme_blob_path_with_subpath(self):
+        r = _resolve_source(
+            "github:mattpocock/skills/blob/main/skills/engineering/diagnose"
+        )
+        assert r["kind"] == "github"
+        assert r["value"] == "mattpocock/skills/skills/engineering/diagnose"
+
     def test_https_url(self):
         r = _resolve_source("https://example.com/SKILL.md")
         assert r["kind"] == "url"
