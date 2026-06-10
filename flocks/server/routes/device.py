@@ -5,6 +5,7 @@ return responses. No business logic or SQL lives here.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, List, Optional
 
 import aiosqlite
@@ -40,6 +41,7 @@ from flocks.tool.device.plugin_index import (
     create_custom_device_template,
     list_device_templates,
 )
+from flocks.tool.device.secrets import resolve_for_runtime
 from flocks.tool.device.store import (
     create_group,
     delete_device_tool_setting,
@@ -181,6 +183,13 @@ async def route_list_devices(group_id: Optional[str] = None, refresh: bool = Fal
 @router.get("/templates", response_model=List[DeviceTemplate])
 async def route_list_device_templates(refresh: bool = False):
     return list_device_templates(refresh=refresh)
+
+
+@router.post("/sync")
+async def route_sync_devices(refresh: bool = True):
+    """Synchronize device instances from installed user-level templates."""
+    created = await ensure_user_device_instances(refresh_templates=refresh)
+    return {"created": created}
 
 
 @router.post(
