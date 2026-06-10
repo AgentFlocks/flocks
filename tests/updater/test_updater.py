@@ -54,6 +54,39 @@ def test_run_replaces_invalid_windows_stderr_bytes(
     assert stderr == "failed�output"
 
 
+@pytest.mark.asyncio
+async def test_await_ignoring_cancellation_backs_off_on_repeated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shield_calls = 0
+    sleep_delays: list[float] = []
+
+    async def fake_shield(task):
+        nonlocal shield_calls
+        shield_calls += 1
+        if shield_calls <= 2:
+            raise updater.asyncio.CancelledError
+        return await task
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    async def critical_step() -> str:
+        return "done"
+
+    monkeypatch.setattr(updater.asyncio, "shield", fake_shield)
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+
+    result = await updater._await_ignoring_cancellation(critical_step())
+
+    assert result == "done"
+    assert shield_calls == 3
+    assert sleep_delays == [
+        updater._CANCELLATION_RETRY_DELAY_SECONDS,
+        updater._CANCELLATION_RETRY_DELAY_SECONDS,
+    ]
+
+
 def test_get_current_version_prefers_higher_marker_version(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
