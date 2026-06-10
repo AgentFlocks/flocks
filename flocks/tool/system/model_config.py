@@ -353,7 +353,7 @@ async def add_model_tool(
             "supports_vision": supports_vision,
             "supports_tools": supports_tools,
             "supports_streaming": True,
-            "supports_reasoning": False,
+            "supports_reasoning": True,
             "input_price": 0.0,
             "output_price": 0.0,
             "currency": "USD",

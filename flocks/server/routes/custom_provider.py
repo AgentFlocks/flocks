@@ -72,7 +72,7 @@ class CreateModelReq(BaseModel):
     supports_vision: bool = False
     supports_tools: bool = True
     supports_streaming: bool = True
-    supports_reasoning: bool = False
+    supports_reasoning: bool = True
     input_price: float = Field(0.0, ge=0)
     output_price: float = Field(0.0, ge=0)
     currency: str = "USD"
@@ -403,7 +403,7 @@ async def load_custom_providers_on_startup():
                     supports_streaming=mcfg.get("supports_streaming", True),
                     supports_tools=mcfg.get("supports_tools", True),
                     supports_vision=mcfg.get("supports_vision", False),
-                    supports_reasoning=mcfg.get("supports_reasoning", False),
+                    supports_reasoning=mcfg.get("supports_reasoning", True),
                     max_tokens=mcfg.get("max_output_tokens", 4096),
                     context_window=mcfg.get("context_window", 128000),
                 ),
