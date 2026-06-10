@@ -101,6 +101,8 @@ async def test_im_send_message_reuses_channel_message_after_resolution() -> None
     _, kwargs = channel_message.await_args
     assert kwargs["session_id"] == "ses_target"
     assert kwargs["channel_type"] == "feishu"
+    assert kwargs["account_id"] == "default"
+    assert kwargs["chat_id"] == "chat_1"
     assert kwargs["message"] == "hello"
 
 
@@ -122,6 +124,8 @@ async def test_im_send_message_uses_current_im_session_by_default() -> None:
     _, kwargs = channel_message.await_args
     assert kwargs["session_id"] == "ses_current"
     assert kwargs["channel_type"] == "wecom"
+    assert kwargs["account_id"] == "default"
+    assert kwargs["chat_id"] == "chat_1"
 
 
 @pytest.mark.asyncio
@@ -152,6 +156,8 @@ async def test_im_send_message_asks_when_multiple_targets_match() -> None:
     _, kwargs = channel_message.await_args
     assert kwargs["session_id"] == "ses_second"
     assert kwargs["channel_type"] == "wecom"
+    assert kwargs["account_id"] == "default"
+    assert kwargs["chat_id"] == "chat_1"
 
 
 @pytest.mark.asyncio
