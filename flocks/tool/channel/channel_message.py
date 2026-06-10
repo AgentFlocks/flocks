@@ -62,6 +62,8 @@ async def _http_session_send(
     text: str,
     channel_type: str | None = None,
     media_url: str | None = None,
+    account_id: str | None = None,
+    chat_id: str | None = None,
 ) -> ToolResult | None:
     """Send a message via the running flocks server's /api/channel/session-send endpoint,
     reusing the already-established WebSocket connection.
@@ -77,6 +79,10 @@ async def _http_session_send(
             payload["channel_type"] = channel_type
         if media_url:
             payload["media_url"] = media_url
+        if account_id:
+            payload["account_id"] = account_id
+        if chat_id:
+            payload["chat_id"] = chat_id
 
         headers: dict[str, str] = {}
         api_token = _get_api_token()
@@ -159,12 +165,26 @@ async def _http_session_send(
             required=False,
             description="Media URL or local file path (optional).",
         ),
+        ToolParameter(
+            name="account_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
+        ToolParameter(
+            name="chat_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
     ],
 )
 async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     session_id: str = kwargs["session_id"]
     message: str = kwargs["message"]
     media: str | None = kwargs.get("media")
+    account_id: str | None = kwargs.get("account_id")
+    chat_id: str | None = kwargs.get("chat_id")
     raw_channel_type: str | None = kwargs.get("channel_type")
     channel_type: str | None = _normalize_channel_type(raw_channel_type)
 
@@ -176,7 +196,15 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     except Exception:
         port = 8000
 
-    result = await _http_session_send(port, session_id, message, channel_type, media)
+    result = await _http_session_send(
+        port,
+        session_id,
+        message,
+        channel_type,
+        media,
+        account_id,
+        chat_id,
+    )
     if result is not None:
         return result
 
@@ -212,6 +240,19 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
         targets = filtered
     else:
         targets = matched
+
+    if account_id:
+        targets = [b for b in targets if b.account_id == account_id]
+    if chat_id:
+        targets = [b for b in targets if b.chat_id == chat_id]
+    if (account_id or chat_id) and not targets:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Session '{session_id}' has no binding matching "
+                f"account_id='{account_id}' chat_id='{chat_id}'."
+            ),
+        )
 
     all_results = []
     errors = []

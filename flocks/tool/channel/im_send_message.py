@@ -264,6 +264,8 @@ async def im_send_message(ctx: ToolContext, **kwargs) -> ToolResult:
     resolved_target = (resolved.metadata or {}).get("target") or {}
     resolved_session_id = resolved_target.get("session_id")
     resolved_channel_type = resolved_target.get("channel_id")
+    resolved_account_id = resolved_target.get("account_id")
+    resolved_chat_id = resolved_target.get("chat_id")
     if not resolved_session_id:
         return ToolResult(success=False, error="Failed to resolve an IM session_id.")
 
@@ -274,5 +276,7 @@ async def im_send_message(ctx: ToolContext, **kwargs) -> ToolResult:
         session_id=resolved_session_id,
         message=message,
         channel_type=resolved_channel_type,
+        account_id=resolved_account_id,
+        chat_id=resolved_chat_id,
         media=media,
     )
