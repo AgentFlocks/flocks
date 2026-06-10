@@ -86,6 +86,12 @@ The publish page reads `config.json` as a template and runtime state from storag
 - If only `schedule` is configured, show only schedule start/stop controls.
 - Store secret references or configured booleans only; never store plaintext secrets.
 
+Workflow configuration guidance lives in `guide.md`.
+
+- `workflow-config-guide` defines interaction rules only.
+- `guide.md` defines this workflow's actual configuration questions, defaults, samples, and validation steps.
+- Workflow chat shortcut buttons must read `guide.md` before asking or applying any configuration step.
+
 ## 8. Change Guide
 
 | Change type | Edit first | Also check |

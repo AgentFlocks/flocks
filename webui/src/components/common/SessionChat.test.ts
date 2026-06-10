@@ -10,9 +10,11 @@ import {
   buildTodoSummary,
   ChatMessageBubble,
   ChatToolPart,
+  buildInstructionDisplayText,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
   getEditingActionBarClassName,
+  getInstructionDisplayBubbleClassName,
   getMessageBubbleClassName,
   getMessageGroupClassName,
   getRenderableFileUrl,
@@ -20,9 +22,11 @@ import {
   getStandaloneThinkingBubbleClassName,
   getUserAvatarContainerClassName,
   getUserAvatarSpacerClassName,
+  getUserMessageSafeInsetClassName,
   isIntermediateStepPart,
   isQuestionToolPart,
   listUploadedDocumentPaths,
+  parseInstructionDisplayText,
   shouldRenderMessage,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
@@ -346,6 +350,16 @@ describe('getUserAvatarSpacerClassName', () => {
   });
 });
 
+describe('getUserMessageSafeInsetClassName', () => {
+  it('reserves enough right-side room for the full-layout user avatar', () => {
+    expect(getUserMessageSafeInsetClassName(false)).toBe('pr-11');
+  });
+
+  it('reserves enough right-side room for the compact user avatar', () => {
+    expect(getUserMessageSafeInsetClassName(true)).toBe('pr-10');
+  });
+});
+
 describe('SessionChat standalone thinking indicator', () => {
   it('keeps only the bouncing dots during the initial assistant loading state', async () => {
     useSessionMessagesMock.mockReturnValue({
@@ -381,6 +395,77 @@ describe('SessionChat standalone thinking indicator', () => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
       expect(container.textContent).not.toContain('思考中...');
     });
+  });
+});
+
+describe('SessionChat conversation bottom slot', () => {
+  it('renders guide content above the composer instead of as a sticky conversation overlay', () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      conversationBottomSlot: React.createElement('div', { 'data-testid': 'guide-slot' }, 'Guide shortcuts'),
+    }));
+
+    const guideSlot = screen.getByTestId('guide-slot');
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    expect(Boolean(guideSlot.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(guideSlot.parentElement?.className ?? '').toContain('mb-2');
+    expect(guideSlot.parentElement?.className ?? '').not.toContain('sticky');
+  });
+
+  it('can send a full prompt while showing only an instruction label', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      conversationBottomSlot: ({ sendPrompt }) => React.createElement(
+        'button',
+        {
+          type: 'button',
+          onClick: () => sendPrompt('full workflow configuration prompt', {
+            displayText: buildInstructionDisplayText('智能配置'),
+          }),
+        },
+        'start guide',
+      ),
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'start guide' }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          displayText: buildInstructionDisplayText('智能配置'),
+          parts: expect.arrayContaining([
+            expect.objectContaining({ type: 'text', text: 'full workflow configuration prompt' }),
+          ]),
+        }),
+      );
+    });
+    expect(screen.queryByText('full workflow configuration prompt')).not.toBeInTheDocument();
+  });
+});
+
+describe('instruction display text', () => {
+  it('parses instruction labels from internal display text', () => {
+    expect(parseInstructionDisplayText(buildInstructionDisplayText('智能配置'))).toBe('智能配置');
+    expect(parseInstructionDisplayText('普通消息')).toBeNull();
+  });
+
+  it('renders instruction display text as a compact rose chip', () => {
+    const instructionMessage = makeMessage({
+      id: 'guide-user',
+      role: 'user',
+      parts: [{ id: 'guide-part', type: 'text', text: buildInstructionDisplayText('智能配置') }] as Message['parts'],
+    });
+
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: instructionMessage,
+      compact: true,
+    }));
+
+    expect(screen.getByText('智能配置')).toBeInTheDocument();
+    expect(container.querySelector('.border-rose-100')).not.toBeNull();
+    expect(getInstructionDisplayBubbleClassName(true)).toContain('bg-rose-50/80');
   });
 });
 

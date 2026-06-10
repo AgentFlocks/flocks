@@ -1,7 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, Plus, Clock, Sparkles, SearchCheck, FlaskConical, ChevronsLeft, ChevronsRight } from 'lucide-react';
-import SessionChat, { NodeRef, type SSEChatEvent } from '@/components/common/SessionChat';
+import { useNavigate } from 'react-router-dom';
+import { AlertCircle, Plus, Clock, ChevronsLeft, ChevronsRight, Info } from 'lucide-react';
+import SessionChat, {
+  NodeRef,
+  buildInstructionDisplayText,
+  type PromptDisplayOptions,
+  type SSEChatEvent,
+} from '@/components/common/SessionChat';
+import {
+  ChatAgentDisplay,
+  ChatModelPicker,
+  useChatAgentOptions,
+  useChatModelOptions,
+} from '@/components/common/ChatPromptSelectors';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import type { ImagePartData } from '@/utils/imageUpload';
@@ -17,6 +29,9 @@ import {
 
 const FALLBACK_POLL_MS = 30_000;
 const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
+const WORKFLOW_CHAT_AGENT_NAME = 'rex';
+const WORKFLOW_CHAT_AGENT_NAMES = [WORKFLOW_CHAT_AGENT_NAME];
+const WORKFLOW_GUIDE_FILE_NAME = 'guide.md';
 
 function workflowRevisionKey(workflow: Workflow): string {
   return [
@@ -33,6 +48,7 @@ function workflowRevisionKey(workflow: Workflow): string {
 export interface WorkflowChatLaunchRequest {
   id: number;
   prompt: string;
+  displayLabel?: string;
 }
 
 interface ChatTabProps {
@@ -59,17 +75,28 @@ export default function ChatTab({
   onNodeRefDismiss,
 }: ChatTabProps) {
   const { t } = useTranslation('workflow');
-  const supportsVision = useDefaultModelVision();
+  const navigate = useNavigate();
+  const defaultSupportsVision = useDefaultModelVision();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [initialMessage, setInitialMessage] = useState<string | null>(null);
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const hasCreatedRef = useRef(false);
-  const handledLaunchRequestRef = useRef<number | null>(null);
   const workflowRevisionRef = useRef<string>(workflowRevisionKey(workflow));
   const workflowIdRef = useRef<string>(workflow.id);
   workflowIdRef.current = workflow.id;
   const historyBtnRef = useRef<HTMLDivElement>(null);
+  const { agents: workflowChatAgents } = useChatAgentOptions({
+    allowedAgentNames: WORKFLOW_CHAT_AGENT_NAMES,
+  });
+  const {
+    groupedOptions: groupedChatModelOptions,
+    loading: loadingChatModels,
+    selectedModelOption,
+    selectedPromptModel,
+    setSelectedModelKey,
+  } = useChatModelOptions();
+  const effectiveSupportsVision = selectedModelOption?.supportsVision ?? defaultSupportsVision;
 
   useEffect(() => {
     workflowRevisionRef.current = workflowRevisionKey(workflow);
@@ -79,6 +106,7 @@ export default function ChatTab({
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowMdPath = `${workflowDir}workflow.md`;
+  const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
 
   const {
     sessionId: hookSessionId,
@@ -97,6 +125,7 @@ export default function ChatTab({
       dir: workflowDir,
       mdPath: workflowMdPath,
       jsonPath: `${workflowDir}workflow.json`,
+      guidePath: workflowGuidePath,
       configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
     }),
   });
@@ -171,19 +200,34 @@ export default function ChatTab({
 
   // First message — via SessionChat's onCreateAndSend callback
   const handleCreateAndSend = useCallback(
-    async (text: string, imageParts?: ImagePartData[]) => {
+    async (
+      text: string,
+      imageParts?: ImagePartData[],
+      agentOverride?: string,
+      modelOverride?: { providerID: string; modelID: string } | null,
+      options?: PromptDisplayOptions,
+    ) => {
       const hasImages = (imageParts?.length ?? 0) > 0;
       // Allow image-only messages (no text) to flow through.
       if (hasCreatedRef.current || (!text.trim() && !hasImages)) return;
       hasCreatedRef.current = true;
       onFirstMessageSent?.();
+      const effectiveAgent = agentOverride || WORKFLOW_CHAT_AGENT_NAME;
+      const effectiveModel = modelOverride === undefined ? selectedPromptModel : modelOverride;
+      const effectiveDisplayText = options?.displayText;
 
       try {
-        if (hasImages) {
+        if (hasImages || effectiveDisplayText) {
           // initialMessage is text-only; use createAndSend so the inline
           // image parts survive into the very first prompt instead of being
           // silently dropped (the previous bug for non-Session composers).
-          await createAndSendSession({ text, imageParts });
+          await createAndSendSession({
+            text,
+            imageParts,
+            agent: effectiveAgent,
+            model: effectiveModel,
+            displayText: effectiveDisplayText,
+          });
         } else {
           setInitialMessage(text);
           await createSession();
@@ -193,7 +237,7 @@ export default function ChatTab({
         setInitialMessage(null);
       }
     },
-    [onFirstMessageSent, createSession, createAndSendSession],
+    [onFirstMessageSent, selectedPromptModel, createSession, createAndSendSession],
   );
 
   const handleNewSession = useCallback(() => {
@@ -203,22 +247,6 @@ export default function ChatTab({
     resetSession();
     hasCreatedRef.current = false;
   }, [resetSession]);
-
-  useEffect(() => {
-    if (!launchRequest || handledLaunchRequestRef.current === launchRequest.id) return;
-    handledLaunchRequestRef.current = launchRequest.id;
-    onLaunchRequestHandled?.(launchRequest.id);
-
-    setShowHistory(false);
-    setActiveSessionId(null);
-    setInitialMessage(null);
-    resetSession();
-    hasCreatedRef.current = true;
-
-    createAndSendSession({ text: launchRequest.prompt }).catch(() => {
-      hasCreatedRef.current = false;
-    });
-  }, [createAndSendSession, launchRequest, onLaunchRequestHandled, resetSession]);
 
   const handleSelectSession = useCallback((sid: string) => {
     setInitialMessage(null);
@@ -380,21 +408,51 @@ export default function ChatTab({
           placeholder={t('detail.chat.inputPlaceholder')}
           className="h-full"
           display={{ collapseIntermediateSteps: true }}
+          agentName={WORKFLOW_CHAT_AGENT_NAME}
+          mentionAgents={workflowChatAgents}
           nodeRef={nodeRef}
           onNodeRefDismiss={onNodeRefDismiss}
           onStreamingDone={handleStreamingDone}
           initialMessage={initialMessage}
           onSSEEvent={handleSSEEvent}
-          supportsVision={supportsVision}
+          supportsVision={effectiveSupportsVision}
+          contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
+          model={selectedPromptModel}
           onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
-          composerTextareaMinHeight={72}
-          composerTextareaMaxHeight={180}
-          conversationBottomSlot={({ sendPrompt, sending }) => (
-            <WorkflowGuideDock
-              workflow={workflow}
-              disabled={sending}
-              onStartPrompt={sendPrompt}
+          composerTextareaMinHeight={48}
+          composerTextareaMaxHeight={120}
+          toolbarSlot={
+            <ChatAgentDisplay
+              agents={workflowChatAgents}
+              selectedAgent={WORKFLOW_CHAT_AGENT_NAME}
             />
+          }
+          centerToolbarSlot={
+            <ChatModelPicker
+              groupedOptions={groupedChatModelOptions}
+              loading={loadingChatModels}
+              selectedModelOption={selectedModelOption}
+              onSelectModel={(option) => setSelectedModelKey(option.key)}
+              onAddModel={() => navigate('/models')}
+            />
+          }
+          conversationBottomSlot={({ sendPrompt, sending }) => (
+            <>
+              <WorkflowLaunchRequestRunner
+                launchRequest={launchRequest}
+                onLaunchRequestHandled={onLaunchRequestHandled}
+                onStartPrompt={(prompt, label) => sendPrompt(prompt, {
+                  displayText: label ? buildInstructionDisplayText(label) : undefined,
+                })}
+              />
+              <WorkflowGuideDock
+                workflow={workflow}
+                disabled={sending}
+                onStartPrompt={(prompt, label) => sendPrompt(prompt, {
+                  displayText: buildInstructionDisplayText(label),
+                })}
+              />
+            </>
           )}
           welcomeContent={!sessionId ? (
             <WorkflowWelcome
@@ -462,6 +520,27 @@ function WorkflowWelcome({
   );
 }
 
+function WorkflowLaunchRequestRunner({
+  launchRequest,
+  onLaunchRequestHandled,
+  onStartPrompt,
+}: {
+  launchRequest?: WorkflowChatLaunchRequest | null;
+  onLaunchRequestHandled?: (id: number) => void;
+  onStartPrompt: (text: string, label?: string) => void;
+}) {
+  const handledLaunchRequestRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!launchRequest || handledLaunchRequestRef.current === launchRequest.id) return;
+    handledLaunchRequestRef.current = launchRequest.id;
+    onStartPrompt(launchRequest.prompt, launchRequest.displayLabel);
+    onLaunchRequestHandled?.(launchRequest.id);
+  }, [launchRequest, onLaunchRequestHandled, onStartPrompt]);
+
+  return null;
+}
+
 function WorkflowGuideDock({
   workflow,
   disabled,
@@ -469,45 +548,109 @@ function WorkflowGuideDock({
 }: {
   workflow: Workflow;
   disabled?: boolean;
-  onStartPrompt: (text: string) => void;
+  onStartPrompt: (text: string, label: string) => void;
 }) {
   const { t } = useTranslation('workflow');
   const [collapsed, setCollapsed] = useState(false);
+  const [guideTooltip, setGuideTooltip] = useState<{
+    title: string;
+    description: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const workflowDir = workflow.source === 'global'
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowMdPath = `${workflowDir}workflow.md`;
+  const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
   const promptParams = {
     id: workflow.id,
     name: workflow.name,
     dir: workflowDir,
     mdPath: workflowMdPath,
+    guidePath: workflowGuidePath,
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
+  const buildQuestionPrompt = (focus: string, instruction: string) => t(
+    'detail.chat.welcome.guideQuestionPrompt',
+    {
+      ...promptParams,
+      focus,
+      instruction,
+    },
+  );
+  const guideButtonClassName = 'border-zinc-200 bg-white text-zinc-700 hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-600';
   const guideActions = [
     {
       label: t('detail.chat.welcome.guidePrimaryShort'),
       description: t('detail.chat.welcome.guidePrimaryDesc'),
       prompt: t('detail.chat.welcome.guidePrompt', promptParams),
-      icon: Sparkles,
-      className: 'border-slate-200 bg-slate-100 text-slate-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600',
+    },
+    {
+      label: t('detail.chat.welcome.guideInputModeShort'),
+      description: t('detail.chat.welcome.guideInputModeDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.chat.welcome.guideInputModeShort'),
+        t('detail.chat.welcome.guideInputModeInstruction'),
+      ),
+    },
+    {
+      label: t('detail.chat.welcome.guideSourceShapeShort'),
+      description: t('detail.chat.welcome.guideSourceShapeDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.chat.welcome.guideSourceShapeShort'),
+        t('detail.chat.welcome.guideSourceShapeInstruction'),
+      ),
+    },
+    {
+      label: t('detail.chat.welcome.guideOutputShort'),
+      description: t('detail.chat.welcome.guideOutputDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.chat.welcome.guideOutputShort'),
+        t('detail.chat.welcome.guideOutputInstruction'),
+      ),
+    },
+    {
+      label: t('detail.chat.welcome.guideFilterShort'),
+      description: t('detail.chat.welcome.guideFilterDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.chat.welcome.guideFilterShort'),
+        t('detail.chat.welcome.guideFilterInstruction'),
+      ),
+    },
+    {
+      label: t('detail.chat.welcome.guideSampleShort'),
+      description: t('detail.chat.welcome.guideSampleDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.chat.welcome.guideSampleShort'),
+        t('detail.chat.welcome.guideSampleInstruction'),
+      ),
+    },
+    {
+      label: t('detail.chat.welcome.guideApplyShort'),
+      description: t('detail.chat.welcome.guideApplyDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.chat.welcome.guideApplyShort'),
+        t('detail.chat.welcome.guideApplyInstruction'),
+      ),
     },
     {
       label: t('detail.chat.welcome.guideAuditShort'),
       description: t('detail.chat.welcome.guideAuditDesc'),
       prompt: t('detail.chat.welcome.auditPrompt', promptParams),
-      icon: SearchCheck,
-      className: 'border-slate-200 bg-slate-100 text-slate-700 hover:border-slate-300 hover:bg-slate-200 hover:text-slate-800',
-    },
-    {
-      label: t('detail.chat.welcome.guideSampleShort'),
-      description: t('detail.chat.welcome.guideSampleDesc'),
-      prompt: t('detail.chat.welcome.samplePrompt', promptParams),
-      icon: FlaskConical,
-      className: 'border-slate-200 bg-slate-100 text-slate-700 hover:border-slate-300 hover:bg-slate-200 hover:text-slate-800',
     },
   ];
+
+  const showGuideTooltip = useCallback((target: HTMLElement, title: string, description: string) => {
+    const rect = target.getBoundingClientRect();
+    setGuideTooltip({
+      title,
+      description,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 8,
+    });
+  }, []);
 
   const handleGuideWheel = useCallback((event: WheelEvent) => {
     const el = scrollRef.current;
@@ -534,14 +677,14 @@ function WorkflowGuideDock({
   }, [collapsed, handleGuideWheel]);
 
   return (
-    <div className="flex w-full min-w-0 items-stretch gap-2">
+    <div className="flex w-full min-w-0 items-stretch gap-1.5">
       <button
         type="button"
         onClick={() => setCollapsed((value) => !value)}
-        className="flex h-16 w-10 flex-shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-100 text-slate-500 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-200 hover:text-slate-700"
+        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition-colors hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-500"
         title={collapsed ? t('detail.chat.welcome.guideExpand') : t('detail.chat.welcome.guideCollapse')}
       >
-        {collapsed ? <ChevronsRight className="h-4 w-4" /> : <ChevronsLeft className="h-4 w-4" />}
+        {collapsed ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}
       </button>
 
       <div
@@ -550,30 +693,46 @@ function WorkflowGuideDock({
           collapsed ? 'basis-0 max-w-0 opacity-0 pointer-events-none' : 'basis-auto max-w-full opacity-100'
         }`}
       >
-        <div className="flex w-max gap-2.5 pr-1">
+        <div className="flex w-max gap-1.5 pr-1">
           {guideActions.map((action) => {
-            const Icon = action.icon;
             return (
               <button
                 key={action.label}
                 type="button"
                 disabled={disabled}
-                onClick={() => onStartPrompt(action.prompt)}
-                className={`flex h-16 w-[208px] flex-shrink-0 items-center gap-2.5 rounded-lg border px-3 text-left shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${action.className}`}
-                title={`${action.label} - ${action.description}`}
+                onClick={() => onStartPrompt(action.prompt, action.label)}
+                className={`inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${guideButtonClassName}`}
+                title={action.label}
               >
-                <span className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-slate-50 text-current">
-                  <Icon className="h-4 w-4 flex-shrink-0" />
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-[13px] font-semibold">{action.label}</span>
-                  <span className="mt-0.5 block truncate text-[11px] font-normal opacity-70">{action.description}</span>
+                <span className="whitespace-nowrap text-xs font-semibold leading-none">{action.label}</span>
+                <span
+                  className="group/info inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500"
+                  title={action.description}
+                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                  onPointerEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
+                  onMouseEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
+                  onMouseOver={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
+                  onMouseLeave={() => setGuideTooltip(null)}
+                  onPointerLeave={() => setGuideTooltip(null)}
+                >
+                  <Info className="h-3.5 w-3.5" aria-hidden="true" />
                 </span>
               </button>
             );
           })}
         </div>
       </div>
+      {guideTooltip && (
+        <div
+          className="pointer-events-none fixed z-[80] w-48 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md"
+          style={{ left: guideTooltip.x, top: guideTooltip.y }}
+        >
+          <div className="mb-0.5 font-semibold text-zinc-800">{guideTooltip.title}</div>
+          <div>{guideTooltip.description}</div>
+          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+        </div>
+      )}
     </div>
   );
 }

@@ -9,12 +9,14 @@ import WorkflowDetail from './index';
 const {
   mockGetWorkflow,
   mockUpdateWorkflow,
+  mockSendSessionMessage,
   originalMarkdown,
   twoHunkMarkdown,
   topOnlyMarkdown,
 } = vi.hoisted(() => ({
   mockGetWorkflow: vi.fn(),
   mockUpdateWorkflow: vi.fn(),
+  mockSendSessionMessage: vi.fn(),
   originalMarkdown: '# old\n\nkeep 1\nkeep 2\nkeep 3\nkeep 4\n\nlast\n',
   twoHunkMarkdown: '# new\n\nkeep 1\nkeep 2\nkeep 3\nkeep 4\n\nlast changed\n',
   topOnlyMarkdown: '# new\n\nkeep 1\nkeep 2\nkeep 3\nkeep 4\n\nlast\n',
@@ -26,6 +28,12 @@ vi.mock('@/api/workflow', () => ({
     update: mockUpdateWorkflow,
     delete: vi.fn(),
     export: vi.fn(),
+  },
+}));
+
+vi.mock('@/api/session', () => ({
+  sessionApi: {
+    sendMessage: mockSendSessionMessage,
   },
 }));
 
@@ -89,18 +97,29 @@ vi.mock('./RightPanel', () => ({
     activeTab,
     workflow,
     onWorkflowUpdated,
+    onSessionChange,
+    chatLaunchRequest,
   }: {
     open: boolean;
     activeTab?: string;
     workflow: ReturnType<typeof makeWorkflow>;
     onWorkflowUpdated?: (workflow: ReturnType<typeof makeWorkflow>) => void;
+    onSessionChange?: (sessionId: string | null) => void;
+    chatLaunchRequest?: { prompt: string; displayLabel?: string } | null;
   }) => (
     <div
       data-testid="right-panel"
       data-open={open ? 'open' : 'closed'}
       data-active-tab={activeTab}
+      data-launch-label={chatLaunchRequest?.displayLabel ?? ''}
     >
       right panel
+      <button
+        type="button"
+        onClick={() => onSessionChange?.('session-1')}
+      >
+        attach workflow chat session
+      </button>
       <button
         type="button"
         onClick={() => onWorkflowUpdated?.({
@@ -181,6 +200,7 @@ describe('Flocks help button', () => {
         editMarkdownContent: payload.markdownContent ?? '',
       },
     }));
+    mockSendSessionMessage.mockResolvedValue({});
   });
 
   it('opens the right panel on the AI edit tab', async () => {
@@ -198,6 +218,18 @@ describe('Flocks help button', () => {
 
     expect(screen.getByTestId('right-panel')).toHaveAttribute('data-open', 'open');
     expect(screen.getByTestId('right-panel')).toHaveAttribute('data-active-tab', 'chat');
+  });
+
+  it('uses an instruction label when launching workflow regeneration from the editor', async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    await screen.findByTestId('flow-canvas');
+    await user.click(screen.getByRole('button', { name: 'MD 描述' }));
+    await user.click(screen.getByRole('button', { name: '重新生成工作流' }));
+
+    expect(screen.getByTestId('right-panel')).toHaveAttribute('data-active-tab', 'chat');
+    expect(screen.getByTestId('right-panel')).toHaveAttribute('data-launch-label', '重新生成工作流');
   });
 
   it('shows AI markdown diff inline above the editor and can reject it', async () => {
@@ -260,5 +292,53 @@ describe('Flocks help button', () => {
     expect(screen.getByText('keep 3')).toBeInTheDocument();
     expect(screen.getByText('keep 4')).toBeInTheDocument();
     expect(screen.getByText('last')).toBeInTheDocument();
+  });
+
+  it('persists an accepted markdown diff review result into the workflow chat session', async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    await screen.findByTestId('flow-canvas');
+    await user.click(screen.getByRole('button', { name: 'attach workflow chat session' }));
+    await user.click(screen.getByRole('button', { name: 'simulate top-only markdown update' }));
+    await screen.findByText('AI 修改差异');
+    await user.click(screen.getByRole('button', { name: '接受' }));
+
+    await waitFor(() => {
+      expect(mockSendSessionMessage).toHaveBeenCalledWith('session-1', {
+        parts: [{
+          type: 'text',
+          text: expect.stringContaining('decision: accepted'),
+        }],
+        noReply: true,
+      });
+    });
+    const payload = mockSendSessionMessage.mock.calls[0][1].parts[0].text;
+    expect(payload).toContain('proposed_change_applied: true');
+    expect(payload).toContain('review_state: completed');
+  });
+
+  it('persists a rejected markdown diff review result into the workflow chat session', async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    await screen.findByTestId('flow-canvas');
+    await user.click(screen.getByRole('button', { name: 'attach workflow chat session' }));
+    await user.click(screen.getByRole('button', { name: 'simulate top-only markdown update' }));
+    await screen.findByText('AI 修改差异');
+    await user.click(screen.getByRole('button', { name: '拒绝' }));
+
+    await waitFor(() => {
+      expect(mockSendSessionMessage).toHaveBeenCalledWith('session-1', {
+        parts: [{
+          type: 'text',
+          text: expect.stringContaining('decision: rejected'),
+        }],
+        noReply: true,
+      });
+    });
+    const payload = mockSendSessionMessage.mock.calls[0][1].parts[0].text;
+    expect(payload).toContain('proposed_change_applied: false');
+    expect(payload).toContain('workflow.md was restored to the previous content');
   });
 });

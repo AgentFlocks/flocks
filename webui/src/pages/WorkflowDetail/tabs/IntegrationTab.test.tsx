@@ -44,7 +44,7 @@ vi.mock('@/components/common/WorkflowStatusBadge', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => {
+    t: (key: string, params?: Record<string, unknown>) => {
       const translations: Record<string, string> = {
         'detail.run.publishSection': '发布为 API',
         'detail.run.publishDesc': 'publish desc',
@@ -60,8 +60,28 @@ vi.mock('react-i18next', () => ({
         'detail.run.driverDockerDesc': 'docker desc',
         'detail.run.apiKeyHide': '隐藏',
         'detail.run.apiKeyShow': '显示',
+        'detail.run.guidePanelTitle': 'Rex 辅助发布',
+        'detail.run.guidePanelDesc': '选择一种发布方式',
+        'detail.run.guideApiShort': '发布为 API',
+        'detail.run.guideApiDesc': '配置 API 发布',
+        'detail.run.guideApiInstruction': '围绕 API 发布读取 guide.md 并用 question 工具提问',
+        'detail.run.guideSyslogShort': 'Syslog 接入',
+        'detail.run.guideSyslogDesc': '配置 Syslog 接入',
+        'detail.run.guideSyslogInstruction': '围绕 Syslog 接入读取 guide.md 并用 question 工具提问',
+        'detail.run.guideKafkaShort': 'Kafka 接入',
+        'detail.run.guideKafkaDesc': '配置 Kafka 接入',
+        'detail.run.guideKafkaInstruction': '围绕 Kafka 接入读取 guide.md 并用 question 工具提问',
+        'detail.run.guideWebhookShort': 'Webhook 接入',
+        'detail.run.guideWebhookDesc': '配置 Webhook 接入',
+        'detail.run.guideWebhookInstruction': '围绕 Webhook 接入读取 guide.md 并用 question 工具提问',
+        'detail.run.guideScheduleShort': '定时触发',
+        'detail.run.guideScheduleDesc': '配置定时触发',
+        'detail.run.guideScheduleInstruction': '围绕定时触发读取 guide.md 并用 question 工具提问',
+        'detail.chat.welcome.guideQuestionPrompt': '用户点击了「{{focus}}」按钮。这个按钮的意图是：{{instruction}} 工作流 ID 是 {{id}}，工作流目录是 {{dir}}，工作流配置引导文件是 {{guidePath}}。第一步必须读取 {{guidePath}}，必须调用 question 工具。',
       };
-      return translations[key] ?? key;
+      return (translations[key] ?? key).replace(/{{(\w+)}}/g, (_match, name: string) => (
+        params?.[name] === undefined ? '' : String(params[name])
+      ));
     },
   }),
 }));
@@ -129,12 +149,18 @@ describe('IntegrationTab trigger workspace', () => {
   });
 
   it('does not render broad publish controls without a publish config template', async () => {
-    render(<IntegrationTab workflow={workflow} />);
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
 
     expect(await screen.findByText('当前工作流还没有发布配置模板。')).toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
+    expect(screen.getByTitle('发布为 API')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Syslog 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Kafka 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
     expect(workflowAPI.getConfig).toHaveBeenCalledWith('wf-1');
     expect(workflowAPI.syncConfig).not.toHaveBeenCalled();
-    expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '发布为 API 服务' })).not.toBeInTheDocument();
     expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
     expect(screen.queryByText('Kafka 配置')).not.toBeInTheDocument();
     expect(screen.queryByText('Workflow Poller')).not.toBeInTheDocument();
@@ -278,10 +304,66 @@ describe('IntegrationTab trigger workspace', () => {
       },
     });
 
-    render(<IntegrationTab workflow={workflow} />);
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
 
     expect(await screen.findByText('发布配置中没有声明可发布的 API 或触发能力。')).toBeInTheDocument();
-    expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
+    expect(screen.getByTitle('发布为 API')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
     expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
+  });
+
+  it('offers publish guide actions and routes the selected guide prompt', async () => {
+    const user = userEvent.setup();
+    const onGuidePrompt = vi.fn();
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          publish: { type: 'api_service', driver: 'local' },
+          triggers: [
+            {
+              id: 'syslog-default',
+              type: 'syslog',
+              name: 'Syslog Listener',
+              source: { protocol: 'udp', host: '0.0.0.0', port: 5514 },
+            },
+            {
+              id: 'kafka-default',
+              type: 'kafka',
+              name: 'Kafka Consumer',
+              source: { inputBroker: 'localhost:9092', inputTopic: 'alerts' },
+            },
+          ],
+        },
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={onGuidePrompt} />);
+
+    expect(await screen.findByTitle('发布为 API')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Syslog 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Kafka 接入/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Syslog 接入/ }));
+
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('用户点击了「Syslog 接入」按钮'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('guide.md'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('必须调用 question 工具'),
+      'Syslog 接入',
+    );
   });
 });

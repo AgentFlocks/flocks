@@ -1040,6 +1040,7 @@ class PromptRequest(BaseModel):
     model: Optional[ModelInfo] = Field(None, description="Model selection")
     messageID: Optional[str] = Field(None, description="Message ID")
     agent: Optional[str] = Field(None, description="Agent name")
+    display_text: Optional[str] = Field(None, alias="displayText", description="User-visible message text")
     noReply: Optional[bool] = Field(None, description="Skip AI response")
     mockReply: Optional[str] = Field(None, description="Inject a mock assistant message after noReply user message")
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool settings (deprecated)")
@@ -2935,7 +2936,7 @@ def _event_from_queued_prompt(item, working_directory: str):
         agent=item.agent,
         model=item.model,
         variant=item.variant,
-        display_text=None,
+        display_text=item.display_text,
         messageID=item.messageID,
         noReply=item.noReply,
         mockReply=item.mockReply,
@@ -3229,6 +3230,7 @@ async def _enqueue_prompt_request(
         agent=request.agent,
         model=model,
         variant=request.variant,
+        display_text=request.display_text,
         message_id=request.messageID,
         no_reply=request.noReply,
         mock_reply=request.mockReply,
@@ -3395,7 +3397,7 @@ async def send_session_message_async(
         agent=request.agent,
         model=request.model.model_dump(by_alias=True) if request.model else None,
         variant=request.variant,
-        display_text=None,
+        display_text=request.display_text,
         messageID=request.messageID,
         noReply=request.noReply,
         mockReply=request.mockReply,

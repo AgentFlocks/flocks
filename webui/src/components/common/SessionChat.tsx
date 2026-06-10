@@ -72,12 +72,28 @@ export interface NodeRef {
 }
 
 export interface ConversationBottomSlotActions {
-  sendPrompt: (text: string) => void;
+  sendPrompt: (text: string, options?: PromptDisplayOptions) => void;
   setInput: (text: string) => void;
   focusInput: () => void;
   sending: boolean;
   streaming: boolean;
   sessionId?: string | null;
+}
+
+export interface PromptDisplayOptions {
+  displayText?: string;
+}
+
+const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
+
+export function buildInstructionDisplayText(label: string): string {
+  return `${INSTRUCTION_DISPLAY_PREFIX}${label}`;
+}
+
+export function parseInstructionDisplayText(text: string): string | null {
+  return text.startsWith(INSTRUCTION_DISPLAY_PREFIX)
+    ? text.slice(INSTRUCTION_DISPLAY_PREFIX.length).trim() || null
+    : null;
 }
 
 /** Display-related options grouped to reduce prop surface. */
@@ -163,6 +179,7 @@ export interface SessionChatProps {
     imageParts?: ImagePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
+    options?: PromptDisplayOptions,
   ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
@@ -477,6 +494,10 @@ export function getMessageBubbleClassName({
   }`;
 }
 
+export function getInstructionDisplayBubbleClassName(compact: boolean): string {
+  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-rose-100 bg-rose-50/80 text-sm text-rose-700 shadow-none`;
+}
+
 export function getMessageGroupClassName({
   compact,
   isUser,
@@ -568,6 +589,10 @@ export function getUserAvatarContainerClassName(compact: boolean): string {
 
 export function getUserAvatarSpacerClassName(compact: boolean): string {
   return compact ? 'h-3.5' : 'h-4';
+}
+
+export function getUserMessageSafeInsetClassName(compact: boolean): string {
+  return compact ? 'pr-10' : 'pr-11';
 }
 
 function areToolStatesRenderEqual(
@@ -667,6 +692,8 @@ function isAllowedUploadFile(file: File): boolean {
 }
 
 function getQueuedPromptText(item: QueuedPrompt): string {
+  if (typeof item.displayText === 'string' && item.displayText) return item.displayText;
+  if (typeof item.display_text === 'string' && item.display_text) return item.display_text;
   const textPart = item.parts.find((part) => part.type === 'text' && typeof part.text === 'string');
   return typeof textPart?.text === 'string' ? textPart.text : '';
 }
@@ -720,6 +747,7 @@ function QueuedPromptPanel({
             const isEditing = editingId === item.id;
             const isBusy = actionId === item.id || item.status === 'executing';
             const text = getQueuedPromptText(item);
+            const instructionLabel = parseInstructionDisplayText(text);
             return (
               <div key={item.id} className="flex items-start gap-2 px-3 py-2 border-b border-zinc-100 last:border-b-0">
                 <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 flex-shrink-0" />
@@ -732,7 +760,13 @@ function QueuedPromptPanel({
                       rows={2}
                     />
                   ) : (
-                    <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                    instructionLabel ? (
+                      <span className="inline-flex max-w-full items-center truncate rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700">
+                        {instructionLabel}
+                      </span>
+                    ) : (
+                      <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                    )
                   )}
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1">
@@ -1685,9 +1719,15 @@ export default function SessionChat({
   };
 
   /** Core send logic */
-  const sendText = async (text: string, imageParts: ImagePartData[] = [], agentOverride?: string) => {
+  const sendText = async (
+    text: string,
+    imageParts: ImagePartData[] = [],
+    agentOverride?: string,
+    options?: PromptDisplayOptions,
+  ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
+    const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     // Force scroll to bottom when user sends a new message
@@ -1698,7 +1738,7 @@ export default function SessionChat({
 
     const tempId = `temp-${Date.now()}`;
     const tempParts: MessagePart[] = [];
-    if (text) tempParts.push({ id: `${tempId}-text`, type: 'text', text });
+    if (visibleText) tempParts.push({ id: `${tempId}-text`, type: 'text', text: visibleText });
     imageParts.forEach((img, i) => {
       tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
     });
@@ -1707,7 +1747,7 @@ export default function SessionChat({
       id: tempId,
       sessionID: sessionId,
       role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text }],
+      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text: visibleText }],
       timestamp: Date.now(),
       agent: effectiveAgent,
     } as Message);
@@ -1718,6 +1758,7 @@ export default function SessionChat({
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
+      if (options?.displayText) payload.displayText = options.displayText;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
@@ -1738,6 +1779,7 @@ export default function SessionChat({
     text: string,
     imageParts: ImagePartData[] = [],
     agentOverride?: string,
+    options?: PromptDisplayOptions,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -1746,6 +1788,7 @@ export default function SessionChat({
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
+        ...(options?.displayText ? { displayText: options.displayText } : {}),
       });
       await fetchPromptQueue();
       setQueueExpanded(true);
@@ -1760,7 +1803,7 @@ export default function SessionChat({
     }
   };
 
-  const handleComposerPrompt = async (text: string) => {
+  const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
 
@@ -1771,7 +1814,7 @@ export default function SessionChat({
 
     if (sessionId && isStreaming) {
       try {
-        await enqueueText(trimmed);
+        await enqueueText(trimmed, [], undefined, options);
       } catch {
         setInput(trimmed);
       }
@@ -1787,7 +1830,7 @@ export default function SessionChat({
       setSending(true);
       try {
         setPendingAgentName(agentName || 'rex');
-        await onCreateAndSend(trimmed, [], agentName);
+        await onCreateAndSend(trimmed, [], agentName, model, options);
       } catch {
         setInput(trimmed);
       } finally {
@@ -1797,7 +1840,7 @@ export default function SessionChat({
     }
 
     try {
-      await sendText(trimmed, [], agentName);
+      await sendText(trimmed, [], agentName, options);
     } catch {
       setInput(trimmed);
     }
@@ -2447,27 +2490,6 @@ export default function SessionChat({
           </div>
         )}
         <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
-
-        {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
-        {conversationBottomSlot && !hideInput && (
-          <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
-            <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pl-4 pr-8' : ''}`}>
-              {typeof conversationBottomSlot === 'function'
-                ? conversationBottomSlot({
-                  sendPrompt: (text) => { void handleComposerPrompt(text); },
-                  setInput: (text) => {
-                    setInput(text);
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  },
-                  focusInput: () => textareaRef.current?.focus(),
-                  sending,
-                  streaming: isStreaming,
-                  sessionId,
-                })
-                : conversationBottomSlot}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Suggestions — shown before user sends any message */}
@@ -2493,8 +2515,25 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
+        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-2.5' : 'py-4'}`}>
           <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
+            {conversationBottomSlot && (
+              <div className="mb-2 min-w-0">
+                {typeof conversationBottomSlot === 'function'
+                  ? conversationBottomSlot({
+                    sendPrompt: (text, options) => { void handleComposerPrompt(text, options); },
+                    setInput: (text) => {
+                      setInput(text);
+                      requestAnimationFrame(() => textareaRef.current?.focus());
+                    },
+                    focusInput: () => textareaRef.current?.focus(),
+                    sending,
+                    streaming: isStreaming,
+                    sessionId,
+                  })
+                  : conversationBottomSlot}
+              </div>
+            )}
             <QueuedPromptPanel
               items={queuedPrompts}
               expanded={queueExpanded}
@@ -2980,9 +3019,12 @@ function ChatMessageBubbleInner({
   const editableRawText = latestEditablePart?.text || '';
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
+  const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
+    ? parseInstructionDisplayText(editableTextParts[0].text)
+    : null;
 
   const useStableAssistantWidth = compact && !isUser && collapseIntermediateSteps;
-  const bubbleClass = `${getMessageBubbleClassName({ compact, isUser, isEditing })} ${useStableAssistantWidth ? 'w-full' : ''}`.trim();
+  const bubbleClass = `${instructionDisplayLabel ? getInstructionDisplayBubbleClassName(compact) : getMessageBubbleClassName({ compact, isUser, isEditing })} ${useStableAssistantWidth ? 'w-full' : ''}`.trim();
   const messageGroupClass = `${getMessageGroupClassName({ compact, isUser, isEditing })} ${useStableAssistantWidth ? 'w-full' : ''}`.trim();
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
@@ -2996,6 +3038,14 @@ function ChatMessageBubbleInner({
       ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
       : null;
     const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
+    const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
+    if (instructionLabel) {
+      return (
+        <span className="inline-flex items-center rounded-md text-xs font-semibold leading-none text-rose-700">
+          {instructionLabel}
+        </span>
+      );
+    }
     return (
       <>
         {nodeRefMatch && (
@@ -3371,7 +3421,7 @@ function ChatMessageBubbleInner({
 
   if (isUser) {
     return (
-      <div className={`group relative ${!compact ? 'w-full' : ''} flex justify-end`}>
+      <div className={`group relative ${!compact ? 'w-full' : ''} flex justify-end ${getUserMessageSafeInsetClassName(compact)}`}>
         <div className={`relative flex flex-col items-end gap-2 ${messageGroupClass}`}>
           <div className={getUserAvatarContainerClassName(compact)}>
             {avatar}

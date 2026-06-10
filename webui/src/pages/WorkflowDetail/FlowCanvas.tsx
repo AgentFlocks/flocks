@@ -623,7 +623,7 @@ function CanvasControlButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="group relative flex h-8 w-8 items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+      className="group relative flex h-8 w-full items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
     >
       {children}
       <span className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
@@ -779,9 +779,9 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         )}
       </ReactFlow>
 
-      <div className="absolute right-4 top-4 z-20 flex flex-col items-end gap-1 overflow-visible">
+      <div className="absolute right-4 top-4 z-20 flex w-9 flex-col items-stretch gap-1 overflow-visible">
         {!controlsCollapsed && (
-          <div className="flex flex-col divide-y divide-slate-100 overflow-visible rounded-lg border border-slate-200 bg-white/90 backdrop-blur">
+          <div className="flex w-full flex-col divide-y divide-slate-100 overflow-visible rounded-lg border border-slate-200 bg-white/90 backdrop-blur">
             <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
               <ZoomIn className="h-4 w-4" strokeWidth={1.8} />
             </CanvasControlButton>
@@ -800,7 +800,7 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
           type="button"
           onClick={() => setControlsCollapsed((prev) => !prev)}
           aria-label={t(controlsCollapsed ? 'detail.flowControls.expand' : 'detail.flowControls.collapse')}
-          className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+          className="flex h-8 w-full items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
         >
           {controlsCollapsed ? (
             <ChevronDown className="h-4 w-4" strokeWidth={1.8} />

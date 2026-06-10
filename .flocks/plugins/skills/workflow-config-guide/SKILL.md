@@ -2,24 +2,49 @@
 name: workflow-config-guide
 category: system
 ui_hidden: true
-description: 配置现有 Flocks 工作流的发布、集成、触发器和发布配置模板，引导用户完成 API/Syslog/Kafka/Webhook/Schedule/File 输入、下游输出、样例验证、差异确认和最终报告
+description: 配置现有 Flocks 工作流的发布、集成、触发器和发布配置模板；本 skill 只定义交互协议，具体配置问题必须来自工作流目录内的 guide.md
 ---
 
 # Workflow Config Guide
 
 Use this skill when the user asks to configure, publish, integrate, deploy, or validate an existing Flocks workflow, especially when the task involves publish configuration templates, `config.json` import/fallback, API publishing, Syslog/Kafka/Webhook/Schedule triggers, file input, downstream output, sample validation, or a first-time deployment guide.
 
+This skill is a protocol layer only. It must not be used as the source of workflow-specific configuration questions or defaults. For every existing workflow, the source of truth for configuration details is the workflow-local `guide.md` file in the same directory as `workflow.md`, `workflow.json`, and optional `config.json`.
+
 Do not use this skill to create a brand-new workflow from scratch. Use `workflow-builder` for workflow design and generation, then return to this skill when the workflow already exists and needs runtime configuration.
 
 ## Quick Start
 
 1. Identify the current workflow directory. Prefer the explicit path in the user request; otherwise inspect the active workflow context and project/user workflow roots.
-2. Read the workflow files that exist: `workflow.json`, `workflow.md`, optional legacy `config.json`, and `meta.json`. Treat the backend `/api/workflow/<workflow_id>/config` response as the canonical publish template.
-3. Summarize the current configurable capabilities in plain language: publish mode, triggers, inputs, outputs, sample inputs, existing secrets references, and missing items.
-4. When any user decision, missing value, preference, or confirmation is needed, call the `question` tool. Do not ask configuration questions in ordinary assistant text.
-5. Before changing the publish template, show a unified diff of the proposed JSON, then call the `question` tool for explicit confirmation.
-6. After applying changes, validate JSON syntax and run the lightest useful workflow/config smoke test available.
-7. End with a concise report in chat and save a timestamped report under `~/.flocks/workspace/outputs/<today>/`, computing `<today>` at execution time.
+2. Read the workflow-local `guide.md` first. If it is missing or too thin to answer the user's request, stop and use the `question` tool to ask whether to generate or repair `guide.md` from `workflow.md`, `workflow.json`, and `config.json`.
+3. Read the workflow files that exist: `workflow.json`, `workflow.md`, optional legacy `config.json`, and `meta.json`. Treat the backend `/api/workflow/<workflow_id>/config` response as the canonical publish template.
+4. Summarize the current configurable capabilities in plain language, using `guide.md` as the source for workflow-specific modes, defaults, sample requirements, validation, and recommended question order.
+5. When any user decision, missing value, preference, or confirmation is needed, call the `question` tool. Do not ask configuration questions in ordinary assistant text.
+6. Before changing the publish template, show a unified diff against the canonical backend config, then call the `question` tool for explicit confirmation. That single approval authorizes applying the shown diff through the backend config endpoint; do not ask a second "should I call PUT" question for the same diff.
+7. After applying changes, validate JSON syntax and run the lightest useful workflow/config smoke test available.
+8. End with a concise report in chat and save a timestamped report under `~/.flocks/workspace/outputs/<today>/`, computing `<today>` at execution time.
+
+## Workflow-local Guide Contract
+
+Each workflow that can be configured by Rex should include:
+
+```text
+<workflow_dir>/
+  workflow.md
+  workflow.json
+  config.json        # optional import/fallback publish template
+  guide.md          # workflow-specific configuration guide
+```
+
+`guide.md` must answer these questions for this workflow, in the workflow's own domain language:
+
+- What problem the workflow solves and which runtime paths are supported.
+- What information must be collected from the user before configuration can be applied.
+- Recommended defaults and safe fallback behavior.
+- Which values are runtime state in Storage/SQL rather than editable template fields.
+- Sample input requirements and the lightest validation method.
+
+`guide.md` should not contain a UI button table. If a user clicks a guide shortcut, treat the shortcut label as an intent hint, read `guide.md`, semantically extract the relevant guidance, defaults, constraints, examples, and validation rules, then ask the single next useful question with the `question` tool. If no relevant guidance exists, say that the workflow guide is missing that detail and ask whether to repair `guide.md`.
 
 ## Configuration Contract
 
@@ -36,14 +61,14 @@ Treat the publish configuration template as a workflow runtime/publish template,
 
 Guide the user from "I have this workflow" to "I know what is configured and what I still need to do".
 
-Ask these decisions in order when relevant, using one `question` tool call per step:
+Ask decisions in the order specified by `guide.md`, using one `question` tool call per step. If `guide.md` has no order, use the clicked shortcut as the current step and ask only the single most relevant question for that shortcut. The generic categories below are only fallback headings for organizing a guide file, not universal workflow defaults:
 
-1. **Input mode**: API, Syslog, Kafka, Webhook, Schedule, File, or manual test input.
-2. **Source system or data shape**: product/source name, expected payload format, and whether a sample exists.
-3. **Output destinations**: local files, API response, Kafka, IM/channel push, another workflow, or custom downstream.
-4. **Filtering or business defaults**: keep the user-facing behavior simple; hide low-level thresholds and field lists behind "use default / show details".
-5. **Validation sample**: ask for one representative payload when available; if unavailable, mark the configuration as unvalidated rather than blocking forever.
-6. **Apply or draft**: show the publish-template JSON diff, then ask whether to apply through the backend endpoint or save as draft.
+1. **Input mode**
+2. **Source system or data shape**
+3. **Output destinations**
+4. **Filtering or business defaults**
+5. **Validation sample**
+6. **Apply or draft**
 
 ### Mandatory Question Tool Rule
 
@@ -52,7 +77,7 @@ The `question` tool is mandatory for this skill. Any time you need the user to c
 - Ordinary assistant text may summarize the current state, explain a proposed diff, or report results. It must not contain actionable questions such as "要不要...", "是否...", "请确认...", or numbered follow-ups like "第二个问题...".
 - If `question` is not available in the tool list, say that the configuration guide cannot continue interactively until the `question` tool is available. Do not fall back to inline chat questions.
 - Use one question card per turn. Do not ask several independent decisions in a single text paragraph.
-- For diff approval, show the diff first, then call `question` with choices such as "应用上面的 diff", "只保存草稿", and "暂不修改".
+- For diff approval, show the diff first, then call `question` with choices such as "应用上面的 diff", "只保存草稿", and "暂不修改". If the user chooses to apply the shown diff, immediately apply it through the backend config endpoint; do not ask an extra confirmation that only repeats the same side effect.
 - For side-effect scope questions, such as "是否顺手修改 workflow.md", call `question`; do not ask in prose.
 
 Never make a configuration question choice-only. Every Question-tool prompt used by this skill must include a way for the user to type a custom answer:
@@ -117,10 +142,7 @@ The final report must include:
 - Full final config or draft path.
 - Smoke test results or a clear reason the smoke test was skipped.
 
-## References
-
-- For `stream_alert_denoise`, `stream_alert_dedup`, or similar streaming alert deduplication workflows, read `references/stream-alert-dedup-integration-guide.md` and follow its scenario-specific defaults.
-- For other workflows, use this `SKILL.md` as the source of truth and derive details from the workflow's own files instead of blindly applying the alert-dedup reference.
+Do not look for skill-relative `references/` files during workflow configuration. Workflow-specific details must come from the current workflow's own `guide.md`; this prevents loading stale generic instructions or resolving a project-level skill path as a user-level path.
 
 ## Safety Rules
 

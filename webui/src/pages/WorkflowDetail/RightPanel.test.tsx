@@ -11,7 +11,7 @@ vi.mock('react-i18next', () => ({
     t: (key: string) => {
       const translations: Record<string, string> = {
         'detail.rightPanel.tabOverview': '概览',
-        'detail.rightPanel.tabChat': 'AI 编辑',
+        'detail.rightPanel.tabChat': '工作台',
         'detail.rightPanel.tabIntegration': '发布',
         'detail.rightPanel.deleteWorkflow': '删除工作流',
         'detail.rightPanel.deleting': '删除中...',
@@ -126,7 +126,7 @@ describe('RightPanel', () => {
 
     expect(screen.getByRole('button', { name: '删除工作流' })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'AI 编辑' }));
+    await user.click(screen.getByRole('button', { name: '工作台' }));
 
     expect(screen.queryByRole('button', { name: '删除工作流' })).not.toBeInTheDocument();
   });

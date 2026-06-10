@@ -77,6 +77,7 @@ interface RightPanelProps {
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
   onSessionChange?: (sessionId: string | null) => void;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
   /** Currently selected node — passed to ChatTab to show reference chip in input */
   selectedNode?: WorkflowNode | null;
   onDeselectNode?: () => void;
@@ -94,6 +95,7 @@ export default function RightPanel({
   onWorkflowUpdated,
   onFirstMessageSent,
   onSessionChange,
+  onGuidePrompt,
   selectedNode, onDeselectNode,
   onDelete,
 }: RightPanelProps) {
@@ -182,7 +184,11 @@ export default function RightPanel({
         )}
         {currentActiveTab === 'integration' && (
           <TabErrorBoundary>
-            <IntegrationTab workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
+            <IntegrationTab
+              workflow={workflow}
+              onWorkflowUpdated={onWorkflowUpdated}
+              onGuidePrompt={onGuidePrompt}
+            />
           </TabErrorBoundary>
         )}
       </div>

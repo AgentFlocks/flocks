@@ -96,7 +96,13 @@ vi.mock('@/components/common/SessionChat', () => ({
     sessionId?: string | null;
     mentionAgents?: Array<{ name: string }>;
     toolbarSlot?: React.ReactNode;
-    onCreateAndSend?: (text: string, imageParts?: unknown[], agentOverride?: string) => Promise<unknown> | unknown;
+    onCreateAndSend?: (
+      text: string,
+      imageParts?: unknown[],
+      agentOverride?: string,
+      model?: { providerID: string; modelID: string } | null,
+      options?: { displayText?: string },
+    ) => Promise<unknown> | unknown;
   }) => (
     <div data-testid="session-chat" data-mention-agents={(mentionAgents ?? []).map((a) => a.name).join(',')}>
       {sessionId ?? 'no-session'}
@@ -109,6 +115,7 @@ vi.mock('@/components/common/SessionChat', () => ({
 }));
 
 vi.mock('@/utils/agentDisplay', () => ({
+  getAgentDisplayName: (agent: { name: string }) => agent.name.charAt(0).toUpperCase() + agent.name.slice(1),
   getAgentDisplayDescription: () => 'agent-description',
 }));
 
@@ -121,6 +128,10 @@ vi.mock('react-i18next', () => ({
     t: (key: string) => key,
     i18n: { language: 'zh-CN' },
   }),
+}));
+
+vi.mock('@/i18n', () => ({
+  default: { t: (key: string) => key },
 }));
 
 const session = {

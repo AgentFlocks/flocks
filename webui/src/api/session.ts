@@ -20,6 +20,8 @@ export interface QueuedPrompt {
   agent?: string | null;
   model?: Record<string, unknown> | null;
   variant?: string | null;
+  display_text?: string | null;
+  displayText?: string | null;
   messageID?: string | null;
   status: 'pending' | 'executing' | string;
   createdAt: number;
@@ -145,6 +147,7 @@ export const sessionApi = {
     agent?: string;
     model?: Record<string, unknown>;
     variant?: string;
+    displayText?: string;
   }) => {
     const response = await client.post(`/api/session/${sessionId}/prompt_queue`, data);
     return response.data;

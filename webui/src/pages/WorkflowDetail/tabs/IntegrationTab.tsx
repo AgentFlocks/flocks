@@ -13,7 +13,9 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Bot,
   Globe,
+  Info,
   Loader2,
   Server,
   Trash2,
@@ -38,6 +40,7 @@ import { extractErrorMessage } from '@/utils/error';
 export interface IntegrationTabProps {
   workflow: Workflow;
   onWorkflowUpdated?: (updated: Workflow) => void;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
 }
 
 type JsonObject = Record<string, any>;
@@ -50,6 +53,18 @@ interface TemplateView {
   hasApi: boolean;
   triggers: WorkflowTrigger[];
 }
+
+interface PublishGuideAction {
+  key: string;
+  label: string;
+  description: string;
+  prompt: string;
+}
+
+const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
+const WORKFLOW_GUIDE_FILE_NAME = 'guide.md';
+
+type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
 
 function asObject(value: unknown): JsonObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
@@ -115,6 +130,216 @@ function buildTemplateView(config?: WorkflowIntegrationConfig | null): TemplateV
     hasApi: templateHasApi(config),
     triggers: templateTriggers(config),
   };
+}
+
+function workflowGuidePromptParams(workflow: Workflow) {
+  const dir = workflow.source === 'global'
+    ? `~/.flocks/plugins/workflows/${workflow.id}/`
+    : `.flocks/plugins/workflows/${workflow.id}/`;
+  return {
+    id: workflow.id,
+    name: workflow.name,
+    dir,
+    mdPath: `${dir}workflow.md`,
+    guidePath: `${dir}${WORKFLOW_GUIDE_FILE_NAME}`,
+    configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
+  };
+}
+
+function buildGuideQuestionPrompt(
+  t: TranslateFn,
+  workflow: Workflow,
+  focus: string,
+  instruction: string,
+): string {
+  return t('detail.chat.welcome.guideQuestionPrompt', {
+    ...workflowGuidePromptParams(workflow),
+    focus,
+    instruction,
+  });
+}
+
+function triggerGuideKind(type: WorkflowTriggerType): string {
+  if (type === 'custom_webhook') return 'webhook';
+  if (type === 'custom_adapter') return 'adapter';
+  return type;
+}
+
+function triggerGuideTranslationKey(kind: string, suffix: 'Short' | 'Desc' | 'Instruction'): string {
+  const normalized = kind.charAt(0).toUpperCase() + kind.slice(1);
+  return `detail.run.guide${normalized}${suffix}`;
+}
+
+function buildPublishGuideActions(t: TranslateFn, workflow: Workflow, view: TemplateView): PublishGuideAction[] {
+  const actions: PublishGuideAction[] = [];
+  const addApiAction = () => {
+    const label = t('detail.run.guideApiShort');
+    actions.push({
+      key: 'api',
+      label,
+      description: t('detail.run.guideApiDesc'),
+      prompt: buildGuideQuestionPrompt(t, workflow, label, t('detail.run.guideApiInstruction')),
+    });
+  };
+  const addTriggerKindAction = (kind: string) => {
+    const labelKey = triggerGuideTranslationKey(kind, 'Short');
+    const descriptionKey = triggerGuideTranslationKey(kind, 'Desc');
+    const instructionKey = triggerGuideTranslationKey(kind, 'Instruction');
+    const label = t(labelKey);
+    actions.push({
+      key: kind,
+      label,
+      description: t(descriptionKey),
+      prompt: buildGuideQuestionPrompt(t, workflow, label, t(instructionKey)),
+    });
+  };
+
+  if (view.hasApi) {
+    addApiAction();
+  }
+
+  const seen = new Set<string>();
+  view.triggers.forEach((trigger) => {
+    const kind = triggerGuideKind(trigger.type);
+    if (seen.has(kind)) return;
+    seen.add(kind);
+
+    addTriggerKindAction(kind);
+  });
+
+  if (actions.length === 0) {
+    addApiAction();
+    addTriggerKindAction('syslog');
+    addTriggerKindAction('kafka');
+    addTriggerKindAction('webhook');
+    addTriggerKindAction('schedule');
+  }
+
+  return actions;
+}
+
+function PublishGuidePanel({
+  actions,
+  onGuidePrompt,
+  variant = 'inline',
+}: {
+  actions: PublishGuideAction[];
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
+  variant?: 'empty' | 'inline';
+}) {
+  const { t } = useTranslation('workflow');
+  const [guideTooltip, setGuideTooltip] = useState<{
+    title: string;
+    description: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const showGuideTooltip = useCallback((target: HTMLElement, title: string, description: string) => {
+    const rect = target.getBoundingClientRect();
+    setGuideTooltip({
+      title,
+      description,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 8,
+    });
+  }, []);
+
+  const isEmpty = variant === 'empty';
+  const hasActionButtons = Boolean(onGuidePrompt && actions.length > 0);
+
+  if (!hasActionButtons) return null;
+
+  return (
+    <div className={
+      isEmpty
+        ? 'mx-auto w-full rounded-xl border border-zinc-200 bg-white px-5 py-5 text-center shadow-sm'
+        : 'rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2'
+    }>
+      <div className={
+        isEmpty
+          ? 'mb-4 flex flex-col items-center gap-2'
+          : 'mb-2 flex items-start gap-2'
+      }>
+        <span className={`${isEmpty ? 'h-9 w-9' : 'mt-0.5 h-7 w-7'} inline-flex flex-shrink-0 items-center justify-center rounded-lg border border-rose-100 bg-rose-50 text-rose-500`}>
+          <Bot className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0">
+          <div className={`${isEmpty ? 'text-sm' : 'text-xs'} font-semibold text-zinc-800`}>
+            {t('detail.run.guidePanelTitle')}
+          </div>
+          <div className={`${isEmpty ? 'mt-1' : 'mt-0.5'} text-[11px] leading-relaxed text-zinc-500`}>
+            {t('detail.run.guidePanelDesc')}
+          </div>
+        </div>
+      </div>
+      <div className={
+        isEmpty
+          ? 'mx-auto flex w-full max-w-[360px] min-w-0 flex-col gap-2'
+          : 'flex min-w-0 items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'
+      }>
+        {actions.map((action) => (
+          <button
+            key={action.key}
+            type="button"
+            onClick={() => onGuidePrompt?.(action.prompt, action.label)}
+            className={`${isEmpty ? 'w-full justify-between px-3' : 'flex-shrink-0 px-2.5'} inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white text-left text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-600`}
+            title={action.label}
+          >
+            <span className="whitespace-nowrap text-xs font-semibold leading-none">{action.label}</span>
+            <span
+              className="inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500"
+              title={action.description}
+              onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+              onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+              onPointerEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
+              onMouseEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
+              onMouseOver={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
+              onMouseLeave={() => setGuideTooltip(null)}
+              onPointerLeave={() => setGuideTooltip(null)}
+            >
+              <Info className="h-3.5 w-3.5" aria-hidden="true" />
+            </span>
+          </button>
+        ))}
+      </div>
+      {guideTooltip && (
+        <div
+          className="pointer-events-none fixed z-[80] w-52 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md"
+          style={{ left: guideTooltip.x, top: guideTooltip.y }}
+        >
+          <div className="mb-0.5 font-semibold text-zinc-800">{guideTooltip.title}</div>
+          <div>{guideTooltip.description}</div>
+          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PublishStatusNotice({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-[88px] w-full items-center justify-center rounded-xl border border-dashed border-zinc-200 bg-zinc-50/70 px-6 py-5 text-center text-xs leading-relaxed text-zinc-500">
+      {children}
+    </div>
+  );
+}
+
+function EmptyPublishGuideState({
+  statusText,
+  actions,
+  onGuidePrompt,
+}: {
+  statusText: string;
+  actions: PublishGuideAction[];
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
+}) {
+  return (
+    <div className="flex min-h-[calc(100vh-150px)] w-full flex-col items-center justify-start gap-16 p-4 pt-12">
+      <PublishStatusNotice>{statusText}</PublishStatusNotice>
+      <PublishGuidePanel actions={actions} onGuidePrompt={onGuidePrompt} variant="empty" />
+    </div>
+  );
 }
 
 function SectionHeader({
@@ -370,7 +595,15 @@ function createTriggerDraft(
   };
 }
 
-function PublishSection({ workflowId }: { workflowId: string }) {
+function PublishSection({
+  workflowId,
+  guideActions,
+  onGuidePrompt,
+}: {
+  workflowId: string;
+  guideActions?: PublishGuideAction[];
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
+}) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
   const [service, setService] = useState<WorkflowService | null>(null);
@@ -473,6 +706,7 @@ function PublishSection({ workflowId }: { workflowId: string }) {
                   </div>
                 </div>
               </div>
+              <PublishGuidePanel actions={guideActions ?? []} onGuidePrompt={onGuidePrompt} />
               <button
                 type="button"
                 onClick={handleUnpublish}
@@ -512,6 +746,7 @@ function PublishSection({ workflowId }: { workflowId: string }) {
               >
                 {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
               </button>
+              <PublishGuidePanel actions={guideActions ?? []} onGuidePrompt={onGuidePrompt} />
             </div>
           )}
           {error ? (
@@ -540,10 +775,14 @@ function TemplateTriggersSection({
   workflow,
   triggers,
   onWorkflowUpdated,
+  guideActionsByKind,
+  onGuidePrompt,
 }: {
   workflow: Workflow;
   triggers: WorkflowTrigger[];
   onWorkflowUpdated?: (updated: Workflow) => void;
+  guideActionsByKind?: Record<string, PublishGuideAction[]>;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -708,6 +947,7 @@ function TemplateTriggersSection({
             const status = statuses[trigger.id];
             const active = isRuntimeActive(status);
             const busy = savingId === trigger.id;
+            const guideActions = guideActionsByKind?.[triggerGuideKind(trigger.type)] ?? [];
             return (
               <div key={trigger.id} className="rounded-xl border border-gray-200 bg-white px-3 py-3 space-y-3">
                 <div className="flex items-start justify-between gap-3">
@@ -742,6 +982,7 @@ function TemplateTriggersSection({
                 >
                   {busy ? '处理中...' : active ? '停止监听' : '启动监听'}
                 </button>
+                <PublishGuidePanel actions={guideActions} onGuidePrompt={onGuidePrompt} />
               </div>
             );
           })}
@@ -1610,7 +1851,8 @@ function TriggersSection({
   );
 }
 
-export default function IntegrationTab({ workflow, onWorkflowUpdated }: IntegrationTabProps) {
+export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePrompt }: IntegrationTabProps) {
+  const { t } = useTranslation('workflow');
   const [config, setConfig] = useState<WorkflowIntegrationConfig | null>(null);
   const [hasTemplate, setHasTemplate] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
@@ -1655,22 +1897,35 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated }: Integrat
 
   if (hasTemplate) {
     const view = buildTemplateView(config);
+    const guideActions = buildPublishGuideActions(t, workflow, view);
+    const guideActionsByKind = guideActions.reduce<Record<string, PublishGuideAction[]>>((acc, action) => {
+      acc[action.key] = [...(acc[action.key] ?? []), action];
+      return acc;
+    }, {});
     return (
       <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
-        {view.hasApi ? <PublishSection workflowId={workflow.id} /> : null}
+        {view.hasApi ? (
+          <PublishSection
+            workflowId={workflow.id}
+            guideActions={guideActionsByKind.api}
+            onGuidePrompt={onGuidePrompt}
+          />
+        ) : null}
         {view.triggers.length > 0 ? (
           <TemplateTriggersSection
             workflow={workflow}
             triggers={view.triggers}
             onWorkflowUpdated={onWorkflowUpdated}
+            guideActionsByKind={guideActionsByKind}
+            onGuidePrompt={onGuidePrompt}
           />
         ) : null}
         {!view.hasApi && view.triggers.length === 0 ? (
-          <div className="p-4">
-            <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
-              发布配置中没有声明可发布的 API 或触发能力。
-            </div>
-          </div>
+          <EmptyPublishGuideState
+            statusText="发布配置中没有声明可发布的 API 或触发能力。"
+            actions={guideActions}
+            onGuidePrompt={onGuidePrompt}
+          />
         ) : null}
       </div>
     );
@@ -1684,11 +1939,11 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated }: Integrat
           <span>{configError}</span>
         </div>
       ) : null}
-      <div className="p-4">
-        <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
-          当前工作流还没有发布配置模板。
-        </div>
-      </div>
+      <EmptyPublishGuideState
+        statusText="当前工作流还没有发布配置模板。"
+        actions={buildPublishGuideActions(t, workflow, { hasApi: false, triggers: [] })}
+        onGuidePrompt={onGuidePrompt}
+      />
     </div>
   );
 }

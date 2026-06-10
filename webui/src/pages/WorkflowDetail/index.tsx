@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { X, GitBranch, FileText, Code2, Download, FileJson, Save, Sparkles, Eye, Pencil, Workflow as WorkflowIcon, GitCompare, Check, Undo2, Bot } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
+import { sessionApi } from '@/api/session';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
@@ -28,6 +29,11 @@ type EditDocMode = 'edit' | 'preview';
 interface EditDocDiff {
   before: string;
   after: string;
+}
+
+interface WorkflowChatSessionRef {
+  workflowId: string;
+  sessionId: string;
 }
 
 const PANEL_MIN = 240;
@@ -70,6 +76,7 @@ export default function WorkflowDetail() {
   const [editDocSaving, setEditDocSaving] = useState(false);
   const [editDocReviewing, setEditDocReviewing] = useState<string | null>(null);
   const [chatLaunchRequest, setChatLaunchRequest] = useState<WorkflowChatLaunchRequest | null>(null);
+  const [workflowChatSession, setWorkflowChatSession] = useState<WorkflowChatSessionRef | null>(null);
   const hasAutoSwitchedRef = useRef(false);
   const chatLaunchSeqRef = useRef(0);
   const editDocWorkflowIdRef = useRef<string | null>(null);
@@ -226,6 +233,69 @@ export default function WorkflowDetail() {
     editDocDiff ? buildTextDiffHunks(editDocDiff.before, editDocDiff.after) : []
   ), [editDocDiff]);
 
+  const handleWorkflowChatSessionChange = useCallback((sessionId: string | null) => {
+    const workflowId = workflow?.id;
+    setWorkflowChatSession(sessionId && workflowId ? { workflowId, sessionId } : null);
+  }, [workflow?.id]);
+
+  const recordEditDocReviewResult = useCallback(async ({
+    decision,
+    scope,
+    hunk,
+    remainingHunks,
+  }: {
+    decision: 'accepted' | 'rejected';
+    scope: 'full_diff' | 'hunk';
+    hunk?: TextDiffHunk;
+    remainingHunks?: number;
+  }) => {
+    const workflowId = workflow?.id;
+    const chatSession = workflowChatSession;
+    const sessionId = chatSession && chatSession.workflowId === workflowId
+      ? chatSession.sessionId
+      : null;
+    if (!workflowId || !sessionId) return;
+
+    const proposedChangeApplied = decision === 'accepted'
+      ? (scope === 'full_diff' ? 'true' : 'true_for_this_hunk')
+      : (scope === 'full_diff' ? 'false' : 'false_for_this_hunk');
+    const reviewState = remainingHunks && remainingHunks > 0 ? 'pending_remaining_hunks' : 'completed';
+    const summary = decision === 'accepted'
+      ? (scope === 'full_diff'
+        ? 'The user accepted the AI-proposed workflow.md diff. Treat the current workflow.md content as successfully applied.'
+        : 'The user accepted this workflow.md diff hunk. Treat this hunk as successfully applied while the remaining hunks may still need review.')
+      : (scope === 'full_diff'
+        ? 'The user rejected the AI-proposed workflow.md diff. Treat the proposed change as not applied; workflow.md was restored to the previous content.'
+        : 'The user rejected this workflow.md diff hunk. Treat this hunk as not applied; workflow.md was saved with this hunk reverted.');
+
+    const text = [
+      '[Workflow markdown diff review result]',
+      'Use this hidden context in future assistant turns. Do not claim a proposed workflow.md change succeeded unless proposed_change_applied is true or true_for_this_hunk.',
+      `workflow_id: ${workflowId}`,
+      'file: workflow.md',
+      `decision: ${decision}`,
+      `scope: ${scope}`,
+      `proposed_change_applied: ${proposedChangeApplied}`,
+      `review_state: ${reviewState}`,
+      ...(hunk ? [
+        `hunk_id: ${hunk.id}`,
+        `hunk_added_lines: ${hunk.added}`,
+        `hunk_removed_lines: ${hunk.removed}`,
+      ] : []),
+      remainingHunks !== undefined ? `remaining_diff_hunks: ${remainingHunks}` : null,
+      `summary: ${summary}`,
+    ].filter(Boolean).join('\n');
+
+    try {
+      await sessionApi.sendMessage(sessionId, {
+        parts: [{ type: 'text', text }],
+        noReply: true,
+      });
+    } catch (err) {
+      console.warn('[WorkflowDetail] failed to record workflow markdown review result', err);
+    }
+  }, [workflow?.id, workflowChatSession]);
+
   // 导出 workflow.md
   const handleExportEditDoc = useCallback(() => {
     if (!workflow || !editDocDraft.trim()) return;
@@ -268,9 +338,20 @@ export default function WorkflowDetail() {
     setChatLaunchRequest({
       id: chatLaunchSeqRef.current + 1,
       prompt: buildWorkflowGenerationPrompt(content),
+      displayLabel: t('detail.generateWorkflow'),
     });
     chatLaunchSeqRef.current += 1;
-  }, [buildWorkflowGenerationPrompt, openAiEditPanel, workflow]);
+  }, [buildWorkflowGenerationPrompt, openAiEditPanel, t, workflow]);
+
+  const launchWorkflowGuidePrompt = useCallback((prompt: string, displayLabel: string) => {
+    openAiEditPanel();
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt,
+      displayLabel,
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [openAiEditPanel]);
 
   const handleGenerateWorkflow = useCallback(() => {
     if (!workflow) return;
@@ -329,7 +410,12 @@ export default function WorkflowDetail() {
     setEditDocDiff(null);
     setShowMdHint(false);
     showToast('success', t('detail.editDocDiffAcceptSuccess'));
-  }, [showToast, t]);
+    void recordEditDocReviewResult({
+      decision: 'accepted',
+      scope: 'full_diff',
+      remainingHunks: 0,
+    });
+  }, [recordEditDocReviewResult, showToast, t]);
 
   const handleAcceptEditDocDiffHunk = useCallback((hunk: TextDiffHunk) => {
     if (!editDocDiff) return;
@@ -344,7 +430,13 @@ export default function WorkflowDetail() {
       });
     }
     showToast('success', t('detail.editDocDiffAcceptHunkSuccess'));
-  }, [editDocDiff, showToast, t]);
+    void recordEditDocReviewResult({
+      decision: 'accepted',
+      scope: 'hunk',
+      hunk,
+      remainingHunks: nextBefore === editDocDiff.after ? 0 : Math.max(0, editDocDiffHunks.length - 1),
+    });
+  }, [editDocDiff, editDocDiffHunks.length, recordEditDocReviewResult, showToast, t]);
 
   const handleRejectEditDocDiff = useCallback(async () => {
     if (!workflow || !editDocDiff || editDocReviewing) return;
@@ -366,12 +458,17 @@ export default function WorkflowDetail() {
       setEditDocMode('edit');
       setShowMdHint(false);
       showToast('success', t('detail.editDocDiffRejectSuccess'));
+      void recordEditDocReviewResult({
+        decision: 'rejected',
+        scope: 'full_diff',
+        remainingHunks: 0,
+      });
     } catch (err: unknown) {
       showToast('error', `${t('detail.editDocDiffRejectFailed')}: ${extractErrorMessage(err)}`);
     } finally {
       setEditDocReviewing(null);
     }
-  }, [editDocDiff, editDocReviewing, showToast, t, workflow]);
+  }, [editDocDiff, editDocReviewing, recordEditDocReviewResult, showToast, t, workflow]);
 
   const handleRejectEditDocDiffHunk = useCallback(async (hunk: TextDiffHunk) => {
     if (!workflow || !editDocDiff || editDocReviewing) return;
@@ -401,12 +498,18 @@ export default function WorkflowDetail() {
       }
       setEditDocMode('edit');
       showToast('success', t('detail.editDocDiffRejectHunkSuccess'));
+      void recordEditDocReviewResult({
+        decision: 'rejected',
+        scope: 'hunk',
+        hunk,
+        remainingHunks: nextAfter === editDocDiff.before ? 0 : Math.max(0, editDocDiffHunks.length - 1),
+      });
     } catch (err: unknown) {
       showToast('error', `${t('detail.editDocDiffRejectHunkFailed')}: ${extractErrorMessage(err)}`);
     } finally {
       setEditDocReviewing(null);
     }
-  }, [editDocDiff, editDocReviewing, showToast, t, workflow]);
+  }, [editDocDiff, editDocDiffHunks.length, editDocReviewing, recordEditDocReviewResult, showToast, t, workflow]);
 
   // 用户手动切换 canvas tab 时，阻止后续自动跳转
   const handleCanvasTabChange = useCallback((tab: CanvasTab) => {
@@ -577,70 +680,73 @@ export default function WorkflowDetail() {
                     <p className="mt-0.5 truncate text-[11px] text-gray-400">workflow.md</p>
                   </div>
 
-                  <div className="flex min-w-0 flex-shrink items-center gap-2 overflow-x-auto pb-0.5">
-                    <div className="flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                  <div className="flex min-w-0 flex-shrink items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    <div className="flex flex-shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-0.5">
                       <button
                         type="button"
                         onClick={() => setEditDocMode('edit')}
-                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                        className={`inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
                           editDocMode === 'edit'
                             ? 'bg-white text-gray-900 shadow-sm'
                             : 'text-gray-500 hover:text-gray-700'
                         }`}
+                        title={t('detail.editDocModeEdit')}
                       >
                         <Pencil className="h-3.5 w-3.5" />
-                        {t('detail.editDocModeEdit')}
+                        <span className="max-[560px]:hidden">{t('detail.editDocModeEdit')}</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => setEditDocMode('preview')}
-                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                        className={`inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
                           editDocMode === 'preview'
                             ? 'bg-white text-gray-900 shadow-sm'
                             : 'text-gray-500 hover:text-gray-700'
                         }`}
+                        title={t('detail.editDocModePreview')}
                       >
                         <Eye className="h-3.5 w-3.5" />
-                        {t('detail.editDocModePreview')}
+                        <span className="max-[560px]:hidden">{t('detail.editDocModePreview')}</span>
                       </button>
                     </div>
 
                     <button
                       type="button"
                       onClick={handleGenerateEditDoc}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900"
+                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 max-[560px]:px-2.5"
                       title={t('detail.generateEditDocTitle')}
                     >
                       <Sparkles className="h-3.5 w-3.5" />
-                      {editDocDraft.trim() ? t('detail.regenerateEditDoc') : t('detail.generateEditDoc')}
+                      <span className="max-[680px]:hidden">{editDocDraft.trim() ? t('detail.regenerateEditDoc') : t('detail.generateEditDoc')}</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleExportEditDoc}
                       disabled={!editDocDraft.trim()}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40"
+                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 max-[560px]:px-2.5"
                       title={t('detail.downloadMdTitle')}
                     >
                       <Download className="h-3.5 w-3.5" />
-                      {t('detail.downloadMd')}
+                      <span className="max-[680px]:hidden">{t('detail.downloadMd')}</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleSaveEditDoc()}
                       disabled={!editDocDirty || editDocSaving}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none"
+                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-red-600 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none max-[560px]:px-2.5"
+                      title={editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}
                     >
                       <Save className="h-3.5 w-3.5" />
-                      {editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}
+                      <span className="max-[680px]:hidden">{editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleGenerateWorkflow}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800"
+                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800 max-[560px]:px-2.5"
                       title={t('detail.generateWorkflowTitle')}
                     >
                       <WorkflowIcon className="h-3.5 w-3.5" />
-                      {t('detail.generateWorkflow')}
+                      <span className="max-[760px]:hidden">{t('detail.generateWorkflow')}</span>
                     </button>
                   </div>
                 </div>
@@ -756,6 +862,8 @@ export default function WorkflowDetail() {
           onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}
           onFirstMessageSent={handleFirstMessageSent}
+          onSessionChange={handleWorkflowChatSessionChange}
+          onGuidePrompt={launchWorkflowGuidePrompt}
           selectedNode={drawerNode}
           onDeselectNode={() => setDrawerNode(null)}
           onDelete={handleDelete}
