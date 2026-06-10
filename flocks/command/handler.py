@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, Optional
 
 from flocks.command.command import Command, CommandSurface
 from flocks.command.direct import run_direct_command
+from flocks.input.events import ParsedCommand
 
 
 SendText = Callable[[str], Awaitable[None]]
@@ -17,6 +18,7 @@ ClearHistory = Callable[[], Awaitable[None]]
 async def handle_slash_command(
     content: str,
     *,
+    parsed_command: Optional[ParsedCommand] = None,
     send_text: SendText,
     send_prompt: SendPrompt,
     clear_screen: Optional[ClearScreen] = None,
@@ -28,21 +30,33 @@ async def handle_slash_command(
 
     Returns True if handled.
     """
-    stripped = content.strip()
-    if not stripped.startswith("/"):
-        return False
+    parsed = parsed_command
+    if parsed is None:
+        stripped = content.strip()
+        if not stripped.startswith("/"):
+            return False
 
-    cmd_parts = stripped[1:].split(None, 1)
-    if not cmd_parts:
-        return False
+        cmd_parts = stripped[1:].split(None, 1)
+        if not cmd_parts:
+            return False
+        parsed = ParsedCommand(
+            raw_text=stripped,
+            command_name=cmd_parts[0].lower(),
+            canonical_name=cmd_parts[0].lower(),
+            args=cmd_parts[1].strip() if len(cmd_parts) > 1 else "",
+        )
 
-    resolved = Command.resolve(cmd_parts[0].lower())
+    resolved = Command.resolve(parsed.command_name)
     if not resolved or resolved.execution_kind != "direct":
         return False
 
     name = resolved.name
-    args = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
-    result = await run_direct_command(name, args=args, surface=surface)
+    result = await run_direct_command(
+        name,
+        args=parsed.args,
+        args_json=parsed.args_json,
+        surface=surface,
+    )
     if not result.handled:
         return False
 
