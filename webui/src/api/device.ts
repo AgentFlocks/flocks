@@ -167,11 +167,11 @@ export const deviceAPI = {
     client.delete(`/api/devices/groups/${id}`),
 
   // devices
-  list: (params?: { group_id?: string }) =>
+  list: (params?: { group_id?: string; refresh?: boolean }) =>
     client.get<DeviceIntegration[]>('/api/devices', { params }),
 
-  listTemplates: () =>
-    client.get<DeviceTemplate[]>('/api/devices/templates'),
+  listTemplates: (params?: { refresh?: boolean }) =>
+    client.get<DeviceTemplate[]>('/api/devices/templates', { params }),
 
   createCustomTemplate: (data: CustomDeviceTemplateCreate) =>
     client.post<DeviceTemplate>('/api/devices/templates/custom', data),

@@ -1328,13 +1328,13 @@ export default function DeviceIntegrationPage() {
     [devices, selectedGroupId],
   );
 
-  const fetchData = useCallback(async (silent = false): Promise<DeviceTemplate[]> => {
+  const fetchData = useCallback(async (silent = false, refreshTemplates = false): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
       const [devRes, tplRes, grpRes] = await Promise.all([
-        deviceAPI.list(),
-        deviceAPI.listTemplates(),
+        deviceAPI.list(refreshTemplates ? { refresh: true } : undefined),
+        deviceAPI.listTemplates(refreshTemplates ? { refresh: true } : undefined),
         deviceAPI.listGroups(),
       ]);
       const nextTemplates = tplRes.data || [];
@@ -1454,6 +1454,9 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
     if (panel?.kind === 'edit') {
       const updated = await deviceAPI.get(panel.device.id);
+      if (selectedGroupId && updated.data.group_id !== selectedGroupId) {
+        setSelectedGroupId(updated.data.group_id);
+      }
       setPanel({ kind: 'edit', device: updated.data });
     }
   };
@@ -1531,7 +1534,7 @@ export default function DeviceIntegrationPage() {
         action={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => void fetchData(true)}
+              onClick={() => void fetchData(true, true)}
               disabled={refreshing}
               title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
@@ -1810,7 +1813,7 @@ export default function DeviceIntegrationPage() {
             vendorKey={panelVendorKey}
             initialGroupId={panelInitGroupId}
             groups={groups}
-            groupLocked={panel.kind === 'edit' ? true : groupLocked}
+            groupLocked={panel.kind === 'add' ? groupLocked : false}
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={() => setPanel(null)}

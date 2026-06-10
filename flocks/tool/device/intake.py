@@ -12,6 +12,7 @@ from typing import Optional
 
 import httpx
 
+from flocks.storage.storage import Storage
 from flocks.tool.device.models import (
     DEFAULT_GROUP_ID,
     MULTI_GROUP_ENABLED,
@@ -24,15 +25,19 @@ from flocks.tool.device.models import (
 from flocks.tool.device.secrets import delete_secrets, persist_fields, resolve_for_runtime
 from flocks.tool.device.store import (
     delete_device_row,
+    ensure_default_group,
     fetch_device,
     group_exists,
     insert_device,
+    list_devices,
     record_test_result,
     row_to_device,
     storage_key_to_service_id,
     update_device_row,
 )
 from flocks.tool.device.sync import sync_service_tool_state
+
+_AUTO_INSTANCE_IGNORED_KEY = "device.auto_instance_ignored_storage_keys"
 
 
 class DeviceIntakeError(Exception):
@@ -41,6 +46,99 @@ class DeviceIntakeError(Exception):
 
 class DeviceNotFoundError(DeviceIntakeError):
     status_code = 404
+
+
+async def _load_auto_instance_ignored_storage_keys() -> set[str]:
+    raw = await Storage.get(_AUTO_INSTANCE_IGNORED_KEY)
+    if isinstance(raw, list):
+        return {str(item) for item in raw if item}
+    if isinstance(raw, dict):
+        values = raw.get("storage_keys")
+        if isinstance(values, list):
+            return {str(item) for item in values if item}
+    return set()
+
+
+async def _save_auto_instance_ignored_storage_keys(storage_keys: set[str]) -> None:
+    await Storage.set(_AUTO_INSTANCE_IGNORED_KEY, sorted(storage_keys))
+
+
+async def _remember_auto_instance_ignore(storage_key: str) -> None:
+    if not storage_key:
+        return
+    ignored = await _load_auto_instance_ignored_storage_keys()
+    if storage_key in ignored:
+        return
+    ignored.add(storage_key)
+    await _save_auto_instance_ignored_storage_keys(ignored)
+
+
+async def _forget_auto_instance_ignore(storage_key: str) -> None:
+    if not storage_key:
+        return
+    ignored = await _load_auto_instance_ignored_storage_keys()
+    if storage_key not in ignored:
+        return
+    ignored.remove(storage_key)
+    await _save_auto_instance_ignored_storage_keys(ignored)
+
+
+def _user_device_template_storage_keys(*, refresh_templates: bool = False) -> set[str]:
+    from flocks.tool.device.plugin_index import list_device_templates
+
+    return {
+        template.storage_key
+        for template in list_device_templates(refresh=refresh_templates)
+        if template.source == "global" and template.installed
+    }
+
+
+async def ensure_user_device_instances(*, refresh_templates: bool = False) -> int:
+    """Create default device rows for user-level device plugin templates.
+
+    Device templates discovered under ``~/.flocks/plugins/tools/device`` are
+    installable product definitions. The device access page's left pane shows
+    concrete ``device_integrations`` rows, so a user-created local template
+    would otherwise appear only in the right-side picker until the user manually
+    added an instance. Auto-provision one editable instance per user-level
+    template when no instance for the same storage_key exists yet.
+    """
+    await ensure_default_group()
+    existing_storage_keys = {device.storage_key for device in await list_devices()}
+    ignored_storage_keys = await _load_auto_instance_ignored_storage_keys()
+    user_template_storage_keys = _user_device_template_storage_keys(
+        refresh_templates=refresh_templates,
+    )
+    created = 0
+
+    from flocks.tool.device.plugin_index import list_device_templates
+
+    for template in list_device_templates(refresh=False):
+        if template.source != "global" or not template.installed:
+            continue
+        if template.storage_key in existing_storage_keys:
+            continue
+        if template.storage_key in ignored_storage_keys:
+            continue
+        if template.storage_key not in user_template_storage_keys:
+            continue
+
+        device_id = str(uuid.uuid4())
+        await insert_device(
+            device_id=device_id,
+            group_id=DEFAULT_GROUP_ID,
+            name=template.name,
+            storage_key=template.storage_key,
+            service_id=template.service_id,
+            enabled=True,
+            verify_ssl=False,
+            db_fields={},
+        )
+        existing_storage_keys.add(template.storage_key)
+        created += 1
+        await sync_service_tool_state(template.service_id)
+
+    return created
 
 
 async def create_device(body: DeviceIntegrationCreate) -> DeviceIntegration:
@@ -69,6 +167,7 @@ async def create_device(body: DeviceIntegrationCreate) -> DeviceIntegration:
         verify_ssl=body.verify_ssl,
         db_fields=db_fields,
     )
+    await _forget_auto_instance_ignore(storage_key)
     await sync_service_tool_state(service_id)
 
     row = await fetch_device(device_id)
@@ -127,6 +226,8 @@ async def delete_device(device_id: str) -> None:
     service_id: str = storage_key_to_service_id(storage_key)
     db_fields: dict = json.loads(row["fields"] or "{}")
 
+    if storage_key in _user_device_template_storage_keys(refresh_templates=True):
+        await _remember_auto_instance_ignore(storage_key)
     delete_secrets(device_id, db_fields)
     await delete_device_row(device_id)
     await sync_service_tool_state(service_id, deleted_storage_keys=[storage_key])

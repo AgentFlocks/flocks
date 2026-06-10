@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yaml
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -37,6 +38,7 @@ def _write_tool(root: Path, name: str = "device_ping") -> None:
 def _reset_env(monkeypatch, tmp_path):
     from flocks.config.config import Config
     from flocks.config import api_versioning
+    from flocks.storage.storage import Storage
 
     home = tmp_path / "home"
     data = tmp_path / "data"
@@ -49,6 +51,8 @@ def _reset_env(monkeypatch, tmp_path):
     monkeypatch.chdir(project)
     Config._global_config = None
     Config._cached_config = None
+    Storage._db_path = None
+    Storage._initialized = False
     api_versioning._reset_descriptor_cache()
     return home, data, project
 
@@ -224,7 +228,7 @@ def test_device_template_route_is_not_shadowed_by_device_id(monkeypatch):
     monkeypatch.setattr(
         device_routes,
         "list_device_templates",
-        lambda: [
+        lambda refresh=False: [
             {
                 "plugin_id": "demo",
                 "storage_key": "demo_api_v1",
@@ -248,3 +252,107 @@ def test_device_template_route_is_not_shadowed_by_device_id(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()[0]["plugin_id"] == "demo"
+
+
+def test_device_template_route_forwards_refresh(monkeypatch):
+    from flocks.server.routes import device as device_routes
+
+    calls: list[bool] = []
+
+    def fake_list_device_templates(*, refresh: bool = False):
+        calls.append(refresh)
+        return [
+            {
+                "plugin_id": "demo",
+                "storage_key": "demo_api_v1",
+                "service_id": "demo_api",
+                "name": "Demo",
+                "version": "1",
+                "credential_schema": [],
+                "tool_count": 0,
+                "installed": True,
+                "state": "installed",
+                "source": "project",
+            }
+        ]
+
+    monkeypatch.setattr(device_routes, "list_device_templates", fake_list_device_templates)
+
+    app = FastAPI()
+    app.include_router(device_routes.router, prefix="/api/devices")
+    client = TestClient(app)
+
+    response = client.get("/api/devices/templates?refresh=true")
+
+    assert response.status_code == 200
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_device_list_auto_creates_user_device_plugin_instance(monkeypatch, tmp_path):
+    from flocks.server.routes import device as device_routes
+    from flocks.storage.storage import Storage
+    from flocks.tool.device.store import list_devices
+    from flocks.tool.device import plugin_index
+
+    home, _data, _project = _reset_env(monkeypatch, tmp_path)
+    await Storage.init()
+
+    root = home / ".flocks" / "plugins" / "tools" / "device" / "custom_demo"
+    _write_provider(
+        root,
+        {
+            "name": "Custom Demo",
+            "service_id": "custom_demo_api",
+            "version": "0.1.0",
+            "integration_type": "device",
+            "vendor": "custom_vendor",
+            "credential_fields": [],
+        },
+    )
+    _write_tool(root, "custom_demo_ping")
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(plugin_index.hub_catalog, "system_plugin_root", lambda plugin_type, plugin_id: None)
+    monkeypatch.setattr(plugin_index.ToolRegistry, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "list_tools", classmethod(lambda cls: []))
+
+    app = FastAPI()
+    app.include_router(device_routes.router, prefix="/api/devices")
+    client = TestClient(app)
+
+    response = client.get("/api/devices?refresh=true")
+    repeated = client.get("/api/devices?refresh=true")
+    devices = await list_devices()
+
+    assert response.status_code == 200
+    assert repeated.status_code == 200
+    assert len(devices) == 1
+    assert devices[0].name == "Custom Demo"
+    assert devices[0].storage_key == "custom_demo_api_v0_1_0"
+    assert devices[0].service_id == "custom_demo_api"
+    assert devices[0].enabled is True
+
+    delete_response = client.delete(f"/api/devices/{devices[0].id}")
+    after_delete = client.get("/api/devices?refresh=true")
+    devices_after_delete = await list_devices()
+
+    assert delete_response.status_code == 204
+    assert after_delete.status_code == 200
+    assert after_delete.json() == []
+    assert devices_after_delete == []
+
+    manual_create = client.post(
+        "/api/devices",
+        json={
+            "name": "Custom Demo Manual",
+            "storage_key": "custom_demo_api_v0_1_0",
+            "service_id": "custom_demo_api",
+            "fields": {},
+        },
+    )
+    after_manual_create = client.get("/api/devices?refresh=true")
+
+    assert manual_create.status_code == 201
+    assert len(after_manual_create.json()) == 1
+    assert after_manual_create.json()[0]["name"] == "Custom Demo Manual"

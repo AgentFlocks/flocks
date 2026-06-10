@@ -48,6 +48,10 @@ vi.mock('react-i18next', () => ({
         'toolbar.addDevice': '立即添加设备',
         'empty.addNow': '立即添加设备',
         'config.closeAriaLabel': '关闭设备配置面板',
+        'config.nameLabel': '设备名称',
+        'config.roomLabel': '所属机房',
+        'config.saveBtn': '保存配置',
+        'config.addBtn': '添加设备',
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
@@ -483,6 +487,60 @@ describe('DeviceIntegrationPage', () => {
 
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: '关闭设备配置面板' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('allows editing an existing device room from a selected room view', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'TDP-test-02',
+      storage_key: 'tdp_api_v3_3_10',
+      service_id: 'tdp',
+      enabled: true,
+      verify_ssl: false,
+      fields: { base_url: 'https://tdp.example.com' },
+      fields_set: { api_key: true, secret: true, base_url: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          tool_count: 21,
+          vendor: 'threatbook',
+        }),
+      ],
+    });
+    mocks.listGroups.mockResolvedValue({
+      data: [
+        { id: 'group-1', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 },
+        { id: 'group-2', name: '测试', sort_order: 1, created_at: 0, updated_at: 0 },
+      ],
+    });
+    mocks.getDevice.mockResolvedValue({
+      data: { ...initialDevice, group_id: 'group-2' },
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('TDP-test-02'));
+    const roomSelect = await screen.findByRole('combobox');
+    await user.selectOptions(roomSelect, 'group-2');
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(mocks.updateDevice).toHaveBeenCalledWith(
+        'device-1',
+        expect.objectContaining({ group_id: 'group-2' }),
+      );
     });
   });
 
