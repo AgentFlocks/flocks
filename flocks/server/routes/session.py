@@ -3740,11 +3740,16 @@ async def get_session_statistics(sessionID: str):
     - Model usage
     """
     try:
-        # Get session
-        session = await Session.load(sessionID)
-        
-        # Get messages
-        messages = await session.get_messages()
+        session = await _get_session_by_id_unfiltered(sessionID)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session {sessionID} not found",
+            )
+
+        from flocks.session.message import Message
+
+        messages = await Message.list_with_parts(sessionID, include_archived=True)
         
         # Calculate statistics
         message_count = len(messages)
@@ -3752,26 +3757,27 @@ async def get_session_statistics(sessionID: str):
         tool_call_count = 0
         model_usage = {}
         
-        for msg in messages:
+        for message_with_parts in messages:
+            msg = message_with_parts.info
+
             # Count tokens (approximate from parts)
-            for part in msg.parts:
-                if hasattr(part, 'text') and part.text:
+            for part in message_with_parts.parts:
+                if hasattr(part, "text") and part.text:
                     token_count += len(part.text.split())  # Rough approximation
                 
                 # Count tool calls
-                if hasattr(part, 'toolCall') and part.toolCall:
+                if getattr(part, "type", None) == "tool":
                     tool_call_count += 1
             
             # Track model usage
-            if msg.model:
-                model_usage[msg.model] = model_usage.get(msg.model, 0) + 1
-        
-        # Get session info
-        info = await session.get_info()
+            model = getattr(msg, "model", None)
+            if model:
+                model_key = model if isinstance(model, str) else json.dumps(model, sort_keys=True, default=str)
+                model_usage[model_key] = model_usage.get(model_key, 0) + 1
         
         # Calculate duration
-        created_ms = info.time.created
-        updated_ms = info.time.updated
+        created_ms = session.time.created
+        updated_ms = session.time.updated
         duration_ms = updated_ms - created_ms
         duration_seconds = duration_ms / 1000
         
@@ -3788,6 +3794,8 @@ async def get_session_statistics(sessionID: str):
         
         log.info("session.statistics", {"sessionID": sessionID, "messages": message_count})
         return stats
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("session.statistics.error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get session statistics: {str(e)}")
