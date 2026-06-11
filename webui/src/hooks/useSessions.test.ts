@@ -165,6 +165,33 @@ describe('updateMessagePart scheduling', () => {
     expect(result.current.messages[0].parentID).toBe('msg-1');
   });
 
+  it('keeps assistant error info from fetched messages', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: [{
+        info: {
+          id: 'msg-error',
+          sessionID: 'sess-1',
+          role: 'assistant',
+          finish: 'error',
+          error: {
+            name: 'APIConnectionError',
+            data: { message: 'Connection error.' },
+          },
+          time: { created: 123 },
+        },
+        parts: [],
+      }],
+    } as any);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+
+    await act(async () => {});
+
+    expect(result.current.messages).toHaveLength(1);
+    expect((result.current.messages[0].error as any).data.message).toBe('Connection error.');
+    expect(result.current.messages[0].finish).toBe('error');
+  });
+
   it('first appearance of a new part updates messages state immediately', async () => {
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     // Wait for the initial fetchMessages effect to settle so it doesn't wipe state

@@ -527,6 +527,21 @@ export function shouldRefetchFinishedMessage({
   return !finishedMessageId || !abortedMessageId || finishedMessageId !== abortedMessageId;
 }
 
+export function isActiveToolPart(part?: Pick<MessagePart, 'type' | 'state'> | null): boolean {
+  return (
+    (part?.type === 'tool' || part?.type === 'toolCall') &&
+    (part.state?.status === 'pending' || part.state?.status === 'running')
+  );
+}
+
+export function hasActiveToolPart(parts?: Array<Pick<MessagePart, 'type' | 'state'>> | null): boolean {
+  return parts?.some(isActiveToolPart) ?? false;
+}
+
+export function isActiveSessionStatus(status?: { type?: string } | null): boolean {
+  return status?.type === 'busy' || status?.type === 'compacting' || status?.type === 'retry';
+}
+
 export function getEditingActionBarClassName(): string {
   return 'mt-3 flex w-full items-center justify-end gap-1.5';
 }
@@ -572,6 +587,22 @@ export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'f
     return false;
   }
   return true;
+}
+
+export function getMessageErrorText(message: Pick<Message, 'error'>): string {
+  const error = message.error as any;
+  if (!error) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error.data?.displayMessage === 'string' && error.data.displayMessage.trim()) {
+    return error.data.displayMessage;
+  }
+  if (typeof error.message === 'string' && error.message.trim()) return error.message;
+  if (typeof error.data?.message === 'string' && error.data.message.trim()) {
+    return error.data.message;
+  }
+  if (typeof error.code === 'string' && error.code.trim()) return error.code;
+  if (typeof error.name === 'string' && error.name.trim()) return error.name;
+  return 'Message failed';
 }
 
 export function getUserAvatarContainerClassName(compact: boolean): string {
@@ -888,6 +919,7 @@ export default function SessionChat({
   const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const activeToolPartIdsRef = useRef<Set<string>>(new Set());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Lightbox preview for composer thumbnails. Shares the same overlay
@@ -979,6 +1011,7 @@ export default function SessionChat({
     clearAll: clearPendingQuestions,
   } = usePendingQuestions();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1099,6 +1132,7 @@ export default function SessionChat({
       if (type === 'session.cleared' && properties.sessionID === sessionId) {
         abortingRef.current = false;
         sessionBusyRef.current = false;
+        activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
         setIsStreaming(false);
         refetch();
@@ -1123,6 +1157,7 @@ export default function SessionChat({
           setCompactionStages([]);
         } else if (statusType === 'idle') {
           sessionBusyRef.current = false;
+          activeToolPartIdsRef.current.clear();
           setIsStreaming(false);
           setIsCompacting(false);
           isCompactingRef.current = false;
@@ -1142,7 +1177,7 @@ export default function SessionChat({
           // would replace the visible partial response with an empty message.
           if (shouldRefetch) {
             refetch();
-            if (!sessionBusyRef.current) {
+            if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
               setIsStreaming(false);
             }
           }
@@ -1156,6 +1191,15 @@ export default function SessionChat({
           setIsStreaming(true);
         }
       } else if (type === 'message.part.updated' && properties.part?.sessionID === sessionId) {
+        const part = properties.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+        if (part.id) {
+          if (isActiveToolPart(part)) {
+            activeToolPartIdsRef.current.add(part.id);
+            if (!abortingRef.current) setIsStreaming(true);
+          } else {
+            activeToolPartIdsRef.current.delete(part.id);
+          }
+        }
         updateMessagePart(properties.part, properties.delta);
         scrollToBottom();
       } else if (type === 'question.asked' && properties.sessionID === sessionId) {
@@ -1203,6 +1247,7 @@ export default function SessionChat({
         setCompactionStages([]);
         abortingRef.current = false;
         sessionBusyRef.current = false;
+        activeToolPartIdsRef.current.clear();
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
     },
@@ -1265,6 +1310,18 @@ export default function SessionChat({
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!isStreaming && !sending && !isCompacting) return;
+    const target = messagesContentRef.current;
+    if (!target || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(() => {
+      scrollToBottom();
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [isStreaming, sending, isCompacting, scrollToBottom]);
 
   // Auto-resize textarea
   const autoResize = useCallback(() => {
@@ -2096,6 +2153,16 @@ export default function SessionChat({
         const msgs: any[] = res.data || [];
         const lastMsg = msgs[msgs.length - 1];
         if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
+          const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
+          if (hasFetchedActiveTool) {
+            return;
+          }
+          activeToolPartIdsRef.current.clear();
+          const statusRes = await client.get('/api/session/status');
+          const status = statusRes.data?.[sessionId];
+          if (isActiveSessionStatus(status)) {
+            return;
+          }
           refetch();
           setIsStreaming(false);
         }
@@ -2325,7 +2392,7 @@ export default function SessionChat({
             <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
           )
         ) : (
-          <div className={msgListClass}>
+          <div ref={messagesContentRef} className={msgListClass}>
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
               // If this position is a redirect, render the summary message here
@@ -2453,8 +2520,6 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
-
         {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
         {conversationBottomSlot && !hideInput && (
           <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
@@ -2475,6 +2540,7 @@ export default function SessionChat({
             </div>
           </div>
         )}
+        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
       {/* Suggestions — shown before user sends any message */}
@@ -2986,6 +3052,7 @@ function ChatMessageBubbleInner({
   const editingActionBarClass = getEditingActionBarClassName();
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
+  const messageErrorText = isUser ? '' : getMessageErrorText(message);
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
 
@@ -3011,11 +3078,18 @@ function ChatMessageBubbleInner({
             {t('chat.sending')}
           </div>
         ) : (
-          <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
-          </div>
+          messageErrorText ? (
+            <div className="flex items-start gap-2 py-1 text-sm text-red-700" role="alert">
+              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
+              <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
+            </div>
+          )
         )
       )}
 

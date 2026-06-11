@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,6 +13,7 @@ import {
   default as SessionChat,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
+  getMessageErrorText,
   getMessageGroupClassName,
   getRenderableThinkingText,
   getRenderableFileUrl,
@@ -20,6 +21,8 @@ import {
   getStandaloneThinkingBubbleClassName,
   getUserAvatarContainerClassName,
   getUserAvatarSpacerClassName,
+  hasActiveToolPart,
+  isActiveSessionStatus,
   listUploadedDocumentPaths,
   shouldRenderMessage,
   shouldRefetchFinishedMessage,
@@ -37,6 +40,7 @@ const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
+const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string) => ({
   'chat.placeholder': '请输入消息',
   'chat.emptyText': '暂无消息',
@@ -91,7 +95,10 @@ vi.mock('@/hooks/useSessions', () => ({
 }));
 
 vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({ status: 'connected' }),
+  useSSE: (options: any) => {
+    useSSEOptionsRef.current = options;
+    return { status: 'connected' };
+  },
 }));
 
 vi.mock('@/hooks/useReasoningToggle', () => ({
@@ -161,6 +168,7 @@ beforeEach(() => {
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
   pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
+  useSSEOptionsRef.current = null;
   useSessionMessagesMock.mockReturnValue({
     messages: [],
     loading: false,
@@ -442,6 +450,69 @@ describe('getRenderableThinkingText', () => {
   });
 });
 
+describe('getMessageErrorText', () => {
+  it('prefers user-facing display messages over raw provider errors', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: {
+        message: 'Connection error.',
+        data: {
+          displayMessage: 'Model is unavailable. Please check the provider connection and model configuration.',
+          message: 'Connection error.',
+        },
+      } as any,
+    }))).toBe('Model is unavailable. Please check the provider connection and model configuration.');
+  });
+
+  it('extracts nested provider error messages', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: {
+        name: 'APIConnectionError',
+        data: { message: 'Connection error.' },
+      } as any,
+    }))).toBe('Connection error.');
+  });
+
+  it('falls back to the error code', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: { code: 'SessionError' } as any,
+    }))).toBe('SessionError');
+  });
+});
+
+describe('SessionChat error rendering', () => {
+  it('renders empty assistant error messages instead of the thinking indicator', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-error',
+          role: 'assistant',
+          parts: [],
+          finish: 'error',
+          error: {
+            name: 'APIConnectionError',
+            data: { message: 'Connection error.' },
+          } as any,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('Connection error.')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+});
+
 describe('SessionChat agent mentions', () => {
   const mentionAgents = [
     {
@@ -693,6 +764,177 @@ describe('shouldRefetchFinishedMessage', () => {
       finishedMessageId: 'assistant-2',
       abortedMessageId: 'assistant-1',
     })).toBe(true);
+  });
+});
+
+describe('streaming activity helpers', () => {
+  it('detects pending and running tool parts as active', () => {
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'pending' } } as Message['parts'][number],
+    ])).toBe(true);
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
+    ])).toBe(true);
+  });
+
+  it('does not treat completed or error tool parts as active', () => {
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'completed' } } as Message['parts'][number],
+      { id: 'tool-2', type: 'tool', state: { status: 'error' } } as Message['parts'][number],
+    ])).toBe(false);
+  });
+
+  it('keeps busy, compacting, and retry session statuses active', () => {
+    expect(isActiveSessionStatus({ type: 'busy' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'compacting' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'retry' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'idle' })).toBe(false);
+    expect(isActiveSessionStatus(undefined)).toBe(false);
+  });
+});
+
+describe('SessionChat fallback polling', () => {
+  it('does not finish streaming while fetched messages still contain a running tool', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      useSessionMessagesMock.mockReturnValue({
+        messages: [
+          makeMessage({
+            id: 'assistant-1',
+            finish: 'tool-calls',
+            parts: [
+              { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
+            ],
+          }),
+        ],
+        loading: false,
+        refetch,
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        replaceMessageText: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      });
+      clientGetMock.mockResolvedValueOnce({
+        data: [
+          {
+            info: {
+              id: 'assistant-1',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              finish: 'tool-calls',
+            },
+            parts: [
+              { id: 'tool-1', type: 'tool', state: { status: 'running' } },
+            ],
+          },
+        ],
+      });
+
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+        onStreamingDone,
+      }));
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(refetch).not.toHaveBeenCalled();
+      expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes streaming when only the local active tool ref is stale', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      useSessionMessagesMock.mockReturnValue({
+        messages: [
+          makeMessage({
+            id: 'assistant-1',
+            finish: 'stop',
+            parts: [
+              { id: 'text-1', type: 'text', text: 'done' } as Message['parts'][number],
+            ],
+          }),
+        ],
+        loading: false,
+        refetch,
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        replaceMessageText: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      });
+      clientGetMock.mockImplementation((url: string) => {
+        if (url === '/api/session/sess-1/message') {
+          return Promise.resolve({
+            data: [
+              {
+                info: {
+                  id: 'assistant-1',
+                  sessionID: 'sess-1',
+                  role: 'assistant',
+                  finish: 'stop',
+                },
+                parts: [
+                  { id: 'text-1', type: 'text', text: 'done' },
+                ],
+              },
+            ],
+          });
+        }
+        if (url === '/api/session/status') {
+          return Promise.resolve({ data: { 'sess-1': { type: 'idle' } } });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+        onStreamingDone,
+      }));
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'tool-1',
+              messageID: 'assistant-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              state: { status: 'running' },
+            },
+          },
+        });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).toHaveBeenCalled();
+      expect(onStreamingDone).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

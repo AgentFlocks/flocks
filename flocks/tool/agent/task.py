@@ -34,6 +34,7 @@ sibling tool calls in one assistant turn for parallel work.
     name="task",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
+    native=False,
     parameters=[
         ToolParameter(
             name="description",

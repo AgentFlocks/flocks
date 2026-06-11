@@ -91,6 +91,30 @@ _SUBCOMMAND_ENUM = ["find", "install", "status", "install-deps", "remove"]
 _READ_ONLY_SUBCOMMANDS = frozenset({"find", "status"})
 
 
+def _parse_install_args(args: str) -> tuple[Optional[str], str]:
+    tokens = shlex.split(args.strip()) if args.strip() else []
+    source: Optional[str] = None
+    scope = "global"
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--scope" and i + 1 < len(tokens):
+            scope = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith("--scope="):
+            scope = token.split("=", 1)[1]
+            i += 1
+            continue
+        if token in {"--yes", "-y"}:
+            i += 1
+            continue
+        if source is None:
+            source = token
+        i += 1
+    return source, scope
+
+
 def _flocks_executable() -> Optional[str]:
     """Locate the `flocks` CLI on PATH."""
     return shutil.which("flocks")
@@ -139,6 +163,54 @@ async def flocks_skills(
                 f"Unknown subcommand: {subcommand!r}. "
                 f"Allowed: {', '.join(sorted(_ALLOWED_SUBCOMMANDS))}"
             ),
+        )
+
+    if subcommand == "install":
+        source, scope = _parse_install_args(args)
+        if not source:
+            return ToolResult(
+                success=False,
+                error="install requires a source, e.g. github:owner/repo/skill-name",
+            )
+        if scope not in {"global", "project"}:
+            return ToolResult(
+                success=False,
+                error="install --scope must be 'global' or 'project'",
+            )
+        await ctx.ask(
+            permission="bash",
+            patterns=[f"flocks skills install {source} --scope {scope} --yes"],
+            always=["*flocks skills *"],
+            metadata={"subcommand": subcommand},
+        )
+        try:
+            from flocks.skill.installer import SkillInstaller
+
+            result = await SkillInstaller.install_from_source(
+                source,
+                scope=scope,
+                yes=True,
+            )
+        except Exception as exc:
+            return ToolResult(
+                success=False,
+                error=f"Skill install failed: {exc}",
+                title="flocks skills install",
+            )
+        if not result.success:
+            return ToolResult(
+                success=False,
+                error=result.error or result.message or "Skill install failed",
+                title="flocks skills install",
+            )
+        return ToolResult(
+            success=True,
+            output={
+                "message": result.message,
+                "skill_name": result.skill_name,
+                "location": result.location,
+            },
+            title="flocks skills install",
         )
 
     flocks_bin = _flocks_executable()
