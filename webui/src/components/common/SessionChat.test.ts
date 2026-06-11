@@ -816,6 +816,88 @@ describe('SessionChat fallback polling', () => {
       vi.useRealTimers();
     }
   });
+
+  it('finishes streaming when only the local active tool ref is stale', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      useSessionMessagesMock.mockReturnValue({
+        messages: [
+          makeMessage({
+            id: 'assistant-1',
+            finish: 'stop',
+            parts: [
+              { id: 'text-1', type: 'text', text: 'done' } as Message['parts'][number],
+            ],
+          }),
+        ],
+        loading: false,
+        refetch,
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        replaceMessageText: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      });
+      clientGetMock.mockImplementation((url: string) => {
+        if (url === '/api/session/sess-1/message') {
+          return Promise.resolve({
+            data: [
+              {
+                info: {
+                  id: 'assistant-1',
+                  sessionID: 'sess-1',
+                  role: 'assistant',
+                  finish: 'stop',
+                },
+                parts: [
+                  { id: 'text-1', type: 'text', text: 'done' },
+                ],
+              },
+            ],
+          });
+        }
+        if (url === '/api/session/status') {
+          return Promise.resolve({ data: { 'sess-1': { type: 'idle' } } });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+        onStreamingDone,
+      }));
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'tool-1',
+              messageID: 'assistant-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              state: { status: 'running' },
+            },
+          },
+        });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).toHaveBeenCalled();
+      expect(onStreamingDone).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('areChatMessagePartsRenderEqual', () => {

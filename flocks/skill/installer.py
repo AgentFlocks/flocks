@@ -829,6 +829,7 @@ class SkillInstaller:
 
             skill_root = _resolve_install_root(scope) / name
             skill_root.mkdir(parents=True, exist_ok=True)
+            skill_root_resolved = skill_root.resolve()
             prefix = f"{skill_dir}/"
             file_count = 0
             for member in zf.namelist():
@@ -838,7 +839,9 @@ class SkillInstaller:
                 if not rel_path:
                     continue
                 dest = (skill_root / rel_path).resolve()
-                if not str(dest).startswith(str(skill_root.resolve())):
+                try:
+                    dest.relative_to(skill_root_resolved)
+                except ValueError:
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(zf.read(member))

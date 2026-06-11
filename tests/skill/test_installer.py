@@ -528,6 +528,51 @@ class TestInstallFromSource:
             / "checklist.md"
         ).exists()
 
+    @pytest.mark.asyncio
+    async def test_github_archive_fallback_rejects_zip_slip_members(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: demo\n"
+            "description: Demo skill\n"
+            "---\n"
+            "# Demo\n"
+        )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("repo-main/demo/SKILL.md", skill_content)
+            zf.writestr("repo-main/demo/../demo2/pwned.txt", "pwned")
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = "", content: bytes = b""):
+                self.status_code = status_code
+                self.text = text
+                self.content = content
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if "codeload.github.com" in url:
+                    return Resp(200, content=zip_buffer.getvalue())
+                return Resp(404, "not found")
+
+        with (
+            patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source("github:owner/repo/demo")
+
+        assert result.success is True
+        assert (tmp_skills_dir / "demo" / "SKILL.md").exists()
+        assert not (tmp_skills_dir / "demo2" / "pwned.txt").exists()
+
 
 # ---------------------------------------------------------------------------
 # SkillInstaller._build_install_command

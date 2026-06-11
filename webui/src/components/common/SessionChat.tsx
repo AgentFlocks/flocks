@@ -2132,9 +2132,10 @@ export default function SessionChat({
         const lastMsg = msgs[msgs.length - 1];
         if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
           const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
-          if (hasFetchedActiveTool || activeToolPartIdsRef.current.size > 0) {
+          if (hasFetchedActiveTool) {
             return;
           }
+          activeToolPartIdsRef.current.clear();
           const statusRes = await client.get('/api/session/status');
           const status = statusRes.data?.[sessionId];
           if (isActiveSessionStatus(status)) {
