@@ -414,6 +414,19 @@ describe('shouldRenderMessage', () => {
 });
 
 describe('getMessageErrorText', () => {
+  it('prefers user-facing display messages over raw provider errors', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: {
+        message: 'Connection error.',
+        data: {
+          displayMessage: 'Model is unavailable. Please check the provider connection and model configuration.',
+          message: 'Connection error.',
+        },
+      } as any,
+    }))).toBe('Model is unavailable. Please check the provider connection and model configuration.');
+  });
+
   it('extracts nested provider error messages', () => {
     expect(getMessageErrorText(makeMessage({
       id: 'assistant-error',

@@ -19,6 +19,20 @@ RETRY_INITIAL_DELAY = 2000  # 2 seconds in milliseconds
 RETRY_BACKOFF_FACTOR = 2
 RETRY_MAX_DELAY_NO_HEADERS = 30_000  # 30 seconds
 RETRY_MAX_DELAY = 2_147_483_647  # max 32-bit signed integer
+CONNECTION_ERROR_DISPLAY_MESSAGE = (
+    "Model is unavailable. Please check the provider connection and model configuration."
+)
+CONNECTION_ERROR_PATTERNS = [
+    "connection error",
+    "connection reset",
+    "connection refused",
+    "could not connect",
+    "failed to connect",
+    "api connection",
+    "model unavailable",
+    "model is unavailable",
+    "model not available",
+]
 
 
 class SessionRetry:
@@ -177,6 +191,7 @@ class SessionRetry:
             transient_patterns = [
                 "unavailable", "503", "502",
                 "timeout", "timed out",
+                *CONNECTION_ERROR_PATTERNS,
                 "null message", "returned choice with null",
                 "empty streaming response", "empty choices",
             ]
@@ -186,3 +201,13 @@ class SessionRetry:
                 return "Connection or Server Error"
         
         return None
+
+    @staticmethod
+    def is_connection_error(error: Dict[str, Any]) -> bool:
+        """Return True for provider/model connection failures."""
+        data = error.get("data", {})
+        message = data.get("message") or error.get("message", "")
+        if not isinstance(message, str):
+            return False
+        message_lower = message.lower()
+        return any(pattern in message_lower for pattern in CONNECTION_ERROR_PATTERNS)

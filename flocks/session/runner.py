@@ -31,7 +31,7 @@ from flocks.session.core.defaults import (
     DOOM_LOOP_THRESHOLD,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
 )
-from flocks.session.lifecycle.retry import SessionRetry
+from flocks.session.lifecycle.retry import CONNECTION_ERROR_DISPLAY_MESSAGE, SessionRetry
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
@@ -1207,7 +1207,7 @@ class SessionRunner:
         # The two counters are independent: empty-response retries (transient
         # model quirk) and exception retries (API errors) track separately so
         # that one kind of failure doesn't eat the other's budget.
-        MAX_ERROR_RETRIES = 7
+        MAX_ERROR_RETRIES = 3
         MAX_EMPTY_RETRIES = 3
         error_attempt = 0
         empty_attempt = 0
@@ -1366,6 +1366,7 @@ class SessionRunner:
                         "attempt": error_attempt,
                         "delay_ms": delay_ms,
                         "reason": retry_message,
+                        "max_retries": MAX_ERROR_RETRIES,
                     })
                     
                     # Set retry status
@@ -1394,8 +1395,13 @@ class SessionRunner:
                     else:
                         log.error("runner.step.not_retryable", {"error": str(e)})
 
+                    final_error_message = str(e)
+                    if SessionRetry.is_connection_error(error_dict):
+                        final_error_message = CONNECTION_ERROR_DISPLAY_MESSAGE
+                        error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
+
                     if self.callbacks.on_error:
-                        await self.callbacks.on_error(str(e))
+                        await self.callbacks.on_error(final_error_message)
                     
                     # Update assistant message with error (must be dict, not string)
                     await Message.update(
@@ -1405,7 +1411,7 @@ class SessionRunner:
                         finish="error",
                     )
                     
-                    return StepResult(action="stop", error=str(e))
+                    return StepResult(action="stop", error=final_error_message)
         
         # Aborted
         return StepResult(action="stop", error="Aborted")
@@ -1816,6 +1822,11 @@ class SessionRunner:
         ]):
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True
+
+        if SessionRetry.is_connection_error(error_dict):
+            error_dict["name"] = "APIError"
+            error_dict["data"]["isRetryable"] = True
+            error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
         
         return error_dict
     

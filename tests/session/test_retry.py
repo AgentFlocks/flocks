@@ -94,12 +94,14 @@ class TestRetryable:
         result = SessionRetry.retryable(error)
         assert result is not None
 
-    def test_string_message_connection_error_not_retryable(self):
+    def test_string_message_connection_error_pattern(self):
         error = {
             "name": "APIConnectionError",
             "data": {"message": "Connection error."},
         }
-        assert SessionRetry.retryable(error) is None
+        result = SessionRetry.retryable(error)
+        assert result is not None
+        assert SessionRetry.is_connection_error(error) is True
 
     def test_empty_error_returns_none(self):
         assert SessionRetry.retryable({}) is None

@@ -251,12 +251,13 @@ class TestExceptionToErrorDict:
         result = runner._exception_to_error_dict(exc)
         assert result["data"]["isRetryable"] is True
 
-    def test_connection_error_exception_is_not_retryable(self):
+    def test_connection_error_exception_is_retryable(self):
         runner = _make_runner()
         exc = Exception("Connection error.")
         result = runner._exception_to_error_dict(exc)
-        assert result["name"] == "Exception"
-        assert result["data"].get("isRetryable") is not True
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
 
     def test_exception_with_status_code_429(self):
         runner = _make_runner()
@@ -2217,6 +2218,60 @@ async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypat
 
     assert result.action == "stop"
     assert result.content == "done"
+
+
+@pytest.mark.asyncio
+async def test_process_step_limits_connection_error_retries(monkeypatch):
+    runner = _make_runner("ses_runner_connection_error")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_connection_error",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "bailian", "modelID": "deepseek-v4-flash"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_connection_error")
+    update_mock = AsyncMock(return_value=None)
+    call_count = 0
+
+    async def fake_call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise Exception("Connection error.")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 4
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
+
+    final_update = update_mock.await_args_list[-1].kwargs
+    assert final_update["finish"] == "error"
+    assert final_update["error"]["data"]["message"] == "Connection error."
+    assert final_update["error"]["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
 
 
 @pytest.mark.asyncio

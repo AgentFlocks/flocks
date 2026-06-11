@@ -571,6 +571,9 @@ export function getMessageErrorText(message: Pick<Message, 'error'>): string {
   const error = message.error as any;
   if (!error) return '';
   if (typeof error === 'string') return error;
+  if (typeof error.data?.displayMessage === 'string' && error.data.displayMessage.trim()) {
+    return error.data.displayMessage;
+  }
   if (typeof error.message === 'string' && error.message.trim()) return error.message;
   if (typeof error.data?.message === 'string' && error.data.message.trim()) {
     return error.data.message;
