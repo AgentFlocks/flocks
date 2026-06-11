@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +19,8 @@ import {
   getStandaloneThinkingBubbleClassName,
   getUserAvatarContainerClassName,
   getUserAvatarSpacerClassName,
+  hasActiveToolPart,
+  isActiveSessionStatus,
   listUploadedDocumentPaths,
   shouldRenderMessage,
   shouldRefetchFinishedMessage,
@@ -36,6 +38,7 @@ const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
+const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string) => ({
   'chat.placeholder': '请输入消息',
   'chat.emptyText': '暂无消息',
@@ -82,7 +85,10 @@ vi.mock('@/hooks/useSessions', () => ({
 }));
 
 vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => ({ status: 'connected' }),
+  useSSE: (options: any) => {
+    useSSEOptionsRef.current = options;
+    return { status: 'connected' };
+  },
 }));
 
 vi.mock('@/hooks/useReasoningToggle', () => ({
@@ -152,6 +158,7 @@ beforeEach(() => {
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
   pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
+  useSSEOptionsRef.current = null;
   useSessionMessagesMock.mockReturnValue({
     messages: [],
     loading: false,
@@ -655,6 +662,95 @@ describe('shouldRefetchFinishedMessage', () => {
       finishedMessageId: 'assistant-2',
       abortedMessageId: 'assistant-1',
     })).toBe(true);
+  });
+});
+
+describe('streaming activity helpers', () => {
+  it('detects pending and running tool parts as active', () => {
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'pending' } } as Message['parts'][number],
+    ])).toBe(true);
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
+    ])).toBe(true);
+  });
+
+  it('does not treat completed or error tool parts as active', () => {
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'completed' } } as Message['parts'][number],
+      { id: 'tool-2', type: 'tool', state: { status: 'error' } } as Message['parts'][number],
+    ])).toBe(false);
+  });
+
+  it('keeps busy, compacting, and retry session statuses active', () => {
+    expect(isActiveSessionStatus({ type: 'busy' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'compacting' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'retry' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'idle' })).toBe(false);
+    expect(isActiveSessionStatus(undefined)).toBe(false);
+  });
+});
+
+describe('SessionChat fallback polling', () => {
+  it('does not finish streaming while fetched messages still contain a running tool', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      useSessionMessagesMock.mockReturnValue({
+        messages: [
+          makeMessage({
+            id: 'assistant-1',
+            finish: 'tool-calls',
+            parts: [
+              { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
+            ],
+          }),
+        ],
+        loading: false,
+        refetch,
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        replaceMessageText: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      });
+      clientGetMock.mockResolvedValueOnce({
+        data: [
+          {
+            info: {
+              id: 'assistant-1',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              finish: 'tool-calls',
+            },
+            parts: [
+              { id: 'tool-1', type: 'tool', state: { status: 'running' } },
+            ],
+          },
+        ],
+      });
+
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+        onStreamingDone,
+      }));
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(refetch).not.toHaveBeenCalled();
+      expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

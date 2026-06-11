@@ -518,6 +518,21 @@ export function shouldRefetchFinishedMessage({
   return !finishedMessageId || !abortedMessageId || finishedMessageId !== abortedMessageId;
 }
 
+export function isActiveToolPart(part?: Pick<MessagePart, 'type' | 'state'> | null): boolean {
+  return (
+    (part?.type === 'tool' || part?.type === 'toolCall') &&
+    (part.state?.status === 'pending' || part.state?.status === 'running')
+  );
+}
+
+export function hasActiveToolPart(parts?: Array<Pick<MessagePart, 'type' | 'state'>> | null): boolean {
+  return parts?.some(isActiveToolPart) ?? false;
+}
+
+export function isActiveSessionStatus(status?: { type?: string } | null): boolean {
+  return status?.type === 'busy' || status?.type === 'compacting' || status?.type === 'retry';
+}
+
 export function getEditingActionBarClassName(): string {
   return 'mt-3 flex w-full items-center justify-end gap-1.5';
 }
@@ -866,6 +881,7 @@ export default function SessionChat({
   const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const activeToolPartIdsRef = useRef<Set<string>>(new Set());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Lightbox preview for composer thumbnails. Shares the same overlay
@@ -1077,6 +1093,7 @@ export default function SessionChat({
       if (type === 'session.cleared' && properties.sessionID === sessionId) {
         abortingRef.current = false;
         sessionBusyRef.current = false;
+        activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
         setIsStreaming(false);
         refetch();
@@ -1101,6 +1118,7 @@ export default function SessionChat({
           setCompactionStages([]);
         } else if (statusType === 'idle') {
           sessionBusyRef.current = false;
+          activeToolPartIdsRef.current.clear();
           setIsStreaming(false);
           setIsCompacting(false);
           isCompactingRef.current = false;
@@ -1120,7 +1138,7 @@ export default function SessionChat({
           // would replace the visible partial response with an empty message.
           if (shouldRefetch) {
             refetch();
-            if (!sessionBusyRef.current) {
+            if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
               setIsStreaming(false);
             }
           }
@@ -1134,6 +1152,15 @@ export default function SessionChat({
           setIsStreaming(true);
         }
       } else if (type === 'message.part.updated' && properties.part?.sessionID === sessionId) {
+        const part = properties.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+        if (part.id) {
+          if (isActiveToolPart(part)) {
+            activeToolPartIdsRef.current.add(part.id);
+            if (!abortingRef.current) setIsStreaming(true);
+          } else {
+            activeToolPartIdsRef.current.delete(part.id);
+          }
+        }
         updateMessagePart(properties.part, properties.delta);
         scrollToBottom();
       } else if (type === 'question.asked' && properties.sessionID === sessionId) {
@@ -1181,6 +1208,7 @@ export default function SessionChat({
         setCompactionStages([]);
         abortingRef.current = false;
         sessionBusyRef.current = false;
+        activeToolPartIdsRef.current.clear();
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
     },
@@ -2074,6 +2102,15 @@ export default function SessionChat({
         const msgs: any[] = res.data || [];
         const lastMsg = msgs[msgs.length - 1];
         if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
+          const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
+          if (hasFetchedActiveTool || activeToolPartIdsRef.current.size > 0) {
+            return;
+          }
+          const statusRes = await client.get('/api/session/status');
+          const status = statusRes.data?.[sessionId];
+          if (isActiveSessionStatus(status)) {
+            return;
+          }
           refetch();
           setIsStreaming(false);
         }
