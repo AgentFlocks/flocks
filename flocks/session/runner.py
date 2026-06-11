@@ -1813,7 +1813,6 @@ class SessionRunner:
             "rate limit", "too many requests", "429",
             "overloaded", "unavailable", "503", "502",
             "timeout", "timed out", "server error",
-            "connection error", "connection reset", "connection refused",
         ]):
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True

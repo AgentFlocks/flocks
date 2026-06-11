@@ -251,6 +251,13 @@ class TestExceptionToErrorDict:
         result = runner._exception_to_error_dict(exc)
         assert result["data"]["isRetryable"] is True
 
+    def test_connection_error_exception_is_not_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Connection error.")
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "Exception"
+        assert result["data"].get("isRetryable") is not True
+
     def test_exception_with_status_code_429(self):
         runner = _make_runner()
         exc = Exception("Rate limited")

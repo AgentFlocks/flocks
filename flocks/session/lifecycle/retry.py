@@ -177,7 +177,6 @@ class SessionRetry:
             transient_patterns = [
                 "unavailable", "503", "502",
                 "timeout", "timed out",
-                "connection error", "connection reset", "connection refused",
                 "null message", "returned choice with null",
                 "empty streaming response", "empty choices",
             ]
