@@ -6,10 +6,12 @@ import type { ComponentProps } from 'react';
 
 import ChatTab from './ChatTab';
 import { workflowAPI } from '@/api/workflow';
+import { setStoredSessions } from '../sessionStorage';
 
 const {
   capturedSessionChatProps,
   capturedSessionOptions,
+  mockClientGet,
   mockCreate,
   mockCreateAndSend,
   mockReset,
@@ -21,6 +23,7 @@ const {
 } = vi.hoisted(() => ({
   capturedSessionChatProps: [] as any[],
   capturedSessionOptions: [] as any[],
+  mockClientGet: vi.fn(),
   mockCreate: vi.fn(),
   mockCreateAndSend: vi.fn(),
   mockReset: vi.fn(),
@@ -50,7 +53,7 @@ vi.mock('@/hooks/useSessionChat', () => ({
 }));
 
 vi.mock('@/api/client', () => ({
-  default: { get: vi.fn() },
+  default: { get: mockClientGet },
 }));
 
 vi.mock('@/api/workflow', () => ({
@@ -105,7 +108,7 @@ vi.mock('react-i18next', () => ({
         'detail.chat.welcome.title': '{{name}} 当前状态',
         'detail.chat.welcome.descPart1': '你可以直接描述需求。',
         'detail.chat.welcome.descPart2': '。',
-        'detail.chat.welcome.mdTabLabel': 'workflow.md',
+        'detail.chat.welcome.mdTabLabel': '流程说明',
         'detail.chat.welcome.editPanelTitle': 'Rex 辅助修改',
         'detail.chat.welcome.editPanelDesc': '选择一个修改入口，Rex 会先读取 {{name}}。',
         'detail.chat.welcome.editSectionTitle': '编辑引导',
@@ -113,9 +116,12 @@ vi.mock('react-i18next', () => ({
         'detail.chat.welcome.editRequirementShort': '修改功能需求',
         'detail.chat.welcome.editRequirementDesc': '整理功能修改需求',
         'detail.chat.welcome.editRequirementPrompt': '用户点击了「修改功能需求」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
-        'detail.chat.welcome.editNodeShort': '编辑工作流节点',
-        'detail.chat.welcome.editNodeDesc': '调整节点职责和连接',
-        'detail.chat.welcome.editNodePrompt': '用户点击了「编辑工作流节点」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
+        'detail.chat.welcome.editNodeFunctionShort': '修改节点功能',
+        'detail.chat.welcome.editNodeFunctionDesc': '调整节点做什么',
+        'detail.chat.welcome.editNodeFunctionPrompt': '用户点击了「修改节点功能」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
+        'detail.chat.welcome.editNodeShort': '编辑节点实现',
+        'detail.chat.welcome.editNodeDesc': '调整节点代码和连接',
+        'detail.chat.welcome.editNodePrompt': '用户点击了「编辑节点实现」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
         'detail.chat.welcome.editFlowShort': '调整流程结构',
         'detail.chat.welcome.editFlowDesc': '调整节点和边',
         'detail.chat.welcome.editFlowPrompt': '用户点击了「调整流程结构」按钮。工作流 ID 是 {{id}}，工作流目录是 {{dir}}，MD 文件是 {{mdPath}}。',
@@ -132,30 +138,30 @@ vi.mock('react-i18next', () => ({
         'detail.chat.welcome.retry': '重试',
         'detail.chat.welcome.guideExpand': '展开',
         'detail.chat.welcome.guideCollapse': '收起',
-        'detail.chat.welcome.guidePrimaryShort': '智能配置',
+        'detail.chat.welcome.guidePrimaryShort': '帮我智能配置',
         'detail.chat.welcome.guidePrimaryDesc': '配置工作流',
-        'detail.chat.welcome.guidePrompt': '用户点击了「智能配置」按钮。请从 {{guidePath}} 获取工作流有哪些配置，包括发布配置、工作流执行配置等。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。',
-        'detail.chat.welcome.guideInputModeShort': '输入模式',
+        'detail.chat.welcome.guidePrompt': '用户点击了「帮我智能配置」按钮。请从 {{guidePath}} 获取工作流有哪些配置，包括发布配置、工作流执行配置等。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。配置模板接口是 GET/PUT {{configEndpoint}}，兜底迁移接口是 {{configSyncEndpoint}}。config.json 只能作为迁移兜底。',
+        'detail.chat.welcome.guideInputModeShort': '配置输入方式',
         'detail.chat.welcome.guideInputModeDesc': '选择 API、Syslog 或其它输入',
         'detail.chat.welcome.guideInputModeInstruction': '不要要求 guide.md 存在按钮表；请围绕输入模式自动提取引导信息并发一个 question 卡片。',
-        'detail.chat.welcome.guideSourceShapeShort': '来源形态',
+        'detail.chat.welcome.guideSourceShapeShort': '确认来源数据',
         'detail.chat.welcome.guideSourceShapeDesc': '确认来源产品和数据格式',
         'detail.chat.welcome.guideSourceShapeInstruction': '请围绕来源形态发一个 question 卡片。',
-        'detail.chat.welcome.guideOutputShort': '输出去向',
+        'detail.chat.welcome.guideOutputShort': '设置输出去向',
         'detail.chat.welcome.guideOutputDesc': '确认输出位置',
         'detail.chat.welcome.guideOutputInstruction': '请围绕输出去向发一个 question 卡片。',
-        'detail.chat.welcome.guideFilterShort': '过滤规则',
+        'detail.chat.welcome.guideFilterShort': '调整过滤规则',
         'detail.chat.welcome.guideFilterDesc': '确认过滤和去重规则',
         'detail.chat.welcome.guideFilterInstruction': '请围绕过滤规则发一个 question 卡片。',
-        'detail.chat.welcome.guideApplyShort': '应用方式',
+        'detail.chat.welcome.guideApplyShort': '应用配置方案',
         'detail.chat.welcome.guideApplyDesc': '确认应用或保存草稿',
         'detail.chat.welcome.guideApplyInstruction': '请围绕应用方式发一个 question 卡片。',
         'detail.chat.welcome.guideSampleInstruction': '请围绕样例验证发一个 question 卡片。',
-        'detail.chat.welcome.guideQuestionPrompt': '用户点击了「{{focus}}」按钮。这个按钮的意图是：{{instruction}} 第一步必须读取 {{guidePath}}，不要要求 guide.md 存在按钮表，请从全文自动提取相关引导信息。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。必须调用 question 工具，并提供自定义输入，没有则填 none。',
-        'detail.chat.welcome.guideAuditShort': '查配置',
+        'detail.chat.welcome.guideQuestionPrompt': '用户点击了「{{focus}}」按钮。这个按钮的意图是：{{instruction}} 第一步必须读取 {{guidePath}}，不要要求 guide.md 存在按钮表，请从全文自动提取相关引导信息。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。配置模板接口是 GET/PUT {{configEndpoint}}，兜底迁移接口是 {{configSyncEndpoint}}。config.json 不能直接写。必须调用 question 工具，并提供自定义输入，没有则填 none。',
+        'detail.chat.welcome.guideAuditShort': '检查当前配置',
         'detail.chat.welcome.guideAuditDesc': '检查缺失项',
         'detail.chat.welcome.auditPrompt': '请先读取 {{guidePath}} 后检查配置。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。',
-        'detail.chat.welcome.guideSampleShort': '样例验证',
+        'detail.chat.welcome.guideSampleShort': '验证样例数据',
         'detail.chat.welcome.guideSampleDesc': '验证输入输出',
         'detail.chat.welcome.samplePrompt': '请先读取 {{guidePath}} 后验证样例。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。',
       };
@@ -206,6 +212,7 @@ describe('WorkflowDetail ChatTab', () => {
     capturedSessionChatProps.length = 0;
     capturedSessionOptions.length = 0;
     localStorage.clear();
+    mockClientGet.mockResolvedValue({ data: {} });
     mockCreateAndSend.mockResolvedValue(undefined);
     mockUseAgents.mockReturnValue({
       agents: [
@@ -260,13 +267,13 @@ describe('WorkflowDetail ChatTab', () => {
     const user = userEvent.setup();
     renderChatTab();
 
-    await user.click(screen.getByRole('button', { name: /智能配置/ }));
+    await user.click(screen.getByRole('button', { name: /帮我智能配置/ }));
 
     await waitFor(() => {
       expect(mockCreateAndSend).toHaveBeenCalledWith(
         expect.objectContaining({
           text: expect.stringContaining('工作流 ID 是 stream_alert_denoise'),
-          displayText: '@@flocks-instruction:智能配置',
+          displayText: '@@flocks-instruction:帮我智能配置',
         }),
       );
     });
@@ -282,12 +289,22 @@ describe('WorkflowDetail ChatTab', () => {
     );
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: expect.stringContaining('用户点击了「智能配置」按钮'),
+        text: expect.stringContaining('用户点击了「帮我智能配置」按钮'),
       }),
     );
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('发布配置、工作流执行配置'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('/api/workflow/stream_alert_denoise/config'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('config.json 只能作为迁移兜底'),
       }),
     );
   });
@@ -296,25 +313,25 @@ describe('WorkflowDetail ChatTab', () => {
     const user = userEvent.setup();
     renderChatTab();
 
-    expect(screen.getByRole('button', { name: /输入模式/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /来源形态/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /输出去向/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /过滤规则/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /应用方式/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /配置输入方式/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /确认来源数据/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /设置输出去向/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /调整过滤规则/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /应用配置方案/ })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /输入模式/ }));
+    await user.click(screen.getByRole('button', { name: /配置输入方式/ }));
 
     await waitFor(() => {
       expect(mockCreateAndSend).toHaveBeenCalledWith(
         expect.objectContaining({
           text: expect.stringContaining('第一步必须读取 ~/.flocks/plugins/workflows/stream_alert_denoise/guide.md'),
-          displayText: '@@flocks-instruction:输入模式',
+          displayText: '@@flocks-instruction:配置输入方式',
         }),
       );
     });
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: expect.stringContaining('用户点击了「输入模式」按钮'),
+        text: expect.stringContaining('用户点击了「配置输入方式」按钮'),
       }),
     );
     expect(mockCreateAndSend).toHaveBeenCalledWith(
@@ -325,6 +342,11 @@ describe('WorkflowDetail ChatTab', () => {
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('必须调用 question 工具'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('config.json 不能直接写'),
       }),
     );
   });
@@ -338,17 +360,18 @@ describe('WorkflowDetail ChatTab', () => {
     expect(screen.getByText('配置引导')).toBeInTheDocument();
     expect(screen.getByTestId('workflow-edit-guide-scroll')).toHaveClass('overflow-y-auto');
     expect(screen.getByRole('button', { name: /修改功能需求/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /编辑工作流节点/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /修改节点功能/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /编辑节点实现/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /调整流程结构/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /生成工作流/ })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /编辑工作流节点/ }));
+    await user.click(screen.getByRole('button', { name: /修改节点功能/ }));
 
     await waitFor(() => {
       expect(mockCreateAndSend).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: expect.stringContaining('用户点击了「编辑工作流节点」按钮'),
-          displayText: '@@flocks-instruction:编辑工作流节点',
+          text: expect.stringContaining('用户点击了「修改节点功能」按钮'),
+          displayText: '@@flocks-instruction:修改节点功能',
         }),
       );
     });
@@ -356,6 +379,9 @@ describe('WorkflowDetail ChatTab', () => {
 
   it('routes launch requests through the current chat instead of directly creating a new session', async () => {
     const onLaunchRequestHandled = vi.fn();
+    setStoredSessions(workflow.id, [
+      { id: 'existing-workflow-session', title: 'Existing', createdAt: Date.now() },
+    ]);
 
     renderChatTab({
       launchRequest: {
@@ -367,6 +393,7 @@ describe('WorkflowDetail ChatTab', () => {
     });
 
     await waitFor(() => {
+      expect(capturedSessionChatProps[capturedSessionChatProps.length - 1]?.sessionId).toBe('existing-workflow-session');
       expect(mockSendPrompt).toHaveBeenCalledWith(
         '请引导我配置 API 发布。',
         expect.objectContaining({
@@ -374,6 +401,7 @@ describe('WorkflowDetail ChatTab', () => {
         }),
       );
     });
+    expect(mockClientGet).toHaveBeenCalledWith('/api/session/existing-workflow-session');
     expect(mockReset).not.toHaveBeenCalled();
     expect(mockCreateAndSend).not.toHaveBeenCalled();
     expect(onLaunchRequestHandled).toHaveBeenCalledWith(1);
@@ -397,11 +425,21 @@ describe('WorkflowDetail ChatTab', () => {
   });
 
   it('keeps workflow guide descriptions behind info tooltips', async () => {
+    const user = userEvent.setup();
     renderChatTab();
 
-    expect(screen.getByRole('button', { name: /智能配置/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /帮我智能配置/ })).toBeInTheDocument();
     expect(screen.queryByText('配置工作流')).not.toBeInTheDocument();
-    expect(screen.getAllByTitle('配置工作流').length).toBeGreaterThan(0);
+
+    const infoIcon = screen.getAllByRole('img', { name: '帮我智能配置说明' })[0];
+    await user.hover(infoIcon);
+
+    expect(await screen.findByText('配置工作流')).toBeInTheDocument();
+
+    await user.unhover(infoIcon);
+    await waitFor(() => {
+      expect(screen.queryByText('配置工作流')).not.toBeInTheDocument();
+    });
   });
 
   it('refreshes after a tool finishes when workflow.md content changed without updatedAt changing', async () => {

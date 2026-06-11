@@ -15,7 +15,6 @@ import {
   ChevronRight,
   Bot,
   Globe,
-  Info,
   Loader2,
   Server,
   Trash2,
@@ -34,6 +33,7 @@ import {
   WorkflowTriggerType,
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
+import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import WorkflowStatusBadge from '@/components/common/WorkflowStatusBadge';
 import { extractErrorMessage } from '@/utils/error';
 
@@ -48,6 +48,7 @@ type JsonObject = Record<string, any>;
 const DEFAULT_JSON_TEXT = JSON.stringify({}, null, 2);
 const LEGACY_SINGLETON_TYPES: WorkflowTriggerType[] = ['schedule', 'kafka', 'syslog'];
 const TEMPLATE_API_MODES = new Set(['api', 'publish', 'api_service', 'service']);
+const DEFAULT_PUBLISH_GUIDE_KINDS = ['api', 'syslog', 'kafka', 'webhook', 'schedule'] as const;
 
 interface TemplateView {
   hasApi: boolean;
@@ -142,6 +143,11 @@ function workflowGuidePromptParams(workflow: Workflow) {
     dir,
     mdPath: `${dir}workflow.md`,
     guidePath: `${dir}${WORKFLOW_GUIDE_FILE_NAME}`,
+    configEndpoint: `/api/workflow/${workflow.id}/config`,
+    configSyncEndpoint: `/api/workflow/${workflow.id}/config/sync`,
+    publishEndpoint: `/api/workflow/${workflow.id}/publish`,
+    unpublishEndpoint: `/api/workflow/${workflow.id}/unpublish`,
+    triggersEndpoint: `/api/workflow/${workflow.id}/triggers`,
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
 }
@@ -172,7 +178,10 @@ function triggerGuideTranslationKey(kind: string, suffix: 'Short' | 'Desc' | 'In
 
 function buildPublishGuideActions(t: TranslateFn, workflow: Workflow, view: TemplateView): PublishGuideAction[] {
   const actions: PublishGuideAction[] = [];
+  const seen = new Set<string>();
   const addApiAction = () => {
+    if (seen.has('api')) return;
+    seen.add('api');
     const label = t('detail.run.guideApiShort');
     actions.push({
       key: 'api',
@@ -182,6 +191,8 @@ function buildPublishGuideActions(t: TranslateFn, workflow: Workflow, view: Temp
     });
   };
   const addTriggerKindAction = (kind: string) => {
+    if (seen.has(kind)) return;
+    seen.add(kind);
     const labelKey = triggerGuideTranslationKey(kind, 'Short');
     const descriptionKey = triggerGuideTranslationKey(kind, 'Desc');
     const instructionKey = triggerGuideTranslationKey(kind, 'Instruction');
@@ -194,26 +205,18 @@ function buildPublishGuideActions(t: TranslateFn, workflow: Workflow, view: Temp
     });
   };
 
-  if (view.hasApi) {
-    addApiAction();
-  }
-
-  const seen = new Set<string>();
-  view.triggers.forEach((trigger) => {
-    const kind = triggerGuideKind(trigger.type);
-    if (seen.has(kind)) return;
-    seen.add(kind);
-
+  DEFAULT_PUBLISH_GUIDE_KINDS.forEach((kind) => {
+    if (kind === 'api') {
+      addApiAction();
+      return;
+    }
     addTriggerKindAction(kind);
   });
 
-  if (actions.length === 0) {
-    addApiAction();
-    addTriggerKindAction('syslog');
-    addTriggerKindAction('kafka');
-    addTriggerKindAction('webhook');
-    addTriggerKindAction('schedule');
-  }
+  view.triggers.forEach((trigger) => {
+    const kind = triggerGuideKind(trigger.type);
+    addTriggerKindAction(kind);
+  });
 
   return actions;
 }
@@ -228,23 +231,6 @@ function PublishGuidePanel({
   variant?: 'empty' | 'inline';
 }) {
   const { t } = useTranslation('workflow');
-  const [guideTooltip, setGuideTooltip] = useState<{
-    title: string;
-    description: string;
-    x: number;
-    y: number;
-  } | null>(null);
-
-  const showGuideTooltip = useCallback((target: HTMLElement, title: string, description: string) => {
-    const rect = target.getBoundingClientRect();
-    setGuideTooltip({
-      title,
-      description,
-      x: rect.left + rect.width / 2,
-      y: rect.top - 8,
-    });
-  }, []);
-
   const isEmpty = variant === 'empty';
   const hasActionButtons = Boolean(onGuidePrompt && actions.length > 0);
 
@@ -273,46 +259,30 @@ function PublishGuidePanel({
           </div>
         </div>
       </div>
-      <div className={
-        isEmpty
-          ? 'mx-auto flex w-full max-w-[360px] min-w-0 flex-col gap-2'
-          : 'flex min-w-0 items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'
-      }>
+      <div
+        data-testid={isEmpty ? 'publish-guide-actions-empty' : 'publish-guide-actions-inline'}
+        className={
+          isEmpty
+            ? 'mx-auto flex w-full max-w-[360px] min-w-0 flex-col gap-2'
+            : 'flex min-w-0 flex-wrap items-center gap-1.5'
+        }
+      >
         {actions.map((action) => (
-          <button
+          <div
             key={action.key}
-            type="button"
-            onClick={() => onGuidePrompt?.(action.prompt, action.label)}
-            className={`${isEmpty ? 'w-full justify-between px-3' : 'flex-shrink-0 px-2.5'} inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white text-left text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-600`}
-            title={action.label}
+            className={`${isEmpty ? 'w-full justify-between px-3' : 'min-w-fit px-2.5'} group inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white text-left text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-600`}
           >
-            <span className="whitespace-nowrap text-xs font-semibold leading-none">{action.label}</span>
-            <span
-              className="inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500"
-              title={action.description}
-              onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
-              onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-              onPointerEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
-              onMouseEnter={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
-              onMouseOver={(event) => showGuideTooltip(event.currentTarget, action.label, action.description)}
-              onMouseLeave={() => setGuideTooltip(null)}
-              onPointerLeave={() => setGuideTooltip(null)}
+            <button
+              type="button"
+              onClick={() => onGuidePrompt?.(action.prompt, action.label)}
+              className="whitespace-nowrap text-xs font-semibold leading-none"
             >
-              <Info className="h-3.5 w-3.5" aria-hidden="true" />
-            </span>
-          </button>
+              {action.label}
+            </button>
+            <GuideInfoIcon label={action.label} description={action.description} />
+          </div>
         ))}
       </div>
-      {guideTooltip && (
-        <div
-          className="pointer-events-none fixed z-[80] w-52 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md"
-          style={{ left: guideTooltip.x, top: guideTooltip.y }}
-        >
-          <div className="mb-0.5 font-semibold text-zinc-800">{guideTooltip.title}</div>
-          <div>{guideTooltip.description}</div>
-          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
-        </div>
-      )}
     </div>
   );
 }
@@ -417,6 +387,164 @@ function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   );
 }
 
+function SyslogTriggerFields({
+  source,
+  inputKey,
+  onSourceChange,
+  onInputKeyChange,
+}: {
+  source: JsonObject;
+  inputKey: string;
+  onSourceChange: (patch: JsonObject) => void;
+  onInputKeyChange: (key: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="协议">
+          <Select value={String(source.protocol ?? 'udp')} onChange={(e) => onSourceChange({ protocol: e.target.value })}>
+            <option value="udp">UDP</option>
+            <option value="tcp">TCP</option>
+          </Select>
+        </Field>
+        <Field label="格式">
+          <Select value={String(source.format ?? 'auto')} onChange={(e) => onSourceChange({ format: e.target.value })}>
+            <option value="auto">auto</option>
+            <option value="rfc3164">rfc3164</option>
+            <option value="rfc5424">rfc5424</option>
+          </Select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Host">
+          <Input value={String(source.host ?? '0.0.0.0')} onChange={(e) => onSourceChange({ host: e.target.value })} />
+        </Field>
+        <Field label="Port">
+          <Input
+            type="number"
+            min={1}
+            value={String(source.port ?? 5140)}
+            onChange={(e) => onSourceChange({ port: Math.max(1, Number.parseInt(e.target.value || '5140', 10)) })}
+          />
+        </Field>
+      </div>
+      <Field label="Input Key">
+        <Input value={inputKey} onChange={(e) => onInputKeyChange(e.target.value || 'syslog_message')} />
+      </Field>
+    </div>
+  );
+}
+
+function KafkaTriggerFields({
+  source,
+  inputKey,
+  onSourceChange,
+  onInputKeyChange,
+}: {
+  source: JsonObject;
+  inputKey: string;
+  onSourceChange: (patch: JsonObject) => void;
+  onInputKeyChange: (key: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Broker">
+          <Input value={String(source.inputBroker ?? '')} onChange={(e) => onSourceChange({ inputBroker: e.target.value })} />
+        </Field>
+        <Field label="Topic">
+          <Input value={String(source.inputTopic ?? '')} onChange={(e) => onSourceChange({ inputTopic: e.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Group ID">
+          <Input value={String(source.inputGroupId ?? '')} onChange={(e) => onSourceChange({ inputGroupId: e.target.value })} />
+        </Field>
+        <Field label="Input Key">
+          <Input value={inputKey} onChange={(e) => onInputKeyChange(e.target.value || 'kafka_message')} />
+        </Field>
+      </div>
+      <Field label="Offset Reset">
+        <Select value={String(source.autoOffsetReset ?? 'latest')} onChange={(e) => onSourceChange({ autoOffsetReset: e.target.value })}>
+          <option value="latest">latest</option>
+          <option value="earliest">earliest</option>
+        </Select>
+      </Field>
+    </div>
+  );
+}
+
+function ScheduleTriggerFields({
+  source,
+  runtime,
+  onSourceChange,
+  onRuntimeChange,
+}: {
+  source: JsonObject;
+  runtime: JsonObject;
+  onSourceChange: (patch: JsonObject) => void;
+  onRuntimeChange: (patch: JsonObject) => void;
+}) {
+  const mode = source.mode ?? (source.cron ? 'cron' : 'interval');
+  return (
+    <div className="grid grid-cols-1 gap-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="调度模式">
+          <Select
+            value={String(mode)}
+            onChange={(e) => {
+              const nextMode = e.target.value;
+              if (nextMode === 'cron') {
+                onSourceChange({ mode: nextMode, cron: String(source.cron ?? '*/5 * * * *'), intervalSeconds: undefined });
+                return;
+              }
+              onSourceChange({
+                mode: nextMode,
+                intervalSeconds: Math.max(1, Number.parseInt(String(source.intervalSeconds ?? 300), 10)),
+                cron: undefined,
+              });
+            }}
+          >
+            <option value="interval">Interval</option>
+            <option value="cron">Cron</option>
+          </Select>
+        </Field>
+        <Field label="执行超时（秒）">
+          <Input
+            type="number"
+            min={1}
+            value={String(runtime.timeoutSeconds ?? 7200)}
+            onChange={(e) => onRuntimeChange({ timeoutSeconds: Math.max(1, Number.parseInt(e.target.value || '7200', 10)) })}
+          />
+        </Field>
+      </div>
+      {mode === 'cron' ? (
+        <Field label="Cron 表达式">
+          <Input value={String(source.cron ?? '')} onChange={(e) => onSourceChange({ cron: e.target.value })} placeholder="*/5 * * * *" />
+        </Field>
+      ) : (
+        <Field label="轮询间隔（秒）">
+          <Input
+            type="number"
+            min={1}
+            value={String(source.intervalSeconds ?? 300)}
+            onChange={(e) => onSourceChange({ intervalSeconds: Math.max(1, Number.parseInt(e.target.value || '300', 10)) })}
+          />
+        </Field>
+      )}
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input
+          type="checkbox"
+          checked={Boolean(runtime.noOverlap ?? true)}
+          onChange={(e) => onRuntimeChange({ noOverlap: e.target.checked })}
+          className="rounded border-gray-300 text-red-600 focus:ring-red-500"
+        />
+        禁止重叠执行
+      </label>
+    </div>
+  );
+}
+
 function stringifyJson(value: unknown): string {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return DEFAULT_JSON_TEXT;
@@ -485,6 +613,22 @@ function triggerSourceLabel(trigger: WorkflowTrigger): string {
       return `${source.method ?? 'POST'} ${source.path ?? '/webhook'}`;
     default:
       return JSON.stringify(source);
+  }
+}
+
+function triggerRuntimeActionLabel(type: WorkflowTriggerType, active: boolean): string {
+  switch (type) {
+    case 'syslog':
+      return active ? '停止监听' : '启动监听';
+    case 'kafka':
+      return active ? '停止消费' : '启动消费';
+    case 'schedule':
+      return active ? '停止定时' : '启动定时';
+    case 'custom_webhook':
+    case 'webhook':
+      return active ? '停用接入' : '启用接入';
+    default:
+      return active ? '停用' : '启用';
   }
 }
 
@@ -597,12 +741,8 @@ function createTriggerDraft(
 
 function PublishSection({
   workflowId,
-  guideActions,
-  onGuidePrompt,
 }: {
   workflowId: string;
-  guideActions?: PublishGuideAction[];
-  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -675,7 +815,10 @@ function PublishSection({
             </div>
           ) : service && service.status !== 'stopped' ? (
             <div className="space-y-3">
-              <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 space-y-3">
+              <div
+                data-testid="api-publish-card"
+                className="min-h-[190px] rounded-xl border border-gray-200 bg-white px-4 py-4 space-y-3"
+              >
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-gray-500">运行方式</span>
                   <span className="font-medium text-gray-700">
@@ -705,48 +848,51 @@ function PublishSection({
                     <CopyButton text={service.apiKey ?? ''} />
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleUnpublish}
+                  disabled={stopping}
+                  className="w-full rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
+                >
+                  {stopping ? t('detail.run.stopping') : t('detail.run.stopService')}
+                </button>
               </div>
-              <PublishGuidePanel actions={guideActions ?? []} onGuidePrompt={onGuidePrompt} />
-              <button
-                type="button"
-                onClick={handleUnpublish}
-                disabled={stopping}
-                className="w-full rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
-              >
-                {stopping ? t('detail.run.stopping') : t('detail.run.stopService')}
-              </button>
             </div>
           ) : (
             <div className="space-y-3">
-              <p className="text-xs text-gray-500">{t('detail.run.publishDesc')}</p>
-              <div className="grid grid-cols-2 gap-2">
-                {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => setDriver(item)}
-                    className={`rounded-lg border px-3 py-2 text-left text-xs ${
-                      driver === item ? 'border-red-400 bg-red-50 text-red-700' : 'border-gray-200 hover:bg-gray-50 text-gray-600'
-                    }`}
-                  >
-                    <div className="font-semibold">
-                      {item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}
-                    </div>
-                    <div className="mt-1 text-[11px] text-gray-500">
-                      {item === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={handlePublish}
-                disabled={publishing}
-                className="w-full rounded-lg bg-green-600 px-3 py-2 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-60"
+              <div
+                data-testid="api-publish-card"
+                className="min-h-[190px] rounded-xl border border-gray-200 bg-white px-4 py-4 space-y-3"
               >
-                {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
-              </button>
-              <PublishGuidePanel actions={guideActions ?? []} onGuidePrompt={onGuidePrompt} />
+                <p className="text-xs text-gray-500">{t('detail.run.publishDesc')}</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => setDriver(item)}
+                      className={`rounded-lg border px-3 py-2 text-left text-xs ${
+                        driver === item ? 'border-red-400 bg-red-50 text-red-700' : 'border-gray-200 hover:bg-gray-50 text-gray-600'
+                      }`}
+                    >
+                      <div className="font-semibold">
+                        {item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}
+                      </div>
+                      <div className="mt-1 text-[11px] text-gray-500">
+                        {item === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={handlePublish}
+                  disabled={publishing}
+                  className="w-full rounded-lg bg-green-600 px-3 py-2 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-60"
+                >
+                  {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
+                </button>
+              </div>
             </div>
           )}
           {error ? (
@@ -774,20 +920,21 @@ function templateStatusLabel(status?: JsonObject | null): string {
 function TemplateTriggersSection({
   workflow,
   triggers,
+  config,
+  onConfigUpdated,
   onWorkflowUpdated,
-  guideActionsByKind,
-  onGuidePrompt,
 }: {
   workflow: Workflow;
   triggers: WorkflowTrigger[];
+  config: WorkflowIntegrationConfig | null;
+  onConfigUpdated: (config: WorkflowIntegrationConfig) => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
-  guideActionsByKind?: Record<string, PublishGuideAction[]>;
-  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(false);
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [configSavingId, setConfigSavingId] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, JsonObject>>({});
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -926,6 +1073,54 @@ function TemplateTriggersSection({
     }
   };
 
+  const saveTemplateTrigger = async (trigger: WorkflowTrigger): Promise<WorkflowTrigger | null> => {
+    const baseConfig = (config ?? {
+      version: 1,
+      kind: 'workflow.integration-config',
+      workflow: {
+        id: workflow.id,
+        name: workflow.name,
+        category: workflow.category,
+        source: workflow.source,
+      },
+      updatedAt: Date.now(),
+      publish: {},
+      triggers: [],
+    }) as WorkflowIntegrationConfig;
+    const rawTriggers = Array.isArray(baseConfig.triggers) ? baseConfig.triggers : [];
+    const triggerExists = rawTriggers.some((item) => item?.id === trigger.id);
+    const nextTriggers = triggerExists
+      ? rawTriggers.map((item) => (item?.id === trigger.id ? trigger : item))
+      : [...rawTriggers, trigger];
+    const nextConfig = {
+      ...baseConfig,
+      workflow: {
+        ...asObject((baseConfig as JsonObject).workflow),
+        id: workflow.id,
+        name: workflow.name,
+        category: workflow.category,
+        source: workflow.source,
+      },
+      triggers: nextTriggers,
+    } as WorkflowIntegrationConfig;
+
+    setConfigSavingId(trigger.id);
+    setError('');
+    setSuccess('');
+    try {
+      const response = await workflowAPI.updateConfig(workflow.id, nextConfig);
+      const savedConfig = response.data.config;
+      onConfigUpdated(savedConfig);
+      setSuccess(`${triggerTypeLabel(trigger.type)} 配置已保存`);
+      return templateTriggers(savedConfig).find((item) => item.id === trigger.id) ?? trigger;
+    } catch (err: unknown) {
+      setError(extractErrorMessage(err, '保存配置失败'));
+      return null;
+    } finally {
+      setConfigSavingId(null);
+    }
+  };
+
   return (
     <div className="border-b border-gray-100">
       <SectionHeader
@@ -947,43 +1142,19 @@ function TemplateTriggersSection({
             const status = statuses[trigger.id];
             const active = isRuntimeActive(status);
             const busy = savingId === trigger.id;
-            const guideActions = guideActionsByKind?.[triggerGuideKind(trigger.type)] ?? [];
             return (
-              <div key={trigger.id} className="rounded-xl border border-gray-200 bg-white px-3 py-3 space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-gray-900">{trigger.name || triggerTypeLabel(trigger.type)}</span>
-                      <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
-                        {triggerTypeLabel(trigger.type)}
-                      </span>
-                    </div>
-                    <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(trigger)}</div>
-                    <div className="mt-1 text-[11px] text-gray-400">模板来自配置库</div>
-                  </div>
-                  <WorkflowStatusBadge status={templateStatusLabel(status)} />
-                </div>
-                {status?.error ? (
-                  <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-                    {String(status.error)}
-                  </div>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleToggle(trigger);
-                  }}
-                  disabled={busy}
-                  className={`w-full rounded-lg px-3 py-2 text-xs font-medium disabled:opacity-60 ${
-                    active
-                      ? 'border border-red-200 text-red-600 hover:bg-red-50'
-                      : 'bg-green-600 text-white hover:bg-green-700'
-                  }`}
-                >
-                  {busy ? '处理中...' : active ? '停止监听' : '启动监听'}
-                </button>
-                <PublishGuidePanel actions={guideActions} onGuidePrompt={onGuidePrompt} />
-              </div>
+              <TemplateTriggerConfigCard
+                key={trigger.id}
+                trigger={trigger}
+                status={status}
+                active={active}
+                toggling={busy}
+                saving={configSavingId === trigger.id}
+                onToggle={(nextTrigger) => {
+                  void handleToggle(nextTrigger);
+                }}
+                onSave={saveTemplateTrigger}
+              />
             );
           })}
 
@@ -1001,6 +1172,233 @@ function TemplateTriggersSection({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+function TemplateTriggerConfigCard({
+  trigger,
+  status,
+  active,
+  toggling,
+  saving,
+  onToggle,
+  onSave,
+}: {
+  trigger: WorkflowTrigger;
+  status?: JsonObject;
+  active: boolean;
+  toggling: boolean;
+  saving: boolean;
+  onToggle: (trigger: WorkflowTrigger) => void;
+  onSave: (trigger: WorkflowTrigger) => Promise<WorkflowTrigger | null>;
+}) {
+  const [draft, setDraft] = useState(() => cloneTrigger(trigger));
+  const [inputsText, setInputsText] = useState(() => stringifyJson(trigger.inputs ?? {}));
+  const [jsonError, setJsonError] = useState('');
+
+  useEffect(() => {
+    setDraft(cloneTrigger(trigger));
+    setInputsText(stringifyJson(trigger.inputs ?? {}));
+    setJsonError('');
+  }, [trigger]);
+
+  const source = draft.source ?? {};
+  const runtime = draft.runtime ?? {};
+  const auth = draft.auth ?? { type: 'none' };
+  const isWebhook = draft.type === 'webhook' || draft.type === 'custom_webhook';
+  const isSchedule = draft.type === 'schedule';
+  const isKafka = draft.type === 'kafka';
+  const isSyslog = draft.type === 'syslog';
+  const inputKey = isKafka
+    ? getTriggerInputKey(draft, 'kafka_message')
+    : isSyslog
+      ? getTriggerInputKey(draft, 'syslog_message')
+      : getTriggerInputKey(draft, 'event');
+
+  const updateDraft = (patch: Partial<WorkflowTrigger>) => {
+    setDraft((current) => ({
+      ...current,
+      ...patch,
+    }));
+  };
+
+  const updateSource = (patch: JsonObject) => {
+    setDraft((current) => ({
+      ...current,
+      source: {
+        ...(current.source ?? {}),
+        ...patch,
+      },
+    }));
+  };
+
+  const updateRuntime = (patch: JsonObject) => {
+    setDraft((current) => ({
+      ...current,
+      runtime: {
+        ...(current.runtime ?? {}),
+        ...patch,
+      },
+    }));
+  };
+
+  const updateAuth = (patch: JsonObject) => {
+    setDraft((current) => ({
+      ...current,
+      auth: {
+        ...(current.auth ?? { type: 'none' }),
+        ...patch,
+      },
+    }));
+  };
+
+  const saveCurrentDraft = async (): Promise<WorkflowTrigger | null> => {
+    const parsedInputs = parseJsonObject(inputsText, 'Inputs');
+    if (!parsedInputs.ok) {
+      setJsonError(parsedInputs.error);
+      return null;
+    }
+    setJsonError('');
+    const nextDraft = {
+      ...draft,
+      inputs: parsedInputs.value,
+    };
+    const saved = await onSave(nextDraft);
+    if (saved) {
+      setDraft(cloneTrigger(saved));
+      setInputsText(stringifyJson(saved.inputs ?? {}));
+    }
+    return saved;
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white px-4 py-4 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-gray-900">{draft.name || triggerTypeLabel(draft.type)}</span>
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
+              {triggerTypeLabel(draft.type)}
+            </span>
+          </div>
+          <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(draft)}</div>
+          <div className="mt-1 text-[11px] text-gray-400">模板来自配置库</div>
+        </div>
+        <WorkflowStatusBadge status={templateStatusLabel(status)} />
+      </div>
+
+      {status?.error ? (
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+          {String(status.error)}
+        </div>
+      ) : null}
+
+      <Field label="名称">
+        <Input value={draft.name ?? ''} onChange={(e) => updateDraft({ name: e.target.value })} />
+      </Field>
+
+      {isSyslog ? (
+        <SyslogTriggerFields
+          source={source}
+          inputKey={inputKey}
+          onSourceChange={updateSource}
+          onInputKeyChange={(key) => setDraft((current) => setTriggerInputKey(current, key))}
+        />
+      ) : null}
+
+      {isKafka ? (
+        <KafkaTriggerFields
+          source={source}
+          inputKey={inputKey}
+          onSourceChange={updateSource}
+          onInputKeyChange={(key) => setDraft((current) => setTriggerInputKey(current, key))}
+        />
+      ) : null}
+
+      {isWebhook ? (
+        <div className="grid grid-cols-1 gap-3">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="方法">
+              <Select value={String(source.method ?? 'POST')} onChange={(e) => updateSource({ method: e.target.value })}>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+              </Select>
+            </Field>
+            <Field label="路径">
+              <Input value={String(source.path ?? '/webhook')} onChange={(e) => updateSource({ path: e.target.value })} />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="鉴权方式">
+              <Select value={String(auth.type ?? 'none')} onChange={(e) => updateAuth({ type: e.target.value })}>
+                <option value="none">none</option>
+                <option value="api_key">api_key</option>
+                <option value="hmac">hmac</option>
+              </Select>
+            </Field>
+            <Field label="Secret Ref">
+              <Input value={String(auth.secretRef ?? '')} onChange={(e) => updateAuth({ secretRef: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Input Key">
+            <Input
+              value={inputKey}
+              onChange={(e) => setDraft((current) => setTriggerInputKey(current, e.target.value || 'event'))}
+            />
+          </Field>
+        </div>
+      ) : null}
+
+      {isSchedule ? (
+        <ScheduleTriggerFields
+          source={source}
+          runtime={runtime}
+          onSourceChange={updateSource}
+          onRuntimeChange={updateRuntime}
+        />
+      ) : null}
+
+      <Field label="Inputs（JSON）" hint='直接填写工作流需要的输入，例如：{ "alert_data": { "id": 1 } }'>
+        <TextArea value={inputsText} onChange={(e) => setInputsText(e.target.value)} rows={5} />
+      </Field>
+
+      {jsonError ? (
+        <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <span>{jsonError}</span>
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={async () => {
+            const saved = await saveCurrentDraft();
+            if (saved) {
+              onToggle(saved);
+            }
+          }}
+          disabled={toggling || saving}
+          className={`rounded-lg px-3 py-2 text-xs font-medium disabled:opacity-60 ${
+            active
+              ? 'border border-red-200 text-red-600 hover:bg-red-50'
+              : 'bg-green-600 text-white hover:bg-green-700'
+          }`}
+        >
+          {toggling ? '处理中...' : triggerRuntimeActionLabel(draft.type, active)}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void saveCurrentDraft();
+          }}
+          disabled={saving}
+          className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >
+          {saving ? '保存中...' : '保存配置'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1169,65 +1567,12 @@ function TriggerEditor({
       </Field>
 
       {isSchedule ? (
-        <div className="grid grid-cols-1 gap-3">
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="调度模式">
-              <Select
-                value={String(source.mode ?? (source.cron ? 'cron' : 'interval'))}
-                onChange={(e) => {
-                  const nextMode = e.target.value;
-                  if (nextMode === 'cron') {
-                    updateSource({
-                      mode: nextMode,
-                      cron: String(source.cron ?? '*/5 * * * *'),
-                      intervalSeconds: undefined,
-                    });
-                    return;
-                  }
-                  updateSource({
-                    mode: nextMode,
-                    intervalSeconds: Math.max(1, Number.parseInt(String(source.intervalSeconds ?? 300), 10)),
-                    cron: undefined,
-                  });
-                }}
-              >
-                <option value="interval">Interval</option>
-                <option value="cron">Cron</option>
-              </Select>
-            </Field>
-            <Field label="执行超时（秒）">
-              <Input
-                type="number"
-                min={1}
-                value={String(runtime.timeoutSeconds ?? 7200)}
-                onChange={(e) => updateRuntime({ timeoutSeconds: Math.max(1, Number.parseInt(e.target.value || '7200', 10)) })}
-              />
-            </Field>
-          </div>
-          {(source.mode ?? (source.cron ? 'cron' : 'interval')) === 'cron' ? (
-            <Field label="Cron 表达式">
-              <Input value={String(source.cron ?? '')} onChange={(e) => updateSource({ cron: e.target.value })} placeholder="*/5 * * * *" />
-            </Field>
-          ) : (
-            <Field label="轮询间隔（秒）">
-              <Input
-                type="number"
-                min={1}
-                value={String(source.intervalSeconds ?? 300)}
-                onChange={(e) => updateSource({ intervalSeconds: Math.max(1, Number.parseInt(e.target.value || '300', 10)) })}
-              />
-            </Field>
-          )}
-          <label className="flex items-center gap-2 text-xs text-gray-600">
-            <input
-              type="checkbox"
-              checked={Boolean(runtime.noOverlap ?? true)}
-              onChange={(e) => updateRuntime({ noOverlap: e.target.checked })}
-              className="rounded border-gray-300 text-red-600 focus:ring-red-500"
-            />
-            禁止重叠执行
-          </label>
-        </div>
+        <ScheduleTriggerFields
+          source={source}
+          runtime={runtime}
+          onSourceChange={updateSource}
+          onRuntimeChange={updateRuntime}
+        />
       ) : null}
 
       {isWebhook ? (
@@ -1277,66 +1622,21 @@ function TriggerEditor({
       ) : null}
 
       {isKafka ? (
-        <div className="grid grid-cols-1 gap-3">
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Broker">
-              <Input value={String(source.inputBroker ?? '')} onChange={(e) => updateSource({ inputBroker: e.target.value })} />
-            </Field>
-            <Field label="Topic">
-              <Input value={String(source.inputTopic ?? '')} onChange={(e) => updateSource({ inputTopic: e.target.value })} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Group ID">
-              <Input value={String(source.inputGroupId ?? '')} onChange={(e) => updateSource({ inputGroupId: e.target.value })} />
-            </Field>
-            <Field label="Input Key">
-              <Input value={inputKey} onChange={(e) => onChange(setTriggerInputKey(draft, e.target.value || 'kafka_message'))} />
-            </Field>
-          </div>
-          <Field label="Offset Reset">
-            <Select value={String(source.autoOffsetReset ?? 'latest')} onChange={(e) => updateSource({ autoOffsetReset: e.target.value })}>
-              <option value="latest">latest</option>
-              <option value="earliest">earliest</option>
-            </Select>
-          </Field>
-        </div>
+        <KafkaTriggerFields
+          source={source}
+          inputKey={inputKey}
+          onSourceChange={updateSource}
+          onInputKeyChange={(key) => onChange(setTriggerInputKey(draft, key))}
+        />
       ) : null}
 
       {isSyslog ? (
-        <div className="grid grid-cols-1 gap-3">
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="协议">
-              <Select value={String(source.protocol ?? 'udp')} onChange={(e) => updateSource({ protocol: e.target.value })}>
-                <option value="udp">UDP</option>
-                <option value="tcp">TCP</option>
-              </Select>
-            </Field>
-            <Field label="格式">
-              <Select value={String(source.format ?? 'auto')} onChange={(e) => updateSource({ format: e.target.value })}>
-                <option value="auto">auto</option>
-                <option value="rfc3164">rfc3164</option>
-                <option value="rfc5424">rfc5424</option>
-              </Select>
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Host">
-              <Input value={String(source.host ?? '0.0.0.0')} onChange={(e) => updateSource({ host: e.target.value })} />
-            </Field>
-            <Field label="Port">
-              <Input
-                type="number"
-                min={1}
-                value={String(source.port ?? 5140)}
-                onChange={(e) => updateSource({ port: Math.max(1, Number.parseInt(e.target.value || '5140', 10)) })}
-              />
-            </Field>
-          </div>
-          <Field label="Input Key">
-            <Input value={inputKey} onChange={(e) => onChange(setTriggerInputKey(draft, e.target.value || 'syslog_message'))} />
-          </Field>
-        </div>
+        <SyslogTriggerFields
+          source={source}
+          inputKey={inputKey}
+          onSourceChange={updateSource}
+          onInputKeyChange={(key) => onChange(setTriggerInputKey(draft, key))}
+        />
       ) : null}
 
       {isAdapter ? (
@@ -1854,7 +2154,7 @@ function TriggersSection({
 export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePrompt }: IntegrationTabProps) {
   const { t } = useTranslation('workflow');
   const [config, setConfig] = useState<WorkflowIntegrationConfig | null>(null);
-  const [hasTemplate, setHasTemplate] = useState(false);
+  const [hasStoredTemplate, setHasStoredTemplate] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [configError, setConfigError] = useState('');
 
@@ -1865,12 +2165,12 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
     void workflowAPI.getConfig(workflow.id)
       .then((response) => {
         if (cancelled) return;
-        setHasTemplate(response.data.exists === true);
+        setHasStoredTemplate(response.data.exists === true);
         setConfig(response.data.config ?? null);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setHasTemplate(false);
+        setHasStoredTemplate(false);
         setConfig(null);
         setConfigError(extractErrorMessage(err, '加载发布配置失败'));
       })
@@ -1895,55 +2195,43 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
     );
   }
 
-  if (hasTemplate) {
-    const view = buildTemplateView(config);
-    const guideActions = buildPublishGuideActions(t, workflow, view);
-    const guideActionsByKind = guideActions.reduce<Record<string, PublishGuideAction[]>>((acc, action) => {
-      acc[action.key] = [...(acc[action.key] ?? []), action];
-      return acc;
-    }, {});
-    return (
-      <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
-        {view.hasApi ? (
-          <PublishSection
-            workflowId={workflow.id}
-            guideActions={guideActionsByKind.api}
-            onGuidePrompt={onGuidePrompt}
-          />
-        ) : null}
-        {view.triggers.length > 0 ? (
-          <TemplateTriggersSection
-            workflow={workflow}
-            triggers={view.triggers}
-            onWorkflowUpdated={onWorkflowUpdated}
-            guideActionsByKind={guideActionsByKind}
-            onGuidePrompt={onGuidePrompt}
-          />
-        ) : null}
-        {!view.hasApi && view.triggers.length === 0 ? (
-          <EmptyPublishGuideState
-            statusText="发布配置中没有声明可发布的 API 或触发能力。"
-            actions={guideActions}
-            onGuidePrompt={onGuidePrompt}
-          />
-        ) : null}
-      </div>
-    );
-  }
+  const view = buildTemplateView(config);
+  const guideActions = buildPublishGuideActions(t, workflow, view);
+  const hasConfiguredCapabilities = view.hasApi || view.triggers.length > 0;
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto">
+    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
       {configError ? (
         <div className="flex items-start gap-1.5 bg-red-50 px-4 py-3 text-xs text-red-600">
           <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{configError}</span>
         </div>
       ) : null}
-      <EmptyPublishGuideState
-        statusText="当前工作流还没有发布配置模板。"
-        actions={buildPublishGuideActions(t, workflow, { hasApi: false, triggers: [] })}
-        onGuidePrompt={onGuidePrompt}
-      />
+      {view.hasApi ? (
+        <PublishSection workflowId={workflow.id} />
+      ) : null}
+      {view.triggers.length > 0 ? (
+        <TemplateTriggersSection
+          workflow={workflow}
+          triggers={view.triggers}
+          config={config}
+          onConfigUpdated={setConfig}
+          onWorkflowUpdated={onWorkflowUpdated}
+        />
+      ) : null}
+      {hasConfiguredCapabilities ? (
+        <div className="p-4">
+          <PublishGuidePanel actions={guideActions} onGuidePrompt={onGuidePrompt} />
+        </div>
+      ) : (
+        <EmptyPublishGuideState
+          statusText={hasStoredTemplate
+            ? '发布配置中没有声明可发布的 API 或触发能力。'
+            : '当前工作流还没有发布或配置接入方式。'}
+          actions={guideActions}
+          onGuidePrompt={onGuidePrompt}
+        />
+      )}
     </div>
   );
 }

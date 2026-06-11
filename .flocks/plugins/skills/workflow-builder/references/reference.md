@@ -195,6 +195,10 @@
 ```json
 {
   "name": "my_workflow",
+  "nameI18n": {
+    "zh-CN": "我的工作流",
+    "en-US": "My Workflow"
+  },
   "description": "工作流用途说明（可选）",
   "start": "step_1",
   "nodes": [

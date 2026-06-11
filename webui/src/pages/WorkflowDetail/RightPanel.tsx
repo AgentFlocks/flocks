@@ -6,6 +6,7 @@ import { useConfirm } from '@/components/common/ConfirmDialog';
 import OverviewTab from './tabs/OverviewTab';
 import ChatTab, { type WorkflowChatLaunchRequest } from './tabs/ChatTab';
 import IntegrationTab from './tabs/IntegrationTab';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 export type { WorkflowChatLaunchRequest };
 
@@ -99,8 +100,9 @@ export default function RightPanel({
   selectedNode, onDeselectNode,
   onDelete,
 }: RightPanelProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const confirm = useConfirm();
+  const workflowDisplayName = getWorkflowDisplayName(workflow, i18n?.language);
   const [internalActiveTab, setInternalActiveTab] = useState<RightPanelTabId>('overview');
   const [deleting, setDeleting] = useState(false);
   const currentActiveTab = activeTab ?? internalActiveTab;
@@ -115,7 +117,7 @@ export default function RightPanel({
   const handleDelete = async () => {
     const ok = await confirm({
       title: t('detail.rightPanel.deleteConfirmTitle'),
-      description: t('detail.rightPanel.deleteConfirmDesc', { name: workflow.name }),
+      description: t('detail.rightPanel.deleteConfirmDesc', { name: workflowDisplayName }),
       confirmText: t('detail.rightPanel.deleteConfirmText'),
       variant: 'danger',
     });

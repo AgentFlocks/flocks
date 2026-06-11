@@ -9,6 +9,8 @@ export interface UseSessionChatOptions {
   contextMessage?: string;
   /** Mock welcome message from assistant */
   welcomeMessage?: string;
+  /** Existing session to resume instead of creating a new one */
+  initialSessionId?: string | null;
   /** Auto-create session when hook mounts */
   autoCreate?: boolean;
 }
@@ -27,13 +29,14 @@ export function useSessionChat({
   category,
   contextMessage,
   welcomeMessage,
+  initialSessionId = null,
   autoCreate = false,
 }: UseSessionChatOptions) {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const sessionIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(initialSessionId);
   const createPromiseRef = useRef<Promise<string> | null>(null);
   const optionsRef = useRef({ title, category, contextMessage, welcomeMessage });
   optionsRef.current = { title, category, contextMessage, welcomeMessage };
@@ -88,6 +91,15 @@ export function useSessionChat({
     },
     [],
   );
+
+  useEffect(() => {
+    if (!initialSessionId || initialSessionId === sessionIdRef.current) return;
+    sessionIdRef.current = initialSessionId;
+    createPromiseRef.current = null;
+    setSessionId(initialSessionId);
+    setLoading(false);
+    setError(null);
+  }, [initialSessionId]);
 
   const retry = useCallback(() => {
     setError(null);

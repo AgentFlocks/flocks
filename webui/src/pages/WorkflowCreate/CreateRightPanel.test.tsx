@@ -5,8 +5,16 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Workflow } from '@/api/workflow';
 import CreateRightPanel from './CreateRightPanel';
 
+const { capturedCreateChatTabProps, capturedIntegrationTabProps } = vi.hoisted(() => ({
+  capturedCreateChatTabProps: [] as any[],
+  capturedIntegrationTabProps: [] as any[],
+}));
+
 vi.mock('./CreateChatTab', () => ({
-  default: () => <div>Workbench content</div>,
+  default: (props: any) => {
+    capturedCreateChatTabProps.push(props);
+    return <div>Workbench content</div>;
+  },
 }));
 
 vi.mock('./CreateOverviewTab', () => ({
@@ -14,7 +22,20 @@ vi.mock('./CreateOverviewTab', () => ({
 }));
 
 vi.mock('../WorkflowDetail/tabs/IntegrationTab', () => ({
-  default: ({ workflow }: { workflow: Workflow }) => <div>Publish content for {workflow.id}</div>,
+  default: ({ workflow, onGuidePrompt }: { workflow: Workflow; onGuidePrompt?: (prompt: string, label: string) => void }) => {
+    capturedIntegrationTabProps.push({ workflow, onGuidePrompt });
+    return (
+      <div>
+        <div>Publish content for {workflow.id}</div>
+        <button
+          type="button"
+          onClick={() => onGuidePrompt?.('publish api prompt', '发布为 API')}
+        >
+          发布为 API
+        </button>
+      </div>
+    );
+  },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -57,6 +78,11 @@ const workflow: Workflow = {
 };
 
 describe('WorkflowCreate CreateRightPanel', () => {
+  beforeEach(() => {
+    capturedCreateChatTabProps.length = 0;
+    capturedIntegrationTabProps.length = 0;
+  });
+
   it('opens on the workbench tab and exposes a publish tab', () => {
     render(
       <CreateRightPanel
@@ -104,5 +130,35 @@ describe('WorkflowCreate CreateRightPanel', () => {
     await user.click(screen.getByRole('button', { name: '发布' }));
 
     expect(screen.getByText('Publish content for generated_workflow')).toBeInTheDocument();
+    expect(capturedIntegrationTabProps[capturedIntegrationTabProps.length - 1].onGuidePrompt).toEqual(expect.any(Function));
+  });
+
+  it('routes publish guide prompts back into the current workbench session', async () => {
+    const user = userEvent.setup();
+    const onLaunchRequestHandled = vi.fn();
+    render(
+      <CreateRightPanel
+        workflow={workflow}
+        open
+        width={420}
+        onWorkflowCreated={vi.fn()}
+        initialChatSessionId="session-existing"
+        onChatLaunchRequestHandled={onLaunchRequestHandled}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '发布' }));
+    await user.click(screen.getByRole('button', { name: '发布为 API' }));
+
+    expect(screen.getByText('Workbench content')).toBeInTheDocument();
+    const latestChatProps = capturedCreateChatTabProps[capturedCreateChatTabProps.length - 1];
+    expect(latestChatProps.initialSessionId).toBe('session-existing');
+    expect(latestChatProps.launchRequest).toMatchObject({
+      prompt: 'publish api prompt',
+      displayLabel: '发布为 API',
+    });
+
+    latestChatProps.onLaunchRequestHandled(latestChatProps.launchRequest.id);
+    expect(onLaunchRequestHandled).toHaveBeenCalledWith(latestChatProps.launchRequest.id);
   });
 });

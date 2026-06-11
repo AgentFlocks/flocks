@@ -137,6 +137,7 @@ class WorkflowCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
     name: str = Field(..., description="Workflow name")
+    name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field("default", description="Workflow category")
     workflow_json: Dict[str, Any] = Field(..., alias="workflowJson", description="Workflow JSON definition")
@@ -152,6 +153,7 @@ class WorkflowUpdateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     
     name: Optional[str] = Field(None, description="Workflow name")
+    name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field(None, description="Workflow category")
     workflow_json: Optional[Dict[str, Any]] = Field(None, alias="workflowJson", description="Workflow JSON")
@@ -174,6 +176,7 @@ class WorkflowResponse(BaseModel):
     
     id: str = Field(..., description="Workflow ID")
     name: str = Field(..., description="Workflow name")
+    nameI18n: Optional[Dict[str, str]] = Field(None, description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Description")
     markdownContent: Optional[str] = Field(None, description="Workflow markdown documentation content")
     editMarkdownContent: Optional[str] = Field(None, description="Human-editable workflow markdown document content")
@@ -1229,6 +1232,7 @@ async def create_workflow(req: WorkflowCreateRequest):
         meta = {
             "id": workflow_id,
             "name": req.name,
+            "nameI18n": req.name_i18n,
             "description": req.description,
             "category": req.category or "default",
             "status": "draft",
@@ -1302,6 +1306,8 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
 
         if req.name is not None:
             data["name"] = req.name
+        if req.name_i18n is not None:
+            data["nameI18n"] = req.name_i18n
         if req.description is not None:
             data["description"] = req.description
         if req.category is not None:

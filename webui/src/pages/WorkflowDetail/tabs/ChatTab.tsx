@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, Bot, Clock, Info, Plus } from 'lucide-react';
+import { AlertCircle, Bot, Clock, Plus } from 'lucide-react';
 import SessionChat, {
   NodeRef,
   buildInstructionDisplayText,
@@ -15,11 +15,13 @@ import {
   useChatModelOptions,
 } from '@/components/common/ChatPromptSelectors';
 import ChatGuideDock, { type ChatGuideAction } from '@/components/common/ChatGuideDock';
+import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import type { ImagePartData } from '@/utils/imageUpload';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { formatSessionDate } from '@/utils/time';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import client from '@/api/client';
 import {
   getStoredSessions,
@@ -77,13 +79,15 @@ export default function ChatTab({
   selectedNode,
   onNodeRefDismiss,
 }: ChatTabProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
+  const workflowDisplayName = getWorkflowDisplayName(workflow, i18n?.language);
   const defaultSupportsVision = useDefaultModelVision();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [initialMessage, setInitialMessage] = useState<string | null>(null);
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [sessionsHydrated, setSessionsHydrated] = useState(false);
   const hasCreatedRef = useRef(false);
   const workflowRevisionRef = useRef<string>(workflowRevisionKey(workflow));
   const workflowIdRef = useRef<string>(workflow.id);
@@ -110,6 +114,7 @@ export default function ChatTab({
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowMdPath = `${workflowDir}workflow.md`;
   const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
+  const workflowConfigEndpoint = `/api/workflow/${workflow.id}/config`;
 
   const {
     sessionId: hookSessionId,
@@ -119,17 +124,22 @@ export default function ChatTab({
     createAndSend: createAndSendSession,
     reset: resetSession,
   } = useSessionChat({
-    title: t('detail.chat.sessionTitle', { name: workflow.name }),
+    title: t('detail.chat.sessionTitle', { name: workflowDisplayName }),
     category: 'workflow',
     contextMessage: t('detail.chat.contextMessage', {
       id: workflow.id,
-      name: workflow.name,
+      name: workflowDisplayName,
       category: workflow.category,
       dir: workflowDir,
       mdPath: workflowMdPath,
       jsonPath: `${workflowDir}workflow.json`,
       guidePath: workflowGuidePath,
       configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
+      configEndpoint: workflowConfigEndpoint,
+      configSyncEndpoint: `/api/workflow/${workflow.id}/config/sync`,
+      publishEndpoint: `/api/workflow/${workflow.id}/publish`,
+      unpublishEndpoint: `/api/workflow/${workflow.id}/unpublish`,
+      triggersEndpoint: `/api/workflow/${workflow.id}/triggers`,
     }),
   });
 
@@ -141,9 +151,14 @@ export default function ChatTab({
 
   // Load stored sessions and validate only the active one (lightweight check)
   useEffect(() => {
+    let cancelled = false;
+    setSessionsHydrated(false);
     const stored = getStoredSessions(workflow.id);
     if (stored.length === 0) {
       setSessions([]);
+      setActiveSessionId(null);
+      hasCreatedRef.current = false;
+      setSessionsHydrated(true);
       return;
     }
 
@@ -155,7 +170,9 @@ export default function ChatTab({
     (async () => {
       try {
         await client.get(`/api/session/${stored[0].id}`);
+        if (cancelled) return;
       } catch {
+        if (cancelled) return;
         // First session is gone — try to find a valid one
         const valid: StoredSession[] = [];
         for (const s of stored.slice(1)) {
@@ -173,8 +190,15 @@ export default function ChatTab({
           setActiveSessionId(null);
           hasCreatedRef.current = false;
         }
+      } finally {
+        if (!cancelled) {
+          setSessionsHydrated(true);
+        }
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [workflow.id]);
 
   // Save newly created session to localStorage
@@ -182,12 +206,12 @@ export default function ChatTab({
     if (!hookSessionId) return;
     const newSession: StoredSession = {
       id: hookSessionId,
-      title: t('detail.chat.sessionTitle', { name: workflow.name }),
+      title: t('detail.chat.sessionTitle', { name: workflowDisplayName }),
       createdAt: Date.now(),
     };
     pushStoredSession(workflow.id, newSession);
     setSessions(getStoredSessions(workflow.id));
-  }, [hookSessionId, workflow.id, workflow.name]);
+  }, [hookSessionId, workflow.id, workflowDisplayName, t]);
 
   // Close history dropdown on outside click
   useEffect(() => {
@@ -452,6 +476,7 @@ export default function ChatTab({
             <>
               <WorkflowLaunchRequestRunner
                 launchRequest={launchRequest}
+                enabled={sessionsHydrated}
                 onLaunchRequestHandled={onLaunchRequestHandled}
                 onStartPrompt={(prompt, label) => sendPrompt(prompt, {
                   displayText: label ? buildInstructionDisplayText(label) : undefined,
@@ -497,7 +522,8 @@ function WorkflowWelcome({
   onRetry: () => void;
   onStartPrompt: (prompt: string, label: string) => void;
 }) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
+  const workflowDisplayName = getWorkflowDisplayName(workflow, i18n?.language);
   const guideGroups = buildWorkflowGuideGroups(t, workflow);
 
   return (
@@ -514,7 +540,7 @@ function WorkflowWelcome({
             {t('detail.chat.welcome.editPanelTitle')}
           </h3>
           <p className="mx-auto mt-2 max-w-[320px] text-xs leading-relaxed text-gray-500">
-            {t('detail.chat.welcome.editPanelDesc', { name: workflow.name })}
+            {t('detail.chat.welcome.editPanelDesc', { name: workflowDisplayName })}
           </p>
         </div>
         <div
@@ -563,25 +589,23 @@ function WorkflowGuideSection({
       <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
       <div className="flex flex-col gap-1.5">
         {actions.map((action) => (
-          <button
+          <div
             key={action.label}
-            type="button"
-            onClick={() => onStartPrompt(action.prompt, action.label)}
             className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
-            title={action.description}
           >
-            <span className="truncate">{action.label}</span>
-            <span
-              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors group-hover:text-rose-400"
-              title={action.description}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-              }}
+            <button
+              type="button"
+              onClick={() => onStartPrompt(action.prompt, action.label)}
+              className="min-w-0 flex-1 truncate text-left"
             >
-              <Info className="h-3.5 w-3.5" aria-hidden="true" />
-            </span>
-          </button>
+              {action.label}
+            </button>
+            <GuideInfoIcon
+              label={action.label}
+              description={action.description}
+              className="group-hover:text-rose-400"
+            />
+          </div>
         ))}
       </div>
     </section>
@@ -590,21 +614,23 @@ function WorkflowGuideSection({
 
 function WorkflowLaunchRequestRunner({
   launchRequest,
+  enabled,
   onLaunchRequestHandled,
   onStartPrompt,
 }: {
   launchRequest?: WorkflowChatLaunchRequest | null;
+  enabled: boolean;
   onLaunchRequestHandled?: (id: number) => void;
   onStartPrompt: (text: string, label?: string) => void;
 }) {
   const handledLaunchRequestRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!launchRequest || handledLaunchRequestRef.current === launchRequest.id) return;
+    if (!enabled || !launchRequest || handledLaunchRequestRef.current === launchRequest.id) return;
     handledLaunchRequestRef.current = launchRequest.id;
     onStartPrompt(launchRequest.prompt, launchRequest.displayLabel);
     onLaunchRequestHandled?.(launchRequest.id);
-  }, [launchRequest, onLaunchRequestHandled, onStartPrompt]);
+  }, [enabled, launchRequest, onLaunchRequestHandled, onStartPrompt]);
 
   return null;
 }
@@ -621,6 +647,11 @@ function buildWorkflowPromptParams(workflow: Workflow) {
     dir: workflowDir,
     mdPath: workflowMdPath,
     guidePath: workflowGuidePath,
+    configEndpoint: `/api/workflow/${workflow.id}/config`,
+    configSyncEndpoint: `/api/workflow/${workflow.id}/config/sync`,
+    publishEndpoint: `/api/workflow/${workflow.id}/publish`,
+    unpublishEndpoint: `/api/workflow/${workflow.id}/unpublish`,
+    triggersEndpoint: `/api/workflow/${workflow.id}/triggers`,
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
 }
@@ -632,6 +663,11 @@ function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuide
       label: t('detail.chat.welcome.editRequirementShort'),
       description: t('detail.chat.welcome.editRequirementDesc'),
       prompt: t('detail.chat.welcome.editRequirementPrompt', promptParams),
+    },
+    {
+      label: t('detail.chat.welcome.editNodeFunctionShort'),
+      description: t('detail.chat.welcome.editNodeFunctionDesc'),
+      prompt: t('detail.chat.welcome.editNodeFunctionPrompt', promptParams),
     },
     {
       label: t('detail.chat.welcome.editNodeShort'),

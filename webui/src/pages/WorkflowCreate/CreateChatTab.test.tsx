@@ -2,8 +2,10 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ComponentProps } from 'react';
 
 import CreateChatTab from './CreateChatTab';
+import { workflowAPI } from '@/api/workflow';
 
 const {
   capturedSessionChatProps,
@@ -35,8 +37,8 @@ vi.mock('@/hooks/useDefaultModelVision', () => ({
 }));
 
 vi.mock('@/hooks/useSessionChat', () => ({
-  useSessionChat: () => ({
-    sessionId: null,
+  useSessionChat: (options: any) => ({
+    sessionId: options.initialSessionId ?? null,
     error: null,
     createAndSend: mockCreateAndSend,
     retry: vi.fn(),
@@ -126,10 +128,10 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-function renderCreateChatTab() {
+function renderCreateChatTab(props?: Partial<ComponentProps<typeof CreateChatTab>>) {
   return render(
     <MemoryRouter>
-      <CreateChatTab onWorkflowCreated={vi.fn()} />
+      <CreateChatTab onWorkflowCreated={vi.fn()} {...props} />
     </MemoryRouter>,
   );
 }
@@ -218,5 +220,58 @@ describe('WorkflowCreate CreateChatTab', () => {
         displayText: '@@flocks-instruction:IP 情报',
       });
     });
+  });
+
+  it('resumes a persisted create session', () => {
+    const onSessionChange = vi.fn();
+    renderCreateChatTab({
+      initialSessionId: 'session-restored',
+      onSessionChange,
+    });
+
+    expect(capturedSessionChatProps[0].sessionId).toBe('session-restored');
+    expect(capturedSessionChatProps[0].welcomeContent).toBeUndefined();
+    expect(onSessionChange).toHaveBeenCalledWith('session-restored');
+  });
+
+  it('does not attach an already-known workflow just because it was created recently', async () => {
+    const creationStartedAt = Date.now();
+    const recentKnownWorkflow = {
+      id: 'previous-workflow',
+      name: 'Previous Workflow',
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt - 1000,
+      updatedAt: creationStartedAt - 1000,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    };
+    vi.mocked(workflowAPI.list).mockResolvedValue({ data: [recentKnownWorkflow] });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.list).toHaveBeenCalledTimes(1);
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(workflowAPI.list).toHaveBeenCalledTimes(2);
+    });
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
   });
 });

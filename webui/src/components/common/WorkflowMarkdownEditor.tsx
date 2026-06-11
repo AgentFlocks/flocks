@@ -34,12 +34,12 @@ export default function WorkflowMarkdownEditor({
   }, [lineNumbers.length, syncLineNumberOffset]);
 
   return (
-    <div className="flex min-h-0 flex-1 overflow-hidden bg-slate-950">
+    <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden bg-slate-950">
       <label htmlFor={id} className="sr-only">{label}</label>
       <div
         aria-hidden="true"
         data-testid="workflow-md-line-numbers"
-        className="flex-shrink-0 overflow-hidden select-none border-r border-slate-800 bg-slate-900/80 py-5 pr-3 text-right font-mono text-sm leading-6 text-slate-500"
+        className="h-full flex-shrink-0 overflow-hidden select-none border-r border-slate-800 bg-slate-900/80 py-5 pr-3 text-right font-mono text-sm leading-6 text-slate-500"
         style={{ width: gutterWidth }}
       >
         <div ref={lineNumberTrackRef}>

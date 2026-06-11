@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Code2, Download, Eye, FileText, GitBranch, Pencil, Save, Sparkles, Workflow as WorkflowIcon } from 'lucide-react';
+import { Code2, FileText, GitBranch, Workflow as WorkflowIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { workflowAPI, Workflow, WorkflowJSON } from '@/api/workflow';
-import WorkflowMarkdownEditor from '@/components/common/WorkflowMarkdownEditor';
+import WorkflowDocumentPanel, { type WorkflowDocumentMode } from '@/components/common/WorkflowDocumentPanel';
 import WorkflowMarkdownDiffReview from '@/components/common/WorkflowMarkdownDiffReview';
 import { buildWorkflowMarkdown } from '@/utils/workflowMarkdown';
 import {
@@ -20,7 +19,6 @@ import CreateTopBar from './CreateTopBar';
 import CreateRightPanel from './CreateRightPanel';
 
 type CreateCanvasTab = 'flow' | 'md' | 'json';
-type EditDocMode = 'edit' | 'preview';
 
 interface EditDocDiff {
   before: string;
@@ -30,12 +28,78 @@ interface EditDocDiff {
 const PANEL_MIN = 240;
 const PANEL_RATIO = 0.40;
 const WORKFLOW_REFRESH_MS = 3000;
+const CREATE_DRAFT_STORAGE_KEY = 'flocks.workflow.create.draft.v1';
 
 const EMPTY_WORKFLOW_JSON: WorkflowJSON = {
   start: '',
   nodes: [],
   edges: [],
 };
+
+interface StoredCreateDraft {
+  version: 1;
+  workflowId?: string | null;
+  chatSessionId?: string | null;
+  creationStartedAt?: number;
+  panelOpen?: boolean;
+  panelWidth?: number;
+  canvasTab?: CreateCanvasTab;
+  workflowMdDraft?: string;
+  workflowMdBase?: string;
+  workflowMdDiff?: EditDocDiff | null;
+  editDocMode?: WorkflowDocumentMode;
+  updatedAt?: number;
+}
+
+function readStoredCreateDraft(): StoredCreateDraft | null {
+  try {
+    const raw = window.localStorage.getItem(CREATE_DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredCreateDraft>;
+    if (parsed.version !== 1) return null;
+    return parsed as StoredCreateDraft;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredCreateDraft(draft: StoredCreateDraft) {
+  try {
+    window.localStorage.setItem(CREATE_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  } catch {
+    // Best-effort persistence; the creation page can still work in memory.
+  }
+}
+
+function clearStoredCreateDraft() {
+  try {
+    window.localStorage.removeItem(CREATE_DRAFT_STORAGE_KEY);
+  } catch {
+    // Best-effort persistence; the creation page can still work in memory.
+  }
+}
+
+function patchStoredCreateDraft(patch: Partial<StoredCreateDraft>) {
+  const current = readStoredCreateDraft() ?? { version: 1 };
+  writeStoredCreateDraft({
+    ...current,
+    ...patch,
+    version: 1,
+    updatedAt: Date.now(),
+  });
+}
+
+function isFreshCreateState(value: unknown): boolean {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && (value as { freshCreate?: unknown }).freshCreate === true
+  );
+}
+
+function isValidCanvasTab(value: unknown): value is CreateCanvasTab {
+  return value === 'flow' || value === 'md' || value === 'json';
+}
 
 function getInitialPanelWidth() {
   const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
@@ -44,22 +108,43 @@ function getInitialPanelWidth() {
 }
 
 function getWorkflowMarkdown(workflow: Workflow) {
-  return workflow.markdownContent ?? workflow.editMarkdownContent ?? buildWorkflowMarkdown(workflow);
+  return workflow.markdownContent ?? workflow.editMarkdownContent ?? '';
+}
+
+function hasWorkflowJsonDefinition(workflow: Workflow | null) {
+  if (!workflow) return false;
+  return Boolean(
+    workflow.workflowJson.start
+    || workflow.workflowJson.nodes.length > 0
+    || workflow.workflowJson.edges.length > 0
+  );
 }
 
 export default function WorkflowCreate() {
   const { t } = useTranslation('workflow');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const startFreshCreate = isFreshCreateState(location.state);
+  const initialCreateDraftRef = useRef<StoredCreateDraft | null | undefined>(undefined);
+  if (initialCreateDraftRef.current === undefined) {
+    initialCreateDraftRef.current = startFreshCreate ? null : readStoredCreateDraft();
+  }
+  const initialCreateDraft = initialCreateDraftRef.current;
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
-  const [panelOpen, setPanelOpen] = useState(true);
-  const [panelWidth, setPanelWidth] = useState(getInitialPanelWidth);
-  const [canvasTab, setCanvasTab] = useState<CreateCanvasTab>('md');
-  const [workflowMdDraft, setWorkflowMdDraft] = useState('');
-  const [workflowMdBase, setWorkflowMdBase] = useState('');
-  const [editDocMode, setEditDocMode] = useState<EditDocMode>('edit');
-  const [workflowMdDiff, setWorkflowMdDiff] = useState<EditDocDiff | null>(null);
+  const [panelOpen, setPanelOpen] = useState(initialCreateDraft?.panelOpen ?? true);
+  const [panelWidth, setPanelWidth] = useState(initialCreateDraft?.panelWidth ?? getInitialPanelWidth);
+  const [canvasTab, setCanvasTab] = useState<CreateCanvasTab>(
+    isValidCanvasTab(initialCreateDraft?.canvasTab) ? initialCreateDraft.canvasTab : 'md',
+  );
+  const [workflowMdDraft, setWorkflowMdDraft] = useState(initialCreateDraft?.workflowMdDraft ?? '');
+  const [workflowMdBase, setWorkflowMdBase] = useState(initialCreateDraft?.workflowMdBase ?? '');
+  const [editDocMode, setEditDocMode] = useState<WorkflowDocumentMode>(initialCreateDraft?.editDocMode ?? 'edit');
+  const [workflowMdDiff, setWorkflowMdDiff] = useState<EditDocDiff | null>(initialCreateDraft?.workflowMdDiff ?? null);
   const [editDocSaving, setEditDocSaving] = useState(false);
   const [editDocReviewing, setEditDocReviewing] = useState<string | null>(null);
   const [editDocError, setEditDocError] = useState<string | null>(null);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(initialCreateDraft?.chatSessionId ?? null);
+  const [creationStartedAt] = useState(initialCreateDraft?.creationStartedAt ?? Date.now());
   const [chatLaunchRequest, setChatLaunchRequest] = useState<{
     id: number;
     prompt: string;
@@ -70,12 +155,27 @@ export default function WorkflowCreate() {
   const dragStartWidth = useRef(0);
   const editDocWorkflowIdRef = useRef<string | null>(null);
   const chatLaunchSeqRef = useRef(0);
+  const missingMarkdownAutoLaunchRef = useRef<string | null>(null);
+  const restoredDraftForWorkflowRef = useRef(Boolean(
+    initialCreateDraft?.workflowId &&
+    (
+      initialCreateDraft.workflowMdDraft ||
+      initialCreateDraft.workflowMdBase ||
+      initialCreateDraft.workflowMdDiff
+    ),
+  ));
 
   const CANVAS_TABS = [
     { id: 'flow' as const, label: t('detail.canvasTabs.flow'), icon: <GitBranch className="w-3.5 h-3.5" /> },
     { id: 'md' as const, label: t('detail.canvasTabs.md'), icon: <FileText className="w-3.5 h-3.5" /> },
     { id: 'json' as const, label: t('detail.canvasTabs.json'), icon: <Code2 className="w-3.5 h-3.5" /> },
   ];
+
+  useEffect(() => {
+    if (!startFreshCreate) return;
+    clearStoredCreateDraft();
+    navigate('/workflows/new', { replace: true, state: null });
+  }, [navigate, startFreshCreate]);
 
   useEffect(() => {
     const onResize = () => {
@@ -86,6 +186,58 @@ export default function WorkflowCreate() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  useEffect(() => {
+    if (!initialCreateDraft?.workflowId) return;
+    let cancelled = false;
+    void workflowAPI.get(initialCreateDraft.workflowId)
+      .then((response) => {
+        if (cancelled) return;
+        setWorkflow(response.data);
+      })
+      .catch(() => {
+        patchStoredCreateDraft({ workflowId: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialCreateDraft?.workflowId]);
+
+  useEffect(() => {
+    const hasDraftState = Boolean(
+      workflow ||
+      chatSessionId ||
+      workflowMdDraft ||
+      workflowMdBase ||
+      workflowMdDiff,
+    );
+    if (!hasDraftState) return;
+    writeStoredCreateDraft({
+      version: 1,
+      workflowId: workflow?.id ?? null,
+      chatSessionId,
+      creationStartedAt,
+      panelOpen,
+      panelWidth,
+      canvasTab,
+      workflowMdDraft,
+      workflowMdBase,
+      workflowMdDiff,
+      editDocMode,
+      updatedAt: Date.now(),
+    });
+  }, [
+    canvasTab,
+    chatSessionId,
+    creationStartedAt,
+    editDocMode,
+    panelOpen,
+    panelWidth,
+    workflow,
+    workflowMdBase,
+    workflowMdDiff,
+    workflowMdDraft,
+  ]);
 
   const onDragStart = useCallback(
     (e: React.MouseEvent) => {
@@ -151,6 +303,21 @@ export default function WorkflowCreate() {
     editDocWorkflowIdRef.current = workflow.id;
 
     if (workflowIdChanged) {
+      if (restoredDraftForWorkflowRef.current && workflow.id === initialCreateDraft?.workflowId) {
+        restoredDraftForWorkflowRef.current = false;
+        const restoredDraft = initialCreateDraft.workflowMdDraft ?? next;
+        const restoredBase = initialCreateDraft.workflowMdBase ?? next;
+        setWorkflowMdDraft(restoredDraft);
+        setWorkflowMdBase(restoredBase);
+        setWorkflowMdDiff(initialCreateDraft.workflowMdDiff ?? null);
+        setEditDocMode(initialCreateDraft.editDocMode ?? 'edit');
+        setEditDocError(null);
+        if (restoredDraft.trim()) {
+          setCanvasTab(isValidCanvasTab(initialCreateDraft.canvasTab) ? initialCreateDraft.canvasTab : 'md');
+        }
+        return;
+      }
+
       setWorkflowMdDraft(next);
       setWorkflowMdBase(next);
       setWorkflowMdDiff(next.trim() ? { before: '', after: next } : null);
@@ -199,15 +366,6 @@ export default function WorkflowCreate() {
     return updated.markdownContent ?? normalized;
   }, [workflow]);
 
-  const handleGenerateEditDoc = useCallback(() => {
-    if (!workflow) return;
-    const next = buildWorkflowMarkdown(workflow);
-    setWorkflowMdDraft(next);
-    setWorkflowMdDiff(null);
-    setEditDocMode('edit');
-    setEditDocError(null);
-  }, [workflow]);
-
   const handleExportEditDoc = useCallback(() => {
     if (!workflowMdDraft.trim()) return;
     const blob = new Blob([workflowMdDraft], { type: 'text/markdown' });
@@ -235,6 +393,51 @@ export default function WorkflowCreate() {
       setEditDocSaving(false);
     }
   }, [editDocSaving, persistWorkflowMarkdown, workflow, workflowMdDraft]);
+
+  const buildEditDocGenerationPrompt = useCallback(() => {
+    if (workflow) {
+      const workflowDir = workflow.source === 'global'
+        ? `~/.flocks/plugins/workflows/${workflow.id}/`
+        : `.flocks/plugins/workflows/${workflow.id}/`;
+
+      return t('detail.generateEditDocPrompt', {
+        name: workflow.name,
+        dir: workflowDir,
+        mdPath: `${workflowDir}workflow.md`,
+        jsonPath: `${workflowDir}workflow.json`,
+        workflowJson: JSON.stringify(workflow.workflowJson, null, 2),
+      });
+    }
+
+    return t('create.chat.generateEditDocPrompt', {
+      editDocContent: workflowMdDraft,
+    });
+  }, [t, workflow, workflowMdDraft]);
+
+  const launchEditDocGeneration = useCallback(() => {
+    setPanelOpen(true);
+    setCanvasTab('md');
+    setEditDocMode('edit');
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt: buildEditDocGenerationPrompt(),
+      displayLabel: t('detail.generateEditDoc'),
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [buildEditDocGenerationPrompt, t]);
+
+  const handleGenerateEditDoc = useCallback(() => {
+    if (!workflowMdDraft.trim() || !workflow) {
+      launchEditDocGeneration();
+      return;
+    }
+
+    const next = buildWorkflowMarkdown(workflow);
+    setWorkflowMdDraft(next);
+    setWorkflowMdDiff(null);
+    setEditDocMode('edit');
+    setEditDocError(null);
+  }, [launchEditDocGeneration, workflow, workflowMdDraft]);
 
   const buildWorkflowGenerationPrompt = useCallback((editDocContent: string) => {
     if (workflow) {
@@ -268,6 +471,13 @@ export default function WorkflowCreate() {
     });
     chatLaunchSeqRef.current += 1;
   }, [buildWorkflowGenerationPrompt, t, workflowMdDraft]);
+
+  useEffect(() => {
+    if (!workflow || workflowMdDraft.trim() || !hasWorkflowJsonDefinition(workflow)) return;
+    if (missingMarkdownAutoLaunchRef.current === workflow.id) return;
+    missingMarkdownAutoLaunchRef.current = workflow.id;
+    launchEditDocGeneration();
+  }, [launchEditDocGeneration, workflow, workflowMdDraft]);
 
   const handleChatLaunchRequestHandled = useCallback((requestId: number) => {
     setChatLaunchRequest((current) => (
@@ -393,100 +603,27 @@ export default function WorkflowCreate() {
             </div>
 
             {canvasTab === 'md' && (
-              <div className="absolute inset-0 flex flex-col bg-white">
-                <div className="flex flex-shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-gray-200 px-4 py-2.5">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <FileText className="h-4 w-4 flex-shrink-0 text-gray-500" />
-                      <h2 className="truncate text-sm font-semibold text-gray-900">{t('detail.editDocTitle')}</h2>
-                      {editDocDirty && (
-                        <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                          {t('detail.editDocUnsaved')}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-0.5 truncate text-[11px] text-gray-400">workflow.md</p>
-                  </div>
-
-                  <div className="flex min-w-0 flex-shrink items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                    {editDocError && (
-                      <span className="max-w-[180px] truncate rounded bg-red-50 px-2 py-1 text-[11px] font-medium text-red-600">
-                        {editDocError}
-                      </span>
-                    )}
-                    <div className="flex flex-shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-0.5">
-                      <button
-                        type="button"
-                        onClick={() => setEditDocMode('edit')}
-                        className={`inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
-                          editDocMode === 'edit'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                        title={t('detail.editDocModeEdit')}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        <span className="max-[560px]:hidden">{t('detail.editDocModeEdit')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditDocMode('preview')}
-                        className={`inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
-                          editDocMode === 'preview'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                        title={t('detail.editDocModePreview')}
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                        <span className="max-[560px]:hidden">{t('detail.editDocModePreview')}</span>
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleGenerateEditDoc}
-                      disabled={!workflow}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 max-[560px]:px-2.5"
-                      title={t('detail.generateEditDocTitle')}
-                    >
-                      <Sparkles className="h-3.5 w-3.5" />
-                      <span className="max-[680px]:hidden">{workflowMdDraft.trim() ? t('detail.regenerateEditDoc') : t('detail.generateEditDoc')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleExportEditDoc}
-                      disabled={!workflowMdDraft.trim()}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 max-[560px]:px-2.5"
-                      title={t('detail.downloadMdTitle')}
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      <span className="max-[680px]:hidden">{t('detail.downloadMd')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleSaveEditDoc()}
-                      disabled={!workflow || !editDocDirty || editDocSaving}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-red-600 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none max-[560px]:px-2.5"
-                      title={editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}
-                    >
-                      <Save className="h-3.5 w-3.5" />
-                      <span className="max-[680px]:hidden">{editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleGenerateWorkflow}
-                      disabled={!workflowMdDraft.trim()}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none max-[560px]:px-2.5"
-                      title={t('detail.generateWorkflowTitle')}
-                    >
-                      <WorkflowIcon className="h-3.5 w-3.5" />
-                      <span className="max-[760px]:hidden">{t('detail.generateWorkflow')}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {editDocMode === 'edit' ? (
+              <WorkflowDocumentPanel
+                editorId="workflow-create-edit-doc"
+                mode={editDocMode}
+                value={workflowMdDraft}
+                dirty={editDocDirty}
+                saving={editDocSaving}
+                error={editDocError}
+                resetDisabled={false}
+                saveDisabled={!workflow || !editDocDirty || editDocSaving}
+                generateWorkflowDisabled={!workflowMdDraft.trim()}
+                onModeChange={setEditDocMode}
+                onChange={(value) => {
+                  setWorkflowMdDraft(value);
+                  setWorkflowMdDiff(null);
+                  setEditDocError(null);
+                }}
+                onResetDocument={handleGenerateEditDoc}
+                onSave={() => void handleSaveEditDoc()}
+                onGenerateWorkflow={handleGenerateWorkflow}
+                onDownload={handleExportEditDoc}
+                diffReview={
                   workflowMdDiff ? (
                     <WorkflowMarkdownDiffReview
                       lines={workflowMdDiffLines}
@@ -500,35 +637,9 @@ export default function WorkflowCreate() {
                       onAcceptHunk={handleAcceptEditDocDiffHunk}
                       onRejectHunk={(hunk) => void handleRejectEditDocDiffHunk(hunk)}
                     />
-                  ) : (
-                    <WorkflowMarkdownEditor
-                      id="workflow-create-edit-doc"
-                      label={t('detail.editDocTextareaLabel')}
-                      placeholder={t('detail.editDocPlaceholder')}
-                      value={workflowMdDraft}
-                      onChange={(value) => {
-                        setWorkflowMdDraft(value);
-                        setWorkflowMdDiff(null);
-                        setEditDocError(null);
-                      }}
-                    />
-                  )
-                ) : workflowMdDraft.trim() ? (
-                  <div className="min-h-0 flex-1 overflow-y-auto bg-white p-6">
-                    <div className="mx-auto max-w-3xl prose prose-sm prose-gray leading-relaxed">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {workflowMdDraft}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-gray-50 text-gray-400">
-                    <FileText className="h-10 w-10 opacity-40" />
-                    <p className="text-sm font-medium text-gray-500">{t('detail.editDocEmpty')}</p>
-                    <p className="max-w-sm text-center text-xs leading-relaxed">{t('detail.editDocEmptyHint')}</p>
-                  </div>
-                )}
-              </div>
+                  ) : undefined
+                }
+              />
             )}
 
             {canvasTab === 'json' && (
@@ -559,6 +670,9 @@ export default function WorkflowCreate() {
           width={panelWidth}
           onWorkflowCreated={handleWorkflowCreated}
           onWorkflowUpdated={handleWorkflowUpdated}
+          initialChatSessionId={chatSessionId}
+          creationStartedAt={creationStartedAt}
+          onChatSessionChange={setChatSessionId}
           chatLaunchRequest={chatLaunchRequest}
           onChatLaunchRequestHandled={handleChatLaunchRequestHandled}
         />

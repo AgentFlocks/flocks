@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { AlertCircle, Bot, Info } from 'lucide-react';
+import { AlertCircle, Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import SessionChat, {
@@ -14,6 +14,7 @@ import {
   useChatModelOptions,
 } from '@/components/common/ChatPromptSelectors';
 import ChatGuideDock, { type ChatGuideAction } from '@/components/common/ChatGuideDock';
+import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { workflowAPI, Workflow } from '@/api/workflow';
@@ -25,6 +26,9 @@ const WORKFLOW_CHAT_AGENT_NAMES = [WORKFLOW_CHAT_AGENT_NAME];
 
 interface CreateChatTabProps {
   onWorkflowCreated: (workflow: Workflow) => void;
+  initialSessionId?: string | null;
+  creationStartedAt?: number;
+  onSessionChange?: (sessionId: string | null) => void;
   launchRequest?: CreateWorkflowChatLaunchRequest | null;
   onLaunchRequestHandled?: (id: number) => void;
 }
@@ -56,6 +60,9 @@ function normalizeGuideActions(value: unknown): ChatGuideAction[] {
 
 export default function CreateChatTab({
   onWorkflowCreated,
+  initialSessionId = null,
+  creationStartedAt,
+  onSessionChange,
   launchRequest,
   onLaunchRequestHandled,
 }: CreateChatTabProps) {
@@ -97,17 +104,24 @@ export default function CreateChatTab({
     category: 'workflow',
     contextMessage: t('create.chat.contextMessage'),
     welcomeMessage: t('create.chat.welcomeMessage'),
+    initialSessionId,
   });
 
   const knownIdsRef = useRef<Set<string>>(new Set());
+  const snapshotStartedAtRef = useRef<number | null>(null);
   const createdWorkflowRef = useRef<string | null>(null);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const onWorkflowCreatedRef = useRef(onWorkflowCreated);
   onWorkflowCreatedRef.current = onWorkflowCreated;
 
+  useEffect(() => {
+    onSessionChange?.(sessionId ?? null);
+  }, [onSessionChange, sessionId]);
+
   // Snapshot existing workflow IDs on mount
   useEffect(() => {
     (async () => {
+      snapshotStartedAtRef.current = Date.now();
       try {
         const snap = await workflowAPI.list();
         knownIdsRef.current = new Set((snap.data as Workflow[]).map((w) => w.id));
@@ -124,17 +138,26 @@ export default function CreateChatTab({
     try {
       const res = await workflowAPI.list();
       const workflows: Workflow[] = res.data;
-      const fresh = workflows.find(
+      const sortedWorkflows = [...workflows].sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+      const freshBySnapshot = sortedWorkflows.find(
         (w) =>
           !knownIdsRef.current.has(w.id) &&
           w.id !== createdWorkflowRef.current,
       );
+      const freshByCreateTime = creationStartedAt
+        ? sortedWorkflows.find(
+          (w) =>
+            w.id !== createdWorkflowRef.current &&
+            Number(w.createdAt ?? 0) >= Math.max(creationStartedAt, snapshotStartedAtRef.current ?? creationStartedAt) - 500,
+        )
+        : undefined;
+      const fresh = freshBySnapshot ?? freshByCreateTime;
       if (fresh) {
         createdWorkflowRef.current = fresh.id;
         onWorkflowCreatedRef.current(fresh);
       }
     } catch { /* ignore */ }
-  }, [snapshotReady]);
+  }, [creationStartedAt, snapshotReady]);
 
   // SSE: react to workflow.created events immediately
   const handleSSEEvent = useCallback(
@@ -354,25 +377,23 @@ function CreateGuideSection({
       <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
       <div className="flex flex-col gap-1.5">
         {actions.map((action) => (
-          <button
+          <div
             key={action.label}
-            type="button"
-            onClick={() => onStartPrompt(action.prompt, action.label)}
             className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
-            title={action.description}
           >
-            <span className="truncate">{action.label}</span>
-            <span
-              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors group-hover:text-rose-400"
-              title={action.description}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-              }}
+            <button
+              type="button"
+              onClick={() => onStartPrompt(action.prompt, action.label)}
+              className="min-w-0 flex-1 truncate text-left"
             >
-              <Info className="h-3.5 w-3.5" aria-hidden="true" />
-            </span>
-          </button>
+              {action.label}
+            </button>
+            <GuideInfoIcon
+              label={action.label}
+              description={action.description}
+              className="group-hover:text-rose-400"
+            />
+          </div>
         ))}
       </div>
     </section>

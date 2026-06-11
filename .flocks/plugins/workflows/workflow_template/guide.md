@@ -88,9 +88,11 @@ Rex 验证时应优先做轻量检查：
 发布配置模板的生效来源：
 
 - 优先读后端 Storage/SQL 的 `/api/workflow/<id>/config`。
-- 如果库里没有，再读取工作流目录下的 `config.json` 并迁移到 Storage/SQL。
+- 如果库里没有，调用 `/api/workflow/<id>/config/sync`，由后端读取工作流目录下的 `config.json` 并迁移到 Storage/SQL。
 - `config.json` 是导入/兜底模板，不是运行态开关。
+- 不要直接写 `config.json` 来表示发布、接入或触发配置已经生效。
 - 启停、发布、取消发布等运行态动作必须调用运行时接口，不要通过修改 `config.json` 完成。
+- 如果后端配置接口不可用，只能把目标配置保存为草稿到 outputs，并明确说明未应用、未发布、未启动。
 
 应用变更前：
 

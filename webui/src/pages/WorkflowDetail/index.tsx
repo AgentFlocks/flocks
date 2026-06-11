@@ -1,13 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
-import { X, GitBranch, FileText, Code2, Download, FileJson, Save, Sparkles, Eye, Pencil, Workflow as WorkflowIcon, Bot } from 'lucide-react';
+import { X, GitBranch, FileText, Code2, FileJson, Bot } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { sessionApi } from '@/api/session';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
-import WorkflowMarkdownEditor from '@/components/common/WorkflowMarkdownEditor';
+import WorkflowDocumentPanel, { type WorkflowDocumentMode } from '@/components/common/WorkflowDocumentPanel';
 import WorkflowMarkdownDiffReview from '@/components/common/WorkflowMarkdownDiffReview';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
@@ -25,7 +23,6 @@ import {
 import { useConfirm } from '@/components/common/ConfirmDialog';
 
 type CanvasTab = 'flow' | 'md' | 'json';
-type EditDocMode = 'edit' | 'preview';
 
 interface EditDocDiff {
   before: string;
@@ -45,6 +42,15 @@ function getInitialPanelWidth() {
   const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
   const available = window.innerWidth - sidebarWidth;
   return Math.max(PANEL_MIN, Math.round(available * PANEL_RATIO));
+}
+
+function hasWorkflowJsonDefinition(workflow: Workflow | null) {
+  if (!workflow) return false;
+  return Boolean(
+    workflow.workflowJson.start
+    || workflow.workflowJson.nodes.length > 0
+    || workflow.workflowJson.edges.length > 0
+  );
 }
 
 export default function WorkflowDetail() {
@@ -72,7 +78,7 @@ export default function WorkflowDetail() {
   const [showMdHint, setShowMdHint] = useState(false);
   const [editDocDraft, setEditDocDraft] = useState('');
   const [editDocBase, setEditDocBase] = useState('');
-  const [editDocMode, setEditDocMode] = useState<EditDocMode>('preview');
+  const [editDocMode, setEditDocMode] = useState<WorkflowDocumentMode>('preview');
   const [editDocDiff, setEditDocDiff] = useState<EditDocDiff | null>(null);
   const [editDocSaving, setEditDocSaving] = useState(false);
   const [editDocReviewing, setEditDocReviewing] = useState<string | null>(null);
@@ -81,6 +87,7 @@ export default function WorkflowDetail() {
   const hasAutoSwitchedRef = useRef(false);
   const chatLaunchSeqRef = useRef(0);
   const editDocWorkflowIdRef = useRef<string | null>(null);
+  const missingMarkdownAutoLaunchRef = useRef<string | null>(null);
   const dragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
@@ -309,13 +316,45 @@ export default function WorkflowDetail() {
     URL.revokeObjectURL(url);
   }, [editDocDraft, workflow]);
 
+  const buildEditDocGenerationPrompt = useCallback(() => {
+    if (!workflow) return '';
+    const workflowDir = workflow.source === 'global'
+      ? `~/.flocks/plugins/workflows/${workflow.id}/`
+      : `.flocks/plugins/workflows/${workflow.id}/`;
+
+    return t('detail.generateEditDocPrompt', {
+      name: workflow.name,
+      dir: workflowDir,
+      mdPath: `${workflowDir}workflow.md`,
+      jsonPath: `${workflowDir}workflow.json`,
+      workflowJson: JSON.stringify(workflow.workflowJson, null, 2),
+    });
+  }, [t, workflow]);
+
+  const launchEditDocGeneration = useCallback(() => {
+    if (!workflow) return;
+
+    openAiEditPanel();
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt: buildEditDocGenerationPrompt(),
+      displayLabel: t('detail.generateEditDoc'),
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [buildEditDocGenerationPrompt, openAiEditPanel, t, workflow]);
+
   const handleGenerateEditDoc = useCallback(() => {
     if (!workflow) return;
+    if (!editDocDraft.trim()) {
+      launchEditDocGeneration();
+      return;
+    }
+
     setEditDocDraft(buildWorkflowMarkdown(workflow));
     setEditDocDiff(null);
     setEditDocMode('edit');
     setShowMdHint(false);
-  }, [workflow]);
+  }, [editDocDraft, launchEditDocGeneration, workflow]);
 
   const buildWorkflowGenerationPrompt = useCallback((editDocContent: string) => {
     if (!workflow) return '';
@@ -356,14 +395,23 @@ export default function WorkflowDetail() {
 
   const handleGenerateWorkflow = useCallback(() => {
     if (!workflow) return;
-    const content = editDocDraft.trim() ? editDocDraft : buildWorkflowMarkdown(workflow);
-    if (!editDocDraft.trim()) {
-      setEditDocDraft(content);
-      setEditDocMode('edit');
+    const content = editDocDraft.trim();
+    if (!content) {
+      launchEditDocGeneration();
+      return;
     }
 
-    launchWorkflowGeneration(content);
-  }, [editDocDraft, launchWorkflowGeneration, workflow]);
+    launchWorkflowGeneration(editDocDraft);
+  }, [editDocDraft, launchEditDocGeneration, launchWorkflowGeneration, workflow]);
+
+  useEffect(() => {
+    if (rightPanelTab !== 'chat') return;
+    if (!workflow || editDocDraft.trim() || !hasWorkflowJsonDefinition(workflow)) return;
+    if (chatLaunchRequest) return;
+    if (missingMarkdownAutoLaunchRef.current === workflow.id) return;
+    missingMarkdownAutoLaunchRef.current = workflow.id;
+    launchEditDocGeneration();
+  }, [chatLaunchRequest, editDocDraft, launchEditDocGeneration, rightPanelTab, workflow]);
 
   const handleChatLaunchRequestHandled = useCallback((requestId: number) => {
     setChatLaunchRequest((current) => (
@@ -666,93 +714,22 @@ export default function WorkflowDetail() {
 
             {/* MD 描述 */}
             {canvasTab === 'md' && (
-              <div className="absolute inset-0 flex flex-col bg-white">
-                <div className="flex flex-shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-gray-200 px-4 py-2.5">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <FileText className="h-4 w-4 flex-shrink-0 text-gray-500" />
-                      <h2 className="truncate text-sm font-semibold text-gray-900">{t('detail.editDocTitle')}</h2>
-                      {editDocDirty && (
-                        <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                          {t('detail.editDocUnsaved')}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-0.5 truncate text-[11px] text-gray-400">workflow.md</p>
-                  </div>
-
-                  <div className="flex min-w-0 flex-shrink items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                    <div className="flex flex-shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-0.5">
-                      <button
-                        type="button"
-                        onClick={() => setEditDocMode('edit')}
-                        className={`inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
-                          editDocMode === 'edit'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                        title={t('detail.editDocModeEdit')}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        <span className="max-[560px]:hidden">{t('detail.editDocModeEdit')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditDocMode('preview')}
-                        className={`inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
-                          editDocMode === 'preview'
-                            ? 'bg-white text-gray-900 shadow-sm'
-                            : 'text-gray-500 hover:text-gray-700'
-                        }`}
-                        title={t('detail.editDocModePreview')}
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                        <span className="max-[560px]:hidden">{t('detail.editDocModePreview')}</span>
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleGenerateEditDoc}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 max-[560px]:px-2.5"
-                      title={t('detail.generateEditDocTitle')}
-                    >
-                      <Sparkles className="h-3.5 w-3.5" />
-                      <span className="max-[680px]:hidden">{editDocDraft.trim() ? t('detail.regenerateEditDoc') : t('detail.generateEditDoc')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleExportEditDoc}
-                      disabled={!editDocDraft.trim()}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 max-[560px]:px-2.5"
-                      title={t('detail.downloadMdTitle')}
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      <span className="max-[680px]:hidden">{t('detail.downloadMd')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleSaveEditDoc()}
-                      disabled={!editDocDirty || editDocSaving}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-red-600 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none max-[560px]:px-2.5"
-                      title={editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}
-                    >
-                      <Save className="h-3.5 w-3.5" />
-                      <span className="max-[680px]:hidden">{editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleGenerateWorkflow}
-                      className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800 max-[560px]:px-2.5"
-                      title={t('detail.generateWorkflowTitle')}
-                    >
-                      <WorkflowIcon className="h-3.5 w-3.5" />
-                      <span className="max-[760px]:hidden">{t('detail.generateWorkflow')}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {editDocMode === 'edit' ? (
+              <WorkflowDocumentPanel
+                mode={editDocMode}
+                value={editDocDraft}
+                dirty={editDocDirty}
+                saving={editDocSaving}
+                saveDisabled={!editDocDirty || editDocSaving}
+                onModeChange={setEditDocMode}
+                onChange={(value) => {
+                  setEditDocDraft(value);
+                  setEditDocDiff(null);
+                }}
+                onResetDocument={handleGenerateEditDoc}
+                onSave={() => void handleSaveEditDoc()}
+                onGenerateWorkflow={handleGenerateWorkflow}
+                onDownload={handleExportEditDoc}
+                diffReview={
                   editDocDiff ? (
                     <WorkflowMarkdownDiffReview
                       lines={editDocDiffLines}
@@ -766,47 +743,15 @@ export default function WorkflowDetail() {
                       onAcceptHunk={handleAcceptEditDocDiffHunk}
                       onRejectHunk={(hunk) => void handleRejectEditDocDiffHunk(hunk)}
                     />
-                  ) : (
-                    <WorkflowMarkdownEditor
-                      label={t('detail.editDocTextareaLabel')}
-                      placeholder={t('detail.editDocPlaceholder')}
-                      value={editDocDraft}
-                      onChange={(value) => {
-                        setEditDocDraft(value);
-                        setEditDocDiff(null);
-                      }}
-                    />
-                  )
-                ) : editDocDraft.trim() ? (
-                  <div className="min-h-0 flex-1 overflow-y-auto bg-white p-6">
-                    <div className="mx-auto max-w-3xl prose prose-sm prose-gray leading-relaxed">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {editDocDraft}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-gray-50 text-gray-400">
-                    <FileText className="h-10 w-10 opacity-40" />
-                    <p className="text-sm font-medium text-gray-500">{t('detail.editDocEmpty')}</p>
-                    <p className="max-w-sm text-center text-xs leading-relaxed">{t('detail.editDocEmptyHint')}</p>
-                    <button
-                      type="button"
-                      onClick={handleGenerateEditDoc}
-                      className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700"
-                    >
-                      <Sparkles className="h-3.5 w-3.5" />
-                      {t('detail.generateEditDoc')}
-                    </button>
-                  </div>
-                )}
-              </div>
+                  ) : undefined
+                }
+              />
             )}
 
             {/* JSON */}
             {canvasTab === 'json' && (
               <div className="absolute inset-0 overflow-y-auto bg-gray-900 p-4">
-                {/* 下载 JSON 按钮 - 右上角浮动 */}
+                {/* 下载工作流文件按钮 - 右上角浮动 */}
                 <button
                   onClick={handleExport}
                   className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 border border-gray-600 text-gray-200 text-xs rounded-lg hover:bg-gray-600 shadow-sm transition-colors"

@@ -1,6 +1,10 @@
 {
   "id": "workflow_template",
   "name": "workflow_template",
+  "nameI18n": {
+    "zh-CN": "工作流模板",
+    "en-US": "Workflow Template"
+  },
   "description": "Hidden template for workflow.json, workflow.md, and config.json.",
   "start": "template_entry",
   "nodes": [

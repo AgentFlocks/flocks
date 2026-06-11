@@ -1,6 +1,10 @@
 {
   "id": "workflow_template",
   "name": "Hidden Workflow Publish Template",
+  "nameI18n": {
+    "zh-CN": "隐藏工作流发布模板",
+    "en-US": "Hidden Workflow Publish Template"
+  },
   "description": "Internal template for workflow authoring and config-driven publish pages.",
   "category": "template",
   "status": "hidden",

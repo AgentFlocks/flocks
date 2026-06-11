@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Rocket } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow } from '@/api/workflow';
@@ -14,6 +14,9 @@ interface CreateRightPanelProps {
   width?: number;
   onWorkflowCreated: (workflow: Workflow) => void;
   onWorkflowUpdated?: (workflow: Workflow) => void;
+  initialChatSessionId?: string | null;
+  creationStartedAt?: number;
+  onChatSessionChange?: (sessionId: string | null) => void;
   chatLaunchRequest?: CreateWorkflowChatLaunchRequest | null;
   onChatLaunchRequestHandled?: (id: number) => void;
 }
@@ -24,17 +27,40 @@ export default function CreateRightPanel({
   width = 320,
   onWorkflowCreated,
   onWorkflowUpdated,
+  initialChatSessionId,
+  creationStartedAt,
+  onChatSessionChange,
   chatLaunchRequest,
   onChatLaunchRequestHandled,
 }: CreateRightPanelProps) {
   const { t } = useTranslation('workflow');
   const [activeTab, setActiveTab] = useState<TabId>('chat');
+  const [publishGuideLaunchRequest, setPublishGuideLaunchRequest] = useState<CreateWorkflowChatLaunchRequest | null>(null);
+  const publishGuideLaunchSeqRef = useRef(10_000);
+  const effectiveChatLaunchRequest = chatLaunchRequest ?? publishGuideLaunchRequest;
 
   useEffect(() => {
-    if (chatLaunchRequest) {
+    if (effectiveChatLaunchRequest) {
       setActiveTab('chat');
     }
-  }, [chatLaunchRequest]);
+  }, [effectiveChatLaunchRequest]);
+
+  const handlePublishGuidePrompt = (prompt: string, displayLabel: string) => {
+    publishGuideLaunchSeqRef.current += 1;
+    setPublishGuideLaunchRequest({
+      id: publishGuideLaunchSeqRef.current,
+      prompt,
+      displayLabel,
+    });
+    setActiveTab('chat');
+  };
+
+  const handleChatLaunchRequestHandled = (id: number) => {
+    setPublishGuideLaunchRequest((current) => (
+      current?.id === id ? null : current
+    ));
+    onChatLaunchRequestHandled?.(id);
+  };
 
   const TABS: { id: TabId; label: string }[] = [
     { id: 'overview', label: t('create.rightPanel.tabOverview') },
@@ -69,8 +95,11 @@ export default function CreateRightPanel({
         {activeTab === 'chat' && (
           <CreateChatTab
             onWorkflowCreated={onWorkflowCreated}
-            launchRequest={chatLaunchRequest}
-            onLaunchRequestHandled={onChatLaunchRequestHandled}
+            initialSessionId={initialChatSessionId}
+            creationStartedAt={creationStartedAt}
+            onSessionChange={onChatSessionChange}
+            launchRequest={effectiveChatLaunchRequest}
+            onLaunchRequestHandled={handleChatLaunchRequestHandled}
           />
         )}
         {activeTab === 'overview' && (
@@ -81,6 +110,7 @@ export default function CreateRightPanel({
             <IntegrationTab
               workflow={workflow}
               onWorkflowUpdated={onWorkflowUpdated}
+              onGuidePrompt={handlePublishGuidePrompt}
             />
           ) : (
             <div className="flex min-h-0 flex-1 items-center justify-center p-6">

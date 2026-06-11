@@ -6,11 +6,11 @@ description: 根据自然语言描述生成 flocks 内置工作流（workflow.md
 
 # Workflow Builder
 
-创建模式按以下顺序构建工作流：**场景确认与流程设计** → **workflow.md 草稿与确认循环** → **workflow.json 生成与验证** → **逐节点测试** → **集成测试** → **性能评估与优化**。
+创建模式按以下顺序构建工作流：**场景确认与流程设计** → **确认 workflow.md 文档语言** → **workflow.md 草稿与确认循环** → **workflow.json 生成与验证** → **逐节点测试** → **集成测试** → **性能评估与优化**。
 
 > **产物**：`workflow.json` 中所有可执行节点均为 `type="python"` 并自带 `code`。最终交付物固定为：`workflow.md`、`workflow.json`。
 >
-> **顺序强制**：创建工作流时，`workflow.md` 是唯一的人类意图源。必须先创建并确认 `workflow.md`，再基于已确认的 `workflow.md` 生成 `workflow.json`。在 `workflow.md` 写入并确认前，严禁写入或覆盖 `workflow.json`。
+> **顺序强制**：创建工作流时，`workflow.md` 是唯一的人类意图源。必须先询问用户需要中文还是英文流程说明文档，再按所选语言创建并确认 `workflow.md`，最后基于已确认的 `workflow.md` 生成 `workflow.json`。在 `workflow.md` 写入并确认前，严禁写入或覆盖 `workflow.json`。
 
 ## 参考资料（按需读取）
 
@@ -18,6 +18,10 @@ description: 根据自然语言描述生成 flocks 内置工作流（workflow.md
 |------|------|---------|
 | [references/reference.md](references/reference.md) | 节点类型详解、出边选择行为、分支/循环/Join 规则、Edge Mapping 指南、Tool vs LLM 决策、文件输出规则、报告生成模板、`workflow.json` 骨架模板 | **生成 `workflow.json` 前建议读取** |
 | [references/composition.md](references/composition.md) | 嵌套工作流（subworkflow）组合格式与展开规则 | 仅在用户需要嵌套工作流时读取 |
+| [references/workflow_zh.md](references/workflow_zh.md) | 中文 `workflow.md` 结构模板 | 用户选择中文流程说明文档时读取 |
+| [references/workflow_en.md](references/workflow_en.md) | English `workflow.md` structure template | 用户选择英文流程说明文档时读取 |
+| `.flocks/plugins/workflows/workflow_template/workflow.md` | 项目内标准工作流文档模板 | **创建 `workflow.md` 前建议读取** |
+| `~/.flocks/plugins/workflows/stream_alert_denoise/workflow.md` | 已成型业务工作流示例，展示“功能、流程、输入输出、模块逻辑、发布配置、编辑指南”的写法 | 文件存在且需要参考真实工作流表达时读取 |
 
 ---
 
@@ -32,7 +36,9 @@ description: 根据自然语言描述生成 flocks 内置工作流（workflow.md
 [ ] 1.   场景深度确认：与用户对话，明确业务场景与核心目标
 [ ] 1.   输出思考维度分析 + Mermaid 流程简图，与用户沟通对齐
 [ ] 1.   获取样例数据（用户上传或自动构造后确认）
-[ ] 2.   生成 workflow.md 草稿（人读描述，包含流程、节点、输入输出、处理逻辑）
+[ ] 2.   用 Question 工具确认 workflow.md 使用中文还是英文
+[ ] 2.   读取对应语言模板 workflow_zh.md 或 workflow_en.md，以及可用业务示例
+[ ] 2.   生成单份 workflow.md 草稿（人读描述，包含功能、流程、节点、输入输出、处理逻辑）
 [ ] 2.   写入 workflow.md 文件，供页面编辑器展示
 [ ] 2.   向用户展示流程摘要并收集修改建议（循环直至满意）
 [ ] 2.   确认 workflow.md 已是最新意图源
@@ -135,24 +141,43 @@ flowchart TD
 
 > 目标：先把工作流的业务意图、节点结构、输入输出和处理逻辑写成可读、可编辑的 `workflow.md`。页面左侧编辑器以 `workflow.md` 表达工作流，用户应先在这里确认意图；只有确认后才能生成 `workflow.json`。
 
+### 2.0 文档语言选择（必须）
+
+创建 `workflow.md` 前，必须用 `Question` 工具询问用户需要哪种流程说明文档：
+
+- 中文流程说明文档：读取 [references/workflow_zh.md](references/workflow_zh.md)，生成中文 `workflow.md`。
+- English workflow specification：读取 [references/workflow_en.md](references/workflow_en.md)，生成英文 `workflow.md`。
+
+规则：
+
+- 工作流目录里最终只写一份 `workflow.md`。
+- 不要在工作流目录里创建 `workflow_zh.md`、`workflow_en.md`、`workflow.en.md` 或其它语言副本。
+- `workflow_zh.md` / `workflow_en.md` 只是本 skill 内部的结构模板。
+- 不要根据用户当前会话语言自动猜测文档语言；创建 `workflow.md` 前必须明确询问并得到选择。
+
 ### 2.1 核心要求
 
 `workflow.md` 必须让人读得懂，也必须足够结构化，便于后续稳定生成 `workflow.json`。每个步骤必须包含：
 
+- **功能概述**：用人能理解的话说明这个工作流解决什么问题、不解决什么问题。
+- **总体流程**：用箭头、表格或 Mermaid 描述节点顺序和职责。
 - **输入/输出**：数据来源、格式、用途。
-- **处理逻辑**：具体操作步骤、判定条件、循环方式、异常处理。
+- **模块逻辑**：每个节点的职责、处理步骤、判定条件、循环方式、异常处理。
 - **工具/LLM 标注**：明确该步是 Tool-driven 还是 LLM-driven（详细决策指南见 [reference.md § Tool vs LLM](references/reference.md#5-tool-vs-llm-决策指南)）。
   - **推荐组合**：`tool.run_safe(...)` 获取数据 → `llm.ask(...)` 分析 → `tool.run('write', ...)` 落盘。
   - **默认使用 `tool.run_safe()`**，返回 `{"success", "text", "obj", "error"}` 统一包络。
 - **文件落盘**：节点有任何文件输出时，统一写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/` 目录下，详见 [reference.md § 文件输出规则](references/reference.md#6-文件输出规则)。
 - **决策分支**：写清条件、各分支处理、跳转规则。
+- **发布和配置**：写清 API、Syslog、Kafka、Webhook、Schedule 等入口是否支持，运行态配置由 `config.json` 模板和 Storage/SQL 管理。
+- **编辑指南**：告诉用户修改输入、节点逻辑、输出、发布方式时应该优先改哪里。
 - **报告结构**（若涉及）：除非用户要求简化，需包含摘要、分析、发现、建议、来源（模板见 [reference.md § 报告生成](references/reference.md#7-报告生成最佳实践)）。
 
 ### 2.2 写入 workflow.md
 
-1. 先用 `write` 工具将 `workflow.md` **写入文件**（路径与第 9 节一致，例如 `.../plugins/workflows/<id>/workflow.md`）。
+1. 先按用户选择的语言模板生成内容，再用 `write` 工具将单份 `workflow.md` **写入文件**（路径与第 9 节一致，例如 `.../plugins/workflows/<id>/workflow.md`）。
    - **⚠️ 路径必须使用绝对路径**：全局目录可用 `python3 -c "import os; print(os.path.expanduser('~/.flocks/plugins/workflows/<id>'))"`；项目目录可先解析 workspace（从 cwd 向上第一个含 `.flocks` 的目录）再拼接 `/.flocks/plugins/workflows/<id>`。
    - **严禁**使用未展开的相对路径（如 `.flocks/plugins/workflows/<id>/` 相对仓库根随手写入错误位置），否则 WebUI 可能无法从实际扫描目录读到文件。
+   - **严禁**同时写入 `workflow.en.md` 或语言副本；UI 和生成流程只认当前工作流目录下的 `workflow.md`。
 2. 写入成功后，在消息中说明：「已创建 `workflow.md`，请在左侧编辑器查看并确认。需要调整节点、输入输出或处理逻辑时，请先改 `workflow.md`。」
 3. 需要用户确认是否进入 `workflow.json` 生成时，必须使用 `Question` 工具或等待页面 diff 的接受/拒绝结果；不要用普通文本提问替代确认。
 
@@ -559,27 +584,11 @@ python3 -c "from pathlib import Path; p=Path.cwd(); ws=next((x for x in [p,*p.pa
 
 ---
 
-## workflow.md 标准模板
+## workflow.md 模板资源
 
-```markdown
-# [Workflow Name]
+本 skill 内置两份流程说明文档模板：
 
-## 业务场景
-[目标和背景]
+- 中文模板：[references/workflow_zh.md](references/workflow_zh.md)
+- English template: [references/workflow_en.md](references/workflow_en.md)
 
-## 流程步骤
-
-### 1. [步骤名称]
-- **描述**: [操作手册级别描述]
-- **工具/模型**: [Tool: xxx / LLM: xxx]
-- **输入**: [字段名: 来源和格式]
-- **输出**: [字段名: 格式和用途]
-- **处理逻辑**:
-  - [操作步骤]
-  - [工具调用：`result = tool.run_safe('name', ...)`，用 `result["text"]` 取结果]
-- **决策分支**（如适用）:
-  - 条件 → 分支处理
-
-### 2. [步骤名称]
-...
-```
+创建工作流时，先用 `Question` 工具确认用户需要哪种语言，然后读取对应模板，把真实内容写入工作流目录下唯一的 `workflow.md`。

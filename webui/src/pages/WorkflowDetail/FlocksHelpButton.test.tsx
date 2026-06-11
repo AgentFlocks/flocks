@@ -45,8 +45,8 @@ vi.mock('react-i18next', () => ({
         'detail.flocksHelpTitle': '让Rex帮你配置、编辑工作流',
         'detail.resetLayout': '重置布局',
         'detail.canvasTabs.flow': '流程图',
-        'detail.canvasTabs.md': 'MD 描述',
-        'detail.canvasTabs.json': 'JSON',
+        'detail.canvasTabs.md': '流程说明',
+        'detail.canvasTabs.json': '工作流文件',
         'detail.editDocTitle': 'workflow.md',
         'detail.editDocModeEdit': '编辑',
         'detail.editDocModePreview': '预览',
@@ -67,14 +67,17 @@ vi.mock('react-i18next', () => ({
         'detail.editDocDiffRejectHunkFailed': '拒绝此段失败',
         'detail.editDocTextareaLabel': '编辑 workflow.md',
         'detail.editDocPlaceholder': '在这里编辑 workflow.md...',
-        'detail.downloadMd': '下载 MD',
-        'detail.downloadMdTitle': '下载当前 workflow.md',
-        'detail.generateEditDocTitle': '生成 workflow.md',
-        'detail.regenerateEditDoc': '重新生成',
+        'detail.downloadMd': '下载说明文件',
+        'detail.downloadMdTitle': '下载当前说明文件',
+        'detail.generateEditDocTitle': '生成说明',
+        'detail.regenerateEditDocTitle': '重置 workflow.md',
+        'detail.regenerateEditDoc': '重置文档',
+        'detail.generateEditDoc': '生成说明',
         'detail.editDocSave': '保存',
         'detail.editDocSaving': '保存中',
         'detail.generateWorkflow': '生成工作流',
         'detail.generateWorkflowTitle': '基于 workflow.md 生成 workflow.json',
+        'detail.generateEditDocPrompt': '用户点击了「生成说明」。基于 {{jsonPath}} 生成 workflow.md。\n{{workflowJson}}',
       };
       return translations[key] ?? key;
     },
@@ -225,11 +228,31 @@ describe('Flocks help button', () => {
     renderDetail();
 
     await screen.findByTestId('flow-canvas');
-    await user.click(screen.getByRole('button', { name: 'MD 描述' }));
+    await user.click(screen.getByRole('button', { name: '流程说明' }));
     await user.click(screen.getByRole('button', { name: '生成工作流' }));
 
     expect(screen.getByTestId('right-panel')).toHaveAttribute('data-active-tab', 'chat');
     expect(screen.getByTestId('right-panel')).toHaveAttribute('data-launch-label', '生成工作流');
+  });
+
+  it('launches workflow.md generation first when entering the workbench without a markdown document', async () => {
+    const user = userEvent.setup();
+    mockGetWorkflow.mockResolvedValue({
+      data: {
+        ...makeWorkflow(),
+        markdownContent: undefined,
+        editMarkdownContent: undefined,
+      },
+    });
+    renderDetail();
+
+    await screen.findByTestId('flow-canvas');
+    await user.click(screen.getByRole('button', { name: '让Rex帮你配置、编辑工作流' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('right-panel')).toHaveAttribute('data-active-tab', 'chat');
+      expect(screen.getByTestId('right-panel')).toHaveAttribute('data-launch-label', '生成说明');
+    });
   });
 
   it('shows AI markdown diff inline above the editor and can reject it', async () => {
@@ -264,7 +287,7 @@ describe('Flocks help button', () => {
     renderDetail();
 
     await screen.findByTestId('flow-canvas');
-    await user.click(screen.getByRole('button', { name: 'MD 描述' }));
+    await user.click(screen.getByRole('button', { name: '流程说明' }));
     await user.click(screen.getByRole('button', { name: '编辑' }));
 
     const lineNumbers = within(screen.getByTestId('workflow-md-line-numbers'));

@@ -163,6 +163,7 @@ export interface WorkflowTriggerPlugin {
 export interface WorkflowJSON {
   version?: string;
   name?: string;
+  nameI18n?: Record<string, string>;
   start: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -173,6 +174,7 @@ export interface WorkflowJSON {
 export interface Workflow {
   id: string;
   name: string;
+  nameI18n?: Record<string, string>;
   description?: string;
   markdownContent?: string;
   editMarkdownContent?: string;

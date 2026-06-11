@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowEdge, WorkflowExecution, WorkflowNode, WorkflowNodeExecution } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -596,7 +597,7 @@ function NodeRunSection({
 }
 
 export default function NodeInfoPanel({ node, workflow, latestExecution, width = 260, onClose, onSaved }: NodeInfoPanelProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const [form, setForm]       = useState<WorkflowNode>({ ...node });
   const [saving, setSaving]   = useState(false);
   const [savedOk, setSavedOk] = useState(false);
@@ -787,7 +788,11 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
               <div><FL required>{t('detail.nodeInfo.subworkflow')}</FL>
                 <select value={form.workflow_id ?? ''} onChange={(e) => set('workflow_id', e.target.value)} className={SL}>
                   <option value="">{t('detail.nodeInfo.selectWorkflow')}</option>
-                  {avail.map((wf) => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
+                  {avail.map((wf) => (
+                    <option key={wf.id} value={wf.id}>
+                      {getWorkflowDisplayName(wf, i18n.language)}
+                    </option>
+                  ))}
                 </select>
               </div>
               <JsonField label={t('detail.nodeInfo.inputMapping')} value={form.inputs_mapping} onChange={(v) => set('inputs_mapping', v)} />

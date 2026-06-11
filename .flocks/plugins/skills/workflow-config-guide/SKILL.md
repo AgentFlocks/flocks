@@ -17,7 +17,7 @@ Do not use this skill to create a brand-new workflow from scratch. Use `workflow
 
 1. Identify the current workflow directory. Prefer the explicit path in the user request; otherwise inspect the active workflow context and project/user workflow roots.
 2. Read the workflow-local `guide.md` first. If it is missing or too thin to answer the user's request, stop and use the `question` tool to ask whether to generate or repair `guide.md` from `workflow.md`, `workflow.json`, and `config.json`.
-3. Read the workflow files that exist: `workflow.json`, `workflow.md`, optional legacy `config.json`, and `meta.json`. Treat the backend `/api/workflow/<workflow_id>/config` response as the canonical publish template.
+3. Read the workflow files that exist: `workflow.json`, `workflow.md`, optional legacy `config.json`, and `meta.json`. Treat the backend `/api/workflow/<workflow_id>/config` response as the canonical publish template. If no stored template exists, use `/api/workflow/<workflow_id>/config/sync` to let the backend migrate the fallback `config.json`.
 4. Summarize the current configurable capabilities in plain language, using `guide.md` as the source for workflow-specific modes, defaults, sample requirements, validation, and recommended question order.
 5. When any user decision, missing value, preference, or confirmation is needed, call the `question` tool. Do not ask configuration questions in ordinary assistant text.
 6. Before changing the publish template, show a unified diff against the canonical backend config, then call the `question` tool for explicit confirmation. That single approval authorizes applying the shown diff through the backend config endpoint; do not ask a second "should I call PUT" question for the same diff.
@@ -53,6 +53,7 @@ Treat the publish configuration template as a workflow runtime/publish template,
 - If the stored template declares only API publishing, the publish page should expose only API publish controls.
 - If the stored template declares only Syslog, Kafka, Webhook, or Schedule triggers, the publish page should expose only that trigger's start/stop or enable/disable controls.
 - Do not store plaintext secrets in the template; store booleans such as `apiKeyConfigured` or secret-manager references.
+- Never edit workflow-local `config.json` to apply a publish, input, or trigger configuration. It is a fallback import template only.
 - Treat the template as display/intent only. Real enabled/running/stopped state must come from runtime APIs backed by Storage/SQL, never from editing a template file directly.
 - Do not modify workflow node code while applying runtime configuration unless the user explicitly asks for a code change.
 - Re-running with the same answers should be idempotent: no changes, or a small diff limited to comments/timestamps.
@@ -79,6 +80,8 @@ The `question` tool is mandatory for this skill. Any time you need the user to c
 - Use one question card per turn. Do not ask several independent decisions in a single text paragraph.
 - For diff approval, show the diff first, then call `question` with choices such as "应用上面的 diff", "只保存草稿", and "暂不修改". If the user chooses to apply the shown diff, immediately apply it through the backend config endpoint; do not ask an extra confirmation that only repeats the same side effect.
 - For side-effect scope questions, such as "是否顺手修改 workflow.md", call `question`; do not ask in prose.
+
+Rule anchor: never make a configuration question choice-only.
 
 Never make a configuration question choice-only. Every Question-tool prompt used by this skill must include a way for the user to type a custom answer:
 
@@ -118,14 +121,22 @@ Good pattern after showing a diff:
 When the user approves an apply:
 
 1. Read and preserve the previous canonical template from `GET /api/workflow/<workflow_id>/config`.
-2. Deep-merge the selected values into the existing config shape where possible.
-3. Prefer the backend template endpoint: `PUT /api/workflow/<workflow_id>/config` with the full proposed config object as the JSON body.
-4. Use the response's `config` as the saved template and `runtime` as the current effective state; do not infer runtime state from template `enabled` fields.
-5. If the endpoint is unavailable, save a draft under `~/.flocks/workspace/outputs/<today>/` instead of directly changing runtime state.
-6. Validate with a JSON parser.
-7. Verify the publish page or config endpoint returns the saved template from Storage/SQL.
-8. Run a smoke test with `metadata.sampleInputs`, `workflow.json` sample inputs, or the user's pasted sample when a safe local test is available.
-9. If validation fails, restore the previous template through `PUT /api/workflow/<workflow_id>/config` and report the exact failure.
+2. If the response says no stored template exists, call `POST /api/workflow/<workflow_id>/config/sync` so the backend migrates the fallback file or creates a generated template.
+3. Deep-merge the selected values into the existing config shape where possible.
+4. Prefer the backend template endpoint: `PUT /api/workflow/<workflow_id>/config` with the full proposed config object as the JSON body.
+5. Use the response's `config` as the saved template and `runtime` as the current effective state; do not infer runtime state from template `enabled` fields.
+6. If the endpoint is unavailable, save a draft under `~/.flocks/workspace/outputs/<today>/` instead of changing `config.json`, and clearly state that the change was not applied, not published, and not started.
+7. Validate with a JSON parser.
+8. Verify the publish page or config endpoint returns the saved template from Storage/SQL.
+9. Run a smoke test with `metadata.sampleInputs`, `workflow.json` sample inputs, or the user's pasted sample when a safe local test is available.
+10. If validation fails, restore the previous template through `PUT /api/workflow/<workflow_id>/config` and report the exact failure.
+
+If the user says "publish as API", "Syslog input", "Kafka input", "Webhook input", or "Schedule" from the Publish page, treat it as a guided configuration intent:
+
+- First identify whether the user wants to declare/change the template, start/stop runtime state, or both.
+- For template changes, use `GET /config` -> diff -> question confirmation -> `PUT /config`.
+- For runtime actions, use the runtime endpoint after template confirmation, such as `/publish`, `/unpublish`, `/syslog-config`, `/kafka-config`, `/poller-config`, or `/triggers`.
+- If the backend is unreachable, do not say "the user should publish later in the WebUI" as if the requested action succeeded. Save a draft and report the exact blocker.
 
 When the user wants to start, stop, enable, disable, publish, or unpublish a capability, do not edit the template. Use the runtime endpoint for that capability, such as `/publish`, `/unpublish`, `/syslog-config`, `/kafka-config`, `/poller-config`, or `/triggers`.
 
