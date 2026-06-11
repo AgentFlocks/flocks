@@ -314,6 +314,18 @@ describe('getRenderableFileUrl', () => {
     );
   });
 
+  it('converts Windows file URLs without adding a POSIX root prefix', () => {
+    expect(getRenderableFileUrl('file:///C:/Users/demo/Pictures/channel%20image.png')).toBe(
+      '/api/file/download?path=C%3A%2FUsers%2Fdemo%2FPictures%2Fchannel%20image.png',
+    );
+  });
+
+  it('preserves UNC file URL hosts for Windows network paths', () => {
+    expect(getRenderableFileUrl('file://server/share/channel%20image.png')).toBe(
+      '/api/file/download?path=%2F%2Fserver%2Fshare%2Fchannel%20image.png',
+    );
+  });
+
   it('leaves browser-readable URLs unchanged', () => {
     expect(getRenderableFileUrl('https://example.com/image.png')).toBe('https://example.com/image.png');
     expect(getRenderableFileUrl('data:image/png;base64,abc')).toBe('data:image/png;base64,abc');

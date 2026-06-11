@@ -542,7 +542,12 @@ export function getRenderableFileUrl(url: string): string {
 
   try {
     const parsed = new URL(url);
-    const path = decodeURIComponent(parsed.pathname);
+    let path = decodeURIComponent(parsed.pathname);
+    if (/^\/[A-Za-z]:\//.test(path)) {
+      path = path.slice(1);
+    } else if (parsed.hostname) {
+      path = `//${parsed.hostname}${path}`;
+    }
     return `${getApiBase()}/api/file/download?path=${encodeURIComponent(path)}`;
   } catch {
     return url;

@@ -144,7 +144,7 @@ class WorkflowEngine:
     mutate_workflow: bool = False
     workflow_path: Optional[str] = None
     node_timeout_s: Optional[float] = 300.0
-    history_mode: Literal["full", "summary"] = "full"
+    history_mode: Literal["full", "summary"] = "summary"
     _depth: int = 0
     max_parallel_workers: int = 4
     workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)

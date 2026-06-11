@@ -16,6 +16,7 @@ import pytest
 
 from flocks.session.utils.file_extractor import (
     extract_file_text,
+    file_url_to_path,
     is_text_extractable_mime,
     read_file_part_bytes,
     truncate_extracted_text,
@@ -25,6 +26,7 @@ from flocks.session.utils.file_extractor import (
 # ---------------------------------------------------------------------------
 # read_file_part_bytes
 # ---------------------------------------------------------------------------
+
 
 class TestReadFilePartBytes:
     def test_empty_string_returns_none(self):
@@ -69,46 +71,64 @@ class TestReadFilePartBytes:
         result = read_file_part_bytes(url)
         assert result == b"spaced content"
 
+    def test_windows_drive_file_url_path_does_not_keep_posix_prefix(self):
+        path = file_url_to_path("file:///C:/Users/demo/Pictures/channel%20image.png")
+        assert path == "C:/Users/demo/Pictures/channel image.png"
+
+    def test_unc_file_url_path_preserves_host(self):
+        path = file_url_to_path("file://server/share/channel%20image.png")
+        assert path == "//server/share/channel image.png"
+
 
 # ---------------------------------------------------------------------------
 # is_text_extractable_mime
 # ---------------------------------------------------------------------------
 
+
 class TestIsTextExtractableMime:
-    @pytest.mark.parametrize("mime", [
-        "text/plain",
-        "text/html",
-        "text/css",
-        "text/javascript",
-        "text/markdown",
-        "text/csv",
-        "text/xml",
-    ])
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "text/plain",
+            "text/html",
+            "text/css",
+            "text/javascript",
+            "text/markdown",
+            "text/csv",
+            "text/xml",
+        ],
+    )
     def test_text_prefix_is_extractable(self, mime):
         assert is_text_extractable_mime(mime) is True
 
-    @pytest.mark.parametrize("mime", [
-        "application/json",
-        "application/ld+json",
-        "application/xml",
-        "application/yaml",
-        "application/x-yaml",
-        "application/javascript",
-        "application/x-sh",
-        "application/x-shellscript",
-    ])
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "application/json",
+            "application/ld+json",
+            "application/xml",
+            "application/yaml",
+            "application/x-yaml",
+            "application/javascript",
+            "application/x-sh",
+            "application/x-shellscript",
+        ],
+    )
     def test_special_application_mimes_are_extractable(self, mime):
         assert is_text_extractable_mime(mime) is True
 
-    @pytest.mark.parametrize("mime", [
-        "image/png",
-        "image/jpeg",
-        "video/mp4",
-        "audio/mpeg",
-        "application/octet-stream",
-        "application/zip",
-        "application/pdf",  # PDF handled separately
-    ])
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "image/png",
+            "image/jpeg",
+            "video/mp4",
+            "audio/mpeg",
+            "application/octet-stream",
+            "application/zip",
+            "application/pdf",  # PDF handled separately
+        ],
+    )
     def test_binary_mimes_are_not_extractable(self, mime):
         assert is_text_extractable_mime(mime) is False
 
@@ -119,6 +139,7 @@ class TestIsTextExtractableMime:
 # ---------------------------------------------------------------------------
 # truncate_extracted_text
 # ---------------------------------------------------------------------------
+
 
 class TestTruncateExtractedText:
     def test_short_text_not_truncated(self):
@@ -166,6 +187,7 @@ class TestTruncateExtractedText:
 # ---------------------------------------------------------------------------
 # extract_file_text
 # ---------------------------------------------------------------------------
+
 
 class TestExtractFileText:
     def test_plain_text_file(self, tmp_path):
