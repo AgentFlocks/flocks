@@ -14,6 +14,7 @@ import {
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageGroupClassName,
+  getRenderableThinkingText,
   getRenderableFileUrl,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
@@ -53,6 +54,14 @@ const tMock = (key: string) => ({
   'chat.tool.inputParams': '输入参数',
   'chat.tool.outputResult': '输出结果',
   'chat.tool.todoStages': 'Todo 阶段',
+  'chat.tool.todoStatus.pending': '待办',
+  'chat.tool.todoStatus.inProgress': '进行中',
+  'chat.tool.todoStatus.completed': '完成',
+  'chat.tool.todoStatus.cancelled': '已取消',
+  'chat.tool.todoSummary.progress': '进度',
+  'chat.tool.todoSummary.inProgress': '进行中',
+  'chat.tool.todoSummary.completed': '完成',
+  'chat.tool.todoSummary.done': '完成',
   'smartAssistant': '智能助手',
 }[key] ?? key);
 const pendingQuestionsHookMock = {
@@ -403,6 +412,34 @@ describe('shouldRenderMessage', () => {
       error: { code: 'SessionError', message: 'Provider failed' },
     }))).toBe(true);
   });
+
+  it('hides stopped assistant messages that only contain punctuation reasoning', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-dot',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'part-dot',
+          messageID: 'assistant-dot',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '.',
+        } as any,
+      ],
+    }))).toBe(false);
+  });
+});
+
+describe('getRenderableThinkingText', () => {
+  it('filters punctuation-only reasoning previews', () => {
+    expect(getRenderableThinkingText({ type: 'reasoning', text: '.' } as any)).toBe('');
+    expect(getRenderableThinkingText({ type: 'reasoning', text: '。' } as any)).toBe('');
+  });
+
+  it('keeps meaningful reasoning text', () => {
+    expect(getRenderableThinkingText({ type: 'reasoning', text: '需要更新 todo 状态' } as any)).toBe('需要更新 todo 状态');
+  });
 });
 
 describe('SessionChat agent mentions', () => {
@@ -612,10 +649,11 @@ describe('ChatToolPart todo rendering', () => {
       }),
     );
 
-    expect(container.textContent).toContain('Progress 1/3 · In progress 1');
+    expect(container.textContent).toContain('进度 1/3 · 进行中 1');
     expect(container.textContent).toContain('Todo 阶段');
     expect(container.textContent).toContain('定位 todo 摘要问题中');
-    expect(container.textContent).toContain('completed');
+    expect(container.textContent).toContain('完成');
+    expect(container.textContent).not.toContain('completed');
     expect(container.textContent).not.toContain('输入参数');
     expect(container.textContent).not.toContain('输出结果');
     expect(container.textContent).not.toContain('[object Object]');
