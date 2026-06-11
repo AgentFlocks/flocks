@@ -57,6 +57,7 @@ _DEPENDENCY_SYNC_TIMEOUT_SECONDS = 180
 _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 _WINDOWS_VENV_BACKUP_NAME = ".venv.flocks_backup"
 _WINDOWS_VENV_FAILED_NAME = ".venv.flocks_failed"
+_CANCELLATION_RETRY_DELAY_SECONDS = 0.1
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
@@ -563,6 +564,7 @@ async def _await_ignoring_cancellation(awaitable):
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             log.warning("updater.restart.critical_step_cancelled_ignored")
+            await asyncio.sleep(_CANCELLATION_RETRY_DELAY_SECONDS)
 
 
 def _dependency_sync_timeout_seconds() -> int:

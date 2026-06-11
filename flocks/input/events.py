@@ -50,4 +50,5 @@ class ParsedCommand(BaseModel):
     command_name: str
     canonical_name: str
     args: str = ""
+    args_json: Optional[Any] = None
     command_def: Optional[CommandInfo] = None

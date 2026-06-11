@@ -294,8 +294,20 @@ class TestRexPromptAwareness:
         rex = await Agent.get("rex")
         prompt = rex.prompt or ""
         assert "### Available Skills" in prompt
-        assert "Load a skill when the task clearly matches its domain expertise." in prompt
+        assert "Call `skill_load` when the task clearly matches a skill's domain expertise." in prompt
         assert "Category + Skills Delegation System" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_points_to_im_send_tool(self):
+        """Rex prompt 应只指向 im_send_message 工具，不内嵌完整 IM SOP。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "im_send_message" in prompt
+        assert 'skill_load(name="im-send")' not in prompt
+        assert "### IM Send Protocol" not in prompt
+        assert "Execute this exact sequence" not in prompt
+        assert "IM Session Resolution for schedule_task_create" not in prompt
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_workflow_section(self):

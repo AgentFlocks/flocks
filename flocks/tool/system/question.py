@@ -92,6 +92,102 @@ Question format:
 The user's answers will be returned for you to continue with."""
 
 
+def _format_channel_question_text(questions: List[Dict[str, Any]]) -> str:
+    """Render normalized questions as plain text for IM channels."""
+    blocks: list[str] = []
+    for idx, q in enumerate(questions, start=1):
+        header = str(q.get("header") or "").strip()
+        question = str(q.get("question") or "").strip()
+        qtype = str(q.get("type") or "choice")
+        options = q.get("options") or []
+
+        lines: list[str] = []
+        if header:
+            lines.append(header)
+        prefix = f"{idx}. " if len(questions) > 1 else ""
+        lines.append(f"{prefix}{question}")
+
+        if qtype in {"choice", "confirm"} and options:
+            for opt_idx, opt in enumerate(options, start=1):
+                label = str(opt.get("label", "")).strip()
+                description = str(opt.get("description", "") or "").strip()
+                if description:
+                    lines.append(f"{opt_idx}. {label} - {description}")
+                else:
+                    lines.append(f"{opt_idx}. {label}")
+            lines.append("请回复选项序号、选项文本，或直接补充你的答案。")
+        else:
+            lines.append("请直接回复你的答案。")
+
+        blocks.append("\n".join(line for line in lines if line))
+
+    return "\n\n".join(blocks)
+
+
+async def _send_channel_question_if_applicable(
+    ctx: ToolContext,
+    questions: List[Dict[str, Any]],
+) -> ToolResult | None:
+    """Send the question as a plain text IM message for channel sessions.
+
+    Channel sessions do not have the Web UI question-answer transport. Sending
+    a text prompt and returning immediately avoids waiting until timeout.
+    """
+    try:
+        from flocks.channel.inbound.session_binding import SessionBindingService
+        from flocks.channel.outbound.deliver import OutboundDelivery
+        from flocks.channel.base import OutboundContext
+
+        svc = SessionBindingService()
+        bindings = await svc.get_bindings_by_session(ctx.session_id)
+        if not bindings:
+            return None
+
+        text = _format_channel_question_text(questions)
+        for binding in bindings:
+            await OutboundDelivery.deliver(
+                OutboundContext(
+                    channel_id=binding.channel_id,
+                    account_id=binding.account_id,
+                    to=binding.chat_id,
+                    text=text,
+                    thread_id=binding.thread_id,
+                ),
+                session_id=binding.session_id,
+            )
+
+        return ToolResult(
+            success=True,
+            output=(
+                "Question sent to the IM channel as plain text. "
+                "Do not continue the dependent action until the user replies in a new message."
+            ),
+            title="Question sent to channel",
+            metadata={
+                "deferred": True,
+                "channel_session": True,
+                "bindings": [
+                    {
+                        "channel_id": b.channel_id,
+                        "chat_type": b.chat_type.value if b.chat_type else None,
+                        "chat_id": b.chat_id,
+                        "session_id": b.session_id,
+                    }
+                    for b in bindings
+                ],
+            },
+        )
+    except Exception as e:
+        log.warning("question.channel_send_failed", {
+            "session_id": ctx.session_id,
+            "error": str(e),
+        })
+        return ToolResult(
+            success=False,
+            error=f"Failed to send question to channel: {e}",
+        )
+
+
 async def default_question_handler(
     session_id: str,
     questions: List[Dict[str, Any]]
@@ -274,6 +370,10 @@ async def question_tool(
             success=False,
             error="No valid questions provided"
         )
+
+    channel_result = await _send_channel_question_if_applicable(ctx, normalized_questions)
+    if channel_result is not None:
+        return channel_result
     
     # Get handler
     handler = _question_handler or default_question_handler

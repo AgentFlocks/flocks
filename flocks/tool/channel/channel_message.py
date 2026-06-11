@@ -22,6 +22,7 @@ from flocks.tool.registry import (
 
 _CHANNEL_ALIASES: dict[str, list[str]] = {
     "wecom": ["wecom", "企微", "企业微信", "wechat_work", "wxwork"],
+    "weixin": ["weixin", "微信", "wechat", "wx"],
     "feishu": ["feishu", "飞书", "lark"],
     "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
 }
@@ -61,6 +62,8 @@ async def _http_session_send(
     text: str,
     channel_type: str | None = None,
     media_url: str | None = None,
+    account_id: str | None = None,
+    chat_id: str | None = None,
 ) -> ToolResult | None:
     """Send a message via the running flocks server's /api/channel/session-send endpoint,
     reusing the already-established WebSocket connection.
@@ -76,6 +79,10 @@ async def _http_session_send(
             payload["channel_type"] = channel_type
         if media_url:
             payload["media_url"] = media_url
+        if account_id:
+            payload["account_id"] = account_id
+        if chat_id:
+            payload["chat_id"] = chat_id
 
         headers: dict[str, str] = {}
         api_token = _get_api_token()
@@ -122,7 +129,8 @@ async def _http_session_send(
 @ToolRegistry.register_function(
     name="channel_message",
     description=(
-        "Send a message to the IM channel (WeCom / Feishu / DingTalk) bound to a session. "
+        "Send a message to the IM channel bound to a session. "
+        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk. "
         "Resolves the target channel and chat automatically from session_id. "
         "Use channel_type to target a specific channel when the session has multiple bindings."
     ),
@@ -144,9 +152,9 @@ async def _http_session_send(
             name="channel_type",
             type=ParameterType.STRING,
             required=False,
-            enum=["wecom", "feishu", "dingtalk", "企微", "飞书", "钉钉"],
+            enum=["wecom", "weixin", "feishu", "dingtalk", "企微", "企业微信", "微信", "飞书", "钉钉"],
             description=(
-                "Target channel: wecom, feishu, or dingtalk. "
+                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, or dingtalk=钉钉. "
                 "Chinese aliases are accepted. "
                 "If omitted and the session has only one binding, that channel is used automatically. "
                 "If omitted and the session has multiple bindings, the message is sent to all of them."
@@ -158,12 +166,26 @@ async def _http_session_send(
             required=False,
             description="Media URL or local file path (optional).",
         ),
+        ToolParameter(
+            name="account_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
+        ToolParameter(
+            name="chat_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
     ],
 )
 async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     session_id: str = kwargs["session_id"]
     message: str = kwargs["message"]
     media: str | None = kwargs.get("media")
+    account_id: str | None = kwargs.get("account_id")
+    chat_id: str | None = kwargs.get("chat_id")
     raw_channel_type: str | None = kwargs.get("channel_type")
     channel_type: str | None = _normalize_channel_type(raw_channel_type)
 
@@ -175,7 +197,15 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     except Exception:
         port = 8000
 
-    result = await _http_session_send(port, session_id, message, channel_type, media)
+    result = await _http_session_send(
+        port,
+        session_id,
+        message,
+        channel_type,
+        media,
+        account_id,
+        chat_id,
+    )
     if result is not None:
         return result
 
@@ -211,6 +241,19 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
         targets = filtered
     else:
         targets = matched
+
+    if account_id:
+        targets = [b for b in targets if b.account_id == account_id]
+    if chat_id:
+        targets = [b for b in targets if b.chat_id == chat_id]
+    if (account_id or chat_id) and not targets:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Session '{session_id}' has no binding matching "
+                f"account_id='{account_id}' chat_id='{chat_id}'."
+            ),
+        )
 
     all_results = []
     errors = []

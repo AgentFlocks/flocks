@@ -13,7 +13,7 @@ from flocks.session.message import Message
 from flocks.agent.registry import Agent
 from flocks.project.project import Project
 from flocks.config.config import Config
-from flocks.mcp.server import get_manager
+from flocks.mcp import get_manager
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -85,11 +85,13 @@ class SessionClient:
         model: str,
         agent: str,
         directory: str,
+        arguments_json: Optional[Any] = None,
     ) -> None:
         """Execute a command in the session"""
         log.info("session.command", {
             "session_id": session_id,
             "command": command,
+            "arguments_json": arguments_json is not None,
         })
     
     async def summarize(

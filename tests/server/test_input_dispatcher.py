@@ -19,6 +19,15 @@ class TestParseSlashCommand:
         assert parsed.command_name == "reset"
         assert parsed.canonical_name == "new"
 
+    def test_reads_structured_arguments_from_metadata(self):
+        parsed = parse_slash_command(
+            '/bug {"scope":"acp"}',
+            {"commandArgumentsJson": {"scope": "acp"}},
+        )
+        assert parsed is not None
+        assert parsed.args == '{"scope":"acp"}'
+        assert parsed.args_json == {"scope": "acp"}
+
     def test_removed_restart_command_no_longer_resolves(self):
         parsed = parse_slash_command("/restart")
         assert parsed is not None
