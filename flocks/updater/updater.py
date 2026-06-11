@@ -3210,16 +3210,23 @@ async def perform_update(
             return
 
     if sys.platform == "win32":
-        log.info("updater.restart.spawn", {"argv": restart_argv})
         try:
+            handoff_argv = _build_windows_restart_handoff_argv(restart_argv, install_root)
+            log.info(
+                "updater.restart.handoff_spawn",
+                {
+                    "argv": handoff_argv,
+                    "restart_argv": restart_argv,
+                },
+            )
             subprocess.Popen(
-                restart_argv,
+                handoff_argv,
                 cwd=install_root,
                 close_fds=True,
             )
             os._exit(0)
-        except OSError as exc:
-            log.error("updater.restart.spawn_failed", {"error": str(exc)})
+        except Exception as exc:
+            log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
             if handover_active:
                 try:
                     rollback_upgrade_handover()
@@ -3347,6 +3354,38 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
 
     log.info("updater.restart.force_venv", {"python": str(venv_python)})
     return [str(venv_python), "-m", "flocks.cli.main"] + clean_rest
+
+
+def _build_windows_restart_handoff_argv(restart_argv: list[str], install_root: Path) -> list[str]:
+    """Wrap the real restart command in a helper that waits for port release."""
+    from flocks.cli import service_manager
+
+    if not restart_argv:
+        raise ValueError("restart command is empty")
+
+    config = _current_service_config()
+    paths = service_manager.ensure_runtime_dirs()
+    return [
+        restart_argv[0],
+        "-m",
+        "flocks.updater.restart_handoff",
+        "--parent-pid",
+        str(os.getpid()),
+        "--backend-host",
+        str(config.backend_host),
+        "--backend-port",
+        str(config.backend_port),
+        "--frontend-host",
+        str(config.frontend_host),
+        "--frontend-port",
+        str(config.frontend_port),
+        "--backend-pid-file",
+        str(paths.backend_pid),
+        "--install-root",
+        str(install_root),
+        "--",
+        *restart_argv,
+    ]
 
 
 def _resolve_windows_restart_command(argv0: str, orig_argv: list[str]) -> list[str] | None:

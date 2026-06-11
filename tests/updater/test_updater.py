@@ -3104,6 +3104,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
         return None
 
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
@@ -3131,8 +3132,18 @@ async def test_perform_update_spawns_restart_process_on_windows(
         async for _step in updater.perform_update("2026.4.1"):
             pass
 
-    assert popen_calls == [
-        ([r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"], tmp_path / "install-root", True),
+    assert len(popen_calls) == 1
+    handoff_argv, cwd, close_fds = popen_calls[0]
+    assert cwd == tmp_path / "install-root"
+    assert close_fds is True
+    assert handoff_argv[:3] == [r"C:\tool\python.exe", "-m", "flocks.updater.restart_handoff"]
+    assert "--parent-pid" in handoff_argv
+    assert "--backend-port" in handoff_argv
+    assert handoff_argv[handoff_argv.index("--") + 1 :] == [
+        r"C:\tool\python.exe",
+        "-m",
+        "flocks.cli.main",
+        "start",
     ]
     assert events == ["handover"]
     assert "execv" not in events
