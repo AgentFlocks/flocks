@@ -50,6 +50,33 @@ def test_run_workflow_summary_history_does_not_retain_large_step_payloads() -> N
     assert result.history[1]["inputs"]["raw_alerts"]["count"] == 200
 
 
+def test_run_workflow_defaults_to_summary_history_mode() -> None:
+    workflow = {
+        "start": "produce",
+        "nodes": [
+            {
+                "id": "produce",
+                "type": "python",
+                "code": "outputs['items'] = [{'body': 'x' * 1000} for _ in range(200)]",
+            },
+        ],
+        "edges": [],
+    }
+
+    result = run_workflow(workflow=workflow, ensure_requirements=False)
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs["items"] == {
+        "_type": "list",
+        "count": 200,
+        "preview": [
+            {"_type": "dict", "keys": ["body"]},
+            {"_type": "dict", "keys": ["body"]},
+            {"_type": "dict", "keys": ["body"]},
+        ],
+    }
+
+
 def test_run_workflow_summary_outputs_do_not_retain_large_final_payloads() -> None:
     workflow = {
         "start": "final",
@@ -85,4 +112,3 @@ def test_python_runtime_can_cleanup_node_globals_after_execute() -> None:
     assert outputs == {"ok": True}
     assert "temporary_payload" not in runtime.globals
     assert runtime.globals["outputs"] == {"ok": True}
-
