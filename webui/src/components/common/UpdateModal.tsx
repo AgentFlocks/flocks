@@ -17,10 +17,10 @@ import {
 import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
+import { checkRestartReadiness } from '@/utils/restartPolling';
 
 // ------------------------------------------------------------------ //
 
-const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 
@@ -54,6 +54,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
+  const restartFailureReasonRef = useRef('');
   const setRestartingSync = (val: boolean) => {
     restartingRef.current = val;
     setRestarting(val);
@@ -98,6 +99,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
           return next;
         });
         if (progress.stage === 'restarting') {
+          restartFailureReasonRef.current = '';
           setRestartingSync(true);
           pollUntilReady();
         }
@@ -108,6 +110,8 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
       if (!restartingRef.current) {
         setError(e.message ?? t('upgradeFailed'));
         setUpgrading(false);
+      } else if (e?.message) {
+        restartFailureReasonRef.current = e.message;
       }
     }
   }, [edition, i18n.language, info, t]);
@@ -120,28 +124,22 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
 
   const pollUntilReady = () => {
     const start = Date.now();
+    let lastPollFailure = '';
     const poll = async () => {
       if (Date.now() - start > HEALTH_POLL_TIMEOUT) {
-        setError(t('restartTimeout'));
+        const reason = restartFailureReasonRef.current || lastPollFailure || t('restartUnknown');
+        setError(t('restartTimeout', { reason }));
         setRestartingSync(false);
         setUpgrading(false);
         return;
       }
 
-      try {
-        const rootResponse = await fetch('/', { cache: 'no-store' });
-        const rootHtml = await rootResponse.text();
-        const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
-
-        if (rootResponse.ok && !stillShowingUpgradePage) {
-          const healthResponse = await fetch('/api/health', { cache: 'no-store' });
-          if (healthResponse.ok) {
-            window.location.reload();
-            return;
-          }
-        }
-      } catch {
+      const readiness = await checkRestartReadiness();
+      if (readiness.ready) {
+        window.location.reload();
+        return;
       }
+      lastPollFailure = readiness.reason || lastPollFailure;
 
       setTimeout(() => {
         void poll();
