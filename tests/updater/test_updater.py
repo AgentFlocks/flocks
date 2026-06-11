@@ -70,6 +70,8 @@ async def test_await_ignoring_cancellation_backs_off_on_repeated_cancellation(
 
     async def fake_sleep(delay: float) -> None:
         sleep_delays.append(delay)
+        if len(sleep_delays) == 1:
+            raise updater.asyncio.CancelledError
 
     async def critical_step() -> str:
         return "done"
@@ -704,7 +706,7 @@ async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
     assert captured["headers"] == {"Authorization": "Bearer secret"}
 
 
-def test_build_restart_argv_uses_windows_venv_python(
+def test_build_restart_argv_uses_windows_service_restart(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -718,14 +720,34 @@ def test_build_restart_argv_uses_windows_venv_python(
         "argv",
         [r"C:\Users\worker\.local\bin\flocks", "start", "--reload", "--port", "8000"],
     )
+    monkeypatch.setattr(
+        updater,
+        "_current_service_config",
+        lambda: service_manager.ServiceConfig(
+            backend_host="127.0.0.1",
+            backend_port=8000,
+            frontend_host="127.0.0.1",
+            frontend_port=5173,
+            no_browser=True,
+            skip_frontend_build=True,
+        ),
+    )
 
     assert updater._build_restart_argv(tmp_path) == [
         str(tmp_path / ".venv" / "Scripts" / "python.exe"),
         "-m",
         "flocks.cli.main",
-        "start",
-        "--port",
+        "restart",
+        "--no-browser",
+        "--skip-webui-build",
+        "--server-host",
+        "127.0.0.1",
+        "--server-port",
         "8000",
+        "--webui-host",
+        "127.0.0.1",
+        "--webui-port",
+        "5173",
     ]
 
 
@@ -746,6 +768,38 @@ def test_build_restart_argv_uses_venv_python_on_non_windows(
         "-m",
         "flocks.cli.main",
         "start",
+    ]
+
+
+def test_build_restart_argv_uses_service_restart_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(
+        updater,
+        "_build_service_restart_argv",
+        lambda install_root=None: [
+            str(python_exe),
+            "-m",
+            "flocks.cli.main",
+            "restart",
+            "--no-browser",
+            "--skip-webui-build",
+        ],
+    )
+
+    assert updater._build_restart_argv(tmp_path) == [
+        str(python_exe),
+        "-m",
+        "flocks.cli.main",
+        "restart",
+        "--no-browser",
+        "--skip-webui-build",
     ]
 
 
