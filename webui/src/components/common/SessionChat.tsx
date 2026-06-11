@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -201,6 +201,15 @@ const APPROX_CHARS_PER_TOKEN = 4;
 function countTokensLikeCompaction(text: string | null | undefined): number {
   if (!text) return 0;
   return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+}
+
+const INSIGNIFICANT_THINKING_TEXT_RE = /^[\p{P}\p{S}]+$/u;
+
+export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text' | 'thinking'>): string {
+  if (part.type !== 'reasoning' && part.type !== 'thinking') return '';
+  const text = (part.text || part.thinking || '').trim();
+  if (!text || INSIGNIFICANT_THINKING_TEXT_RE.test(text)) return '';
+  return text;
 }
 
 function stringifyToolPayload(value: unknown): string {
@@ -546,6 +555,19 @@ export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'f
     (message.parts?.length ?? 0) === 0 &&
     message.finish === 'stop' &&
     !message.error
+  ) {
+    return false;
+  }
+  if (
+    message.role === 'assistant' &&
+    message.finish === 'stop' &&
+    !message.error &&
+    message.parts?.length &&
+    message.parts.every((part) => {
+      if (part.type === 'text') return !(part.text || '').trim();
+      if (part.type === 'reasoning' || part.type === 'thinking') return !getRenderableThinkingText(part);
+      return false;
+    })
   ) {
     return false;
   }
@@ -3090,8 +3112,9 @@ function ChatMessageBubbleInner({
                   )}
 
                   {/* Reasoning / thinking */}
-                  {(part.type === 'reasoning' || part.type === 'thinking') && (part.text || part.thinking) && (() => {
-                    const thinkingText = part.text || part.thinking || '';
+                  {(part.type === 'reasoning' || part.type === 'thinking') && (() => {
+                    const thinkingText = getRenderableThinkingText(part);
+                    if (!thinkingText) return null;
                     const partKey = part.id || `reasoning-${i}`;
                     const isExpanded = getPartExpanded(partKey);
                     const isThinking = !isReasoningDone;
@@ -3333,6 +3356,7 @@ type TodoSummaryEntry = {
   status?: string;
   activeForm?: string;
 };
+type TodoTranslator = (key: string) => string;
 
 function isTodoSummaryEntry(value: unknown): value is TodoSummaryEntry {
   if (!value || typeof value !== 'object') return false;
@@ -3367,7 +3391,7 @@ function getTodoActionLabel(action: unknown): string {
   return 'Todos';
 }
 
-export function buildTodoSummary(state: Partial<ToolState>): string {
+export function buildTodoSummary(state: Partial<ToolState>, t?: TodoTranslator): string {
   const metadata = state.metadata ?? {};
   const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
   if (currentTodos.length === 0) return getTodoActionLabel(state.input?.action);
@@ -3381,42 +3405,80 @@ export function buildTodoSummary(state: Partial<ToolState>): string {
   let summary =
     terminalCount === totalCount
       ? hasCancelled
-        ? `Done ${terminalCount}/${totalCount}`
-        : `Completed ${terminalCount}/${totalCount}`
-      : `Progress ${terminalCount}/${totalCount}`;
+        ? `${t?.('chat.tool.todoSummary.done') ?? 'Done'} ${terminalCount}/${totalCount}`
+        : `${t?.('chat.tool.todoSummary.completed') ?? 'Completed'} ${terminalCount}/${totalCount}`
+      : `${t?.('chat.tool.todoSummary.progress') ?? 'Progress'} ${terminalCount}/${totalCount}`;
 
   if (inProgressCount > 0 && terminalCount < totalCount) {
-    summary += ` · In progress ${inProgressCount}`;
+    summary += ` · ${t?.('chat.tool.todoSummary.inProgress') ?? 'In progress'} ${inProgressCount}`;
   }
 
   return summary;
 }
 
-function todoStatusLabel(status: string | undefined): string {
+function todoStatusLabel(status: string | undefined, t: TodoTranslator): string {
   switch (status) {
     case 'completed':
-      return 'completed';
+      return t('chat.tool.todoStatus.completed');
     case 'in_progress':
-      return 'in progress';
+      return t('chat.tool.todoStatus.inProgress');
     case 'cancelled':
-      return 'cancelled';
+      return t('chat.tool.todoStatus.cancelled');
     case 'pending':
-      return 'pending';
+      return t('chat.tool.todoStatus.pending');
     default:
       return status || 'pending';
   }
 }
 
-function todoStatusClass(status: string | undefined): string {
+function todoStatusIcon(status: string | undefined): React.ReactNode {
   switch (status) {
     case 'completed':
-      return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+      return (
+        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-white">
+          <Check className="h-3 w-3" strokeWidth={3} />
+        </span>
+      );
     case 'in_progress':
-      return 'bg-sky-50 text-sky-700 border-sky-100';
+      return (
+        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-sky-400 bg-white">
+          <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+        </span>
+      );
     case 'cancelled':
-      return 'bg-zinc-100 text-zinc-500 border-zinc-200';
+      return (
+        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-zinc-200 text-zinc-500">
+          <X className="h-2.5 w-2.5" strokeWidth={2.5} />
+        </span>
+      );
     default:
-      return 'bg-amber-50 text-amber-700 border-amber-100';
+      return <span className="h-4 w-4 rounded-full border border-zinc-300 bg-white" />;
+  }
+}
+
+function todoTextClass(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'text-zinc-500';
+    case 'in_progress':
+      return 'font-medium text-zinc-800';
+    case 'cancelled':
+      return 'text-zinc-400 line-through decoration-zinc-300';
+    default:
+      return 'text-zinc-600';
+  }
+}
+
+function todoStatusLabelClass(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'text-emerald-600';
+    case 'in_progress':
+      return 'text-sky-600';
+    case 'cancelled':
+      return 'text-zinc-400';
+    default:
+      return 'text-zinc-400';
   }
 }
 
@@ -3489,18 +3551,22 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
     : [];
   const showGenericToolPayload = toolName !== 'todo';
+  const isTodoTool = toolName === 'todo';
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
     ? truncateToolDisplayText(
         toolName === 'todo'
-          ? buildTodoSummary(state)
+          ? buildTodoSummary(state, t)
           : buildToolInputSummary(state.input),
       )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
+  const statusBadgeClass = isTodoTool
+    ? 'text-[11px] font-medium text-zinc-500'
+    : `text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
 
   if (isWaitingForAnswer) {
     // Outer spacing is owned by the part wrapper in SessionChat's parts map.
@@ -3551,7 +3617,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           </div>
         </div>
         <div className="ml-auto flex items-center gap-1.5 flex-shrink-0 self-center">
-          <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`}>
+          <span className={statusBadgeClass}>
             {config.label}
           </span>
           <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
@@ -3559,18 +3625,28 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
       </summary>
 
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {toolName === 'todo' && todoEntries.length > 0 && (
-          <div className="rounded-md border border-zinc-200 bg-white/70 px-2 py-1.5">
-            <div className="mb-1.5 text-[11px] font-medium text-zinc-500">{t('chat.tool.todoStages')}</div>
-            <div className="space-y-1">
+        {isTodoTool && todoEntries.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
+              <span>{t('chat.tool.todoStages')}</span>
+              <span className="font-normal text-zinc-400">{todoEntries.length}</span>
+            </div>
+            <div className="divide-y divide-zinc-100">
               {todoEntries.map((todo, index) => (
-                <div key={todo.id || index} className="flex items-start gap-2 text-[11px]">
-                  <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-300" />
-                  <span className="min-w-0 flex-1 text-zinc-700">
+                <div
+                  key={todo.id || index}
+                  className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
+                >
+                  <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                    {todoStatusIcon(todo.status)}
+                  </span>
+                  <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
                     {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
                   </span>
-                  <span className={`flex-shrink-0 rounded-full border px-1.5 py-0.5 leading-none ${todoStatusClass(todo.status)}`}>
-                    {todoStatusLabel(todo.status)}
+                  <span
+                    className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
+                  >
+                    {todoStatusLabel(todo.status, t)}
                   </span>
                 </div>
               ))}
