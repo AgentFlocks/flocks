@@ -17,6 +17,9 @@ export interface Session {
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  provider?: string;
+  model?: string;
+  model_pinned?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
@@ -265,27 +268,6 @@ export interface APIServiceMetadata {
 }
 
 export type CustomDeviceAccessMode = 'api' | 'webcli' | 'workflow';
-
-export interface CustomDeviceBaseDraft {
-  accessMode: CustomDeviceAccessMode;
-  deviceName: string;
-  vendorName: string;
-  version: string;
-}
-
-export interface CustomDeviceApiDraft extends CustomDeviceBaseDraft {
-  accessMode: 'api';
-  baseUrl: string;
-  docsUrl: string;
-  capabilities: string;
-}
-
-export interface CustomDeviceWebCliDraft extends CustomDeviceBaseDraft {
-  accessMode: 'webcli';
-  productUrl: string;
-  targetInterfaces: string;
-  authHint: string;
-}
 
 export interface MCPServerConfig {
   type: 'stdio' | 'sse';

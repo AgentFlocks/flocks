@@ -95,8 +95,7 @@ class SessionResponse(BaseModel):
     """
     Session response - Flocks compatible
     
-    Matches Flocks Session.Info format exactly.
-    No agent/model/provider at top level - these come from messages.
+    Matches Flocks Session.Info format.
     """
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
     
@@ -112,6 +111,9 @@ class SessionResponse(BaseModel):
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
+    provider: Optional[str] = Field(None, description="Pinned provider ID")
+    model: Optional[str] = Field(None, description="Pinned model ID")
+    model_pinned: bool = Field(False, description="Whether provider/model are pinned for this session")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
     ownerUsername: Optional[str] = Field(None, description="Session owner username")
     canWrite: bool = Field(False, description="Whether current user can continue this session")
@@ -122,9 +124,6 @@ class SessionResponse(BaseModel):
 def _session_to_response(session: SessionModel) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
-    
-    Note: agent/model/provider are NOT included at session level.
-    They are retrieved from the latest user message in the session.
     """
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
@@ -149,6 +148,9 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
+        provider=session.provider,
+        model=session.model,
+        model_pinned=session.model_pinned,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
         canWrite=can_write,
@@ -561,6 +563,9 @@ class SessionUpdateRequest(BaseModel):
     
     title: Optional[str] = Field(None, description="New title")
     time: Optional[Dict[str, Any]] = Field(None, description="Time updates (archived)")
+    provider: Optional[str] = Field(None, description="Pinned provider ID")
+    model: Optional[str] = Field(None, description="Pinned model ID")
+    model_pinned: Optional[bool] = Field(None, description="Whether provider/model are pinned for this session")
 
 
 @router.patch(
@@ -590,6 +595,12 @@ async def update_session(
         updates["title"] = request.title
     if request.time and request.time.get("archived") is not None:
         updates["archived"] = request.time["archived"]
+    if request.provider is not None:
+        updates["provider"] = request.provider
+    if request.model is not None:
+        updates["model"] = request.model
+    if request.model_pinned is not None:
+        updates["model_pinned"] = request.model_pinned
     
     session = await Session.update(
         project_id=existing.project_id,
@@ -2793,13 +2804,21 @@ def _extract_text_from_parts(parts: List[Dict[str, Any]]) -> str:
     return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
 
 
-def _replace_text_parts(parts: Optional[List[Dict[str, Any]]], text: str) -> List[Dict[str, Any]]:
+def _replace_text_parts(
+    parts: Optional[List[Dict[str, Any]]],
+    text: str,
+    text_metadata: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     updated_parts: List[Dict[str, Any]] = []
     replaced = False
     for part in parts or []:
         if part.get("type") == "text" and not replaced:
             next_part = dict(part)
             next_part["text"] = text
+            if text_metadata:
+                merged_metadata = dict(next_part.get("metadata") or {})
+                merged_metadata.update(text_metadata)
+                next_part["metadata"] = merged_metadata
             updated_parts.append(next_part)
             replaced = True
             continue
@@ -2808,7 +2827,10 @@ def _replace_text_parts(parts: Optional[List[Dict[str, Any]]], text: str) -> Lis
         updated_parts.append(dict(part))
 
     if not replaced:
-        updated_parts.insert(0, {"type": "text", "text": text})
+        next_part: Dict[str, Any] = {"type": "text", "text": text}
+        if text_metadata:
+            next_part["metadata"] = dict(text_metadata)
+        updated_parts.insert(0, next_part)
     return updated_parts
 
 
@@ -3049,7 +3071,7 @@ def _build_prompt_request_from_event(event, prompt_text: str, display_text: Opti
     import types
 
     return types.SimpleNamespace(
-        parts=_replace_text_parts(event.parts, prompt_text),
+        parts=_replace_text_parts(event.parts, prompt_text, event.metadata or None),
         display_text=display_text,
         agent=event.agent,
         model=_coerce_model_for_prompt_request(event.model),
@@ -3432,6 +3454,7 @@ class CommandRequest(BaseModel):
     
     command: str = Field(..., description="Command name")
     arguments: str = Field("", description="Command arguments")
+    arguments_json: Optional[Any] = Field(None, alias="argumentsJson", description="Structured command arguments")
     messageID: Optional[str] = Field(None, description="Message ID")
     agent: Optional[str] = Field(None, description="Agent name")
     model: Optional[str] = Field(None, description="Model string (provider/model)")
@@ -3478,11 +3501,17 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         _require_session_write_access(session, current_user)
 
     working_directory = session.directory or os.getcwd()
+    raw_arguments = request.arguments
+    if not raw_arguments and request.arguments_json is not None:
+        raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)
+    command_metadata: Dict[str, Any] = {}
+    if request.arguments_json is not None:
+        command_metadata["commandArgumentsJson"] = request.arguments_json
 
     # The text the user typed, shown verbatim in the chat bubble
     slash_text = f"/{request.command}"
-    if request.arguments:
-        slash_text += f" {request.arguments}"
+    if raw_arguments:
+        slash_text += f" {raw_arguments}"
 
     # ── Background task ──────────────────────────────────────────────────────
     async def _handle_command() -> None:
@@ -3494,6 +3523,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
             agent=request.agent,
             model=request.model,
             variant=request.variant,
+            metadata=command_metadata,
             display_text=slash_text,
             messageID=request.messageID,
             working_directory=working_directory,
@@ -3731,11 +3761,16 @@ async def get_session_statistics(sessionID: str):
     - Model usage
     """
     try:
-        # Get session
-        session = await Session.load(sessionID)
-        
-        # Get messages
-        messages = await session.get_messages()
+        session = await _get_session_by_id_unfiltered(sessionID)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session {sessionID} not found",
+            )
+
+        from flocks.session.message import Message
+
+        messages = await Message.list_with_parts(sessionID, include_archived=True)
         
         # Calculate statistics
         message_count = len(messages)
@@ -3743,26 +3778,27 @@ async def get_session_statistics(sessionID: str):
         tool_call_count = 0
         model_usage = {}
         
-        for msg in messages:
+        for message_with_parts in messages:
+            msg = message_with_parts.info
+
             # Count tokens (approximate from parts)
-            for part in msg.parts:
-                if hasattr(part, 'text') and part.text:
+            for part in message_with_parts.parts:
+                if hasattr(part, "text") and part.text:
                     token_count += len(part.text.split())  # Rough approximation
                 
                 # Count tool calls
-                if hasattr(part, 'toolCall') and part.toolCall:
+                if getattr(part, "type", None) == "tool":
                     tool_call_count += 1
             
             # Track model usage
-            if msg.model:
-                model_usage[msg.model] = model_usage.get(msg.model, 0) + 1
-        
-        # Get session info
-        info = await session.get_info()
+            model = getattr(msg, "model", None)
+            if model:
+                model_key = model if isinstance(model, str) else json.dumps(model, sort_keys=True, default=str)
+                model_usage[model_key] = model_usage.get(model_key, 0) + 1
         
         # Calculate duration
-        created_ms = info.time.created
-        updated_ms = info.time.updated
+        created_ms = session.time.created
+        updated_ms = session.time.updated
         duration_ms = updated_ms - created_ms
         duration_seconds = duration_ms / 1000
         
@@ -3779,6 +3815,8 @@ async def get_session_statistics(sessionID: str):
         
         log.info("session.statistics", {"sessionID": sessionID, "messages": message_count})
         return stats
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("session.statistics.error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get session statistics: {str(e)}")

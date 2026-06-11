@@ -1518,7 +1518,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
           <ApplyPatch {...toolprops} />
         </Match>
         <Match when={props.part.tool === "todo"}>
-          <TodoWrite {...toolprops} />
+          <TodoToolView {...toolprops} />
         </Match>
         <Match when={props.part.tool === "question"}>
           <Question {...toolprops} />
@@ -2167,7 +2167,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   )
 }
 
-function TodoWrite(props: ToolProps<typeof TodoTool>) {
+function TodoToolView(props: ToolProps<typeof TodoTool>) {
   const todos = () => props.metadata.newTodos ?? props.metadata.todos ?? props.input.todos ?? []
   return (
     <Switch>

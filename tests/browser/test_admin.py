@@ -187,6 +187,7 @@ def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypat
     assert "[ok  ] active browser connections — 2" in out
     assert "        default — active page: Example — https://example.test" in out
     assert "        cats — active page: Cat - Wikipedia — https://en.wikipedia.org/wiki/Cat" in out
+    assert "next action       ready; use `flocks browser -c 'print(page_info())'`" in out
     assert "profile-use installed" not in out
     assert "BROWSER_USE_API_KEY set" not in out
 
@@ -216,6 +217,36 @@ def test_doctor_page_output_truncates_long_text(monkeypatch, capsys) -> None:
     assert "https://example.t..." in out
     assert "profile-use installed" not in out
     assert "BROWSER_USE_API_KEY set" not in out
+
+
+def test_run_doctor_suggests_attach_when_daemon_alive_without_active_connections(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 0
+
+    out = capsys.readouterr().out
+    assert "[ok  ] active browser connections — 0" not in out
+    assert "[FAIL] active browser connections — 0" in out
+    assert "next action       attach; run `flocks browser -c 'print(page_info())'` before setup" in out
+
+
+def test_run_doctor_suggests_setup_when_target_exists_but_daemon_missing(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 1
+
+    out = capsys.readouterr().out
+    assert "next action       setup; run `flocks browser --setup`" in out
 
 
 def test_run_setup_uses_generic_missing_browser_wording(monkeypatch, capsys) -> None:
@@ -343,6 +374,7 @@ def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsy
     out = capsys.readouterr().out
     assert "[FAIL] browser running" in out
     assert "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`" in out
+    assert "next action       start Chrome/Chromium/Edge or provide BU_CDP_URL/BU_CDP_WS" in out
 
 
 def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
@@ -359,6 +391,7 @@ def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatc
     out = capsys.readouterr().out
     assert "[ok  ] browser target — configured via BU_CDP_URL" in out
     assert "[ok  ] daemon alive" in out
+    assert "next action       attach; run `flocks browser -c 'print(page_info())'` before setup" in out
 
 
 def test_chrome_running_on_windows_handles_non_utf8_tasklist_output(monkeypatch) -> None:

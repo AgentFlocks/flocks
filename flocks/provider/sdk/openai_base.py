@@ -29,7 +29,7 @@ log = Log.create(service="provider.openai_base")
 # change covers all three providers. Granular values (instead of a flat
 # timeout) let small control-plane requests fail fast while multimodal
 # (image) uploads get the headroom they need on slow links.
-DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=180.0, write=1800.0, pool=60.0)
 
 
 # Canonical OpenAI-style content translation, shared by every provider that

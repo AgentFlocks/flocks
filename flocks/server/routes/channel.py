@@ -33,6 +33,8 @@ class SessionSendRequest(BaseModel):
     text: str
     channel_type: Optional[str] = None
     media_url: Optional[str] = None
+    account_id: Optional[str] = None
+    chat_id: Optional[str] = None
 
 
 @router.post("/send")
@@ -83,6 +85,19 @@ async def channel_session_send(req: SessionSendRequest):
                 status_code=404,
                 detail=f"session '{req.session_id}' 未绑定渠道 '{req.channel_type}'",
             )
+
+    if req.account_id:
+        matched = [b for b in matched if b.account_id == req.account_id]
+    if req.chat_id:
+        matched = [b for b in matched if b.chat_id == req.chat_id]
+    if (req.account_id or req.chat_id) and not matched:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"session '{req.session_id}' 未绑定 account_id='{req.account_id}' "
+                f"chat_id='{req.chat_id}'"
+            ),
+        )
 
     all_results = []
     errors = []

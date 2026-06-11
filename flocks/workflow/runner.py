@@ -296,47 +296,47 @@ def run_workflow(
     on_step_start: Optional[Any] = None,
     on_step_complete: Optional[Any] = None,
     max_parallel_workers: int = 4,
-    history_mode: Literal["full", "summary"] = "full",
+    history_mode: Literal["full", "summary"] = "summary",
     cancel: Optional[Callable[[], bool]] = None,
 ) -> RunWorkflowResult:
     # 确保日志已配置
     _ensure_logging_configured()
     
-    _logger.info("=== 开始执行 workflow ===")
+    _logger.debug("=== 开始执行 workflow ===")
     
     workflow_path_for_engine: Optional[str] = None
     effective_use_llm: Optional[bool] = use_llm
     if isinstance(workflow, Workflow):
-        _logger.info("workflow 来源: Workflow 对象")
+        _logger.debug("workflow 来源: Workflow 对象")
         wf = workflow
     elif isinstance(workflow, (str, Path)):
         workflow_path = Path(workflow).expanduser()
-        _logger.info(f"workflow 来源: 文件路径 {workflow_path}")
+        _logger.debug("workflow 来源: 文件路径 %s", workflow_path)
         workflow_path_for_engine = str(workflow_path.resolve()) if workflow_path.exists() else None
 
         # Prefer compiled exec workflow if it exists (and is up-to-date). Otherwise compile first.
         exec_path = default_exec_path(workflow_path)
-        _logger.info(f"检查编译缓存: {exec_path}")
+        _logger.debug("检查编译缓存: %s", exec_path)
         wf = load_workflow(workflow_path)
         if effective_use_llm is None:
             # Auto-enable LLM codegen when the workflow contains logic nodes.
             # This keeps pure-python workflows offline-friendly while ensuring
             # logic nodes can be materialized into runnable Python when needed.
             effective_use_llm = workflow_has_logic_nodes(wf)
-            _logger.info(f"自动检测 use_llm={effective_use_llm} (基于是否包含 logic 节点)")
+            _logger.debug("自动检测 use_llm=%s (基于是否包含 logic 节点)", effective_use_llm)
         if workflow_path.exists():
             exec_is_fresh = False
             if exec_path.exists():
                 try:
                     exec_is_fresh = exec_path.stat().st_mtime >= workflow_path.stat().st_mtime
-                    _logger.info(f"编译缓存状态: {'最新' if exec_is_fresh else '过期'}")
+                    _logger.debug("编译缓存状态: %s", "最新" if exec_is_fresh else "过期")
                 except Exception:
                     exec_is_fresh = False
                     _logger.warning("无法检查编译缓存状态")
 
             if exec_is_fresh:
                 try:
-                    _logger.info("使用编译缓存")
+                    _logger.debug("使用编译缓存")
                     wf = load_workflow(exec_path)
                 except Exception:
                     # If exec is unreadable, fall back to source then recompile below if needed.
@@ -346,7 +346,7 @@ def run_workflow(
             # Only compile when the source contains logic nodes. Pure-python workflows don't need exec.
             # If exec exists but is stale/unreadable, recompile and overwrite it.
             if workflow_has_logic_nodes(wf) and (not exec_is_fresh):
-                _logger.info("开始编译 workflow (包含 logic 节点)")
+                _logger.debug("开始编译 workflow (包含 logic 节点)")
                 compiled = compile_workflow(
                     wf,
                     use_llm=bool(effective_use_llm),
@@ -354,17 +354,17 @@ def run_workflow(
                     preserve_description=True,
                     workflow_path=str(workflow_path),
                 )
-                _logger.info(f"编译完成，保存到 {exec_path}")
+                _logger.debug("编译完成，保存到 %s", exec_path)
                 dump_workflow(compiled, exec_path, indent=2)
                 wf = compiled
     else:
-        _logger.info("workflow 来源: 字典")
+        _logger.debug("workflow 来源: 字典")
         wf = Workflow.from_dict(workflow)
 
     if effective_use_llm is None:
         effective_use_llm = workflow_has_logic_nodes(wf)
 
-    _logger.info(f"workflow 信息: nodes={len(wf.nodes)}, edges={len(wf.edges)}, start={wf.start}")
+    _logger.debug("workflow 信息: nodes=%s, edges=%s, start=%s", len(wf.nodes), len(wf.edges), wf.start)
     
     try:
         lint_results = lint_workflow(wf)
@@ -384,11 +384,11 @@ def run_workflow(
 
     reqs = requirements_from_workflow_metadata(wf.metadata)
     if ensure_requirements:
-        _logger.info("检查依赖包...")
+        _logger.debug("检查依赖包...")
         if reqs:
-            _logger.info(f"需要安装的依赖: {reqs}")
+            _logger.debug("需要安装的依赖: %s", reqs)
 
-    _logger.info("初始化工具注册表和运行时环境...")
+    _logger.debug("初始化工具注册表和运行时环境...")
     registry = tool_registry or get_tool_registry(tool_context=tool_context)
     sandbox_payload = _extract_sandbox_runtime_payload(tool_context)
     runtime_preference = _resolve_workflow_runtime_preference(tool_context)
@@ -403,7 +403,7 @@ def run_workflow(
             )
 
     if sandbox_payload:
-        _logger.info("workflow runtime: sandbox python execution enabled")
+        _logger.debug("workflow runtime: sandbox python execution enabled")
         if ensure_requirements and reqs:
             (sandbox_requirements_installer or SandboxRequirementsInstaller(installer="auto")).ensure_installed(
                 reqs,
@@ -412,7 +412,7 @@ def run_workflow(
         rt = SandboxPythonExecRuntime(sandbox=sandbox_payload, tool_registry=registry)
     else:
         if runtime_preference == "host":
-            _logger.info("workflow runtime: host forced by sandbox.mode=off or runtime override")
+            _logger.debug("workflow runtime: host forced by sandbox.mode=off or runtime override")
         if ensure_requirements and reqs:
             (requirements_installer or RequirementsInstaller(installer="auto")).ensure_installed(reqs)
         rt = PythonExecRuntime(
@@ -420,7 +420,7 @@ def run_workflow(
             cleanup_globals_after_execute=(history_mode == "summary"),
         )
     
-    _logger.info(
+    _logger.debug(
         "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, history_mode=%s)",
         effective_use_llm,
         trace,
@@ -440,7 +440,7 @@ def run_workflow(
     )
     
     initial_inputs = _build_initial_inputs(inputs, workflow_path_for_engine)
-    _logger.info(
+    _logger.debug(
         "开始执行 workflow (timeout=%ss, inputs=%s)",
         timeout_s,
         list(initial_inputs.keys()),

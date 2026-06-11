@@ -62,6 +62,7 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "ssh_host_cmd": ["security", "remote-execution"],
     "ssh_run_script": ["security", "remote-execution"],
     "channel_message": ["messaging", "channel"],
+    "im_send_message": ["messaging", "channel", "im"],
     "flocks_mcp": ["mcp", "management"],
     "wecom_mcp": ["enterprise", "wecom"],
     "get_time": ["system", "utility"],

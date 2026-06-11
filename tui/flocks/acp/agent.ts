@@ -32,15 +32,15 @@ import { LoadAPIKeyError } from "ai"
 import type { Event, FlocksClient, SessionMessageResponse } from "@flocks-ai/sdk/v2"
 import { applyPatch } from "diff"
 
-const LegacyTodoWriteOutput = z.array(Todo.Info)
+const LegacyTodoEntriesOutput = z.array(Todo.Info)
 
-function parseTodoWriteEntries(rawOutput: string, rawMetadata: unknown): Todo.Info[] | undefined {
+function parseTodoEntries(rawOutput: string, rawMetadata: unknown): Todo.Info[] | undefined {
   try {
     const parsed = JSON.parse(rawOutput)
     const structured = Todo.WriteOutput.safeParse(parsed)
     if (structured.success) return structured.data.newTodos
 
-    const legacy = LegacyTodoWriteOutput.safeParse(parsed)
+    const legacy = LegacyTodoEntriesOutput.safeParse(parsed)
     if (legacy.success) return legacy.data
   } catch {
     // Fall through to metadata-based parsing below.
@@ -52,10 +52,10 @@ function parseTodoWriteEntries(rawOutput: string, rawMetadata: unknown): Todo.In
   const structuredMetadata = Todo.WriteOutput.safeParse(metadata)
   if (structuredMetadata.success) return structuredMetadata.data.newTodos
 
-  const explicitNewTodos = LegacyTodoWriteOutput.safeParse(metadata["newTodos"])
+  const explicitNewTodos = LegacyTodoEntriesOutput.safeParse(metadata["newTodos"])
   if (explicitNewTodos.success) return explicitNewTodos.data
 
-  const legacyMetadata = LegacyTodoWriteOutput.safeParse(metadata["todos"])
+  const legacyMetadata = LegacyTodoEntriesOutput.safeParse(metadata["todos"])
   if (legacyMetadata.success) return legacyMetadata.data
 
   return undefined
@@ -301,7 +301,7 @@ export namespace ACP {
                 }
 
                 if (part.tool === "todo") {
-                  const parsedTodos = parseTodoWriteEntries(part.state.output, part.state.metadata)
+                  const parsedTodos = parseTodoEntries(part.state.output, part.state.metadata)
                   if (parsedTodos) {
                     await this.connection
                       .sessionUpdate({
@@ -638,7 +638,7 @@ export namespace ACP {
               }
 
               if (part.tool === "todo") {
-                const parsedTodos = parseTodoWriteEntries(part.state.output, part.state.metadata)
+                const parsedTodos = parseTodoEntries(part.state.output, part.state.metadata)
                 if (parsedTodos) {
                   await this.connection
                     .sessionUpdate({

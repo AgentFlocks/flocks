@@ -11,8 +11,11 @@ const mocks = vi.hoisted(() => ({
   toastInfo: vi.fn(),
   navigate: vi.fn(),
   createAndSend: vi.fn().mockResolvedValue('session-1'),
+  useSessionChatOptions: vi.fn(),
+  sessionId: null as string | null,
   resetSession: vi.fn(),
   listDevices: vi.fn(),
+  syncDevices: vi.fn(),
   getDevice: vi.fn(),
   listGroups: vi.fn(),
   createGroup: vi.fn(),
@@ -25,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   revealDeviceCredentials: vi.fn(),
   listDeviceTools: vi.fn(),
   updateDeviceTool: vi.fn(),
-  listApiServices: vi.fn(),
+  listTemplates: vi.fn(),
   getServiceMetadata: vi.fn(),
   listTools: vi.fn(),
   setToolEnabled: vi.fn(),
@@ -46,6 +49,10 @@ vi.mock('react-i18next', () => ({
         'toolbar.addDevice': '立即添加设备',
         'empty.addNow': '立即添加设备',
         'config.closeAriaLabel': '关闭设备配置面板',
+        'config.nameLabel': '设备名称',
+        'config.roomLabel': '所属机房',
+        'config.saveBtn': '保存配置',
+        'config.addBtn': '添加设备',
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
@@ -55,6 +62,8 @@ vi.mock('react-i18next', () => ({
         'wizard.customModes.workflow.title': 'Workflow 接入',
         'custom.actions.submit': '提交给 Rex',
         'custom.actions.openSessionList': '前往会话列表查看',
+        'custom.rex.apiPlaceholder': '请提供产品 API 文档',
+        'custom.rex.webcliPlaceholder': '请提供网站地址',
         'custom.workflow.goToWorkflows': '前往工作流列表',
         'custom.form.api.deviceNameLabel': '设备产品名',
         'custom.form.api.vendorNameLabel': '厂商名称',
@@ -110,26 +119,49 @@ vi.mock('../Tool/components/ToolDetailModal', () => ({
 }));
 
 vi.mock('@/components/common/SessionChat', () => ({
-  default: ({ sessionId }: { sessionId?: string | null }) => (
-    <div>SessionChat:{sessionId ?? 'pending'}</div>
+  default: ({
+    sessionId,
+    welcomeContent,
+    onCreateAndSend,
+    placeholder,
+  }: {
+    sessionId?: string | null;
+    welcomeContent?: React.ReactNode;
+    onCreateAndSend?: (text: string, imageParts: []) => void;
+    placeholder?: string;
+  }) => (
+    <div>
+      <div>SessionChat:{sessionId ?? 'pending'}</div>
+      <div>Placeholder:{placeholder}</div>
+      {!sessionId && welcomeContent}
+      {!sessionId && (
+        <button type="button" onClick={() => onCreateAndSend?.('用户补充资料', [])}>
+          mock send
+        </button>
+      )}
+    </div>
   ),
 }));
 
 vi.mock('@/hooks/useSessionChat', () => ({
-  useSessionChat: () => ({
-    sessionId: 'session-1',
+  useSessionChat: (options: Record<string, unknown>) => {
+    mocks.useSessionChatOptions(options);
+    return {
+    sessionId: mocks.sessionId,
     loading: false,
     error: null,
     create: vi.fn().mockResolvedValue('session-1'),
     createAndSend: mocks.createAndSend,
     retry: vi.fn(),
     reset: mocks.resetSession,
-  }),
+  };
+  },
 }));
 
 vi.mock('@/api/device', () => ({
   deviceAPI: {
     list: (...args: unknown[]) => mocks.listDevices(...args),
+    sync: (...args: unknown[]) => mocks.syncDevices(...args),
     get: (...args: unknown[]) => mocks.getDevice(...args),
     revealCredentials: (...args: unknown[]) => mocks.revealDeviceCredentials(...args),
     listGroups: (...args: unknown[]) => mocks.listGroups(...args),
@@ -140,6 +172,7 @@ vi.mock('@/api/device', () => ({
     update: (...args: unknown[]) => mocks.updateDevice(...args),
     delete: (...args: unknown[]) => mocks.deleteDevice(...args),
     test: (...args: unknown[]) => mocks.testDevice(...args),
+    listTemplates: (...args: unknown[]) => mocks.listTemplates(...args),
     listDeviceTools: (...args: unknown[]) => mocks.listDeviceTools(...args),
     updateDeviceTool: (...args: unknown[]) => mocks.updateDeviceTool(...args),
   },
@@ -147,7 +180,6 @@ vi.mock('@/api/device', () => ({
 
 vi.mock('@/api/provider', () => ({
   providerAPI: {
-    listApiServices: (...args: unknown[]) => mocks.listApiServices(...args),
     getServiceMetadata: (...args: unknown[]) => mocks.getServiceMetadata(...args),
   },
 }));
@@ -162,13 +194,15 @@ vi.mock('@/api/tool', () => ({
 
 function buildTemplate(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'existing_device_v1',
+    plugin_id: 'existing_device_v1',
+    storage_key: 'existing_device_v1',
+    service_id: 'existing_device',
     name: 'Existing Device',
-    enabled: true,
-    status: 'unknown',
+    credential_schema: [],
     tool_count: 1,
-    verify_ssl: false,
-    integration_type: 'device',
+    installed: true,
+    state: 'installed',
+    source: 'project',
     vendor: 'threatbook',
     ...overrides,
   };
@@ -177,7 +211,9 @@ function buildTemplate(overrides: Record<string, unknown> = {}) {
 describe('DeviceIntegrationPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.sessionId = null;
     mocks.listDevices.mockResolvedValue({ data: [] });
+    mocks.syncDevices.mockResolvedValue({ data: { created: 0 } });
     mocks.getDevice.mockResolvedValue({
       data: {
         id: 'device-1',
@@ -197,7 +233,7 @@ describe('DeviceIntegrationPage', () => {
     mocks.listGroups.mockResolvedValue({
       data: [{ id: 'default', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 }],
     });
-    mocks.listApiServices.mockResolvedValue({ data: [buildTemplate()] });
+    mocks.listTemplates.mockResolvedValue({ data: [buildTemplate()] });
     mocks.getServiceMetadata.mockResolvedValue({ data: { credential_schema: [] } });
     mocks.revealDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
     mocks.listTools.mockResolvedValue({ data: [] });
@@ -205,6 +241,29 @@ describe('DeviceIntegrationPage', () => {
     mocks.listDeviceTools.mockResolvedValue({ data: [] });
     mocks.updateDeviceTool.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
+  });
+
+  it('refreshes devices and templates when the window regains focus', async () => {
+    render(<DeviceIntegrationPage />);
+
+    await screen.findByText('设备接入');
+    await waitFor(() => {
+      expect(mocks.listDevices).toHaveBeenCalledTimes(1);
+    });
+    mocks.listDevices.mockClear();
+    mocks.listTemplates.mockClear();
+    mocks.listGroups.mockClear();
+
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => {
+      expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
+    });
+    await waitFor(() => {
+      expect(mocks.listDevices).toHaveBeenCalledWith();
+      expect(mocks.listTemplates).toHaveBeenCalledWith({ refresh: true });
+      expect(mocks.listGroups).toHaveBeenCalled();
+    });
   });
 
   it('shows custom device option and access modes', async () => {
@@ -219,7 +278,34 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByText('Workflow 接入')).toBeInTheDocument();
   });
 
-  it('submits api draft to Rex with device plugin prompt', async () => {
+  it('navigates unavailable templates to FlockHub', async () => {
+    const user = userEvent.setup();
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3_D20250710',
+          storage_key: 'onesig_v2_5_3_D20250710_api_v2_5_3_D20250710',
+          service_id: 'onesig_v2_5_3_D20250710_api',
+          name: 'onesig',
+          version: '2.5.3 D20250710',
+          installed: false,
+          state: 'available',
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(screen.getByText('微步'));
+    await user.click(screen.getByText('onesig'));
+
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      '/hub?type=device&plugin=onesig_v2_5_3_D20250710&q=onesig_v2_5_3_D20250710',
+    );
+  });
+
+  it('opens api mode directly in Rex chat with built-in guidance', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
@@ -227,27 +313,28 @@ describe('DeviceIntegrationPage', () => {
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
-    await user.type(screen.getByLabelText('设备产品名'), 'Acme Guard');
-    await user.type(screen.getByLabelText('厂商名称'), 'Acme Security');
-    await user.type(screen.getByLabelText('Base URL'), 'https://device.example.com/api');
-    await user.type(screen.getByLabelText('API 文档链接'), 'https://device.example.com/openapi');
-    expect(screen.queryByLabelText('API 文档内容')).toBeNull();
-    expect(screen.queryByLabelText('认证方式')).toBeNull();
-    expect(screen.queryByText('Rex 对话')).toBeNull();
-    await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
-
-    await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledTimes(1));
-    const arg = mocks.createAndSend.mock.calls[0][0];
-    expect(arg.text).toContain('Acme Guard');
-    expect(arg.text).toContain('https://device.example.com/openapi');
-    expect(arg.text).toContain('integration_type: device');
-    expect(arg.text).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
-    expect(arg.text).toContain('期望能力范围：全部 API');
-    expect(arg.text).toContain('tool-builder skill');
-    expect(await screen.findByText('SessionChat:session-1')).toBeInTheDocument();
+    expect(screen.queryByLabelText('设备产品名')).toBeNull();
+    expect(screen.queryByLabelText('Base URL')).toBeNull();
+    expect(screen.queryByRole('button', { name: /提交给 Rex/ })).toBeNull();
+    expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
+    expect(screen.getByText('Placeholder:请提供产品 API 文档')).toBeInTheDocument();
+    expect(screen.getByText(/请提供待接入设备的 API 资料。/)).toBeInTheDocument();
+    expect(mocks.createAndSend).not.toHaveBeenCalled();
+    const options = mocks.useSessionChatOptions.mock.calls.at(-1)?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        category: 'entity-config',
+        welcomeMessage: expect.stringContaining('API 文档链接'),
+      }),
+    );
+    expect(options.contextMessage).toContain('本次接入方式是 API 接入');
+    expect(options.contextMessage).toContain('在正式开始构建设备插件之前');
+    expect(options.contextMessage).toContain('使用 `question` 工具明确');
+    expect(options.welcomeMessage).toContain('请提供待接入设备的 API 资料。');
+    expect(options.welcomeMessage).toContain('资料确认后，Rex 将生成');
   });
 
-  it('shows webcli form without login hint field', async () => {
+  it('opens webcli mode directly in Rex chat with skill-first guidance', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
@@ -256,35 +343,44 @@ describe('DeviceIntegrationPage', () => {
     await user.click(screen.getByRole('button', { name: /WebCLI 接入/ }));
 
     expect(screen.queryByLabelText('登录说明')).toBeNull();
-    expect(screen.getByText('产品 URL')).toBeInTheDocument();
-    expect(screen.getByLabelText('产品 URL')).toBeInTheDocument();
-    expect(screen.getByLabelText('需要获取的接口或页面行为')).toBeInTheDocument();
+    expect(screen.queryByLabelText('产品 URL')).toBeNull();
+    expect(screen.queryByLabelText('需要获取的接口或页面行为')).toBeNull();
+    expect(screen.queryByRole('button', { name: /提交给 Rex/ })).toBeNull();
+    expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
+    expect(screen.getByText('Placeholder:请提供网站地址')).toBeInTheDocument();
+    expect(screen.getByText(/请提供待接入设备的 Web 控制台资料。/)).toBeInTheDocument();
+    expect(mocks.createAndSend).not.toHaveBeenCalled();
+    const options = mocks.useSessionChatOptions.mock.calls.at(-1)?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        welcomeMessage: expect.stringContaining('登录 URL'),
+      }),
+    );
+    expect(options.contextMessage).toContain('本次接入方式是 WebCLI 接入');
+    expect(options.contextMessage).toContain('向用户提出必要问题');
+    expect(options.contextMessage).toContain('使用 `question` 工具明确');
+    expect(options.welcomeMessage).toContain('请提供待接入设备的 Web 控制台资料。');
+    expect(options.welcomeMessage).toContain('资料确认后，Rex 将沉淀 WebCLI 资产');
   });
 
-  it('submits webcli draft to Rex with skill-first device prompt', async () => {
+  it('creates custom device session only after the user sends a message', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
     await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /WebCLI 接入/ }));
+    await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
-    await user.type(screen.getByLabelText('设备产品名'), 'Acme Portal');
-    await user.type(screen.getByLabelText('厂商名称'), 'Acme Security');
-    await user.type(screen.getByLabelText('产品 URL'), 'https://portal.example.com');
-    await user.type(screen.getByLabelText('需要获取的接口或页面行为'), '告警列表和资产详情');
-    await user.type(screen.getByLabelText('认证/权限提示'), 'Cookie + CSRF Token');
-    await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
+    expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
+    expect(mocks.createAndSend).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /mock send/ }));
 
     await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledTimes(1));
-    const arg = mocks.createAndSend.mock.calls[0][0];
-    expect(arg.text).toContain('接入方式：WebCLI');
-    expect(arg.text).toContain('https://portal.example.com');
-    expect(arg.text).toContain('references/cli-in-skill.md');
-    expect(arg.text).toContain('integration_type: device');
-    expect(arg.text).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
-    expect(arg.text).toContain('默认认证方式为 `cookie/auth-state`');
-    expect(await screen.findByText('SessionChat:session-1')).toBeInTheDocument();
+    expect(mocks.createAndSend).toHaveBeenCalledWith({
+      text: '用户补充资料',
+      imageParts: [],
+    });
   });
 
   it('hides refresh action and rex footer hint in chat view', async () => {
@@ -294,28 +390,20 @@ describe('DeviceIntegrationPage', () => {
     await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
-    await user.type(screen.getByLabelText('设备产品名'), 'Acme Guard');
-    await user.type(screen.getByLabelText('厂商名称'), 'Acme Security');
-    await user.type(screen.getByLabelText('Base URL'), 'https://device.example.com/api');
-    await user.type(screen.getByLabelText('API 文档链接'), 'https://device.example.com/openapi');
-    await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
 
-    await screen.findByText('SessionChat:session-1');
+    await screen.findByText('SessionChat:pending');
     expect(screen.queryByRole('button', { name: /刷新设备模板/ })).toBeNull();
     expect(screen.queryByText(/已进入 Rex 对话/)).toBeNull();
   });
 
   it('navigates to the matching session from rex chat view', async () => {
     const user = userEvent.setup();
+    mocks.sessionId = 'session-1';
     render(<DeviceIntegrationPage />);
 
     await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
-    await user.type(screen.getByLabelText('设备产品名'), 'Acme Guard');
-    await user.type(screen.getByLabelText('厂商名称'), 'Acme Security');
-    await user.type(screen.getByLabelText('Base URL'), 'https://device.example.com/api');
-    await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
 
     await screen.findByText('SessionChat:session-1');
     await user.click(screen.getByRole('button', { name: /前往会话列表查看/ }));
@@ -356,18 +444,16 @@ describe('DeviceIntegrationPage', () => {
         },
       ],
     });
-    mocks.listApiServices.mockResolvedValueOnce({
+    mocks.listTemplates.mockResolvedValueOnce({
       data: [
-        {
-          id: 'tdp_api_v3_3_10',
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
           name: 'TDP',
-          enabled: true,
-          status: 'ready',
           tool_count: 21,
-          verify_ssl: false,
-          integration_type: 'device',
           vendor: 'threatbook',
-        },
+        }),
       ],
     });
     mocks.listGroups.mockResolvedValueOnce({
@@ -430,6 +516,60 @@ describe('DeviceIntegrationPage', () => {
     });
   });
 
+  it('allows editing an existing device room from a selected room view', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'TDP-test-02',
+      storage_key: 'tdp_api_v3_3_10',
+      service_id: 'tdp',
+      enabled: true,
+      verify_ssl: false,
+      fields: { base_url: 'https://tdp.example.com' },
+      fields_set: { api_key: true, secret: true, base_url: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          tool_count: 21,
+          vendor: 'threatbook',
+        }),
+      ],
+    });
+    mocks.listGroups.mockResolvedValue({
+      data: [
+        { id: 'group-1', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 },
+        { id: 'group-2', name: '测试', sort_order: 1, created_at: 0, updated_at: 0 },
+      ],
+    });
+    mocks.getDevice.mockResolvedValue({
+      data: { ...initialDevice, group_id: 'group-2' },
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('TDP-test-02'));
+    const roomSelect = await screen.findByRole('combobox');
+    await user.selectOptions(roomSelect, 'group-2');
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(mocks.updateDevice).toHaveBeenCalledWith(
+        'device-1',
+        expect.objectContaining({ group_id: 'group-2' }),
+      );
+    });
+  });
+
   it('reveals the full persisted secret when clicking show', async () => {
     const user = userEvent.setup();
     mocks.listDevices.mockResolvedValueOnce({
@@ -454,18 +594,16 @@ describe('DeviceIntegrationPage', () => {
         },
       ],
     });
-    mocks.listApiServices.mockResolvedValueOnce({
+    mocks.listTemplates.mockResolvedValueOnce({
       data: [
-        {
-          id: 'onesec_api_v2_8_2',
+        buildTemplate({
+          plugin_id: 'onesec_v2_8_2',
+          storage_key: 'onesec_api_v2_8_2',
+          service_id: 'onesec_api',
           name: 'OneSEC',
-          enabled: true,
-          status: 'ready',
           tool_count: 5,
-          verify_ssl: false,
-          integration_type: 'device',
           vendor: 'threatbook',
-        },
+        }),
       ],
     });
     mocks.getServiceMetadata.mockResolvedValueOnce({

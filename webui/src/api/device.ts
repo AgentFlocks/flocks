@@ -1,4 +1,5 @@
 import client from './client';
+import type { APIServiceCredentialField } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Groups (机房) — the current product locks this to a single default room
@@ -97,6 +98,44 @@ export interface DeviceTestRequest {
   verify_ssl?: boolean;
 }
 
+export interface DeviceTemplate {
+  plugin_id: string;
+  storage_key: string;
+  service_id: string;
+  name: string;
+  version?: string | null;
+  vendor?: string | null;
+  description?: string | null;
+  description_cn?: string | null;
+  credential_schema: APIServiceCredentialField[];
+  tool_count: number;
+  installed: boolean;
+  state: 'available' | 'installed' | 'updateAvailable' | 'localOnly' | 'broken';
+  source: 'bundled' | 'project' | 'global';
+}
+
+export interface CustomDeviceTemplateCreate {
+  plugin_id: string;
+  name: string;
+  vendor?: string;
+  service_id: string;
+  version?: string;
+  description?: string;
+  description_cn?: string;
+  credential_fields: APIServiceCredentialField[];
+  tools: Array<{
+    name: string;
+    description: string;
+    description_cn?: string;
+    category?: string;
+    inputSchema?: Record<string, any>;
+    parameters?: Array<Record<string, any>>;
+    handler: Record<string, any>;
+    response?: Record<string, any>;
+    requires_confirmation?: boolean;
+  }>;
+}
+
 // ---------------------------------------------------------------------------
 // Per-device tool settings
 // ---------------------------------------------------------------------------
@@ -128,8 +167,17 @@ export const deviceAPI = {
     client.delete(`/api/devices/groups/${id}`),
 
   // devices
-  list: (params?: { group_id?: string }) =>
+  list: (params?: { group_id?: string; refresh?: boolean }) =>
     client.get<DeviceIntegration[]>('/api/devices', { params }),
+
+  listTemplates: (params?: { refresh?: boolean }) =>
+    client.get<DeviceTemplate[]>('/api/devices/templates', { params }),
+
+  sync: (params?: { refresh?: boolean }) =>
+    client.post<{ created: number }>('/api/devices/sync', null, { params }),
+
+  createCustomTemplate: (data: CustomDeviceTemplateCreate) =>
+    client.post<DeviceTemplate>('/api/devices/templates/custom', data),
 
   get: (id: string) =>
     client.get<DeviceIntegration>(`/api/devices/${id}`),

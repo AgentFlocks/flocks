@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: 统一处理浏览器使用任务，支持 CDP 直连/无头模式 使用用户本机 Chromium 系浏览器。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, access internal/login-only pages, handle access-restricted content, when websearch/webfetch are unavailable, or automate browser actions.
+description: 统一处理浏览器使用任务，支持可见浏览器 CDP 直连、专用 headless CDP、agent-browser。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, work with an already-open browser/sidebar browser, access login-only/internal/dynamic pages, or automate browser actions.
 ---
 
 # Browser Use
@@ -22,9 +22,8 @@ description: 统一处理浏览器使用任务，支持 CDP 直连/无头模式 
 | `cdp-direct` | 复用本机 Chromium 系浏览器的 CDP 直连模式 | 用户明确说用 CDP 模式|
 | `cdp-headless` | 通过 `BU_CDP_WS` / `BU_CDP_URL` 连接独立 headless Chromium 实例 | 只有用户明确要求 headless，或任务本身是后台任务/定时任务，或系统不支持可视化 |
 
- - 用户明确指出模式后，直接阅读执行规则部分
- - 当用户没有明确指出使用模式时，进入下一步自动判定
- - 不要默认切到 `cdp-headless`；能用用户正常浏览器完成的任务，优先保持可见浏览器流程
+- 用户明确指出模式后，直接阅读执行规则部分
+- 当用户没有明确指出使用模式时，进入下一步自动判定
 
 ## 自动判定与失败处理
 
@@ -55,17 +54,18 @@ description: 统一处理浏览器使用任务，支持 CDP 直连/无头模式 
 flocks browser --doctor
 ```
 
-该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Chromium/Edge 是否运行,以及当前是否有可用的浏览器连接。
+该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Chromium/Edge 是否运行,以及当前是否有可用的浏览器连接。不要只看命令退出码；必须优先读取 `next action` 行，再结合 `browser running` / `daemon alive` / `active browser connections` 三行判断。
 
-### Step 3: 根据检测结果决定模式（if-then 三段式）
+### Step 3: 根据 doctor 输出决定模式
 
 | 结果 | 触发条件 | 一线修复 | 仍失败兜底 |
 |---|---|---|---|
-| **A** | `flocks browser --doctor` 通过 | 立即确定 `CDP 直连`,阅读 `references/cdp-direct.md`,之后不再切到 `agent-browser` | — |
-| **B** | 浏览器已运行,但 daemon 或 active connection 不可用 | 提示用户 `browser: not connected — 请确保 Chrome/Chromium/Edge 已打开,访问 `chrome://inspect/#remote-debugging` 勾选 Allow`,等用户确认 | 用户确认后 `flocks browser --setup`（不包短超时）→ `--doctor` 确认 → 仍失败则 `flocks browser --reload` 清旧 daemon → 重试 `--setup`。Windows PowerShell 中 `flocks browser -c` 用单行 `;` 分隔,避开多行单引号转义 |
-| **C** | `--doctor` 失败,或当前机器没 Chrome/Chromium/Edge | 明确告知缺哪项,提示安装路径 | **不**擅自降级到 curl/webfetch;坚持告知 skill 边界 |
+| **A** | `next action` 以 `ready` 开头 | 立即确定 `CDP 直连`,阅读 `references/cdp-direct.md`,之后不再切到 `agent-browser` | — |
+| **B** | `next action` 以 `attach` 开头 | 不要先反复 `--setup`；按输出执行 `flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'` 触发一次实际连接/观察 | 如果 `-c` 失败或仍无连接，执行 `flocks browser --reload` 清理旧 daemon，再执行 `flocks browser --setup`；setup 可能需要多次，直到用户完成浏览器 Allow/inspect 授权或错误信息稳定 |
+| **C** | `next action` 以 `setup` 开头 | 先执行 `flocks browser --setup`（不包短超时），再运行 `--doctor` 确认 | 如提示 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake 或 not live yet，再提示用户打开对应 inspect 页面并 Allow；用户确认后可多次 `--setup` |
+| **D** | `next action` 提示启动浏览器或提供 endpoint | 明确告知需要先启动 Chrome/Chromium/Edge 或提供 CDP endpoint | **不**擅自降级到 curl/webfetch；坚持告知 skill 边界 |
 
-### Step 4: 跨模式通用失败（if-then 三段式）
+### Step 4: 跨模式通用失败
 
 | 触发条件 | 一线修复 | 仍失败兜底 |
 |---|---|---|
@@ -80,6 +80,7 @@ flocks browser --doctor
 3. 在 `cdp-headless` 中，如果当前任务自己启动了专用浏览器实例，必须记录 PID / 日志 / 专用 profile，并只在任务结束或明确放弃后清理自己启动的实例；不要关闭用户提供的远程浏览器。
 4. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
 5. `flocks browser` 的 daemon 文件固定放在 `~/.flocks/browser/`,例如 `bu.sock`、`bu.log`、`bu.pid`、`bu.port`。
+6. 基础操作能力（打开、观察、点击、输入、滚动、截图、提取、等待、关闭）优先按 `references/cdp-direct.md` 的“基础操作速查”执行
 
 ## 产品经验Skill
 

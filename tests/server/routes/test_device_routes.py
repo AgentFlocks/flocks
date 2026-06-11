@@ -19,6 +19,7 @@ import pytest
 from httpx import AsyncClient
 
 from flocks.server.routes import device as device_routes
+from flocks.tool.device import intake as device_intake
 from flocks.tool.device.models import DeviceTestResult
 
 
@@ -43,8 +44,7 @@ def _install_route_stubs(
     probe_result: DeviceTestResult,
     captured: dict,
 ) -> None:
-    """Stub out fetch_device, _probe and record_test_result on the
-    routes module so the test stays isolated from DB / network."""
+    """Stub out intake dependencies so the test stays isolated from DB / network."""
 
     async def fake_fetch_device(device_id: str):
         captured["device_id"] = device_id
@@ -60,13 +60,13 @@ def _install_route_stubs(
             {"device_id": device_id, "success": success, "message": message}
         )
 
-    monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
-    monkeypatch.setattr(device_routes, "_probe", fake_probe)
-    monkeypatch.setattr(device_routes, "record_test_result", fake_record)
+    monkeypatch.setattr(device_intake, "fetch_device", fake_fetch_device)
+    monkeypatch.setattr(device_intake, "_probe", fake_probe)
+    monkeypatch.setattr(device_intake, "record_test_result", fake_record)
     # secrets resolution: return the persisted dict untouched so tests can
     # drive the field values directly.
     monkeypatch.setattr(
-        device_routes,
+        device_intake,
         "resolve_for_runtime",
         lambda db_fields: dict(db_fields),
     )
@@ -192,7 +192,7 @@ class TestDeviceTestEndpoint:
         async def fake_fetch_device(device_id: str):
             return None
 
-        monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
+        monkeypatch.setattr(device_intake, "fetch_device", fake_fetch_device)
 
         resp = await client.post("/api/devices/missing-id/test", json={})
 
@@ -258,3 +258,49 @@ class TestDeviceCredentialEndpoint:
         resp = await client.post("/api/devices/missing-id/credentials", json={})
 
         assert resp.status_code == 404
+
+
+class TestDeviceSyncEndpoint:
+    @pytest.mark.asyncio
+    async def test_sync_invokes_auto_instance_creation_with_refresh_flag(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        captured: dict = {}
+
+        async def fake_ensure_user_device_instances(*, refresh_templates: bool):
+            captured["refresh_templates"] = refresh_templates
+            return 3
+
+        monkeypatch.setattr(
+            device_routes,
+            "ensure_user_device_instances",
+            fake_ensure_user_device_instances,
+        )
+
+        resp = await client.post("/api/devices/sync?refresh=true")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"created": 3}
+        assert captured["refresh_templates"] is True
+
+    @pytest.mark.asyncio
+    async def test_sync_allows_non_refresh_sync(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        captured: dict = {}
+
+        async def fake_ensure_user_device_instances(*, refresh_templates: bool):
+            captured["refresh_templates"] = refresh_templates
+            return 0
+
+        monkeypatch.setattr(
+            device_routes,
+            "ensure_user_device_instances",
+            fake_ensure_user_device_instances,
+        )
+
+        resp = await client.post("/api/devices/sync?refresh=false")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"created": 0}
+        assert captured["refresh_templates"] is False

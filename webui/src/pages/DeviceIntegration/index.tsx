@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
@@ -10,8 +11,8 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { providerAPI } from '@/api/provider';
-import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceToolInfo } from '@/api/device';
-import type { APIServiceSummary, APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
+import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
+import type { APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
 import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
@@ -21,6 +22,8 @@ import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
 // ============================================================================
 
 const DEFAULT_GROUP_ID = 'default-room';
+const DEVICE_DRAWER_WIDTH = 560;
+const DEVICE_DRAWER_WIDTH_CSS = `${DEVICE_DRAWER_WIDTH}px`;
 
 /** Pull the backend's human-readable error detail (e.g. "机房名称已存在")
  *  out of an axios error, falling back to a generic message. */
@@ -34,7 +37,7 @@ function errDetail(err: unknown, fallback: string): string {
 // Vendor catalog
 //
 // Vendor identity comes from the backend: each `_provider.yaml` declares a
-// `vendor` field that propagates into `APIServiceSummary.vendor`. The frontend
+// `vendor` field that propagates into `DeviceTemplate.vendor`. The frontend
 // only owns the *presentation* (Chinese/English labels and color theme). When
 // a brand-new vendor key appears (i.e. one not in `VENDOR_PRESENTATION` below),
 // we still render it with a generic neutral label so the device is never
@@ -144,14 +147,15 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // ============================================================================
 
 function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onClose }: {
-  templates: APIServiceSummary[];
+  templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
   initialVendor?: DeviceVendor;
-  onSelect: (template: APIServiceSummary) => void;
+  onSelect: (template: DeviceTemplate) => void;
   onSelectCustom: (mode: CustomDeviceAccessMode) => void;
   onClose: () => void;
 }) {
   const { t, i18n } = useTranslation('device');
+  const navigate = useNavigate();
   const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
   const [showCustomModes, setShowCustomModes] = useState(false);
 
@@ -183,7 +187,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
     const counts: Record<string, number> = {};
     for (const t of templates) {
       const key = t.vendor || '__unspecified__';
-      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.id] ?? 0);
+      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.storage_key] ?? 0);
     }
     return counts;
   }, [templates, instanceCounts]);
@@ -194,6 +198,8 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
   }, [templates, selectedVendor]);
 
   const inModeSelection = showCustomModes && !selectedVendor;
+  const shouldShowVendorSecondary = (vendor: DeviceVendor) =>
+    vendor.nameCn.trim().toLocaleLowerCase() !== vendor.nameEn.trim().toLocaleLowerCase();
 
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
@@ -202,11 +208,11 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
           aria-label={t('wizard.closeAriaLabel')}
           onClick={onClose}
         className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
-        style={{ top: 64, right: 440 }}
+        style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
       />
       <div
-        className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-        style={{ width: 440, top: 64 }}
+        className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+        style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -255,46 +261,49 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
           {!selectedVendor && !inModeSelection ? (
             <>
               <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <button
                   onClick={() => setShowCustomModes(true)}
-                  className="flex flex-col items-center gap-2.5 p-5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 hover:border-blue-300 hover:bg-blue-50 transition-all duration-150 group"
+                  className="group flex w-full items-center gap-3 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50"
                 >
-                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold bg-blue-100 text-blue-700">
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-blue-100 text-sm font-bold text-blue-700">
                     自
                   </div>
-                  <div className="text-center">
-                    <p className="text-sm font-semibold text-zinc-800">{t('wizard.customCardTitle')}</p>
-                    <p className="text-xs text-zinc-400">{t('wizard.customCardSubtitle')}</p>
-                    <p className="text-[10px] text-blue-600 mt-0.5 font-medium">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-zinc-800 truncate">{t('wizard.customCardTitle')}</p>
+                    <p className="text-[11px] text-zinc-400 truncate">{t('wizard.customCardSubtitle')}</p>
+                    <p className="text-[10px] text-blue-600 mt-1 font-medium truncate">
                       {t('wizard.customCardCta')}
                     </p>
                   </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-blue-400 transition-colors" />
+                  <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-blue-300 transition-colors group-hover:text-blue-500" />
                 </button>
                 {availableVendors.map((vendor) => {
                   const count = vendorTotalCounts[vendor.id] ?? 0;
                   const productCount = templates.filter(
                     (t) => (t.vendor || '__unspecified__') === vendor.id,
                   ).length;
+                  const primaryName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
+                  const secondaryName = i18n.language.startsWith('zh') ? vendor.nameEn : vendor.nameCn;
+                  const showSecondary = shouldShowVendorSecondary(vendor);
                   return (
                     <button
                       key={vendor.id}
                       onClick={() => setSelectedVendor(vendor)}
-                      className="flex flex-col items-center gap-2.5 p-5 rounded-xl border border-zinc-200 bg-white hover:border-blue-300 hover:bg-blue-50/40 transition-all duration-150 group"
+                      className="group flex w-full items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
                     >
-                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold ${vendor.color}`}>
+                      <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-sm font-bold ${vendor.color}`}>
                         {vendor.nameCn[0]}
                       </div>
-                      <div className="text-center">
-                        <p className="text-sm font-semibold text-zinc-800">{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</p>
-                        <p className="text-xs text-zinc-400">{vendor.nameEn}</p>
-                        <p className="text-[10px] text-zinc-400 mt-0.5">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-zinc-800 truncate">{primaryName}</p>
+                        {showSecondary && <p className="text-[11px] text-zinc-400 truncate">{secondaryName}</p>}
+                        <p className="text-[10px] text-zinc-400 mt-1 truncate">
                           {t('wizard.productCount', { count: productCount })}
-                          {count > 0 && <span className="text-blue-600 font-medium"> · {t('wizard.instanceCount', { count })}</span>}
+                          {count > 0 && <span className="text-zinc-500"> / {t('wizard.instanceCount', { count })}</span>}
                         </p>
                       </div>
-                      <ChevronRight className="w-3.5 h-3.5 text-zinc-300 group-hover:text-blue-400 transition-colors" />
+                      <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300 transition-colors group-hover:text-blue-400" />
                     </button>
                   );
                 })}
@@ -345,15 +354,35 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
               </p>
               <div className="space-y-2">
                 {vendorTemplates.map((tpl) => {
-                  const count = instanceCounts[tpl.id] ?? 0;
+                  const count = instanceCounts[tpl.storage_key] ?? 0;
+                  const disabled = !tpl.installed;
+                  const stateHint = tpl.state === 'updateAvailable'
+                    ? t('wizard.installState.update')
+                    : tpl.state === 'broken'
+                      ? t('wizard.installState.broken')
+                      : t('wizard.installState.install');
+                  const stateBadge = tpl.state === 'updateAvailable'
+                    ? t('wizard.installState.updateAvailable')
+                    : tpl.state === 'broken'
+                      ? t('wizard.installState.brokenShort')
+                      : tpl.installed
+                        ? t('wizard.installState.installed')
+                        : t('wizard.installState.available');
+                  const hubUrl = `/hub?type=device&plugin=${encodeURIComponent(tpl.plugin_id)}&q=${encodeURIComponent(tpl.plugin_id)}`;
                   return (
                     <button
-                      key={tpl.id}
-                      onClick={() => onSelect(tpl)}
-                      className="w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
+                      key={tpl.storage_key}
+                      onClick={() => { if (disabled) navigate(hubUrl); else onSelect(tpl); }}
+                      className={`w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border transition-all group ${
+                        disabled
+                          ? 'border-zinc-100 bg-zinc-50 opacity-85 hover:border-amber-200 hover:bg-amber-50/30'
+                          : 'border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30'
+                      }`}
                     >
-                      <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
-                        <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
+                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors ${
+                        disabled ? 'bg-zinc-100' : 'bg-zinc-50 group-hover:bg-blue-50'
+                      }`}>
+                        <Plug className={`w-4 h-4 transition-colors ${disabled ? 'text-zinc-300' : 'text-zinc-400 group-hover:text-blue-500'}`} />
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
@@ -363,6 +392,15 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                               v{tpl.version}
                             </span>
                           )}
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5 font-medium ${
+                            tpl.installed
+                              ? 'bg-green-50 text-green-700'
+                              : tpl.state === 'broken'
+                                ? 'bg-red-50 text-red-700'
+                                : 'bg-amber-50 text-amber-700'
+                          }`}>
+                            {stateBadge}
+                          </span>
                         </div>
                         {(tpl.description_cn || tpl.description) && (
                           <p className="text-xs text-zinc-400 mt-0.5 line-clamp-2 leading-relaxed">
@@ -374,8 +412,13 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                             {t('wizard.instanceCount', { count })}
                           </span>
                         )}
+                        {disabled && (
+                          <span className="inline-block mt-1.5 text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-md font-medium underline underline-offset-2">
+                            {stateHint}
+                          </span>
+                        )}
                       </div>
-                      <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
+                      <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-2 transition-colors ${disabled ? 'text-amber-300 group-hover:text-amber-500' : 'text-zinc-300 group-hover:text-blue-400'}`} />
                     </button>
                   );
                 })}
@@ -411,7 +454,7 @@ function DeviceConfigPanel({
   onSave, onDelete, onClose, onTest, onToggleVerifySsl, onToggleEnabled, onBack,
 }: {
   device?: DeviceIntegration;
-  template?: APIServiceSummary;
+  template?: DeviceTemplate;
   vendorKey?: string;
   initialGroupId: string;
   groups: DeviceGroup[];
@@ -453,12 +496,26 @@ function DeviceConfigPanel({
   const [toolEnabled, setToolEnabled] = useState<Record<string, boolean>>({});
   const originalMasked = useRef<Record<string, string>>({});
 
-  const serviceId = device?.service_id ?? template?.id ?? '';
-  const storageKey = device?.storage_key ?? template?.id ?? '';
+  const serviceId = device?.service_id ?? template?.service_id ?? '';
+  const storageKey = device?.storage_key ?? template?.storage_key ?? '';
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
 
   useEffect(() => {
     if (!serviceId) return;
+    if (template) {
+      const schema = template.credential_schema ?? [];
+      setMetadata({
+        name: template.name,
+        version: template.version ?? undefined,
+        description: template.description ?? undefined,
+        description_cn: template.description_cn ?? undefined,
+      });
+      setCredFields(schema);
+      const defaults: Record<string, string> = {};
+      schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
+      setFields((prev) => ({ ...defaults, ...prev }));
+      return;
+    }
     providerAPI.getServiceMetadata(serviceId)
       .then((res) => {
         const meta = res.data;
@@ -502,7 +559,7 @@ function DeviceConfigPanel({
         })
         .catch(() => {});
     }
-  }, [device, serviceId, storageKey]);
+  }, [device, serviceId, storageKey, template]);
 
   const handleSave = async () => {
     if (!name.trim()) { toast.error(t('toast.nameRequired')); return; }
@@ -642,11 +699,11 @@ function DeviceConfigPanel({
           aria-label={t('config.closeAriaLabel')}
           onClick={onClose}
           className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
-          style={{ top: 64, right: 480 }}
+          style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
         />
         <div
-          className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-          style={{ width: 480, top: 64 }}
+          className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+          style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -663,7 +720,7 @@ function DeviceConfigPanel({
                 <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : t('config.newDeviceTitle')}</h3>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   {vendor && <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</span>}
-                  <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.id}</span>
+                  <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.storage_key}</span>
                 </div>
               </div>
             </div>
@@ -1231,7 +1288,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 type PanelMode =
   | { kind: 'pick-group' }
   | { kind: 'wizard'; initialVendor?: DeviceVendor }
-  | { kind: 'add'; template: APIServiceSummary }
+  | { kind: 'add'; template: DeviceTemplate }
   | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
@@ -1240,11 +1297,12 @@ export default function DeviceIntegrationPage() {
   const toast = useToast();
   const { t } = useTranslation('device');
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
-  const [templates, setTemplates] = useState<APIServiceSummary[]>([]);
+  const [templates, setTemplates] = useState<DeviceTemplate[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [panel, setPanel] = useState<PanelMode>(null);
+  const lastRefreshRef = useRef(0);
   // null = "全部机房" aggregate view; string = specific group id
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   // Group ids whose section is collapsed in the "全部机房" view. Default
@@ -1271,16 +1329,19 @@ export default function DeviceIntegrationPage() {
     [devices, selectedGroupId],
   );
 
-  const fetchData = useCallback(async (silent = false): Promise<APIServiceSummary[]> => {
+  const fetchData = useCallback(async (silent = false, refreshTemplates = false): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
+      if (refreshTemplates) {
+        await deviceAPI.sync({ refresh: true });
+      }
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        providerAPI.listApiServices(),
+        deviceAPI.listTemplates(refreshTemplates ? { refresh: true } : undefined),
         deviceAPI.listGroups(),
       ]);
-      const nextTemplates = (tplRes.data || []).filter((s) => s.integration_type === 'device');
+      const nextTemplates = tplRes.data || [];
       setDevices(devRes.data || []);
       setTemplates(nextTemplates);
       setGroups(grpRes.data || []);
@@ -1296,6 +1357,31 @@ export default function DeviceIntegrationPage() {
 
   useEffect(() => { void fetchData(); }, [fetchData]);
 
+  const refreshOnResume = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRefreshRef.current < 1000) return;
+    lastRefreshRef.current = now;
+    void fetchData(true, true);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOnResume();
+      }
+    };
+    const handleWindowFocus = () => {
+      refreshOnResume();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [refreshOnResume]);
+
   // Count instances per storage_key (for wizard display)
   const instanceCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -1308,11 +1394,8 @@ export default function DeviceIntegrationPage() {
     const map: Record<string, string> = {};
     templates.forEach((t) => {
       if (!t.vendor) return;
-      map[t.id] = t.vendor;
-      const bareServiceId = t.id.replace(/_v[\w.]+$/i, '');
-      if (bareServiceId !== t.id && !map[bareServiceId]) {
-        map[bareServiceId] = t.vendor;
-      }
+      map[t.storage_key] = t.vendor;
+      map[t.service_id] = t.vendor;
     });
     return map;
   }, [templates]);
@@ -1380,7 +1463,8 @@ export default function DeviceIntegrationPage() {
     if (panel?.kind === 'add') {
       await deviceAPI.create({
         name: data.name,
-        storage_key: panel.template.id,
+        storage_key: panel.template.storage_key,
+        service_id: panel.template.service_id,
         group_id: data.group_id,
         enabled: data.enabled,
         verify_ssl: data.verify_ssl,
@@ -1399,6 +1483,9 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
     if (panel?.kind === 'edit') {
       const updated = await deviceAPI.get(panel.device.id);
+      if (selectedGroupId && updated.data.group_id !== selectedGroupId) {
+        setSelectedGroupId(updated.data.group_id);
+      }
       setPanel({ kind: 'edit', device: updated.data });
     }
   };
@@ -1476,7 +1563,7 @@ export default function DeviceIntegrationPage() {
         action={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => void fetchData(true)}
+              onClick={() => void fetchData(true, true)}
               disabled={refreshing}
               title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
@@ -1743,19 +1830,19 @@ export default function DeviceIntegrationPage() {
       {(panel?.kind === 'add' || panel?.kind === 'edit') && (() => {
         const panelVendorKey = panel.kind === 'edit'
           ? vendorOf(panel.device)
-          : panel.template.vendor;
+          : panel.template.vendor ?? undefined;
         const panelInitGroupId = panel.kind === 'edit'
           ? panel.device.group_id
           : addDefaultGroupId;
         return (
           <DeviceConfigPanel
-            key={panel.kind === 'edit' ? panel.device.id : panel.template.id}
+            key={panel.kind === 'edit' ? panel.device.id : panel.template.storage_key}
             device={panel.kind === 'edit' ? panel.device : undefined}
             template={panel.kind === 'add' ? panel.template : undefined}
             vendorKey={panelVendorKey}
             initialGroupId={panelInitGroupId}
             groups={groups}
-            groupLocked={panel.kind === 'edit' ? true : groupLocked}
+            groupLocked={panel.kind === 'add' ? groupLocked : false}
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={() => setPanel(null)}

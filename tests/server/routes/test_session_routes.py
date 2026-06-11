@@ -1046,6 +1046,26 @@ class TestSessionUtilities:
         assert resp.status_code == status.HTTP_200_OK
 
     @pytest.mark.asyncio
+    async def test_session_statistics(self, client: AsyncClient, session_id: str):
+        """GET /api/session/{id}/statistics reports stored session messages."""
+        payload = {
+            "parts": [{"type": "text", "text": "Hello from statistics"}],
+            "noReply": True,
+        }
+        message_resp = await client.post(f"/api/session/{session_id}/message", json=payload)
+        assert message_resp.status_code == status.HTTP_200_OK
+
+        resp = await client.get(f"/api/session/{session_id}/statistics")
+        assert resp.status_code == status.HTTP_200_OK
+
+        data = resp.json()
+        assert data["sessionID"] == session_id
+        assert data["messageCount"] == 1
+        assert data["tokenCount"] >= 3
+        assert data["toolCallCount"] == 0
+        assert data["durationSeconds"] >= 0
+
+    @pytest.mark.asyncio
     async def test_session_status(self, client: AsyncClient):
         """GET /api/session/status returns aggregate status."""
         resp = await client.get("/api/session/status")

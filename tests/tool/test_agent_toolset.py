@@ -98,6 +98,7 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "edit",
         "glob",
         "grep",
+        "im_send_message",
         "lsp",
         "memory_search",
         "question",

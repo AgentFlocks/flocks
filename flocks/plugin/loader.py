@@ -173,7 +173,16 @@ class ExtensionPoint:
     E.g. ``frozenset({"mcp", "generated"})`` — these are managed by
     dedicated subsystems rather than the generic PluginLoader."""
 
+    load_once: bool = False
+    """When True, skip later ``load_all`` passes after this extension has loaded.
+
+    Stateful extension points, such as channels, own runtime connections and
+    callbacks on their plugin instances. Re-importing those modules can create
+    replacement instances that have not been started.
+    """
+
     _seen_keys: Set[str] = field(default_factory=set, repr=False)
+    _loaded: bool = field(default=False, repr=False)
 
 
 class PluginLoader:
@@ -225,6 +234,15 @@ class PluginLoader:
         project_plugin_root = project_dir / ".flocks" / "plugins"
 
         for ext in cls._extension_points.values():
+            if ext.load_once and ext._loaded:
+                log.debug(
+                    "plugin.load_all.skip_load_once",
+                    {
+                        "attr": ext.attr_name,
+                    },
+                )
+                continue
+
             ext._seen_keys = set()
 
             # 1. User-level plugin subdirectory (~/.flocks/plugins/{subdir}/)
@@ -269,6 +287,9 @@ class PluginLoader:
             if extra_sources:
                 cls._load_sources_for_ext(ext, extra_sources, project_dir)
 
+            if ext.load_once:
+                ext._loaded = True
+
         # 4. Installed package entry-points
         cls._load_entry_points()
 
@@ -299,6 +320,8 @@ class PluginLoader:
         ext._seen_keys = set()
         try:
             cls._load_sources_for_ext(ext, sources, base_dir)
+            if ext.load_once and sources:
+                ext._loaded = True
         finally:
             ext.consumer = original_consumer
         return collected

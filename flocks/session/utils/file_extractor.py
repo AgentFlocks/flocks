@@ -17,21 +17,34 @@ from urllib.parse import unquote, urlparse
 _log = logging.getLogger(__name__)
 
 
-_TEXT_EXTRACTABLE_MIMES = frozenset({
-    "application/json",
-    "application/ld+json",
-    "application/xml",
-    "application/yaml",
-    "application/x-yaml",
-    "application/javascript",
-    "application/x-sh",
-    "application/x-shellscript",
-    "text/markdown",
-    "text/csv",
-})
+_TEXT_EXTRACTABLE_MIMES = frozenset(
+    {
+        "application/json",
+        "application/ld+json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/javascript",
+        "application/x-sh",
+        "application/x-shellscript",
+        "text/markdown",
+        "text/csv",
+    }
+)
 
 _DEFAULT_MAX_CHARS = 12_000
 _DEFAULT_MAX_PAGES = 20
+
+
+def file_url_to_path(url: str) -> str:
+    """Convert a ``file://`` URL to a local filesystem path string."""
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    if len(path) >= 3 and path[0] == "/" and path[2] == ":" and path[1].isalpha():
+        path = path[1:]
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        path = f"//{parsed.netloc}{path}"
+    return path
 
 
 def read_file_part_bytes(url: str) -> Optional[bytes]:
@@ -50,11 +63,11 @@ def read_file_part_bytes(url: str) -> Optional[bytes]:
             _log.debug("read_file_part_bytes: data URI decode failed: %s", e)
             return None
     if url.startswith("file://"):
-        parsed = urlparse(url)
+        path = file_url_to_path(url)
         try:
-            return Path(unquote(parsed.path)).read_bytes()
+            return Path(path).read_bytes()
         except Exception as e:
-            _log.debug("read_file_part_bytes: file read failed: %s (path=%s)", e, parsed.path)
+            _log.debug("read_file_part_bytes: file read failed: %s (path=%s)", e, path)
             return None
     return None
 
@@ -64,9 +77,7 @@ def is_text_extractable_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in _TEXT_EXTRACTABLE_MIMES
 
 
-def truncate_extracted_text(
-    text: str, max_chars: int = _DEFAULT_MAX_CHARS
-) -> tuple[str, bool]:
+def truncate_extracted_text(text: str, max_chars: int = _DEFAULT_MAX_CHARS) -> tuple[str, bool]:
     """Strip and truncate *text* to *max_chars*.
 
     Returns ``(truncated_text, was_truncated)``.
@@ -141,9 +152,10 @@ def extract_file_text(
 
 
 __all__ = [
-    "read_file_part_bytes",
-    "is_text_extractable_mime",
-    "truncate_extracted_text",
     "extract_pdf_text_from_bytes",
     "extract_file_text",
+    "file_url_to_path",
+    "is_text_extractable_mime",
+    "read_file_part_bytes",
+    "truncate_extracted_text",
 ]

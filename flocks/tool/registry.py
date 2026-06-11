@@ -680,7 +680,7 @@ class ToolRegistry:
         category: ToolCategory = ToolCategory.CUSTOM,
         parameters: Optional[List[ToolParameter]] = None,
         requires_confirmation: bool = False,
-        native: bool = False,
+        native: Optional[bool] = None,
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
         enabled: bool = True,
@@ -688,11 +688,11 @@ class ToolRegistry:
         """
         Decorator to register a function as a tool.
 
-        ``native`` defaults to False (safe default).  Built-in tools get
-        ``native=True`` in bulk by ``_register_builtin_tools()`` after all
-        built-in modules are imported, so callers don't need to pass it
-        explicitly.  User plugin Python files that use this decorator will
-        correctly stay ``native=False``.
+        ``native=None`` means the loading context decides. Built-in tools get
+        ``native=True`` in bulk by ``_register_builtin_tools()`` only when the
+        decorator did not explicitly pass ``native``. User plugin Python files
+        that use this decorator still default to ``native=False`` unless their
+        loading path marks them project-level.
 
         Usage:
             @ToolRegistry.register_function(
@@ -704,18 +704,20 @@ class ToolRegistry:
                 ...
         """
         def decorator(func: ToolHandler) -> ToolHandler:
-            info = ToolInfo(
-                name=name,
-                description=description,
-                description_cn=description_cn,
-                category=category,
-                parameters=parameters or [],
-                requires_confirmation=requires_confirmation,
-                native=native,
-                always_load=always_load,
-                tags=list(tags or []),
-                enabled=enabled,
-            )
+            info_kwargs: Dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "description_cn": description_cn,
+                "category": category,
+                "parameters": parameters or [],
+                "requires_confirmation": requires_confirmation,
+                "always_load": always_load,
+                "tags": list(tags or []),
+                "enabled": enabled,
+            }
+            if native is not None:
+                info_kwargs["native"] = native
+            info = ToolInfo(**info_kwargs)
             tool = Tool(info=info, handler=func)
             cls.register(tool)
             return func
@@ -1457,7 +1459,7 @@ class ToolRegistry:
             # device/ — security device asset context
             ("flocks.tool.device", ["device_context_tool"]),
             # channel/ — IM platform messaging
-            ("flocks.tool.channel", ["channel_message"]),
+            ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
             ("flocks.tool.wecom", ["wecom_mcp"]),
         ]
@@ -1468,23 +1470,18 @@ class ToolRegistry:
                 except ImportError as e:
                     log.warn("builtin_tools.import_failed", {"module": f"{package}.{mod_name}", "error": str(e)})
 
-        # Mark every tool registered during this call as native=True, except
-        # for built-in modules that should remain non-native by policy.
-        # This is done in bulk here so individual @register_function call
-        # sites don't need to pass native=True, and user plugin files using
-        # the same decorator won't be misclassified.
-        builtin_native_exceptions = {
-            "lsp",
-            "task",
-            "list_providers",
-            "add_provider",
-            "add_model",
-        }
+        # Mark built-in tools native=True only when the decorator did not
+        # explicitly declare native. This keeps the default convenient for
+        # built-ins while preserving native=False for management tools that
+        # should be discovered through tool_search.
         for name in set(cls._tools.keys()) - before:
-            if name in builtin_native_exceptions:
-                cls._tools[name].info.native = False
+            tool = cls._tools[name]
+            fields_set = getattr(tool.info, "model_fields_set", None)
+            if fields_set is None:
+                fields_set = getattr(tool.info, "__fields_set__", set())
+            if "native" in fields_set:
                 continue
-            cls._tools[name].info.native = True
+            tool.info.native = True
 
         # Sample tools for testing (only register if not already registered)
         if "get_time" not in cls._tools:
@@ -1766,7 +1763,7 @@ def _tool_event_should_reload(event: object) -> bool:
 class ToolFileWatcher:
     """Watch plugin tool directories and auto-reload plugin tools on change.
 
-    Monitors the ``api/`` and ``python/`` subdirectories under:
+    Monitors the ``api/``, ``device/``, and ``python/`` subdirectories under:
     - ``~/.flocks/plugins/tools/``       (user-level)
     - ``<cwd>/.flocks/plugins/tools/``   (project-level)
 
@@ -1776,7 +1773,7 @@ class ToolFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 1.0
-    _WATCH_SUBDIRS = ("api", "python")
+    _WATCH_SUBDIRS = ("api", "device", "python")
 
     def __init__(self) -> None:
         self._observer: Optional[object] = None
