@@ -8,8 +8,10 @@ All custom providers use the "custom-" ID prefix to distinguish from built-in pr
 Model unique name format: "{provider_id}/{model_id}"
 """
 
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -45,6 +47,60 @@ class CustomProvider(OpenAICompatibleProvider):
 router = APIRouter()
 log = Log.create(service="routes.custom")
 
+FALLBACK_CONTEXT_WINDOW = 128000
+FALLBACK_MAX_OUTPUT_TOKENS = 8192
+MODELS_DEV_URL = "https://models.dev/api.json"
+MODELS_DEV_TIMEOUT_SEC = 5.0
+MODELS_DEV_CACHE_TTL_SEC = 3600.0
+
+_models_dev_cache: Optional[dict[str, Any]] = None
+_models_dev_cache_time = 0.0
+
+_MODELS_DEV_PROVIDER_ALIASES = {
+    "alibaba": "alibaba",
+    "anthropic": "anthropic",
+    "bailian": "alibaba",
+    "cerebras": "cerebras",
+    "cohere": "cohere",
+    "dashscope": "alibaba",
+    "deepinfra": "deepinfra",
+    "deepseek": "deepseek",
+    "gemini": "google",
+    "google": "google",
+    "groq": "groq",
+    "huggingface": "huggingface",
+    "kilocode": "kilo",
+    "kimi-coding": "kimi-for-coding",
+    "kimi-coding-cn": "kimi-for-coding",
+    "mistral": "mistral",
+    "minimax": "minimax",
+    "minimax-cn": "minimax-cn",
+    "nvidia": "nvidia",
+    "ollama-cloud": "ollama-cloud",
+    "opencode-go": "opencode-go",
+    "opencode-zen": "opencode",
+    "openai": "openai",
+    "openai-codex": "openai",
+    "openrouter": "openrouter",
+    "perplexity": "perplexity",
+    "qwen": "alibaba",
+    "qwen-oauth": "alibaba",
+    "siliconflow": "siliconflow",
+    "stepfun": "stepfun",
+    "together": "togetherai",
+    "togetherai": "togetherai",
+    "xai": "xai",
+    "xiaomi": "xiaomi",
+    "zai": "zai",
+}
+
+
+@dataclass
+class ResolvedModelLimits:
+    context_window: int
+    max_output_tokens: int
+    source: str
+
 
 # ==================== Request / Response ====================
 
@@ -67,8 +123,8 @@ class ProviderResp(BaseModel):
 class CreateModelReq(BaseModel):
     model_id: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
-    context_window: int = Field(128000, ge=1024)
-    max_output_tokens: int = Field(4096, ge=1)
+    context_window: Optional[int] = Field(None, ge=1024)
+    max_output_tokens: Optional[int] = Field(None, ge=1)
     supports_vision: bool = False
     supports_tools: bool = True
     supports_streaming: bool = True
@@ -208,8 +264,8 @@ async def list_models(provider_id: str):
             model_id=model_id,
             unique_name=f"{provider_id}/{model_id}",
             name=mcfg.get("name", model_id),
-            context_window=mcfg.get("context_window", 128000),
-            max_output_tokens=mcfg.get("max_output_tokens", 4096),
+            context_window=mcfg.get("context_window", FALLBACK_CONTEXT_WINDOW),
+            max_output_tokens=mcfg.get("max_output_tokens", FALLBACK_MAX_OUTPUT_TOKENS),
             input_price=mcfg.get("input_price", 0.0),
             output_price=mcfg.get("output_price", 0.0),
             currency=mcfg.get("currency", "USD"),
@@ -227,12 +283,13 @@ async def create_model(provider_id: str, body: CreateModelReq):
 
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
+    limits = await _resolve_model_limits(provider_id, body, raw)
 
     now = datetime.now(UTC).isoformat()
     model_config = {
         "name": body.name,
-        "context_window": body.context_window,
-        "max_output_tokens": body.max_output_tokens,
+        "context_window": limits.context_window,
+        "max_output_tokens": limits.max_output_tokens,
         "supports_vision": body.supports_vision,
         "supports_tools": body.supports_tools,
         "supports_streaming": body.supports_streaming,
@@ -247,14 +304,25 @@ async def create_model(provider_id: str, body: CreateModelReq):
     ConfigWriter.add_model(provider_id, body.model_id, model_config)
 
     # Add/update runtime
-    _add_model_to_runtime(provider_id, body)
+    _add_model_to_runtime(
+        provider_id,
+        body,
+        context_window=limits.context_window,
+        max_output_tokens=limits.max_output_tokens,
+    )
 
     action = "updated" if existing_model else "created"
-    log.info(f"custom_model.{action}", {"unique": f"{provider_id}/{body.model_id}"})
+    log.info(f"custom_model.{action}", {
+        "unique": f"{provider_id}/{body.model_id}",
+        "limits_source": limits.source,
+        "context_window": limits.context_window,
+        "max_output_tokens": limits.max_output_tokens,
+    })
     return ModelResp(
         id=body.model_id, provider_id=provider_id, model_id=body.model_id,
         unique_name=f"{provider_id}/{body.model_id}", name=body.name,
-        context_window=body.context_window, max_output_tokens=body.max_output_tokens,
+        context_window=limits.context_window,
+        max_output_tokens=limits.max_output_tokens,
         input_price=body.input_price, output_price=body.output_price,
         currency=body.currency, created_at=now,
     )
@@ -281,6 +349,244 @@ async def delete_model(provider_id: str, model_id: str):
 # ==================== Runtime helpers ====================
 
 
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    """Return value as a positive int, or None when it is not usable."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_limits_from_model(model: Any) -> tuple[Optional[int], Optional[int]]:
+    """Extract context/max-output limits from model metadata objects or dicts."""
+    if model is None:
+        return None, None
+
+    if isinstance(model, dict):
+        context = _coerce_positive_int(model.get("context_window"))
+        max_output = _coerce_positive_int(model.get("max_output_tokens"))
+        limits = model.get("limits")
+        if isinstance(limits, dict):
+            context = context or _coerce_positive_int(limits.get("context_window"))
+            max_output = max_output or _coerce_positive_int(
+                limits.get("max_output_tokens")
+            )
+        return context, max_output
+
+    limits = getattr(model, "limits", None)
+    context = _coerce_positive_int(getattr(limits, "context_window", None))
+    max_output = _coerce_positive_int(getattr(limits, "max_output_tokens", None))
+
+    capabilities = getattr(model, "capabilities", None)
+    context = context or _coerce_positive_int(
+        getattr(capabilities, "context_window", None)
+    )
+    max_output = max_output or _coerce_positive_int(
+        getattr(capabilities, "max_tokens", None)
+    )
+    return context, max_output
+
+
+def _merge_missing_limits(
+    context_window: Optional[int],
+    max_output_tokens: Optional[int],
+    candidate_context: Optional[int],
+    candidate_max_output: Optional[int],
+) -> tuple[Optional[int], Optional[int]]:
+    """Fill missing limit values from a candidate source."""
+    if context_window is None and candidate_context is not None:
+        context_window = candidate_context
+    if max_output_tokens is None and candidate_max_output is not None:
+        max_output_tokens = candidate_max_output
+    return context_window, max_output_tokens
+
+
+def _resolve_catalog_limits(
+    provider_id: str,
+    model_id: str,
+    raw_provider: dict[str, Any],
+) -> tuple[Optional[int], Optional[int]]:
+    """Resolve limits from existing provider config, catalog, or runtime models."""
+    raw_models = raw_provider.get("models", {})
+    if isinstance(raw_models, dict):
+        context, max_output = _extract_limits_from_model(raw_models.get(model_id))
+        if context is not None or max_output is not None:
+            return context, max_output
+
+    try:
+        from flocks.provider.model_catalog import get_provider_model_definitions
+
+        for model_def in get_provider_model_definitions(provider_id):
+            if model_def.id == model_id:
+                return _extract_limits_from_model(model_def)
+    except Exception as exc:
+        log.debug("custom_model.catalog_limits_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+
+    try:
+        model = Provider.resolve_model(provider_id, model_id)
+        return _extract_limits_from_model(model)
+    except Exception as exc:
+        log.debug("custom_model.runtime_limits_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+    return None, None
+
+
+def _models_dev_provider_id(provider_id: str, model_id: str = "") -> Optional[str]:
+    """Map a Flocks provider id to the models.dev provider id when known."""
+    normalized = provider_id.lower().removeprefix("custom-")
+    if normalized in _MODELS_DEV_PROVIDER_ALIASES:
+        return _MODELS_DEV_PROVIDER_ALIASES[normalized]
+    if ":" in model_id:
+        prefix = model_id.split(":", 1)[0].lower()
+        return _MODELS_DEV_PROVIDER_ALIASES.get(prefix)
+    return None
+
+
+async def _fetch_models_dev() -> Optional[dict[str, Any]]:
+    """Fetch models.dev metadata with a short timeout and in-memory cache."""
+    global _models_dev_cache, _models_dev_cache_time
+    now = time.monotonic()
+    if (
+        _models_dev_cache is not None
+        and now - _models_dev_cache_time < MODELS_DEV_CACHE_TTL_SEC
+    ):
+        return _models_dev_cache
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
+            response = await client.get(MODELS_DEV_URL)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        log.warning("custom_model.models_dev_fetch_failed", {"error": str(exc)})
+        return _models_dev_cache
+
+    if not isinstance(data, dict):
+        log.warning("custom_model.models_dev_invalid_payload", {})
+        return _models_dev_cache
+
+    _models_dev_cache = data
+    _models_dev_cache_time = now
+    return data
+
+
+async def _resolve_models_dev_limits(
+    provider_id: str,
+    model_id: str,
+) -> tuple[Optional[int], Optional[int]]:
+    """Resolve model limits from models.dev, returning empty values on failure."""
+    models_dev_provider = _models_dev_provider_id(provider_id, model_id)
+    if not models_dev_provider:
+        return None, None
+
+    data = await _fetch_models_dev()
+    if not data:
+        return None, None
+
+    provider_data = data.get(models_dev_provider)
+    if not isinstance(provider_data, dict):
+        return None, None
+    models = provider_data.get("models")
+    if not isinstance(models, dict):
+        return None, None
+
+    model_candidates = [model_id]
+    if ":" in model_id:
+        model_candidates.append(model_id.split(":", 1)[1])
+
+    entry = None
+    for model_candidate in model_candidates:
+        entry = models.get(model_candidate)
+        if isinstance(entry, dict):
+            break
+        model_lower = model_candidate.lower()
+        for candidate_id, candidate in models.items():
+            if candidate_id.lower() == model_lower and isinstance(candidate, dict):
+                entry = candidate
+                break
+        if isinstance(entry, dict):
+            break
+    if not isinstance(entry, dict):
+        return None, None
+
+    limits = entry.get("limit")
+    if not isinstance(limits, dict):
+        return None, None
+    return (
+        _coerce_positive_int(limits.get("context")),
+        _coerce_positive_int(limits.get("output")),
+    )
+
+
+async def _resolve_model_limits(
+    provider_id: str,
+    body: CreateModelReq,
+    raw_provider: dict[str, Any],
+) -> ResolvedModelLimits:
+    """Resolve model limits using explicit values, local metadata, models.dev, fallback."""
+    context_window = body.context_window
+    max_output_tokens = body.max_output_tokens
+    if context_window is not None and max_output_tokens is not None:
+        return ResolvedModelLimits(context_window, max_output_tokens, "explicit")
+
+    source = "explicit"
+    catalog_context, catalog_max_output = _resolve_catalog_limits(
+        provider_id,
+        body.model_id,
+        raw_provider,
+    )
+    before = (context_window, max_output_tokens)
+    context_window, max_output_tokens = _merge_missing_limits(
+        context_window,
+        max_output_tokens,
+        catalog_context,
+        catalog_max_output,
+    )
+    if before != (context_window, max_output_tokens):
+        source = "catalog"
+
+    if context_window is None or max_output_tokens is None:
+        models_dev_context, models_dev_max_output = await _resolve_models_dev_limits(
+            provider_id,
+            body.model_id,
+        )
+        before = (context_window, max_output_tokens)
+        context_window, max_output_tokens = _merge_missing_limits(
+            context_window,
+            max_output_tokens,
+            models_dev_context,
+            models_dev_max_output,
+        )
+        if before != (context_window, max_output_tokens):
+            source = "models_dev"
+
+    before = (context_window, max_output_tokens)
+    context_window, max_output_tokens = _merge_missing_limits(
+        context_window,
+        max_output_tokens,
+        FALLBACK_CONTEXT_WINDOW,
+        FALLBACK_MAX_OUTPUT_TOKENS,
+    )
+    if before != (context_window, max_output_tokens):
+        source = "fallback"
+
+    return ResolvedModelLimits(
+        context_window=context_window or FALLBACK_CONTEXT_WINDOW,
+        max_output_tokens=max_output_tokens or FALLBACK_MAX_OUTPUT_TOKENS,
+        source=source,
+    )
+
+
 def _register_provider(
     pid: str, name: str, base_url: str, api_key: Optional[str] = None
 ):
@@ -298,7 +604,13 @@ def _register_provider(
     Provider.register(p)
 
 
-def _add_model_to_runtime(provider_id: str, body: CreateModelReq):
+def _add_model_to_runtime(
+    provider_id: str,
+    body: CreateModelReq,
+    *,
+    context_window: Optional[int] = None,
+    max_output_tokens: Optional[int] = None,
+):
     """Add (or upsert) a model in the runtime Provider registry.
 
     Works for both CustomProvider (_custom_models) and DynamicOpenAIProvider
@@ -320,8 +632,16 @@ def _add_model_to_runtime(provider_id: str, body: CreateModelReq):
             supports_tools=body.supports_tools,
             supports_vision=body.supports_vision,
             supports_reasoning=body.supports_reasoning,
-            max_tokens=body.max_output_tokens,
-            context_window=body.context_window,
+            max_tokens=(
+                max_output_tokens
+                or body.max_output_tokens
+                or FALLBACK_MAX_OUTPUT_TOKENS
+            ),
+            context_window=(
+                context_window
+                or body.context_window
+                or FALLBACK_CONTEXT_WINDOW
+            ),
         ),
         pricing=_pricing,
     )
