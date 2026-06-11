@@ -18,8 +18,9 @@ from typing import Sequence
 from flocks.cli import service_manager
 from flocks.utils.log import append_upgrade_text_log
 
-DEFAULT_PARENT_TIMEOUT_SECONDS = 30.0
+DEFAULT_PARENT_TIMEOUT_SECONDS = 20.0
 DEFAULT_PORT_TIMEOUT_SECONDS = 10.0
+POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 
 
@@ -76,7 +77,7 @@ def _ensure_backend_port_free(backend_port: int, backend_pid_file: Path) -> bool
         _record_handoff_log(f"backend_stop_failed port={backend_port} error={exc}")
         return False
 
-    return _wait_for_backend_port_free(backend_port)
+    return _wait_for_backend_port_free(backend_port, timeout_seconds=POST_STOP_PORT_TIMEOUT_SECONDS)
 
 
 def _cli_subcommand(argv: Sequence[str]) -> str | None:

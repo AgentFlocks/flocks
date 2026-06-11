@@ -110,7 +110,11 @@ def test_ensure_backend_port_free_stops_backend_after_wait_timeout(monkeypatch, 
     backend_pid_file = tmp_path / "backend.pid"
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
-    monkeypatch.setattr(restart_handoff, "_wait_for_backend_port_free", lambda port: next(wait_results))
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_backend_port_free",
+        lambda port, **kwargs: events.append(f"wait:{port}:{kwargs.get('timeout_seconds')}") or next(wait_results),
+    )
     monkeypatch.setattr(
         restart_handoff.service_manager,
         "stop_one",
@@ -119,6 +123,8 @@ def test_ensure_backend_port_free_stops_backend_after_wait_timeout(monkeypatch, 
 
     assert restart_handoff._ensure_backend_port_free(8000, backend_pid_file) is True
     assert events == [
+        "wait:8000:None",
         "log:backend_port_still_in_use port=8000; stopping backend",
         "stop:8000:backend.pid:backend",
+        "wait:8000:20.0",
     ]
