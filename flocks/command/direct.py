@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from flocks.agent.agent import AvailableAgent
 from flocks.agent.registry import Agent
@@ -132,6 +132,7 @@ async def run_direct_command(
     name: str,
     *,
     args: str = "",
+    args_json: Optional[Any] = None,
     surface: Optional[CommandSurface] = None,
 ) -> DirectCommandResult:
     """Execute a direct command and return its result."""
@@ -141,6 +142,7 @@ async def run_direct_command(
 
     name = resolved.name
     args = (args or "").strip()
+    _ = args_json
 
     if name == "help":
         return DirectCommandResult(handled=True, text=format_help(surface=surface))
