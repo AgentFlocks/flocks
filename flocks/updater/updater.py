@@ -3349,9 +3349,6 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
     Always uses the project ``.venv`` Python to ensure the restarted process
     runs in the same environment that ``uv sync`` just updated.
     """
-    if sys.platform == "win32":
-        return _build_service_restart_argv(install_root)
-
     rest = sys.argv[1:]
 
     clean_rest: list[str] = []
@@ -3369,7 +3366,10 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
         clean_rest.append(arg)
 
     repo_root = install_root or _get_repo_root()
-    venv_python = repo_root / ".venv" / "bin" / "python"
+    if sys.platform == "win32":
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_python = repo_root / ".venv" / "bin" / "python"
 
     if not venv_python.exists():
         raise FileNotFoundError(f"Restart runtime is missing: {venv_python}")
