@@ -13,6 +13,7 @@ The updater tries each source in turn and falls back to the next on failure.
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
@@ -564,7 +565,8 @@ async def _await_ignoring_cancellation(awaitable):
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             log.warning("updater.restart.critical_step_cancelled_ignored")
-            await asyncio.sleep(_CANCELLATION_RETRY_DELAY_SECONDS)
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(_CANCELLATION_RETRY_DELAY_SECONDS)
 
 
 def _dependency_sync_timeout_seconds() -> int:
@@ -3347,6 +3349,9 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
     Always uses the project ``.venv`` Python to ensure the restarted process
     runs in the same environment that ``uv sync`` just updated.
     """
+    if sys.platform == "win32":
+        return _build_service_restart_argv(install_root)
+
     rest = sys.argv[1:]
 
     clean_rest: list[str] = []
@@ -3364,10 +3369,7 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
         clean_rest.append(arg)
 
     repo_root = install_root or _get_repo_root()
-    if sys.platform == "win32":
-        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
-    else:
-        venv_python = repo_root / ".venv" / "bin" / "python"
+    venv_python = repo_root / ".venv" / "bin" / "python"
 
     if not venv_python.exists():
         raise FileNotFoundError(f"Restart runtime is missing: {venv_python}")
