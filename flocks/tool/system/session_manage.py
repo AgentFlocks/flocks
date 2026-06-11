@@ -25,15 +25,25 @@ log = Log.create(service="tool.session_manage")
 SESSION_MANAGE_ACTIONS = ["list", "get", "create", "update", "delete", "archive"]
 
 SESSION_MANAGE_DESCRIPTION = """\
-管理 Flocks Session 元数据。
+Manage Flocks Session metadata.
+
+Use this tool when the user wants to list, inspect, create, rename, update,
+delete, archive, or restore a Flocks session. Also use it when the user asks to
+change/switch/update the model or provider used by a session.
 
 Use `action` to choose the operation:
-- list: 列出 session；可用 project_id/status/category/limit/offset 过滤或分页
-- get: 获取单个 session；需要 session_id
-- create: 创建 session；可传 title/project_id/directory/agent/parent_id
-- update: 更新 session；需要 session_id，可传 title/agent/model/provider/memory_enabled
-- delete: 软删除 session 及其子 session；需要 session_id，会请求确认
-- archive: 归档或取消归档 session；需要 session_id，archive=false 表示恢复 active
+- list: list sessions; filter or paginate with project_id/status/category/limit/offset.
+  If the target session_id is unknown, call list first.
+- get: get one session; requires session_id.
+- create: create a session; supports title/project_id/directory/agent/parent_id.
+- update: update session metadata; requires session_id. Supports title, agent,
+  model, provider, and memory_enabled. For requests like "change this session to
+  gpt-5" or "update the session model", use action=update with model, and set
+  provider too when the user specifies one.
+- delete: soft-delete a session and its child sessions; requires session_id and
+  confirmation.
+- archive: archive or restore a session; requires session_id. Set archive=false
+  to restore an archived session to active.
 """
 
 
@@ -43,7 +53,10 @@ SESSION_MANAGE_PARAMETERS = [
         type=ParameterType.STRING,
         required=True,
         enum=SESSION_MANAGE_ACTIONS,
-        description="要执行的 session 操作：list/get/create/update/delete/archive",
+        description=(
+            "Session operation: list/get/create/update/delete/archive. Use update "
+            "to change a session's title, agent, model, provider, or memory setting."
+        ),
     ),
     ToolParameter(
         name="session_id",
@@ -99,7 +112,7 @@ SESSION_MANAGE_PARAMETERS = [
         name="agent",
         type=ParameterType.STRING,
         required=False,
-        description="create/update 的 agent 类型",
+        description="Agent type for create/update.",
     ),
     ToolParameter(
         name="parent_id",
@@ -111,13 +124,19 @@ SESSION_MANAGE_PARAMETERS = [
         name="model",
         type=ParameterType.STRING,
         required=False,
-        description="update 的 model ID",
+        description=(
+            "Model ID to set during update, for example when the user asks to "
+            "change/switch/update the model used by a session."
+        ),
     ),
     ToolParameter(
         name="provider",
         type=ParameterType.STRING,
         required=False,
-        description="update 的 provider ID",
+        description=(
+            "Provider ID to set during update, for example openai/anthropic/local. "
+            "Use with model when the target model's provider is specified or known."
+        ),
     ),
     ToolParameter(
         name="memory_enabled",
@@ -140,6 +159,7 @@ SESSION_MANAGE_PARAMETERS = [
     description=SESSION_MANAGE_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=SESSION_MANAGE_PARAMETERS,
+    native=True,
 )
 async def session_manage(
     ctx: ToolContext,
