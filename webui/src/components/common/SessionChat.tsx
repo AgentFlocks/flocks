@@ -989,6 +989,7 @@ export default function SessionChat({
     clearAll: clearPendingQuestions,
   } = usePendingQuestions();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1287,6 +1288,18 @@ export default function SessionChat({
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!isStreaming && !sending && !isCompacting) return;
+    const target = messagesContentRef.current;
+    if (!target || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(() => {
+      scrollToBottom();
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [isStreaming, sending, isCompacting, scrollToBottom]);
 
   // Auto-resize textarea
   const autoResize = useCallback(() => {
@@ -2356,7 +2369,7 @@ export default function SessionChat({
             <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
           )
         ) : (
-          <div className={msgListClass}>
+          <div ref={messagesContentRef} className={msgListClass}>
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
               // If this position is a redirect, render the summary message here
@@ -2484,8 +2497,6 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
-
         {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
         {conversationBottomSlot && !hideInput && (
           <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
@@ -2506,6 +2517,7 @@ export default function SessionChat({
             </div>
           </div>
         )}
+        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
       {/* Suggestions — shown before user sends any message */}
