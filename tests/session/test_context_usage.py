@@ -36,6 +36,7 @@ def context_usage_mocks(monkeypatch):
         "active": [],
         "all": [],
         "estimate": 0,
+        "system_prompt": 0,
         "parts": {},
     }
 
@@ -48,6 +49,9 @@ def context_usage_mocks(monkeypatch):
     async def fake_estimate(session_id: str, messages: list):
         return state["estimate"]
 
+    async def fake_system_prompt_tokens(*args, **kwargs):
+        return state["system_prompt"]
+
     monkeypatch.setattr(context_usage.Message, "list", fake_list)
     monkeypatch.setattr(context_usage.Message, "parts", fake_parts)
     monkeypatch.setattr(
@@ -59,6 +63,11 @@ def context_usage_mocks(monkeypatch):
         context_usage.Provider,
         "resolve_model_info",
         lambda provider_id, model_id: (200, 50, None),
+    )
+    monkeypatch.setattr(
+        context_usage,
+        "_estimate_system_prompt_tokens",
+        fake_system_prompt_tokens,
     )
     return state
 
@@ -77,15 +86,26 @@ async def test_context_usage_prefers_fresh_observed_tokens(context_usage_mocks):
     context_usage_mocks["active"] = [msg]
     context_usage_mocks["all"] = [msg]
     context_usage_mocks["estimate"] = 60
+    context_usage_mocks["system_prompt"] = 30
+    context_usage_mocks["parts"] = {
+        "assistant-1": [
+            SimpleNamespace(type="text", text="c" * 160),
+        ]
+    }
 
     snapshot = await context_usage.build_context_usage_snapshot("sess-1")
 
     assert snapshot.used_tokens == 125
     assert snapshot.observed_tokens == 125
-    assert snapshot.estimated_tokens == 60
+    assert snapshot.estimated_tokens == 90
     assert snapshot.source == "observed"
     assert snapshot.percent == 63
-    assert snapshot.segments == []
+    assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
+        ("systemPrompt", 30),
+        ("conversation", 40),
+        ("otherContext", 55),
+    ]
+    assert sum(segment.tokens for segment in snapshot.segments) == snapshot.used_tokens
 
 
 @pytest.mark.asyncio
@@ -100,7 +120,9 @@ async def test_context_usage_falls_back_to_estimate_without_provider_tokens(cont
     assert snapshot.used_tokens == 80
     assert snapshot.observed_tokens is None
     assert snapshot.source == "estimated"
-    assert snapshot.segments == []
+    assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
+        ("otherContext", 80),
+    ]
 
 
 @pytest.mark.asyncio
@@ -126,7 +148,9 @@ async def test_context_usage_ignores_observed_tokens_after_later_summary(context
     assert snapshot.used_tokens == 40
     assert snapshot.observed_tokens is None
     assert snapshot.source == "estimated"
-    assert snapshot.segments == []
+    assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
+        ("otherContext", 40),
+    ]
 
 
 @pytest.mark.asyncio

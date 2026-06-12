@@ -268,11 +268,13 @@ function estimatePartTokens(part: MessagePart): number {
 
 export interface ContextUsageBreakdownSegment {
   key:
+    | 'systemPrompt'
     | 'tools'
     | 'skillLoad'
     | 'agentDelegation'
     | 'conversation'
     | 'draft'
+    | 'otherContext'
     | 'compactedHistory';
   tokens: number;
   colorClass: string;
@@ -287,11 +289,13 @@ export interface ContextUsageBreakdown {
 }
 
 const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
+  systemPrompt: 'bg-zinc-400',
   tools: 'bg-indigo-400',
   skillLoad: 'bg-amber-400',
   agentDelegation: 'bg-emerald-500',
   conversation: 'bg-slate-500',
   draft: 'bg-sky-400',
+  otherContext: 'bg-teal-400',
   compactedHistory: 'bg-zinc-300',
 };
 
@@ -401,11 +405,13 @@ function getContextUsageLabel(
   key: ContextUsageBreakdownSegment['key'],
 ): string {
   const fallback: Record<ContextUsageBreakdownSegment['key'], string> = {
+    systemPrompt: 'System prompt',
     tools: 'Tool calls',
     skillLoad: 'Skill loads',
     agentDelegation: 'Agent delegation',
     conversation: 'Conversation',
     draft: 'Current draft',
+    otherContext: 'Other context',
     compactedHistory: 'Compacted history',
   };
   const i18nKey = `chat.contextUsage.breakdown.${key}`;

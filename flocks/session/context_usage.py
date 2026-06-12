@@ -112,13 +112,24 @@ async def build_context_usage_snapshot(
         if bool(getattr(msg, "compacted", None))
     ]
 
-    estimated_tokens = await _estimate_messages(session_id, active_messages)
     breakdown_tokens = await _estimate_message_breakdown(session_id, active_messages)
+    message_estimate_tokens = max(
+        await _estimate_messages(session_id, active_messages),
+        sum(breakdown_tokens.values()),
+    )
     compacted_tokens = await _estimate_messages(session_id, archived_messages)
     inferred_provider_id, inferred_model_id = _resolve_message_model(active_messages)
     provider_id = provider_id or inferred_provider_id or getattr(session, "provider", None)
     model_id = model_id or inferred_model_id or getattr(session, "model", None)
     context_window = _resolve_context_window(provider_id, model_id)
+    system_prompt_tokens = await _estimate_system_prompt_tokens(
+        session_id,
+        session=session,
+        messages=active_messages,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
+    estimated_tokens = system_prompt_tokens + message_estimate_tokens
 
     latest_observed = _latest_fresh_observation(
         active_messages,
@@ -142,16 +153,33 @@ async def build_context_usage_snapshot(
     )
 
     segments: List[ContextUsageSegment] = []
-    for key in ("conversation", "tools", "skillLoad", "agentDelegation"):
-        tokens = breakdown_tokens.get(key, 0)
+    attributed_tokens = 0
+    segment_tokens = {
+        "systemPrompt": system_prompt_tokens,
+        **breakdown_tokens,
+    }
+    for key in ("systemPrompt", "conversation", "tools", "skillLoad", "agentDelegation"):
+        tokens = segment_tokens.get(key, 0)
         if tokens <= 0:
             continue
+        attributed_tokens += tokens
         segments.append(
             ContextUsageSegment(
                 key=key,
                 tokens=tokens,
                 included=True,
                 source="estimated",
+            )
+        )
+
+    unattributed_tokens = used_tokens - attributed_tokens
+    if unattributed_tokens > 0:
+        segments.append(
+            ContextUsageSegment(
+                key="otherContext",
+                tokens=unattributed_tokens,
+                included=True,
+                source=source,
             )
         )
 
@@ -254,6 +282,64 @@ async def _estimate_messages(session_id: str, messages: List[Any]) -> int:
             "error": str(exc),
         })
         return 0
+
+
+async def _estimate_system_prompt_tokens(
+    session_id: str,
+    *,
+    session: Optional[SessionInfo],
+    messages: List[Any],
+    provider_id: Optional[str],
+    model_id: Optional[str],
+) -> int:
+    if not provider_id or not model_id:
+        return 0
+    try:
+        from flocks.agent.registry import Agent
+        from flocks.agent.toolset import resolve_agent_initial_tools
+        from flocks.tool.registry import ToolRegistry
+
+        agent_name = _resolve_agent_name(messages, session) or await Agent.default_agent()
+        agent = await Agent.get(agent_name)
+        if agent is None:
+            agent = await Agent.get("rex")
+
+        prompt_tool_names: List[str] = []
+        if agent is not None:
+            prompt_tool_names, _permission_rules = resolve_agent_initial_tools(
+                getattr(agent, "tools", None),
+                getattr(agent, "permission", None),
+                getattr(agent, "name", agent_name),
+            )
+
+        prompts = await SessionPrompt.build_system_prompts(
+            session_id=session_id,
+            session_directory=getattr(session, "directory", None) if session is not None else None,
+            agent_name=getattr(agent, "name", agent_name) if agent is not None else agent_name,
+            agent_prompt=getattr(agent, "prompt", None) if agent is not None else None,
+            provider_id=provider_id,
+            model_id=model_id,
+            prompt_tool_names=prompt_tool_names,
+            tool_revision=ToolRegistry.revision(),
+        )
+        return sum(SessionPrompt.count_tokens(prompt) for prompt in prompts)
+    except Exception as exc:
+        log.debug("context_usage.system_prompt_estimate_failed", {
+            "session_id": session_id,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return 0
+
+
+def _resolve_agent_name(messages: List[Any], session: Optional[SessionInfo]) -> Optional[str]:
+    for message in reversed(messages):
+        agent_name = _field_value(message, "agent")
+        if agent_name:
+            return str(agent_name)
+    agent_name = getattr(session, "agent", None) if session is not None else None
+    return str(agent_name) if agent_name else None
 
 
 async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> Dict[str, int]:

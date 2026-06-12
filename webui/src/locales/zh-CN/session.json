@@ -93,11 +93,13 @@
       "excludedTokens": "已排除 {{tokens}}",
       "noAttributedSegments": "暂无可归因明细",
       "breakdown": {
+        "systemPrompt": "系统提示词",
         "tools": "工具调用",
         "skillLoad": "技能加载",
         "agentDelegation": "智能体委派",
         "conversation": "会话内容",
         "draft": "当前草稿",
+        "otherContext": "其他上下文",
         "compactedHistory": "已压缩历史"
       }
     },

@@ -93,11 +93,13 @@
       "excludedTokens": "{{tokens}} excluded",
       "noAttributedSegments": "No attributed breakdown",
       "breakdown": {
+        "systemPrompt": "System prompt",
         "tools": "Tool calls",
         "skillLoad": "Skill loads",
         "agentDelegation": "Agent delegation",
         "conversation": "Conversation",
         "draft": "Current draft",
+        "otherContext": "Other context",
         "compactedHistory": "Compacted history"
       }
     },
