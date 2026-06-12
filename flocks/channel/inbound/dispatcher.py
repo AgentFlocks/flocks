@@ -1142,8 +1142,9 @@ class InboundDispatcher:
         import mimetypes
         import os
         from pathlib import Path
-        from urllib.parse import unquote, urlparse
+        from urllib.parse import urlparse
 
+        from flocks.session.utils.file_extractor import file_url_to_path
         from flocks.session.message import FilePart, Message, MessageRole
 
         create_kwargs: dict = dict(
@@ -1197,8 +1198,8 @@ class InboundDispatcher:
                 })
             elif scheme in ("", "file"):
                 # Local file already downloaded by the channel plugin (e.g. weixin).
-                # file:// URIs may have URL-encoded paths (e.g. Chinese filenames).
-                local_path = unquote(parsed.path) if scheme == "file" else msg.media_url
+                # file:// URIs may have URL-encoded or Windows drive paths.
+                local_path = file_url_to_path(msg.media_url) if scheme == "file" else msg.media_url
                 if not os.path.isfile(local_path):
                     log.warning("dispatcher.inbound_media_missing", {
                         "channel_id": msg.channel_id,

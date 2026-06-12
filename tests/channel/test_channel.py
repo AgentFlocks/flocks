@@ -839,6 +839,55 @@ class TestFeishuNativeCommands:
         assert stored_part.mime == "image/png"
         assert stored_part.url == "file:///tmp/diagram.png"
 
+    @pytest.mark.asyncio
+    async def test_append_user_message_accepts_windows_file_uri(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.config.config import ChannelConfig
+
+        created_message = SimpleNamespace(id="message_user_1")
+        store_part = AsyncMock()
+        paths_checked: list[str] = []
+
+        def fake_isfile(path: str) -> bool:
+            paths_checked.append(path)
+            return path == "C:/Users/demo/Pictures/channel image.png"
+
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.parts",
+            AsyncMock(return_value=[]),
+        )
+        monkeypatch.setattr("os.path.isfile", fake_isfile)
+
+        await InboundDispatcher._append_user_message(
+            "session_1",
+            "[图片消息]",
+            InboundMessage(
+                channel_id="weixin",
+                account_id="default",
+                message_id="msg_1",
+                sender_id="user_1",
+                chat_type=ChatType.DIRECT,
+                media_url="file:///C:/Users/demo/Pictures/channel%20image.png",
+                media_mime="image/png",
+            ),
+            ChannelConfig(enabled=True),
+        )
+
+        assert paths_checked == ["C:/Users/demo/Pictures/channel image.png"]
+        store_part.assert_awaited_once()
+        stored_part = store_part.await_args.args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "channel image.png"
+        assert stored_part.mime == "image/png"
+
 
 class TestMultimodalInput:
     @pytest.mark.asyncio

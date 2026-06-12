@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -294,6 +295,30 @@ class TestSessionRoutesUseDispatcher:
 
 
 class TestPromptQueueRoutes:
+    def test_materialize_queued_data_url_returns_readable_file_uri(self, monkeypatch, tmp_path):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.utils.file_extractor import read_file_part_bytes
+
+        class FakeWorkspace:
+            def resolve_workspace_path(self, rel_path: str):
+                return tmp_path / rel_path
+
+        monkeypatch.setattr(
+            "flocks.workspace.manager.WorkspaceManager.get_instance",
+            lambda: FakeWorkspace(),
+        )
+        data_url = "data:image/png;base64," + base64.b64encode(b"png-bytes").decode()
+
+        url = session_routes._materialize_data_url_part(
+            "ses_windows_uri",
+            data_url,
+            "image/png",
+            "screenshot.png",
+        )
+
+        assert url.startswith("file://")
+        assert read_file_part_bytes(url) == b"png-bytes"
+
     @pytest.mark.asyncio
     async def test_prompt_async_queues_when_session_running_without_creating_message(self, monkeypatch):
         from flocks.server.routes import session as session_routes
