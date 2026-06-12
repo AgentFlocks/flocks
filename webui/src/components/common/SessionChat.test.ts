@@ -40,6 +40,7 @@ const sessionApiRunQueuedPromptNowMock = vi.fn();
 const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
+const sessionApiGetContextUsageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string, options?: Record<string, unknown>) => {
@@ -58,6 +59,10 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.contextUsage.full': '13% Full',
   'chat.contextUsage.tokens': '~13 / 100 Tokens',
   'chat.contextUsage.excludedTokens': '100 excluded',
+  'chat.contextUsage.noAttributedSegments': 'No attributed breakdown',
+  'chat.contextUsage.breakdown.tools': 'Tool calls',
+  'chat.contextUsage.breakdown.skillLoad': 'Skill loads',
+  'chat.contextUsage.breakdown.agentDelegation': 'Agent delegation',
   'chat.contextUsage.breakdown.conversation': 'Conversation',
   'chat.contextUsage.breakdown.draft': 'Current draft',
   'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
@@ -151,6 +156,7 @@ vi.mock('@/api/session', () => ({
     updateMessagePart: (...args: unknown[]) => sessionApiUpdateMessagePartMock(...args),
     resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
     regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
+    getContextUsage: (...args: unknown[]) => sessionApiGetContextUsageMock(...args),
   },
 }));
 
@@ -182,6 +188,17 @@ beforeEach(() => {
   sessionApiUpdateMessagePartMock.mockResolvedValue({});
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
+  sessionApiGetContextUsageMock.mockResolvedValue({
+    sessionID: 'sess-1',
+    usedTokens: 0,
+    contextWindow: 0,
+    percent: 0,
+    source: 'estimated',
+    estimatedTokens: 0,
+    compactedTokens: 0,
+    segments: [],
+    excludedSegments: [],
+  });
   pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
   useSSEOptionsRef.current = null;
   useSessionMessagesMock.mockReturnValue({
@@ -278,6 +295,42 @@ describe('buildContextUsageBreakdown', () => {
     ], '');
 
     expect(breakdown.usedTokens).toBe(23);
+  });
+
+  it('uses backend snapshots when available and adds the local draft on top', () => {
+    const breakdown = buildContextUsageBreakdown([], 'd'.repeat(40), {
+      sessionID: 'sess-1',
+      usedTokens: 130,
+      contextWindow: 1000,
+      percent: 13,
+      source: 'observed',
+      lastMessageID: 'assistant-1',
+      observedTokens: 130,
+      estimatedTokens: 100,
+      compactedTokens: 50,
+      segments: [
+        { key: 'tools', tokens: 40, included: true, source: 'estimated' },
+        { key: 'skillLoad', tokens: 20, included: true, source: 'estimated' },
+        { key: 'agentDelegation', tokens: 10, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 30, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [
+        { key: 'compactedHistory', tokens: 50, included: false, source: 'estimated' },
+      ],
+    });
+
+    expect(breakdown.usedTokens).toBe(140);
+    expect(breakdown.compactedTokens).toBe(50);
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
+      ['tools', 40],
+      ['skillLoad', 20],
+      ['agentDelegation', 10],
+      ['conversation', 30],
+      ['draft', 10],
+    ]);
+    expect(breakdown.excludedSegments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
+      ['compactedHistory', 50, false],
+    ]);
   });
 });
 

@@ -91,7 +91,11 @@
       "full": "{{percent}}% 已用",
       "tokens": "~{{used}} / {{total}} Tokens",
       "excludedTokens": "已排除 {{tokens}}",
+      "noAttributedSegments": "暂无可归因明细",
       "breakdown": {
+        "tools": "工具调用",
+        "skillLoad": "技能加载",
+        "agentDelegation": "智能体委派",
         "conversation": "会话内容",
         "draft": "当前草稿",
         "compactedHistory": "已压缩历史"

@@ -1,0 +1,393 @@
+"""Session context-usage snapshot helpers.
+
+This module exposes the context usage shown by the Web UI.  Provider-reported
+usage is preferred when it reflects the current prompt, while the existing
+message/part estimator is used as the fallback for providers that do not emit
+token usage or after compaction changes the prompt shape.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from flocks.provider.provider import Provider
+from flocks.session.message import Message
+from flocks.session.prompt import SessionPrompt
+from flocks.session.session import SessionInfo
+from flocks.utils.log import Log
+
+
+log = Log.create(service="context-usage")
+
+UsageSource = Literal["observed", "estimated"]
+DELEGATION_TOOLS = {"delegate_task", "task"}
+
+
+class ContextUsageSegment(BaseModel):
+    """One row in the context-usage breakdown."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    key: str
+    tokens: int = 0
+    included: bool = True
+    source: UsageSource = "estimated"
+
+
+class ContextUsageSnapshot(BaseModel):
+    """Current context usage for a session."""
+
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    session_id: str = Field(..., alias="sessionID")
+    used_tokens: int = Field(0, alias="usedTokens")
+    context_window: int = Field(0, alias="contextWindow")
+    percent: int = 0
+    source: UsageSource = "estimated"
+    last_message_id: Optional[str] = Field(None, alias="lastMessageID")
+    observed_tokens: Optional[int] = Field(None, alias="observedTokens")
+    estimated_tokens: int = Field(0, alias="estimatedTokens")
+    compacted_tokens: int = Field(0, alias="compactedTokens")
+    provider_id: Optional[str] = Field(None, alias="providerID")
+    model_id: Optional[str] = Field(None, alias="modelID")
+    segments: List[ContextUsageSegment] = Field(default_factory=list)
+    excluded_segments: List[ContextUsageSegment] = Field(default_factory=list, alias="excludedSegments")
+
+
+class _ObservedTokens(BaseModel):
+    message_id: str
+    created_ms: int
+    used_tokens: int
+    prompt_tokens: int
+
+
+def token_usage_to_dict(tokens: Any) -> Dict[str, Any]:
+    """Return a stable token dict for API/SSE payloads."""
+    if tokens is None:
+        return {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    if hasattr(tokens, "model_dump"):
+        data = tokens.model_dump()
+    elif isinstance(tokens, dict):
+        data = dict(tokens)
+    else:
+        data = dict(getattr(tokens, "__dict__", {}) or {})
+
+    cache = data.get("cache") or {}
+    if hasattr(cache, "model_dump"):
+        cache = cache.model_dump()
+    elif not isinstance(cache, dict):
+        cache = dict(getattr(cache, "__dict__", {}) or {})
+
+    return {
+        "input": _coerce_int(data.get("input")),
+        "output": _coerce_int(data.get("output")),
+        "reasoning": _coerce_int(data.get("reasoning")),
+        "cache": {
+            "read": _coerce_int(cache.get("read")),
+            "write": _coerce_int(cache.get("write")),
+        },
+    }
+
+
+async def build_context_usage_snapshot(
+    session_id: str,
+    *,
+    session: Optional[SessionInfo] = None,
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
+) -> ContextUsageSnapshot:
+    """Build a context-usage snapshot for UI display.
+
+    ``usedTokens`` means the best available estimate of the current prompt
+    footprint.  If the provider emitted usage for the latest model call and no
+    later compaction mutation has changed the prompt, we use that observed
+    value.  Otherwise we fall back to ``SessionPrompt.estimate_full_context_tokens``.
+    """
+    active_messages = await Message.list(session_id)
+    all_messages = await Message.list(session_id, include_archived=True)
+    archived_messages = [
+        msg for msg in all_messages
+        if bool(getattr(msg, "compacted", None))
+    ]
+
+    estimated_tokens = await _estimate_messages(session_id, active_messages)
+    breakdown_tokens = await _estimate_message_breakdown(session_id, active_messages)
+    compacted_tokens = await _estimate_messages(session_id, archived_messages)
+    inferred_provider_id, inferred_model_id = _resolve_message_model(active_messages)
+    provider_id = provider_id or inferred_provider_id or getattr(session, "provider", None)
+    model_id = model_id or inferred_model_id or getattr(session, "model", None)
+    context_window = _resolve_context_window(provider_id, model_id)
+
+    latest_observed = _latest_fresh_observation(
+        active_messages,
+        latest_context_mutation_ms=await _latest_context_mutation_ms(session_id, all_messages),
+    )
+
+    observed_tokens: Optional[int] = None
+    last_message_id: Optional[str] = None
+    source: UsageSource = "estimated"
+    used_tokens = estimated_tokens
+    if latest_observed is not None:
+        observed_tokens = latest_observed.used_tokens
+        last_message_id = latest_observed.message_id
+        used_tokens = max(estimated_tokens, latest_observed.used_tokens)
+        source = "observed" if used_tokens == latest_observed.used_tokens else "estimated"
+
+    percent = (
+        max(0, min(100, int(((used_tokens / context_window) * 100) + 0.5)))
+        if context_window > 0
+        else 0
+    )
+
+    segments: List[ContextUsageSegment] = []
+    for key in ("conversation", "tools", "skillLoad", "agentDelegation"):
+        tokens = breakdown_tokens.get(key, 0)
+        if tokens <= 0:
+            continue
+        segments.append(
+            ContextUsageSegment(
+                key=key,
+                tokens=tokens,
+                included=True,
+                source="estimated",
+            )
+        )
+
+    excluded_segments: List[ContextUsageSegment] = []
+    if compacted_tokens > 0:
+        excluded_segments.append(
+            ContextUsageSegment(
+                key="compactedHistory",
+                tokens=compacted_tokens,
+                included=False,
+                source="estimated",
+            )
+        )
+
+    return ContextUsageSnapshot(
+        sessionID=session_id,
+        usedTokens=used_tokens,
+        contextWindow=context_window,
+        percent=percent,
+        source=source,
+        lastMessageID=last_message_id,
+        observedTokens=observed_tokens,
+        estimatedTokens=estimated_tokens,
+        compactedTokens=compacted_tokens,
+        providerID=provider_id,
+        modelID=model_id,
+        segments=segments,
+        excludedSegments=excluded_segments,
+    )
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _role_value(message: Any) -> str:
+    role = getattr(message, "role", "")
+    return getattr(role, "value", role) or ""
+
+
+def _time_created_ms(message: Any) -> int:
+    time_data = getattr(message, "time", None)
+    if isinstance(time_data, dict):
+        return _coerce_int(time_data.get("created"))
+    return _coerce_int(getattr(time_data, "created", 0))
+
+
+def _is_summary_message(message: Any) -> bool:
+    return bool(getattr(message, "summary", None)) or getattr(message, "finish", None) == "summary"
+
+
+def _observed_tokens_for_message(message: Any) -> Optional[_ObservedTokens]:
+    if _role_value(message) != "assistant" or _is_summary_message(message):
+        return None
+
+    data = token_usage_to_dict(getattr(message, "tokens", None))
+    cache = data.get("cache") or {}
+    prompt_tokens = _coerce_int(data.get("input")) + _coerce_int(cache.get("read"))
+    used_tokens = (
+        prompt_tokens
+        + _coerce_int(data.get("output"))
+        + _coerce_int(data.get("reasoning"))
+    )
+    if used_tokens <= 0:
+        return None
+    return _ObservedTokens(
+        message_id=getattr(message, "id", ""),
+        created_ms=_time_created_ms(message),
+        used_tokens=used_tokens,
+        prompt_tokens=prompt_tokens,
+    )
+
+
+def _latest_fresh_observation(
+    messages: List[Any],
+    *,
+    latest_context_mutation_ms: int,
+) -> Optional[_ObservedTokens]:
+    for message in reversed(messages):
+        observation = _observed_tokens_for_message(message)
+        if observation is None:
+            continue
+        if observation.created_ms and observation.created_ms < latest_context_mutation_ms:
+            return None
+        return observation
+    return None
+
+
+async def _estimate_messages(session_id: str, messages: List[Any]) -> int:
+    if not messages:
+        return 0
+    try:
+        return _coerce_int(await SessionPrompt.estimate_full_context_tokens(session_id, messages))
+    except Exception as exc:
+        log.warn("context_usage.estimate_failed", {
+            "session_id": session_id,
+            "error": str(exc),
+        })
+        return 0
+
+
+async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> Dict[str, int]:
+    tokens_by_key = {
+        "conversation": 0,
+        "tools": 0,
+        "skillLoad": 0,
+        "agentDelegation": 0,
+    }
+    for message in messages:
+        content = getattr(message, "content", "") if not isinstance(message, dict) else message.get("content", "")
+        tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
+
+        message_id = getattr(message, "id", None) if not isinstance(message, dict) else message.get("id")
+        if not message_id:
+            continue
+        try:
+            parts = await Message.parts(message_id, session_id)
+        except Exception as exc:
+            log.debug("context_usage.breakdown_parts_failed", {
+                "message_id": message_id,
+                "error": str(exc),
+            })
+            continue
+
+        for part in parts:
+            part_type = getattr(part, "type", "")
+            if part_type in {"text", "reasoning"}:
+                tokens_by_key["conversation"] += SessionPrompt.count_tokens(getattr(part, "text", "") or "")
+                continue
+            if part_type == "subtask":
+                tokens_by_key["agentDelegation"] += _estimate_subtask_part_tokens(part)
+                continue
+            if part_type != "tool":
+                continue
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            tokens_by_key[_context_key_for_tool(getattr(part, "tool", ""))] += _estimate_tool_state_tokens(state)
+    return tokens_by_key
+
+
+def _context_key_for_tool(tool_name: str) -> str:
+    if tool_name == "skill_load":
+        return "skillLoad"
+    if tool_name in DELEGATION_TOOLS:
+        return "agentDelegation"
+    return "tools"
+
+
+def _estimate_subtask_part_tokens(part: Any) -> int:
+    total = 0
+    for field in ("prompt", "description"):
+        value = getattr(part, field, "")
+        total += SessionPrompt.count_tokens(value or "")
+    return total
+
+
+def _estimate_tool_state_tokens(state: Any) -> int:
+    total = 0
+    tool_input = getattr(state, "input", None)
+    if tool_input:
+        total += SessionPrompt.count_tokens(
+            tool_input if isinstance(tool_input, str) else str(tool_input)
+        )
+
+    time_info = getattr(state, "time", None)
+    is_compacted = isinstance(time_info, dict) and bool(time_info.get("compacted"))
+    if is_compacted:
+        return total + 10
+
+    tool_output = getattr(state, "output", None)
+    if tool_output:
+        total += SessionPrompt.count_tokens(
+            tool_output if isinstance(tool_output, str) else str(tool_output)
+        )
+    return total
+
+
+def _resolve_message_model(messages: List[Any]) -> tuple[Optional[str], Optional[str]]:
+    for message in reversed(messages):
+        role = _role_value(message)
+        if role == "assistant":
+            provider_id = getattr(message, "providerID", None)
+            model_id = getattr(message, "modelID", None)
+            if provider_id and model_id:
+                return provider_id, model_id
+        if role == "user":
+            model = getattr(message, "model", None)
+            if isinstance(model, dict):
+                provider_id = model.get("providerID") or model.get("provider_id")
+                model_id = model.get("modelID") or model.get("model_id")
+                if provider_id and model_id:
+                    return provider_id, model_id
+    return None, None
+
+
+def _resolve_context_window(provider_id: Optional[str], model_id: Optional[str]) -> int:
+    if not provider_id or not model_id:
+        return 0
+    try:
+        context_window, _max_output, _max_input = Provider.resolve_model_info(provider_id, model_id)
+        return _coerce_int(context_window)
+    except Exception as exc:
+        log.debug("context_usage.resolve_window_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return 0
+
+
+async def _latest_context_mutation_ms(session_id: str, messages: List[Any]) -> int:
+    latest = 0
+    for message in messages:
+        if _is_summary_message(message):
+            latest = max(latest, _time_created_ms(message))
+        latest = max(latest, await _latest_compacted_part_ms(session_id, message))
+    return latest
+
+
+async def _latest_compacted_part_ms(session_id: str, message: Any) -> int:
+    message_id = getattr(message, "id", "")
+    if not message_id:
+        return 0
+    try:
+        parts = await Message.parts(message_id, session_id)
+    except Exception:
+        return 0
+
+    latest = 0
+    for part in parts:
+        state = getattr(part, "state", None)
+        time_info = getattr(state, "time", None) if state is not None else None
+        if isinstance(time_info, dict):
+            latest = max(latest, _coerce_int(time_info.get("compacted")))
+    return latest

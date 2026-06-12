@@ -1,19 +1,19 @@
 /**
- * SessionChat — 统一的 Agent Session 对话组件
+ * SessionChat — shared Agent Session conversation component.
  *
- * 产品中所有需要 AI 对话能力的地方都应使用此组件：
- * - Session 会话主页面 (compact=false)
- * - 工作流编辑对话面板
- * - 任务执行详情面板
- * - ChatDialog 弹窗
- * - EntitySheet Rex 对话 Tab
+ * Use this component anywhere the product needs an AI conversation surface:
+ * - Main Session page (compact=false)
+ * - Workflow edit chat panel
+ * - Task execution detail panel
+ * - ChatDialog modal
+ * - EntitySheet Rex chat tab
  *
- * 功能：
- * - 加载并展示指定 session 的完整对话消息
- * - SSE 实时流式更新
- * - 渲染 text / reasoning / tool 三种 part 类型
- * - 底部追问输入框（可通过 hideInput 隐藏）
- * - 消息复制、时间戳等可选功能
+ * Capabilities:
+ * - Load and render the complete conversation for a session
+ * - Stream live updates over SSE
+ * - Render text, reasoning, and tool parts
+ * - Provide a follow-up composer that can be hidden with hideInput
+ * - Support optional copy actions, timestamps, and related affordances
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
@@ -29,7 +29,7 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
-import { sessionApi, type QueuedPrompt } from '@/api/session';
+import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
@@ -267,7 +267,13 @@ function estimatePartTokens(part: MessagePart): number {
 }
 
 export interface ContextUsageBreakdownSegment {
-  key: 'conversation' | 'draft' | 'compactedHistory';
+  key:
+    | 'tools'
+    | 'skillLoad'
+    | 'agentDelegation'
+    | 'conversation'
+    | 'draft'
+    | 'compactedHistory';
   tokens: number;
   colorClass: string;
   included: boolean;
@@ -280,11 +286,43 @@ export interface ContextUsageBreakdown {
   excludedSegments: ContextUsageBreakdownSegment[];
 }
 
+const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
+  tools: 'bg-indigo-400',
+  skillLoad: 'bg-amber-400',
+  agentDelegation: 'bg-emerald-500',
+  conversation: 'bg-slate-500',
+  draft: 'bg-sky-400',
+  compactedHistory: 'bg-zinc-300',
+};
+
+const CONTEXT_SEGMENT_KEYS = new Set(Object.keys(CONTEXT_SEGMENT_COLORS));
+
 function estimateMessageTokens(message: Message): number {
   return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
 }
 
-export function buildContextUsageBreakdown(messages: Message[], draft: string): ContextUsageBreakdown {
+function normalizeContextSegment(segment: {
+  key: string;
+  tokens: number;
+  included?: boolean;
+}): ContextUsageBreakdownSegment | null {
+  if (!CONTEXT_SEGMENT_KEYS.has(segment.key)) {
+    return null;
+  }
+  const key = segment.key as ContextUsageBreakdownSegment['key'];
+  return {
+    key,
+    tokens: Math.max(0, Math.round(segment.tokens || 0)),
+    colorClass: CONTEXT_SEGMENT_COLORS[key],
+    included: segment.included !== false,
+  };
+}
+
+export function buildContextUsageBreakdown(
+  messages: Message[],
+  draft: string,
+  snapshot?: ContextUsageSnapshot | null,
+): ContextUsageBreakdown {
   const conversationTokens = messages.reduce((total, message) => (
     message.compacted ? total : total + estimateMessageTokens(message)
   ), 0);
@@ -293,11 +331,37 @@ export function buildContextUsageBreakdown(messages: Message[], draft: string): 
   ), 0);
   const draftTokens = countTokensLikeCompaction(draft);
 
+  if (snapshot) {
+    const serverSegments = (snapshot.segments || [])
+      .map(normalizeContextSegment)
+      .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
+    const serverExcludedSegments = (snapshot.excludedSegments || [])
+      .map(normalizeContextSegment)
+      .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
+    const segments = [...serverSegments];
+
+    if (draftTokens > 0) {
+      segments.push({
+        key: 'draft',
+        tokens: draftTokens,
+        colorClass: CONTEXT_SEGMENT_COLORS.draft,
+        included: true,
+      });
+    }
+
+    return {
+      usedTokens: Math.max(0, snapshot.usedTokens || 0) + draftTokens,
+      compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      segments,
+      excludedSegments: serverExcludedSegments,
+    };
+  }
+
   const segments: ContextUsageBreakdownSegment[] = [
     {
       key: 'conversation',
       tokens: conversationTokens,
-      colorClass: 'bg-slate-500',
+      colorClass: CONTEXT_SEGMENT_COLORS.conversation,
       included: true,
     },
   ];
@@ -306,7 +370,7 @@ export function buildContextUsageBreakdown(messages: Message[], draft: string): 
     segments.push({
       key: 'draft',
       tokens: draftTokens,
-      colorClass: 'bg-sky-400',
+      colorClass: CONTEXT_SEGMENT_COLORS.draft,
       included: true,
     });
   }
@@ -319,7 +383,7 @@ export function buildContextUsageBreakdown(messages: Message[], draft: string): 
       ? [{
           key: 'compactedHistory',
           tokens: compactedTokens,
-          colorClass: 'bg-zinc-700',
+          colorClass: CONTEXT_SEGMENT_COLORS.compactedHistory,
           included: false,
         }]
       : [],
@@ -330,6 +394,23 @@ function formatTokenCount(tokens: number): string {
   if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(tokens >= 10000000 ? 0 : 1)}M`;
   if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}K`;
   return String(tokens);
+}
+
+function getContextUsageLabel(
+  t: ReturnType<typeof useTranslation>['t'],
+  key: ContextUsageBreakdownSegment['key'],
+): string {
+  const fallback: Record<ContextUsageBreakdownSegment['key'], string> = {
+    tools: 'Tool calls',
+    skillLoad: 'Skill loads',
+    agentDelegation: 'Agent delegation',
+    conversation: 'Conversation',
+    draft: 'Current draft',
+    compactedHistory: 'Compacted history',
+  };
+  const i18nKey = `chat.contextUsage.breakdown.${key}`;
+  const label = t(i18nKey);
+  return label === i18nKey ? fallback[key] : label;
 }
 
 function ContextUsageRing({
@@ -345,7 +426,7 @@ function ContextUsageRing({
   totalTokens: number;
   breakdown: ContextUsageBreakdown;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation('session');
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const clamped = Math.max(0, Math.min(100, percent));
@@ -360,7 +441,7 @@ function ContextUsageRing({
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
   const rows = [
-    ...breakdown.segments.filter((segment) => segment.tokens > 0 || segment.key === 'conversation'),
+    ...breakdown.segments.filter((segment) => segment.tokens > 0),
     ...breakdown.excludedSegments,
   ];
   const activeSegments = breakdown.segments.filter((segment) => segment.tokens > 0);
@@ -397,7 +478,7 @@ function ContextUsageRing({
         className="relative inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
         title={title}
         aria-label={title}
-        aria-haspopup="dialog"
+        aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
@@ -419,58 +500,62 @@ function ContextUsageRing({
 
       {open && (
         <div
-          role="dialog"
+          role="menu"
           aria-label={t('chat.contextUsage.title')}
-          className="absolute bottom-full right-0 z-50 mb-2 w-[27rem] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-800 bg-zinc-950 p-4 text-zinc-200 shadow-2xl"
+          className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm"
         >
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <h3 className="text-sm font-semibold text-zinc-200">{t('chat.contextUsage.title')}</h3>
-            <button
-              type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-              aria-label={t('chat.contextUsage.close')}
-              title={t('chat.contextUsage.close')}
-              onClick={() => setOpen(false)}
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-
-          <div className="mb-2 flex items-center justify-between gap-4 text-sm font-medium text-zinc-300">
-            <span>{t('chat.contextUsage.full', { percent: clamped })}</span>
-            <span className="text-zinc-400">
-              {t('chat.contextUsage.tokens', {
-                used: formatTokenCount(usedTokens),
-                total: formatTokenCount(totalTokens),
-              })}
-            </span>
-          </div>
-
-          <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-            <div
-              className="flex h-full overflow-hidden rounded-full"
-              style={{ width: `${clamped}%` }}
-            >
-              {activeSegments.map((segment) => (
-                <div
-                  key={segment.key}
-                  className={segment.colorClass}
-                  style={{ flexBasis: 0, flexGrow: Math.max(1, segment.tokens) }}
-                />
-              ))}
+          <div className="border-b border-zinc-100 px-2.5 py-1.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-semibold text-zinc-700">{t('chat.contextUsage.title')}</div>
+                <div className="truncate text-[10px] text-zinc-400">
+                  {t('chat.contextUsage.tokens', {
+                    used: formatTokenCount(usedTokens),
+                    total: formatTokenCount(totalTokens),
+                  })}
+                </div>
+              </div>
+              <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
+                {t('chat.contextUsage.full', { percent: clamped })}
+              </span>
+            </div>
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-zinc-100">
+              <div
+                className="flex h-full overflow-hidden rounded-full"
+                style={{ width: `${clamped}%` }}
+              >
+                {activeSegments.map((segment) => (
+                  <div
+                    key={segment.key}
+                    className={segment.colorClass}
+                    style={{
+                      flex: '0 0 auto',
+                      width: `${Math.min(100, (segment.tokens / Math.max(1, usedTokens)) * 100)}%`,
+                    }}
+                  />
+                ))}
+              </div>
             </div>
           </div>
 
-          <div className="space-y-3">
-            {rows.map((segment) => (
-              <div key={segment.key} className="flex items-center justify-between gap-4 text-sm">
-                <div className="flex min-w-0 items-center gap-3">
-                  <span className={`h-3.5 w-3.5 shrink-0 rounded-[3px] ${segment.colorClass}`} />
-                  <span className="truncate font-semibold text-zinc-200">
-                    {t(`chat.contextUsage.breakdown.${segment.key}`)}
+          <div className="max-h-[13.5rem] space-y-0.5 overflow-y-auto p-1.5">
+            {rows.length === 0 ? (
+              <div className="px-2 py-2 text-xs text-zinc-400">
+                {t('chat.contextUsage.noAttributedSegments')}
+              </div>
+            ) : rows.map((segment) => (
+              <div
+                key={segment.key}
+                role="menuitem"
+                className="flex min-w-0 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={`h-3 w-3 shrink-0 rounded-[3px] ${segment.colorClass}`} />
+                  <span className="truncate font-medium text-zinc-800">
+                    {getContextUsageLabel(t, segment.key)}
                   </span>
                 </div>
-                <span className={segment.included ? 'shrink-0 text-zinc-300' : 'shrink-0 text-zinc-500'}>
+                <span className={segment.included ? 'shrink-0 text-zinc-600' : 'shrink-0 text-zinc-400'}>
                   {segment.included
                     ? formatTokenCount(segment.tokens)
                     : t('chat.contextUsage.excludedTokens', { tokens: formatTokenCount(segment.tokens) })}
@@ -1205,6 +1290,7 @@ export default function SessionChat({
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
   const [editingText, setEditingText] = useState('');
   const [actionMessageId, setActionMessageId] = useState<string | null>(null);
+  const [contextUsageSnapshot, setContextUsageSnapshot] = useState<ContextUsageSnapshot | null>(null);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1297,17 +1383,20 @@ export default function SessionChat({
   } =
     useSessionMessages(sessionId || undefined);
   const contextUsageBreakdown = useMemo(
-    () => buildContextUsageBreakdown(messages, input),
-    [messages, input],
+    () => buildContextUsageBreakdown(messages, input, contextUsageSnapshot),
+    [messages, input, contextUsageSnapshot],
   );
   const estimatedContextTokens = contextUsageBreakdown.usedTokens;
-  const contextUsagePercent = contextWindowTokens && contextWindowTokens > 0
-    ? Math.min(100, Math.round((estimatedContextTokens / contextWindowTokens) * 100))
+  const resolvedContextWindowTokens = contextUsageSnapshot?.contextWindow && contextUsageSnapshot.contextWindow > 0
+    ? contextUsageSnapshot.contextWindow
+    : (contextWindowTokens || 0);
+  const contextUsagePercent = resolvedContextWindowTokens > 0
+    ? Math.min(100, Math.round((estimatedContextTokens / resolvedContextWindowTokens) * 100))
     : 0;
-  const contextUsageTitle = contextWindowTokens && contextWindowTokens > 0
+  const contextUsageTitle = resolvedContextWindowTokens > 0
     ? t('chat.contextUsageTitle', {
         used: formatTokenCount(estimatedContextTokens),
-        total: formatTokenCount(contextWindowTokens),
+        total: formatTokenCount(resolvedContextWindowTokens),
         percent: contextUsagePercent,
       })
     : t('chat.contextUsageUnknown');
@@ -1333,6 +1422,26 @@ export default function SessionChat({
     }
   }, [sessionId]);
 
+  const refreshContextUsage = useCallback(async () => {
+    if (!sessionId) {
+      setContextUsageSnapshot(null);
+      return;
+    }
+    try {
+      const snapshot = await sessionApi.getContextUsage(sessionId);
+      if (snapshot.sessionID === sessionId) {
+        setContextUsageSnapshot(snapshot);
+      }
+    } catch (err) {
+      console.warn('[SessionChat] Failed to fetch context usage:', err);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    setContextUsageSnapshot(null);
+    void refreshContextUsage();
+  }, [refreshContextUsage]);
+
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
       const { type, properties } = event;
@@ -1348,8 +1457,10 @@ export default function SessionChat({
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
+        setContextUsageSnapshot(null);
         setIsStreaming(false);
         refetch();
+        void refreshContextUsage();
       } else if (
         (type === 'session.status' && properties.sessionID === sessionId)
         || (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle')
@@ -1378,6 +1489,7 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
           refetch();
+          void refreshContextUsage();
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -1395,6 +1507,7 @@ export default function SessionChat({
               setIsStreaming(false);
             }
           }
+          void refreshContextUsage();
           abortingRef.current = false;
           abortedMessageIdRef.current = null;
         } else if (
@@ -1455,6 +1568,8 @@ export default function SessionChat({
         const items = Array.isArray(properties.items) ? properties.items : [];
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
+      } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
+        setContextUsageSnapshot(properties as ContextUsageSnapshot);
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
@@ -1470,6 +1585,7 @@ export default function SessionChat({
       updateMessage,
       updateMessagePart,
       refetch,
+      refreshContextUsage,
       handleQuestionAsked,
       removeByRequestId,
       onSSEEvent,
@@ -1506,6 +1622,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       refetch();
+      refreshContextUsage();
       fetchPromptQueue();
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
@@ -3043,12 +3160,12 @@ export default function SessionChat({
 
                   <div className="flex-1" />
 
-                  {contextWindowTokens && contextWindowTokens > 0 && (
+                  {resolvedContextWindowTokens > 0 && (
                     <ContextUsageRing
                       percent={contextUsagePercent}
                       title={contextUsageTitle}
                       usedTokens={estimatedContextTokens}
-                      totalTokens={contextWindowTokens}
+                      totalTokens={resolvedContextWindowTokens}
                       breakdown={contextUsageBreakdown}
                     />
                   )}
@@ -3894,7 +4011,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   type StatusCfg = {
     icon: React.ReactNode;
     iconColor: string;
-    pill: string;      // 状态 pill 样式
+    pill: string;      // Status pill classes.
     label: string;
   };
   const statusConfig: Record<string, StatusCfg> = {

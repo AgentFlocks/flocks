@@ -91,7 +91,11 @@
       "full": "{{percent}}% Full",
       "tokens": "~{{used}} / {{total}} Tokens",
       "excludedTokens": "{{tokens}} excluded",
+      "noAttributedSegments": "No attributed breakdown",
       "breakdown": {
+        "tools": "Tool calls",
+        "skillLoad": "Skill loads",
+        "agentDelegation": "Agent delegation",
         "conversation": "Conversation",
         "draft": "Current draft",
         "compactedHistory": "Compacted history"

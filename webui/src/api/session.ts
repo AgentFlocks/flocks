@@ -33,6 +33,29 @@ export interface PromptQueueResponse {
   items: QueuedPrompt[];
 }
 
+export interface ContextUsageSegment {
+  key: string;
+  tokens: number;
+  included: boolean;
+  source?: 'observed' | 'estimated' | string;
+}
+
+export interface ContextUsageSnapshot {
+  sessionID: string;
+  usedTokens: number;
+  contextWindow: number;
+  percent: number;
+  source: 'observed' | 'estimated' | string;
+  lastMessageID?: string | null;
+  observedTokens?: number | null;
+  estimatedTokens: number;
+  compactedTokens: number;
+  providerID?: string | null;
+  modelID?: string | null;
+  segments: ContextUsageSegment[];
+  excludedSegments: ContextUsageSegment[];
+}
+
 export interface SessionListParams {
   limit?: number;
   offset?: number;
@@ -121,6 +144,11 @@ export const sessionApi = {
    */
   getMessages: async (sessionId: string) => {
     const response = await client.get(`/api/session/${sessionId}/message`);
+    return response.data;
+  },
+
+  getContextUsage: async (sessionId: string): Promise<ContextUsageSnapshot> => {
+    const response = await client.get(`/api/session/${sessionId}/context-usage`);
     return response.data;
   },
 
