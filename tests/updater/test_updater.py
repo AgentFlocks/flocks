@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tomllib
 from os import utime
@@ -18,6 +19,24 @@ def _write_pyproject_version(pyproject_path: Path, version: str) -> None:
         '[project]\nname = "flocks"\nversion = "' + version + '"\n',
         encoding="utf-8",
     )
+
+
+def _prepare_real_restart_runtime(install_root: Path) -> None:
+    for python_path in (
+        install_root / ".venv" / "bin" / "python",
+        install_root / ".venv" / "Scripts" / "python.exe",
+    ):
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        if python_path.exists() or python_path.is_symlink():
+            continue
+        symlinked = False
+        try:
+            python_path.symlink_to(sys.executable)
+            symlinked = True
+        except OSError:
+            shutil.copy2(sys.executable, python_path)
+    if not symlinked:
+        python_path.chmod(0o755)
 
 
 def test_run_handles_none_process_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -470,6 +489,8 @@ def test_build_dependency_sync_command_installs_project_on_windows(
     assert updater._build_dependency_sync_command("uv", uv_default_index="https://mirror.example/simple") == [
         "uv",
         "sync",
+        "--frozen",
+        "--no-python-downloads",
         "--default-index",
         "https://mirror.example/simple",
     ]
@@ -480,7 +501,7 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
 ) -> None:
     monkeypatch.setattr(updater.sys, "platform", "linux")
 
-    assert updater._build_dependency_sync_command("uv") == ["uv", "sync"]
+    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--frozen", "--no-python-downloads"]
 
 
 def test_wheel_build_config_does_not_force_include_flockshub() -> None:
@@ -869,14 +890,18 @@ def test_refresh_global_cli_entry_uninstalls_legacy_uv_tool_after_switching_runt
 
 
 @pytest.mark.asyncio
-async def test_validate_windows_restart_runtime_requires_venv_python(tmp_path: Path) -> None:
-    assert await updater._validate_windows_restart_runtime(tmp_path) == (
-        f"Windows restart runtime is missing: {tmp_path / '.venv' / 'Scripts' / 'python.exe'}"
+async def test_validate_restart_runtime_requires_venv_python(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    assert await updater._validate_restart_runtime(tmp_path) == (
+        f"Restart runtime is missing: {tmp_path / '.venv' / 'Scripts' / 'python.exe'}"
     )
 
 
 @pytest.mark.asyncio
-async def test_validate_windows_restart_runtime_reports_import_failures(
+async def test_validate_restart_runtime_accepts_existing_venv_python_without_importing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -884,84 +909,14 @@ async def test_validate_windows_restart_runtime_reports_import_failures(
     python_exe.parent.mkdir(parents=True)
     python_exe.write_text("", encoding="utf-8")
 
-    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        return 1, "", "No module named uvicorn"
+    async def fail_run_async(*_args, **_kwargs):
+        raise AssertionError("runtime validation should not import project modules")
 
-    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_run_async", fail_run_async)
 
-    result = await updater._validate_windows_restart_runtime(
-        tmp_path, max_attempts=1,
-    )
-    assert result == "Windows restart runtime validation failed: No module named uvicorn"
+    monkeypatch.setattr(updater.sys, "platform", "win32")
 
-
-@pytest.mark.asyncio
-async def test_validate_windows_restart_runtime_handles_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
-    python_exe.parent.mkdir(parents=True)
-    python_exe.write_text("", encoding="utf-8")
-
-    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        raise subprocess.TimeoutExpired(cmd, timeout or 60)
-
-    monkeypatch.setattr(updater, "_run_async", fake_run_async)
-
-    result = await updater._validate_windows_restart_runtime(
-        tmp_path, max_attempts=1, timeout=10,
-    )
-    assert result is not None
-    assert "timed out" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_validate_windows_restart_runtime_handles_generic_exception(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
-    python_exe.parent.mkdir(parents=True)
-    python_exe.write_text("", encoding="utf-8")
-
-    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        raise PermissionError("access denied")
-
-    monkeypatch.setattr(updater, "_run_async", fake_run_async)
-
-    result = await updater._validate_windows_restart_runtime(
-        tmp_path, max_attempts=1,
-    )
-    assert result is not None
-    assert "access denied" in result
-
-
-@pytest.mark.asyncio
-async def test_validate_windows_restart_runtime_retries_and_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
-    python_exe.parent.mkdir(parents=True)
-    python_exe.write_text("", encoding="utf-8")
-
-    call_count = 0
-
-    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise subprocess.TimeoutExpired(cmd, timeout or 60)
-        return 0, "", ""
-
-    monkeypatch.setattr(updater, "_run_async", fake_run_async)
-
-    result = await updater._validate_windows_restart_runtime(
-        tmp_path, max_attempts=2, retry_delay=0.0,
-    )
-    assert result is None
-    assert call_count == 2
+    assert await updater._validate_restart_runtime(tmp_path) is None
 
 
 def test_rmtree_onerror_retries_before_logging_skip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -984,62 +939,15 @@ def test_rmtree_onerror_retries_before_logging_skip(monkeypatch: pytest.MonkeyPa
     assert warnings == [("updater.rmtree.skip_locked", {"path": "/tmp/locked"})]
 
 
-def test_rotate_windows_venv_for_sync_renames_active_venv(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_cleanup_replaced_files_removes_renamed_lock_leftovers(tmp_path: Path) -> None:
     install_root = tmp_path / "install"
-    old_python = install_root / ".venv" / "Scripts" / "python.exe"
-    old_python.parent.mkdir(parents=True)
-    old_python.write_text("old", encoding="utf-8")
-
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-
-    backup = updater._rotate_windows_venv_for_sync(install_root)
-
-    assert backup == install_root / ".venv.flocks_backup"
-    assert not (install_root / ".venv").exists()
-    assert (install_root / ".venv.flocks_backup" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
-
-
-def test_restore_windows_venv_after_failed_sync_moves_failed_venv_aside(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    install_root = tmp_path / "install"
-    new_python = install_root / ".venv" / "Scripts" / "python.exe"
-    old_python = install_root / ".venv.flocks_backup" / "Scripts" / "python.exe"
-    new_python.parent.mkdir(parents=True)
-    old_python.parent.mkdir(parents=True)
-    new_python.write_text("new", encoding="utf-8")
-    old_python.write_text("old", encoding="utf-8")
-
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-
-    error = updater._restore_windows_venv_after_failed_sync(
-        install_root,
-        install_root / ".venv.flocks_backup",
-    )
-
-    assert error is None
-    assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
-    assert (install_root / ".venv.flocks_failed" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "new"
-    assert not (install_root / ".venv.flocks_backup").exists()
-
-
-def test_cleanup_replaced_files_removes_windows_venv_rotation_dirs(tmp_path: Path) -> None:
-    install_root = tmp_path / "install"
-    backup = install_root / ".venv.flocks_backup"
-    failed = install_root / ".venv.flocks_failed"
-    backup.mkdir(parents=True)
-    failed.mkdir(parents=True)
-    (backup / "old.txt").write_text("old", encoding="utf-8")
-    (failed / "failed.txt").write_text("failed", encoding="utf-8")
+    leftover = install_root / "webui.flocks_old_123"
+    leftover.mkdir(parents=True)
+    (leftover / "old.txt").write_text("old", encoding="utf-8")
 
     updater.cleanup_replaced_files(install_root)
 
-    assert not backup.exists()
-    assert not failed.exists()
+    assert not leftover.exists()
 
 
 def test_safe_remove_renames_locked_file_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1605,7 +1513,7 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
 
 
 @pytest.mark.asyncio
-async def test_perform_update_builds_current_frontend_after_handover(
+async def test_perform_update_schedules_handoff_after_handover(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1619,8 +1527,11 @@ async def test_perform_update_builds_current_frontend_after_handover(
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
     install_root = tmp_path / "install-root"
     install_root.mkdir()
+    _prepare_real_restart_runtime(install_root)
 
     events: list[str] = []
+    popen_calls: list[list[str]] = []
+
     async def fake_get_updater_config():
         return SimpleNamespace(
             archive_format="zip",
@@ -1632,15 +1543,6 @@ async def test_perform_update_builds_current_frontend_after_handover(
             base_url=None,
             gitee_repo=None,
         )
-
-    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        if cmd[1] == "install":
-            events.append("npm-install")
-        elif cmd[:3] == ["/usr/bin/npm", "run", "build"]:
-            events.append("npm-build")
-        else:
-            events.append("uv-sync")
-        return 0, "", ""
 
     async def fake_download_with_fallback(**_kwargs):
         return archive_path
@@ -1658,7 +1560,6 @@ async def test_perform_update_builds_current_frontend_after_handover(
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
     monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
-    monkeypatch.setattr(updater, "_run_async", fake_run_async)
     monkeypatch.setattr(
         updater,
         "_find_executable",
@@ -1671,27 +1572,30 @@ async def test_perform_update_builds_current_frontend_after_handover(
         lambda *_args, **_kwargs: events.append("replace")
         or shutil.copytree(staged_webui, install_root / "webui", dirs_exist_ok=True),
     )
-    monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
-    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
     monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
     monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda *_args: events.append("rollback_handover"))
-    monkeypatch.setattr(updater.os, "execv", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **_kwargs: popen_calls.append(list(argv)) or SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    progresses = []
-    async for step in updater.perform_update("2026.4.1"):
-        progresses.append(step)
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1"):
+            pass
 
-    assert progresses[-1].stage == "error"
-    assert "Failed to restart service" in progresses[-1].message
-    assert events[:2] == ["replace", "uv-sync"]
-    assert "marker:2026.4.1" in events
+    assert events[:2] == ["replace", "sleep"]
     assert "handover" in events
-    assert events.index("handover") > events.index("uv-sync")
-    assert events.index("npm-install") > events.index("handover")
-    assert events.index("npm-build") > events.index("npm-install")
-    assert "rollback_handover" in events
+    assert len(popen_calls) == 1
+    handoff_argv = popen_calls[0]
+    assert handoff_argv[:3] == ["/usr/bin/python3", "-m", "flocks.updater.restart_handoff"]
+    assert "--uv-path" in handoff_argv
+    assert "--version" in handoff_argv
+    assert handoff_argv[handoff_argv.index("--") + 1 :] == [
+        "/usr/bin/python3",
+        "-m",
+        "flocks.cli.main",
+        "start",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1772,7 +1676,7 @@ async def test_perform_update_errors_when_handover_fails_before_frontend_build(
 
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == "Failed to prepare WebUI handover: handover boom"
-    assert events == ["replace", "uv-sync", "marker:2026.4.1", "restore"]
+    assert events == ["replace", "restore"]
 
 
 @pytest.mark.asyncio
@@ -1783,6 +1687,8 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
     archive_path = tmp_path / "flocks.tar.gz"
     archive_path.write_text("archive", encoding="utf-8")
     staged_root = tmp_path / "staged"
+    install_root = tmp_path / "install-root"
+    _prepare_real_restart_runtime(install_root)
     staged_webui = staged_root / "webui"
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
@@ -1814,7 +1720,7 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
         return 0, "", ""
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -1842,7 +1748,14 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
     assert captured["sources"] == ["gitee", "github"]
     assert run_calls == [
         (
-            ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
+            [
+                "/usr/bin/uv",
+                "sync",
+                "--frozen",
+                "--no-python-downloads",
+                "--default-index",
+                "https://mirrors.aliyun.com/pypi/simple",
+            ],
             None,
         ),
     ]
@@ -1856,6 +1769,8 @@ async def test_perform_update_retries_cn_uv_sync_with_default_source(
     archive_path = tmp_path / "flocks.tar.gz"
     archive_path.write_text("archive", encoding="utf-8")
     staged_root = tmp_path / "staged"
+    install_root = tmp_path / "install-root"
+    _prepare_real_restart_runtime(install_root)
 
     run_calls: list[list[str]] = []
 
@@ -1873,7 +1788,14 @@ async def test_perform_update_retries_cn_uv_sync_with_default_source(
 
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         run_calls.append(list(cmd))
-        if cmd == ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"]:
+        if cmd == [
+            "/usr/bin/uv",
+            "sync",
+            "--frozen",
+            "--no-python-downloads",
+            "--default-index",
+            "https://mirrors.aliyun.com/pypi/simple",
+        ]:
             return 1, "", "403 Forbidden"
         return 0, "", ""
 
@@ -1884,7 +1806,7 @@ async def test_perform_update_retries_cn_uv_sync_with_default_source(
         pass
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -1900,8 +1822,15 @@ async def test_perform_update_retries_cn_uv_sync_with_default_source(
 
     assert progresses[-1].stage == "done"
     assert run_calls == [
-        ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
-        ["/usr/bin/uv", "sync"],
+        [
+            "/usr/bin/uv",
+            "sync",
+            "--frozen",
+            "--no-python-downloads",
+            "--default-index",
+            "https://mirrors.aliyun.com/pypi/simple",
+        ],
+        ["/usr/bin/uv", "sync", "--frozen", "--no-python-downloads"],
     ]
 
 
@@ -1920,6 +1849,7 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
     install_root = tmp_path / "install-root"
     install_root.mkdir()
+    _prepare_real_restart_runtime(install_root)
 
     node_home = tmp_path / "tools" / "node"
     node_home.mkdir(parents=True)
@@ -1948,9 +1878,6 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
         run_calls.append((list(cmd), env))
         return 0, "", ""
 
-    async def fake_validate_windows_restart_runtime(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
     monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
@@ -1960,7 +1887,6 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
     monkeypatch.setattr(updater, "_find_executable", lambda name: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\uv\uv.exe" if name == "uv" else None)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
@@ -1968,17 +1894,13 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: None)
-    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=4321))
-    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
     monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1", locale="zh-CN"):
-            pass
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
+
+    assert progresses[-1].stage == "done"
     frontend_calls = [
         call for call in run_calls if call[0][0] == str(bundled_npm)
     ]
@@ -2009,6 +1931,7 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     install_root = tmp_path / "install-root"
     install_root.mkdir()
+    _prepare_real_restart_runtime(install_root)
     install_webui = install_root / "webui"
 
     node_home = tmp_path / "tools" / "node"
@@ -2060,9 +1983,6 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
             return 0, "", ""
         raise AssertionError(f"unexpected command: {cmd}")
 
-    async def fake_validate_windows_restart_runtime(*_args, **_kwargs):
-        return None
-
     def fake_find(name: str) -> str | None:
         if name == "npm.cmd":
             return system_npm
@@ -2079,7 +1999,6 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
     monkeypatch.setattr(updater, "_find_executable", fake_find)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
@@ -2087,17 +2006,13 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: None)
-    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=4321))
-    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
     monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1", locale="zh-CN"):
-            pass
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
+
+    assert progresses[-1].stage == "done"
     frontend_calls = [
         call for call in run_calls if call[0][0] in {str(bundled_npm), system_npm}
     ]
@@ -2208,6 +2123,7 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
     install_root = tmp_path / "install-root"
     install_root.mkdir()
+    _prepare_real_restart_runtime(install_root)
     install_webui = install_root / "webui"
 
     node_home = tmp_path / "tools" / "node"
@@ -2257,9 +2173,6 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
             return 0, "", ""
         raise AssertionError(f"unexpected command: {cmd}")
 
-    async def fake_validate_windows_restart_runtime(*_args, **_kwargs):
-        return None
-
     def fake_find(name: str) -> str | None:
         if name == "npm.cmd":
             return system_npm
@@ -2276,7 +2189,6 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
     monkeypatch.setattr(updater, "_find_executable", fake_find)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
@@ -2284,17 +2196,13 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: None)
-    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=4321))
-    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
     monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1", locale="zh-CN"):
-            pass
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
+
+    assert progresses[-1].stage == "done"
     frontend_calls = [
         call for call in run_calls if call[0][0] in {str(bundled_npm), system_npm}
     ]
@@ -2317,6 +2225,8 @@ async def test_perform_update_errors_when_uv_not_found(
     archive_path = tmp_path / "flocks.tar.gz"
     archive_path.write_text("archive", encoding="utf-8")
     staged_root = tmp_path / "staged"
+    install_root = tmp_path / "install-root"
+    _prepare_real_restart_runtime(install_root)
 
     async def fake_get_updater_config():
         return SimpleNamespace(
@@ -2331,7 +2241,7 @@ async def test_perform_update_errors_when_uv_not_found(
         )
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater.sys, "platform", "linux")
 
@@ -2392,7 +2302,10 @@ async def test_perform_update_retries_uv_sync_on_first_failure(
         return archive_path
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    install_root = tmp_path / "install-root"
+    _prepare_real_restart_runtime(install_root)
+
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_kw: tmp_path / "backup.tar.gz")
@@ -2416,7 +2329,7 @@ async def test_perform_update_retries_uv_sync_on_first_failure(
 
 
 @pytest.mark.asyncio
-async def test_perform_update_rotates_windows_venv_before_uv_sync(
+async def test_perform_update_syncs_windows_venv_in_place(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2449,17 +2362,8 @@ async def test_perform_update_rotates_windows_venv_before_uv_sync(
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         if "sync" in cmd:
             sync_calls.append((cmd, cwd))
-            assert not (install_root / ".venv").exists()
-            assert (install_root / ".venv.flocks_backup" / "Scripts" / "python.exe").exists()
-            new_python = install_root / ".venv" / "Scripts" / "python.exe"
-            new_python.parent.mkdir(parents=True)
-            new_python.write_text("new", encoding="utf-8")
+            assert (install_root / ".venv" / "Scripts" / "python.exe").exists()
         return 0, "", ""
-
-    async def fake_validate_windows_restart_runtime(root: Path) -> str | None:
-        assert root == install_root
-        assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "new"
-        return None
 
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
@@ -2472,16 +2376,15 @@ async def test_perform_update_rotates_windows_venv_before_uv_sync(
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
     monkeypatch.setattr(updater, "_find_executable", lambda _name: r"C:\tools\uv.exe")
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
 
     progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
 
     assert progresses[-1].stage == "done"
-    assert sync_calls == [([r"C:\tools\uv.exe", "sync"], install_root)]
-    assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "new"
-    assert (install_root / ".venv.flocks_backup" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
+    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--frozen", "--no-python-downloads"], install_root)]
+    assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
+    assert not (install_root / ".venv.flocks_backup").exists()
 
 
 @pytest.mark.asyncio
@@ -2522,7 +2425,7 @@ async def test_perform_update_rolls_back_when_windows_uv_sync_times_out(
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         if "sync" in cmd:
             new_python = install_root / ".venv" / "Scripts" / "python.exe"
-            new_python.parent.mkdir(parents=True)
+            new_python.parent.mkdir(parents=True, exist_ok=True)
             new_python.write_text("new", encoding="utf-8")
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout or 0)
         return 0, "", ""
@@ -2552,8 +2455,8 @@ async def test_perform_update_rolls_back_when_windows_uv_sync_times_out(
         f"Dependency sync timed out after {expected_timeout}s while running uv sync."
     )
     assert events == ["restore"]
-    assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
-    assert (install_root / ".venv.flocks_failed" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "new"
+    assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "new"
+    assert not (install_root / ".venv.flocks_failed").exists()
     assert not (install_root / ".venv.flocks_backup").exists()
 
 
@@ -2665,12 +2568,12 @@ async def test_perform_update_repairs_broken_uv_managed_python_cache_before_retr
     async def fake_sleep(seconds):
         sleep_calls.append(seconds)
 
-    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
-        return None
+    install_root = tmp_path / "install-root"
+    _prepare_real_restart_runtime(install_root)
 
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_kw: tmp_path / "backup.tar.gz")
@@ -2682,7 +2585,6 @@ async def test_perform_update_repairs_broken_uv_managed_python_cache_before_retr
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_repair_windows_uv_managed_python_install", lambda text: repaired_messages.append(text) or Path(r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none"))
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
 
     progresses = [
@@ -2808,9 +2710,6 @@ async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_han
             events.append("uv-sync")
         return 0, "", ""
 
-    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
-        return "No module named uvicorn"
-
     def fake_replace_install_dir(*_args, **_kwargs):
         replace_attempts["count"] += 1
         events.append(f"replace-{replace_attempts['count']}")
@@ -2834,18 +2733,19 @@ async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_han
     monkeypatch.setattr(updater, "_replace_install_dir", fake_replace_install_dir)
     monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
     monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: events.append("popen") or SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    progresses = [step async for step in updater.perform_update("2026.4.1")]
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1"):
+            pass
 
-    assert progresses[-1].stage == "error"
-    assert progresses[-1].message == "No module named uvicorn"
     assert events == [
         "replace-1",
         "handover",
         "replace-2",
-        "uv-sync",
-        "rollback",
+        "popen",
     ]
     assert "restore" not in events
 
@@ -2864,6 +2764,7 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
     (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
     install_root = tmp_path / "install-root"
     install_root.mkdir()
+    _prepare_real_restart_runtime(install_root)
     install_webui = install_root / "webui"
 
     events: list[str] = []
@@ -2901,7 +2802,6 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
         "_find_executable",
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
-    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover") or {})
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
@@ -2909,20 +2809,18 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
         or shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
-    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
 
-    progresses = [step async for step in updater.perform_update("2026.4.1")]
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
 
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == "Frontend dependency install timed out after 300s while running npm ci."
     assert events == [
         "replace",
-        "/usr/bin/uv sync",
-        "handover",
+        "/usr/bin/uv sync --frozen --no-python-downloads",
         "/usr/bin/npm install",
         "/usr/bin/npm ci",
-        "rollback",
+        "restore",
     ]
 
 
@@ -2939,6 +2837,7 @@ async def test_perform_update_rolls_back_handover_when_current_frontend_build_fa
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     install_root = tmp_path / "install-root"
     install_root.mkdir()
+    _prepare_real_restart_runtime(install_root)
     install_webui = install_root / "webui"
 
     events: list[str] = []
@@ -2984,21 +2883,19 @@ async def test_perform_update_rolls_back_handover_when_current_frontend_build_fa
         "_find_executable",
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
-    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover") or {})
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
         lambda *_args, **_kwargs: events.append("replace")
         or shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
     )
-    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
 
-    progresses = [step async for step in updater.perform_update("2026.4.1")]
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
 
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == "Frontend build failed: boom"
-    assert events == ["replace", "uv-sync", "handover", "npm-install", "npm-build", "rollback"]
+    assert events == ["replace", "uv-sync", "npm-install", "npm-build", "restore"]
 
 
 @pytest.mark.asyncio
@@ -3008,7 +2905,7 @@ async def test_perform_update_no_orphan_state_when_generator_abandoned_before_ha
 ) -> None:
     """SSE disconnect (GeneratorExit) at any yield point before handover
     must not leave upgrade state or orphan temp-page processes, because
-    the handover now happens after all yields (right before os.execv)."""
+    the handover now happens after all yields (right before restart spawn)."""
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
 
     archive_path = tmp_path / "flocks.zip"
@@ -3101,9 +2998,6 @@ async def test_perform_update_spawns_restart_process_on_windows(
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 0, "", ""
 
-    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
-        return None
-
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
@@ -3122,7 +3016,6 @@ async def test_perform_update_spawns_restart_process_on_windows(
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
     monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, cwd=None, close_fds=False: popen_calls.append((list(argv), cwd, close_fds)) or SimpleNamespace(pid=4321))
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
@@ -3183,8 +3076,8 @@ async def test_perform_update_stops_when_windows_restart_runtime_validation_fail
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 0, "", ""
 
-    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
-        return "No module named uvicorn"
+    async def fake_validate_restart_runtime(_install_root: Path) -> str | None:
+        return "Restart runtime is missing: .venv/Scripts/python.exe"
 
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
@@ -3202,14 +3095,13 @@ async def test_perform_update_stops_when_windows_restart_runtime_validation_fail
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: events.append("marker"))
     monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
-    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater, "_validate_restart_runtime", fake_validate_restart_runtime)
     monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: events.append("popen"))
 
-    progresses = [step async for step in updater.perform_update("2026.4.1")]
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
 
     assert progresses[-1].stage == "error"
-    assert progresses[-1].message == "No module named uvicorn"
+    assert progresses[-1].message == "Restart runtime is missing: .venv/Scripts/python.exe"
     assert events == ["restore"]
 
 
@@ -3309,9 +3201,6 @@ async def test_perform_update_yields_error_when_windows_spawn_fails(
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 0, "", ""
 
-    async def fake_validate(_install_root: Path) -> str | None:
-        return None
-
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
@@ -3329,7 +3218,6 @@ async def test_perform_update_yields_error_when_windows_spawn_fails(
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main"])
-    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate)
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
     monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda: events.append("rollback_handover"))
     monkeypatch.setattr(

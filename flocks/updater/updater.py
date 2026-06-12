@@ -56,8 +56,6 @@ _FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 _FRONTEND_BUILD_TIMEOUT_SECONDS = 300
 _DEPENDENCY_SYNC_TIMEOUT_SECONDS = 180
 _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
-_WINDOWS_VENV_BACKUP_NAME = ".venv.flocks_backup"
-_WINDOWS_VENV_FAILED_NAME = ".venv.flocks_failed"
 _CANCELLATION_RETRY_DELAY_SECONDS = 0.1
 
 _PRESERVE_NAMES: set[str] = {
@@ -298,63 +296,21 @@ def _get_repo_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-def _windows_upgrade_python_path(install_root: Path) -> Path:
-    """Return the Windows project virtualenv interpreter for upgrade restarts."""
-    return install_root / ".venv" / "Scripts" / "python.exe"
+def _upgrade_python_path(install_root: Path) -> Path:
+    """Return the project virtualenv interpreter used for upgrade restarts."""
+    if sys.platform == "win32":
+        return install_root / ".venv" / "Scripts" / "python.exe"
+    return install_root / ".venv" / "bin" / "python"
 
 
-async def _validate_windows_restart_runtime(
+async def _validate_restart_runtime(
     install_root: Path,
-    *,
-    max_attempts: int = 2,
-    timeout: int = 60,
-    retry_delay: float = 3.0,
 ) -> str | None:
-    """Validate the Windows project runtime that will be used for restart.
-
-    Retries up to *max_attempts* times to tolerate transient delays caused by
-    antivirus scanning or filesystem cache warm-up after ``uv sync``.
-    """
-    python_exe = _windows_upgrade_python_path(install_root)
+    """Validate that the project runtime path exists for restart."""
+    python_exe = _upgrade_python_path(install_root)
     if not python_exe.exists():
-        return f"Windows restart runtime is missing: {python_exe}"
-
-    last_error: str = ""
-    for attempt in range(max_attempts):
-        try:
-            code, _, err = await _run_async(
-                [str(python_exe), "-c", "import flocks; import uvicorn"],
-                cwd=install_root,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            last_error = (
-                f"Validation timed out ({timeout}s) — "
-                "antivirus or filesystem cache may still be warming up."
-            )
-            log.warning(
-                "updater.validate_runtime.timeout",
-                {"attempt": attempt + 1, "timeout": timeout},
-            )
-        except Exception as exc:
-            last_error = str(exc)
-            log.warning(
-                "updater.validate_runtime.error",
-                {"attempt": attempt + 1, "error": last_error},
-            )
-        else:
-            if code == 0:
-                return None
-            last_error = err or "unknown error"
-            log.warning(
-                "updater.validate_runtime.nonzero",
-                {"attempt": attempt + 1, "code": code, "error": last_error},
-            )
-
-        if attempt < max_attempts - 1:
-            await asyncio.sleep(retry_delay)
-
-    return f"Windows restart runtime validation failed: {last_error}"
+        return f"Restart runtime is missing: {python_exe}"
+    return None
 
 
 def _build_uv_sync_env() -> dict[str, str] | None:
@@ -578,10 +534,93 @@ def _dependency_sync_timeout_seconds() -> int:
 
 def _build_dependency_sync_command(uv_path: str, *, uv_default_index: str | None = None) -> list[str]:
     """Build the ``uv sync`` command used by the self-updater."""
-    cmd = [uv_path, "sync"]
+    cmd = [uv_path, "sync", "--frozen", "--no-python-downloads"]
     if uv_default_index:
         cmd.extend(["--default-index", uv_default_index])
     return cmd
+
+
+async def _sync_project_dependencies(
+    *,
+    uv_path: str,
+    install_root: Path,
+    uv_default_index: str | None = None,
+    sync_timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    """Synchronize backend dependencies in the active project environment."""
+    effective_timeout = sync_timeout or _dependency_sync_timeout_seconds()
+    uv_cmd = _build_dependency_sync_command(uv_path, uv_default_index=uv_default_index)
+    retried_after_managed_python_repair = False
+    log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
+
+    async def _run_uv_sync(cmd: list[str]) -> tuple[int, str, str]:
+        return await _run_async(
+            cmd,
+            cwd=install_root,
+            timeout=effective_timeout,
+            env=env,
+        )
+
+    def _timeout_message() -> str:
+        return f"Dependency sync timed out after {effective_timeout}s while running uv sync."
+
+    try:
+        code, _, err = await _run_uv_sync(uv_cmd)
+    except subprocess.TimeoutExpired:
+        return _timeout_message()
+
+    if (
+        code != 0
+        and sys.platform == "win32"
+        and not retried_after_managed_python_repair
+        and _is_uv_managed_python_runtime_error(err)
+    ):
+        retried_after_managed_python_repair = True
+        repaired_dir = await asyncio.to_thread(_repair_windows_uv_managed_python_install, err)
+        if repaired_dir is not None:
+            log.warning(
+                "updater.dependencies.sync_repair_uv_python",
+                {"path": str(repaired_dir)},
+            )
+        else:
+            log.warning(
+                "updater.dependencies.sync_repair_uv_python_missing_path",
+                {"error": err},
+            )
+        await asyncio.sleep(2)
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            return _timeout_message()
+
+    if code != 0 and uv_default_index:
+        log.warning(
+            "updater.dependencies.sync_retry_default_index",
+            {
+                "first_error": err,
+                "default_index": uv_default_index,
+            },
+        )
+        await asyncio.sleep(3)
+        uv_cmd = _build_dependency_sync_command(uv_path)
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            return _timeout_message()
+
+    if code != 0:
+        log.warning("updater.dependencies.sync_retry", {"first_error": err})
+        await asyncio.sleep(3)
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            return _timeout_message()
+
+    if code != 0:
+        return f"Dependency sync failed: {err}"
+
+    return None
 
 
 # ------------------------------------------------------------------ #
@@ -1670,6 +1709,70 @@ async def _restore_pro_component_snapshot(
     return None
 
 
+async def run_handoff_upgrade_tasks(
+    *,
+    install_root: Path,
+    uv_path: str,
+    version: str,
+    uv_default_index: str | None = None,
+    npm_registry: str | None = None,
+    pro_wheel_path: Path | None = None,
+    pro_bundle_manifest_path: Path | None = None,
+    bundle_sha256: str | None = None,
+    sync_timeout: int | None = None,
+) -> str | None:
+    """Run upgrade work that must happen after the old service exits."""
+    sync_env = _build_uv_sync_env()
+    sync_error = await _sync_project_dependencies(
+        uv_path=uv_path,
+        install_root=install_root,
+        uv_default_index=uv_default_index,
+        sync_timeout=sync_timeout,
+        env=sync_env,
+    )
+    if sync_error is not None:
+        return sync_error
+
+    if pro_wheel_path is not None:
+        python_path = _venv_python_path(install_root)
+        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
+        code, _, err = await _run_async(
+            install_cmd,
+            cwd=install_root,
+            timeout=180,
+            env=sync_env,
+        )
+        if code != 0:
+            return f"Flocks Pro component install failed: {err}"
+
+    validation_error = await _validate_restart_runtime(install_root)
+    if validation_error:
+        return validation_error
+
+    install_webui_dir = install_root / "webui"
+    if install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
+        frontend_error = await _build_frontend_workspace(
+            install_webui_dir,
+            npm_registry=npm_registry,
+        )
+        if frontend_error is not None:
+            return frontend_error
+
+    _write_version_marker(version.lstrip("v"))
+    if pro_bundle_manifest_path is not None and pro_bundle_manifest_path.is_file():
+        _write_pro_bundle_install_marker(
+            _load_json_file(pro_bundle_manifest_path),
+            bundle_sha256=bundle_sha256,
+        )
+
+    try:
+        _refresh_global_cli_entry(install_root)
+    except Exception as exc:
+        log.warning("updater.refresh_cli.failed", {"error": str(exc)})
+
+    return None
+
+
 def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256: str | None = None) -> None:
     marker = _flocks_root() / "run" / "pro-bundle-installed.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -2177,7 +2280,6 @@ def cleanup_replaced_files(root: Path | None = None) -> None:
             path
             for path in install_root.rglob("*")
             if ".flocks_old_" in path.name
-            or path.name in {_WINDOWS_VENV_BACKUP_NAME, _WINDOWS_VENV_FAILED_NAME}
         ),
         key=lambda path: len(path.parts),
         reverse=True,
@@ -2261,49 +2363,6 @@ def _safe_remove(target: Path) -> None:
         renamed = _renamed_lock_path(target)
         target.rename(renamed)
         log.info("updater.rename_locked", {"from": str(target), "to": str(renamed)})
-
-
-def _rotate_windows_venv_for_sync(install_root: Path) -> Path | None:
-    """Rename the active Windows venv so uv can create a fresh one."""
-    if sys.platform != "win32":
-        return None
-
-    venv = install_root / ".venv"
-    if not venv.exists() and not venv.is_symlink():
-        return None
-
-    backup = install_root / _WINDOWS_VENV_BACKUP_NAME
-    if backup.exists() or backup.is_symlink():
-        _safe_remove(backup)
-
-    venv.rename(backup)
-    log.info("updater.dependencies.rotate_venv", {"from": str(venv), "to": str(backup)})
-    return backup
-
-
-def _restore_windows_venv_after_failed_sync(install_root: Path, backup: Path | None) -> str | None:
-    """Restore the pre-sync Windows venv after a failed upgrade attempt."""
-    if sys.platform != "win32" or backup is None:
-        return None
-
-    venv = install_root / ".venv"
-    failed = install_root / _WINDOWS_VENV_FAILED_NAME
-    try:
-        if venv.exists() or venv.is_symlink():
-            if failed.exists() or failed.is_symlink():
-                _safe_remove(failed)
-            venv.rename(failed)
-            log.info("updater.dependencies.failed_venv_saved", {"from": str(venv), "to": str(failed)})
-
-        if not backup.exists() and not backup.is_symlink():
-            return f"Python environment may need manual repair: missing backup runtime {backup}"
-
-        backup.rename(venv)
-        log.info("updater.dependencies.restore_venv", {"from": str(backup), "to": str(venv)})
-    except Exception as exc:
-        return f"Python environment may need manual repair: failed to restore previous venv: {exc}"
-
-    return None
 
 
 def _replace_install_dir(
@@ -2678,9 +2737,6 @@ async def perform_update(
     install_root = _get_repo_root()
     current_version = get_current_version()
     handover_active = False
-    pro_bundle_marker_manifest: dict[str, Any] | None = None
-    pro_component_snapshot: _ProComponentSnapshot | None = None
-
     console_manifest_info: ConsoleManifestRelease | None = None
     fmt = _choose_archive_format(ucfg.archive_format)
     if profile.sources == ["console-manifest"]:
@@ -2843,23 +2899,8 @@ async def perform_update(
         message=f"Applying v{latest_tag}...",
     )
 
-    rotated_windows_venv: Path | None = None
-    runtime_restore_error: str | None = None
-
-    def _message_with_runtime_restore_error(message: str) -> str:
-        if runtime_restore_error:
-            return f"{message}\n{runtime_restore_error}"
-        return message
-
     async def _restore_after_apply_failure() -> None:
-        nonlocal handover_active, runtime_restore_error
-        restore_error = await asyncio.to_thread(
-            _restore_windows_venv_after_failed_sync,
-            install_root,
-            rotated_windows_venv,
-        )
-        if restore_error and runtime_restore_error is None:
-            runtime_restore_error = restore_error
+        nonlocal handover_active
         if backup_path is None:
             if handover_active:
                 await asyncio.to_thread(rollback_upgrade_handover)
@@ -2920,9 +2961,9 @@ async def perform_update(
             return
 
     # ------------------------------------------------------------------ #
-    # Step 5 – sync dependencies
+    # Step 5 – prepare dependency sync
     # ------------------------------------------------------------------ #
-    yield UpdateProgress(stage="syncing", message="Syncing dependencies...")
+    yield UpdateProgress(stage="syncing", message="Preparing dependency sync...")
 
     uv_path = _find_executable("uv")
     if not uv_path:
@@ -2939,192 +2980,43 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=hint, success=False)
         return
 
-    log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
-    uv_cmd = _build_dependency_sync_command(uv_path, uv_default_index=profile.uv_default_index)
-
-    sync_env = _build_uv_sync_env()
     sync_timeout = _dependency_sync_timeout_seconds()
-    retried_after_managed_python_repair = False
-
-    try:
-        rotated_windows_venv = await asyncio.to_thread(_rotate_windows_venv_for_sync, install_root)
-    except Exception as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        await _restore_after_apply_failure()
-        msg = _message_with_runtime_restore_error(f"Dependency sync failed: failed to prepare Windows runtime: {exc}")
-        _record_update_journal(f"ERROR {msg}")
-        yield UpdateProgress(stage="error", message=msg, success=False)
-        return
-
-    async def _run_uv_sync(cmd: list[str]) -> tuple[int, str, str]:
-        return await _run_async(
-            cmd,
-            cwd=install_root,
-            timeout=sync_timeout,
-            env=sync_env,
+    pro_bundle_manifest_path: Path | None = None
+    if pro_bundle_manifest:
+        pro_bundle_manifest_path = tmp_dir / "pro-bundle-marker.json"
+        pro_bundle_manifest_path.write_text(
+            json.dumps(pro_bundle_manifest, ensure_ascii=True, sort_keys=True),
+            encoding="utf-8",
         )
-
-    def _dependency_sync_timeout_message() -> str:
-        return f"Dependency sync timed out after {sync_timeout}s while running uv sync."
-
-    try:
-        code, _, err = await _run_uv_sync(uv_cmd)
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        await _restore_after_apply_failure()
-        timeout_message = _dependency_sync_timeout_message()
-        timeout_message = _message_with_runtime_restore_error(timeout_message)
-        _record_update_journal(f"ERROR {timeout_message}")
-        yield UpdateProgress(stage="error", message=timeout_message, success=False)
-        return
-    if (
-        code != 0
-        and sys.platform == "win32"
-        and not retried_after_managed_python_repair
-        and _is_uv_managed_python_runtime_error(err)
-    ):
-        retried_after_managed_python_repair = True
-        repaired_dir = await asyncio.to_thread(_repair_windows_uv_managed_python_install, err)
-        if repaired_dir is not None:
-            log.warning(
-                "updater.dependencies.sync_repair_uv_python",
-                {"path": str(repaired_dir)},
-            )
-        else:
-            log.warning(
-                "updater.dependencies.sync_repair_uv_python_missing_path",
-                {"error": err},
-            )
-        await asyncio.sleep(2)
-        try:
-            code, _, err = await _run_uv_sync(uv_cmd)
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            await _restore_after_apply_failure()
-            timeout_message = _dependency_sync_timeout_message()
-            timeout_message = _message_with_runtime_restore_error(timeout_message)
-            _record_update_journal(f"ERROR {timeout_message}")
-            yield UpdateProgress(stage="error", message=timeout_message, success=False)
-            return
-    if code != 0 and profile.uv_default_index:
-        log.warning(
-            "updater.dependencies.sync_retry_default_index",
-            {
-                "first_error": err,
-                "default_index": profile.uv_default_index,
-            },
-        )
-        await asyncio.sleep(3)
-        uv_cmd = _build_dependency_sync_command(uv_path)
-        try:
-            code, _, err = await _run_uv_sync(uv_cmd)
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            await _restore_after_apply_failure()
-            timeout_message = _dependency_sync_timeout_message()
-            timeout_message = _message_with_runtime_restore_error(timeout_message)
-            _record_update_journal(f"ERROR {timeout_message}")
-            yield UpdateProgress(stage="error", message=timeout_message, success=False)
-            return
-    if code != 0:
-        log.warning("updater.dependencies.sync_retry", {"first_error": err})
-        await asyncio.sleep(3)
-        try:
-            code, _, err = await _run_uv_sync(uv_cmd)
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            await _restore_after_apply_failure()
-            timeout_message = _dependency_sync_timeout_message()
-            timeout_message = _message_with_runtime_restore_error(timeout_message)
-            _record_update_journal(f"ERROR {timeout_message}")
-            yield UpdateProgress(stage="error", message=timeout_message, success=False)
-            return
-
-    if code != 0:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        await _restore_after_apply_failure()
-        yield UpdateProgress(
-            stage="error",
-            message=_message_with_runtime_restore_error(f"Dependency sync failed: {err}"),
-            success=False,
-        )
-        return
-
-    if pro_wheel_path is not None:
-        yield UpdateProgress(
-            stage="syncing",
-            message="Installing Flocks Pro component...",
-            pro_component_filename=pro_wheel_path.name,
-        )
-        python_path = _venv_python_path(install_root)
-        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
-        pro_component_snapshot = await _snapshot_pro_component(install_root)
-        code, _, err = await _run_async(
-            install_cmd,
-            cwd=install_root,
-            timeout=180,
-            env=sync_env,
-        )
-        if code != 0:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            await _restore_after_apply_failure()
-            restore_error = None
-            if rotated_windows_venv is None:
-                restore_error = await _restore_pro_component_snapshot(
-                    pro_component_snapshot,
-                    uv_path=uv_path,
-                    install_root=install_root,
-                    env=sync_env,
-                )
-            message = f"Flocks Pro component install failed: {err}"
-            if restore_error:
-                message = f"{message}\n{restore_error}"
-            message = _message_with_runtime_restore_error(message)
-            yield UpdateProgress(stage="error", message=message, success=False)
-            return
-        if pro_bundle_manifest:
-            pro_bundle_marker_manifest = pro_bundle_manifest
-
-    if sys.platform == "win32":
-        validation_error = await _validate_windows_restart_runtime(install_root)
-        if validation_error:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            await _restore_after_apply_failure()
-            if pro_component_snapshot is not None and rotated_windows_venv is None:
-                await _restore_pro_component_snapshot(
-                    pro_component_snapshot,
-                    uv_path=uv_path,
-                    install_root=install_root,
-                    env=sync_env,
-                )
-            yield UpdateProgress(
-                stage="error",
-                message=_message_with_runtime_restore_error(validation_error),
-                success=False,
-            )
-            return
-
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    _write_version_marker(latest_tag.lstrip("v"))
-    if pro_bundle_marker_manifest:
-        _write_pro_bundle_install_marker(pro_bundle_marker_manifest, bundle_sha256=bundle_sha256)
-
-    try:
-        _refresh_global_cli_entry(install_root)
-    except Exception as exc:
-        log.warning("updater.refresh_cli.failed", {"error": str(exc)})
 
     # ------------------------------------------------------------------ #
-    # Step 6 – restart in-place (skipped when restart=False, e.g. CLI)
-    # Send the "restarting" event while the proxy is still alive, then
-    # perform the handover, rebuild the frontend in the active install tree,
-    # and finally restart the service.
+    # Step 6 – run post-apply tasks or restart via handoff
     #
-    # CRITICAL: once handover starts we ignore client-disconnect cancellation
-    # until the build/restart sequence finishes, so the temporary upgrade page
-    # is not left behind half-way through cutover.
+    # With restart=True, dependency sync, Pro install, frontend build, marker
+    # writes, and CLI refresh happen in restart_handoff after the old backend
+    # exits. This avoids mutating the active Python environment while the old
+    # service is still running.
     # ------------------------------------------------------------------ #
     if not restart:
+        task_error = await run_handoff_upgrade_tasks(
+            install_root=install_root,
+            uv_path=uv_path,
+            version=latest_tag,
+            uv_default_index=profile.uv_default_index,
+            npm_registry=profile.npm_registry,
+            pro_wheel_path=pro_wheel_path,
+            pro_bundle_manifest_path=pro_bundle_manifest_path,
+            bundle_sha256=bundle_sha256,
+            sync_timeout=sync_timeout,
+        )
+        if task_error is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            _record_update_journal(f"ERROR {task_error}")
+            yield UpdateProgress(stage="error", message=task_error, success=False)
+            return
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         log.info("updater.apply.done", {"version": latest_tag, "restart": False, "region": profile.region})
         yield UpdateProgress(
             stage="done",
@@ -3176,75 +3068,43 @@ async def perform_update(
             await _restore_after_apply_failure()
             yield UpdateProgress(
                 stage="error",
-                message=_message_with_runtime_restore_error(f"Failed to prepare WebUI handover: {exc}"),
+                message=f"Failed to prepare WebUI handover: {exc}",
                 success=False,
             )
             return
 
-    install_webui_dir = install_root / "webui"
-    if install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
-        if not handover_active:
-            frontend_error = "Refusing to rebuild frontend before WebUI handover completes."
-            _record_update_journal(f"ERROR {frontend_error}")
-            await _restore_after_apply_failure()
-            yield UpdateProgress(
-                stage="error",
-                message=_message_with_runtime_restore_error(frontend_error),
-                success=False,
-            )
-            return
-        frontend_error = await _await_ignoring_cancellation(
-            _build_frontend_workspace(
-                install_webui_dir,
-                npm_registry=profile.npm_registry,
-            )
-        )
-        if frontend_error is not None:
-            _record_update_journal(f"ERROR {frontend_error}")
-            await _await_ignoring_cancellation(_restore_after_apply_failure())
-            yield UpdateProgress(
-                stage="error",
-                message=_message_with_runtime_restore_error(frontend_error),
-                success=False,
-            )
-            return
-
-    if sys.platform == "win32":
-        try:
-            handoff_argv = _build_windows_restart_handoff_argv(restart_argv, install_root)
-            log.info(
-                "updater.restart.handoff_spawn",
-                {
-                    "argv": handoff_argv,
-                    "restart_argv": restart_argv,
-                },
-            )
-            subprocess.Popen(
-                handoff_argv,
-                cwd=install_root,
-                close_fds=True,
-            )
-            os._exit(0)
-        except Exception as exc:
-            log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
-            if handover_active:
-                try:
-                    rollback_upgrade_handover()
-                except Exception:
-                    pass
-                handover_active = False
-            yield UpdateProgress(
-                stage="error",
-                message=f"Failed to restart service: {exc}",
-                success=False,
-            )
-            return
-
-    log.info("updater.restart.execv", {"argv": restart_argv})
     try:
-        os.execv(restart_argv[0], restart_argv)
-    except OSError as exc:
-        log.error("updater.restart.execv_failed", {"error": str(exc)})
+        handoff_argv = _build_restart_handoff_argv(
+            restart_argv,
+            install_root,
+            uv_path=uv_path,
+            sync_timeout=sync_timeout,
+            version=latest_tag,
+            current_version=current_version,
+            backup_path=backup_path,
+            uv_default_index=profile.uv_default_index,
+            npm_registry=profile.npm_registry,
+            pro_wheel_path=pro_wheel_path,
+            pro_bundle_manifest_path=pro_bundle_manifest_path,
+            bundle_sha256=bundle_sha256,
+            cleanup_dir=tmp_dir,
+        )
+        log.info(
+            "updater.restart.handoff_spawn",
+            {
+                "argv": handoff_argv,
+                "restart_argv": restart_argv,
+            },
+        )
+        subprocess.Popen(
+            handoff_argv,
+            cwd=install_root,
+            close_fds=True,
+        )
+        os._exit(0)
+    except Exception as exc:
+        log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         if handover_active:
             try:
                 rollback_upgrade_handover()
@@ -3322,7 +3182,7 @@ def _refresh_global_cli_entry(install_root: Path) -> None:
 
 
 def _build_restart_argv(install_root: Path | None = None) -> list[str]:
-    """Reconstruct the argv for ``os.execv`` so the process restarts correctly.
+    """Reconstruct the argv used by restart handoff to restart correctly.
 
     Always uses the project ``.venv`` Python to ensure the restarted process
     runs in the same environment that ``uv sync`` just updated.
@@ -3356,8 +3216,23 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
     return [str(venv_python), "-m", "flocks.cli.main"] + clean_rest
 
 
-def _build_windows_restart_handoff_argv(restart_argv: list[str], install_root: Path) -> list[str]:
-    """Wrap the real restart command in a helper that waits for port release."""
+def _build_restart_handoff_argv(
+    restart_argv: list[str],
+    install_root: Path,
+    *,
+    uv_path: str,
+    sync_timeout: int,
+    version: str,
+    current_version: str,
+    backup_path: Path | None = None,
+    uv_default_index: str | None = None,
+    npm_registry: str | None = None,
+    pro_wheel_path: Path | None = None,
+    pro_bundle_manifest_path: Path | None = None,
+    bundle_sha256: str | None = None,
+    cleanup_dir: Path | None = None,
+) -> list[str]:
+    """Wrap the real restart command in a helper that finishes upgrade work."""
     from flocks.cli import service_manager
 
     if not restart_argv:
@@ -3365,7 +3240,7 @@ def _build_windows_restart_handoff_argv(restart_argv: list[str], install_root: P
 
     config = _current_service_config()
     paths = service_manager.ensure_runtime_dirs()
-    return [
+    argv = [
         restart_argv[0],
         "-m",
         "flocks.updater.restart_handoff",
@@ -3383,9 +3258,31 @@ def _build_windows_restart_handoff_argv(restart_argv: list[str], install_root: P
         str(paths.backend_pid),
         "--install-root",
         str(install_root),
-        "--",
-        *restart_argv,
+        "--uv-path",
+        uv_path,
+        "--sync-timeout",
+        str(sync_timeout),
+        "--version",
+        version,
+        "--current-version",
+        current_version,
     ]
+    if backup_path is not None:
+        argv.extend(["--backup-path", str(backup_path)])
+    if uv_default_index:
+        argv.extend(["--uv-default-index", uv_default_index])
+    if npm_registry:
+        argv.extend(["--npm-registry", npm_registry])
+    if pro_wheel_path is not None:
+        argv.extend(["--pro-wheel-path", str(pro_wheel_path)])
+    if pro_bundle_manifest_path is not None:
+        argv.extend(["--pro-bundle-manifest-path", str(pro_bundle_manifest_path)])
+    if bundle_sha256:
+        argv.extend(["--bundle-sha256", bundle_sha256])
+    if cleanup_dir is not None:
+        argv.extend(["--cleanup-dir", str(cleanup_dir)])
+    argv.extend(["--", *restart_argv])
+    return argv
 
 
 def _resolve_windows_restart_command(argv0: str, orig_argv: list[str]) -> list[str] | None:
