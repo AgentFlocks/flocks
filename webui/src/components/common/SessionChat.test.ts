@@ -966,6 +966,34 @@ describe('ChatToolPart todo rendering', () => {
   });
 });
 
+describe('SessionChat context usage popover', () => {
+  it('shows zero agent delegation when no subagent delegation happened', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 120,
+      contextWindow: 1000,
+      percent: 12,
+      source: 'estimated',
+      estimatedTokens: 120,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'agentDelegation', tokens: 0, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+
+    expect(screen.getByText('Agent delegation')).toBeInTheDocument();
+    expect(screen.getByText('0')).toBeInTheDocument();
+  });
+});
+
 describe('getRegenerateTruncateTarget', () => {
   it('truncates back to the parent user message for assistant regenerations', () => {
     const target = getRegenerateTruncateTarget([

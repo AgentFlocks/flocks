@@ -24,6 +24,7 @@ log = Log.create(service="context-usage")
 
 UsageSource = Literal["observed", "estimated"]
 DELEGATION_TOOLS = {"delegate_task", "task"}
+ZERO_VISIBLE_SEGMENTS = {"agentDelegation"}
 
 
 class ContextUsageSegment(BaseModel):
@@ -168,7 +169,7 @@ async def build_context_usage_snapshot(
     }
     for key in ("systemPrompt", "toolDefinitions", "conversation", "tools", "skillLoad", "agentDelegation"):
         tokens = segment_tokens.get(key, 0)
-        if tokens <= 0:
+        if tokens <= 0 and key not in ZERO_VISIBLE_SEGMENTS:
             continue
         attributed_tokens += tokens
         segments.append(

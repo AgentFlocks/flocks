@@ -302,6 +302,7 @@ const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string
 };
 
 const CONTEXT_SEGMENT_KEYS = new Set(Object.keys(CONTEXT_SEGMENT_COLORS));
+const ZERO_VISIBLE_CONTEXT_SEGMENTS = new Set<ContextUsageBreakdownSegment['key']>(['agentDelegation']);
 
 function estimateMessageTokens(message: Message): number {
   return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
@@ -450,7 +451,9 @@ function ContextUsageRing({
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
   const rows = [
-    ...breakdown.segments.filter((segment) => segment.tokens > 0),
+    ...breakdown.segments.filter((segment) => (
+      segment.tokens > 0 || ZERO_VISIBLE_CONTEXT_SEGMENTS.has(segment.key)
+    )),
     ...breakdown.excludedSegments,
   ];
   const activeSegments = breakdown.segments.filter((segment) => segment.tokens > 0);
