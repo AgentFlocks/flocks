@@ -1569,8 +1569,6 @@ export default function SessionChat({
           if (!abortingRef.current) setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
-          setContextUsageSnapshot(null);
-          setContextUsageRefreshing(true);
           setCompactingMessage(properties.status?.message || t('chat.compacting'));
           // Reset progress state on each new compaction cycle so a stale
           // run's stages do not leak into a fresh "Compacting..." panel.
@@ -1584,7 +1582,7 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
           refetch();
-          void refreshContextUsage({ clear: true });
+          void refreshContextUsage();
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -1644,7 +1642,7 @@ export default function SessionChat({
         const data = (properties.data ?? {}) as Record<string, unknown>;
         if (!stage) return;
         if (stage === 'complete' && data.result === 'continue') {
-          void refreshContextUsage({ clear: true });
+          void refreshContextUsage();
         }
         // Single source of truth: append into ``compactionStages`` and let
         // the progress bar derive ``done/total`` from it via useMemo.
@@ -1667,7 +1665,7 @@ export default function SessionChat({
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
       } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
-        void refreshContextUsage({ clear: true });
+        void refreshContextUsage();
       } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
         setContextUsageSnapshot(properties as ContextUsageSnapshot);
         if (typeof properties.contextWindow === 'number' && properties.contextWindow > 0) {

@@ -1019,7 +1019,7 @@ describe('SessionChat context usage popover', () => {
     expect(screen.queryByText('Compacted history')).not.toBeInTheDocument();
   });
 
-  it('clears stale usage while recalculating after compaction succeeds', async () => {
+  it('keeps usage visible while recalculating after compaction succeeds', async () => {
     const user = userEvent.setup();
     sessionApiGetContextUsageMock
       .mockResolvedValueOnce({
@@ -1035,7 +1035,19 @@ describe('SessionChat context usage popover', () => {
         ],
         excludedSegments: [],
       })
-      .mockReturnValueOnce(new Promise(() => {}));
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 420,
+        contextWindow: 1000,
+        percent: 42,
+        source: 'estimated',
+        estimatedTokens: 420,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
     useSessionMessagesMock.mockReturnValue({
       messages: [
         makeMessage({
@@ -1058,6 +1070,7 @@ describe('SessionChat context usage popover', () => {
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
     await user.click(contextButton);
     expect(await screen.findByText('Conversation')).toBeInTheDocument();
+    expect(screen.getByText('900')).toBeInTheDocument();
 
     act(() => {
       useSSEOptionsRef.current.onEvent({
@@ -1066,11 +1079,11 @@ describe('SessionChat context usage popover', () => {
       });
     });
 
+    expect(screen.getByText('900')).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByText('900')).not.toBeInTheDocument();
+      expect(screen.getByText('420')).toBeInTheDocument();
     });
     expect(screen.getByText('Conversation')).toBeInTheDocument();
-    expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(1);
   });
 
   it('refreshes context usage after compaction fails', async () => {
@@ -1119,6 +1132,10 @@ describe('SessionChat context usage popover', () => {
         },
       });
     });
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+    expect(screen.getByText('900')).toBeInTheDocument();
+
     act(() => {
       useSSEOptionsRef.current.onEvent({
         type: 'session.error',
@@ -1134,8 +1151,6 @@ describe('SessionChat context usage popover', () => {
     });
     expect(onError).toHaveBeenCalledWith('provider unavailable');
 
-    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
-    await user.click(contextButton);
     expect(screen.getByText('420')).toBeInTheDocument();
   });
 });
