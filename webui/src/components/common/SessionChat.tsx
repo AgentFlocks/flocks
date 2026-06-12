@@ -472,7 +472,7 @@ function ContextUsageRing({
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const clamped = Math.max(0, Math.min(100, percent));
-  const radius = 13;
+  const radius = 9;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference * (1 - clamped / 100);
   const strokeClass = clamped >= 90
@@ -515,25 +515,25 @@ function ContextUsageRing({
   return (
     <div
       ref={wrapperRef}
-      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center"
+      className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center"
     >
       <button
         type="button"
-        className="relative inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+        className="relative inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
         title={title}
         aria-label={title}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <svg className="absolute inset-0 h-8 w-8 -rotate-90" viewBox="0 0 32 32" aria-hidden="true">
-          <circle cx="16" cy="16" r={radius} fill="none" strokeWidth="2.5" className="stroke-zinc-200" />
+        <svg className="absolute inset-0 h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200" />
           <circle
-            cx="16"
-            cy="16"
+            cx="12"
+            cy="12"
             r={radius}
             fill="none"
-            strokeWidth="2.5"
+            strokeWidth="2"
             strokeLinecap="round"
             className={strokeClass}
             strokeDasharray={circumference}
@@ -2686,12 +2686,10 @@ export default function SessionChat({
   }, [editingMessageId, messages, resetEditingState]);
 
   // ── Merged messages with compaction grouping ──
-  // The compaction divider is rendered at the position of the FIRST
-  // compacted message (not the summary), so it appears before the
-  // preserved messages rather than after them.
-  const { merged, compactedGroupMap, summaryRedirectMap, skipIndices } = useMemo(() => {
+  // The compaction divider is rendered at the position of the first compacted
+  // message, marking where archived history was replaced by the summary.
+  const { merged, summaryRedirectMap, skipIndices } = useMemo(() => {
     const merged = mergeConsecutiveAssistantMessages(messages);
-    const compactedGroupMap = new Map<number, MergedMessage[]>();
     // Maps: first-compacted-index → summary-message-index, so we can
     // render the summary message at the earlier position.
     const summaryRedirectMap = new Map<number, number>();
@@ -2714,9 +2712,7 @@ export default function SessionChat({
         compactedBuffer.push(msg);
         skipIndices.add(idx);
       } else if (msg.finish === 'summary' && compactedBuffer.length > 0) {
-        // Render the divider at the first compacted message's position
         skipIndices.delete(firstCompactedIdx);
-        compactedGroupMap.set(firstCompactedIdx, [...compactedBuffer]);
         summaryRedirectMap.set(firstCompactedIdx, idx);
         // Skip the summary at its natural (later) position
         skipIndices.add(idx);
@@ -2736,7 +2732,7 @@ export default function SessionChat({
       compactedBuffer.length = 0;
     }
 
-    return { merged, compactedGroupMap, summaryRedirectMap, skipIndices };
+    return { merged, summaryRedirectMap, skipIndices };
   }, [messages]);
 
   // ── Styling based on compact mode ──
@@ -2810,7 +2806,6 @@ export default function SessionChat({
                   onEditSave={handleSaveEditedMessage}
                   onEditSend={handleSendEditedUserMessage}
                   onRegenerate={handleRegenerateMessage}
-                  compactedMessages={compactedGroupMap.get(i)}
                 />
               );
             })}
@@ -3347,8 +3342,6 @@ export interface ChatMessageBubbleProps {
   onEditSave?: () => Promise<void>;
   onEditSend?: () => Promise<void>;
   onRegenerate?: (messageId: string) => Promise<void>;
-  /** Compacted messages that precede this summary message */
-  compactedMessages?: MergedMessage[];
 }
 
 function ChatMessageBubbleInner({
@@ -3372,7 +3365,6 @@ function ChatMessageBubbleInner({
   onEditSave,
   onEditSend,
   onRegenerate,
-  compactedMessages,
 }: ChatMessageBubbleProps) {
   const { t } = useTranslation('session');
   const isUser = message.role === 'user';
@@ -3384,34 +3376,13 @@ function ChatMessageBubbleInner({
   // instead — same UX, no popup blocker / data-URL restriction headaches.
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
-    const hasArchived = compactedMessages && compactedMessages.length > 0;
     return (
-      <div className="my-3 px-1">
-        {/* Archived messages shown inline without collapse */}
-        {hasArchived && (
-          <div className="mb-3 space-y-3">
-            {compactedMessages!.map((cMsg) => (
-              <ChatMessageBubble
-                key={cMsg.id}
-                message={cMsg}
-                showTimestamp={showTimestamp}
-                collapseIntermediateSteps={collapseIntermediateSteps}
-                compact={compact}
-                onCopy={onCopy}
-                editingMessageId={editingMessageId}
-                editingText={editingText}
-                actionsDisabled={actionsDisabled}
-                actionMessageId={actionMessageId}
-                onEditStart={onEditStart}
-                onEditChange={onEditChange}
-                onEditCancel={onEditCancel}
-                onEditSave={onEditSave}
-                onEditSend={onEditSend}
-                onRegenerate={onRegenerate}
-              />
-            ))}
-          </div>
-        )}
+      <div className={`${compact ? 'my-3' : 'my-4'} flex w-full items-center gap-3 px-1 text-xs text-zinc-500`}>
+        <span className="h-px flex-1 bg-zinc-200" />
+        <span className="shrink-0 rounded-full border border-zinc-200 bg-white px-2.5 py-1 font-medium text-zinc-500">
+          {t('chat.contextCompressed')}
+        </span>
+        <span className="h-px flex-1 bg-zinc-200" />
       </div>
     );
   }

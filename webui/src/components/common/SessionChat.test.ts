@@ -54,6 +54,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.compacting': '压缩中...',
+  'chat.contextCompressed': '会话上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
   'chat.contextUsage.full': '13% Full',
@@ -987,10 +988,51 @@ describe('SessionChat context usage popover', () => {
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveClass('h-6', 'w-6');
     await user.click(contextButton);
 
     expect(screen.getByText('Agent delegation')).toBeInTheDocument();
     expect(screen.getByText('0')).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat compaction divider', () => {
+  it('shows a compressed-context divider at the archived history boundary', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'old-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'old-user-part', type: 'text', text: 'old hidden request' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-1',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'current answer' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('会话上下文已压缩')).toBeInTheDocument();
+    expect(screen.queryByText('old hidden request')).not.toBeInTheDocument();
+    expect(screen.getByText('current answer')).toBeInTheDocument();
   });
 });
 
