@@ -99,8 +99,8 @@
         "skillLoad": "Skill loads",
         "agentDelegation": "Agent delegation",
         "conversation": "Conversation",
+        "reasoning": "Reasoning",
         "draft": "Current draft",
-        "otherContext": "Other context",
         "compactedHistory": "Compacted history"
       }
     },

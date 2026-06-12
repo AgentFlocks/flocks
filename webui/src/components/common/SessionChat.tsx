@@ -252,7 +252,7 @@ function estimatePartTokens(part: MessagePart): number {
   if (part.type === 'text') {
     return countTokensLikeCompaction(part.text);
   }
-  if (part.type === 'reasoning') {
+  if (part.type === 'reasoning' || part.type === 'thinking') {
     return countTokensLikeCompaction(part.text);
   }
   if (part.type === 'tool' && part.state) {
@@ -274,8 +274,8 @@ export interface ContextUsageBreakdownSegment {
     | 'skillLoad'
     | 'agentDelegation'
     | 'conversation'
+    | 'reasoning'
     | 'draft'
-    | 'otherContext'
     | 'compactedHistory';
   tokens: number;
   colorClass: string;
@@ -296,8 +296,8 @@ const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string
   skillLoad: 'bg-amber-400',
   agentDelegation: 'bg-emerald-500',
   conversation: 'bg-slate-500',
+  reasoning: 'bg-rose-400',
   draft: 'bg-sky-400',
-  otherContext: 'bg-teal-400',
   compactedHistory: 'bg-zinc-300',
 };
 
@@ -308,15 +308,56 @@ function estimateMessageTokens(message: Message): number {
   return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
 }
 
+function estimateActiveMessageBreakdown(messages: Message[]): Pick<ContextUsageBreakdown, 'segments' | 'usedTokens'> {
+  let conversationTokens = 0;
+  let reasoningTokens = 0;
+
+  messages.forEach((message) => {
+    if (message.compacted) return;
+    message.parts.forEach((part) => {
+      const tokens = estimatePartTokens(part);
+      if (part.type === 'reasoning' || part.type === 'thinking') {
+        reasoningTokens += tokens;
+      } else {
+        conversationTokens += tokens;
+      }
+    });
+  });
+
+  const segments: ContextUsageBreakdownSegment[] = [];
+  if (conversationTokens > 0) {
+    segments.push({
+      key: 'conversation',
+      tokens: conversationTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.conversation,
+      included: true,
+    });
+  }
+  if (reasoningTokens > 0) {
+    segments.push({
+      key: 'reasoning',
+      tokens: reasoningTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.reasoning,
+      included: true,
+    });
+  }
+
+  return {
+    usedTokens: conversationTokens + reasoningTokens,
+    segments,
+  };
+}
+
 function normalizeContextSegment(segment: {
   key: string;
   tokens: number;
   included?: boolean;
 }): ContextUsageBreakdownSegment | null {
-  if (!CONTEXT_SEGMENT_KEYS.has(segment.key)) {
+  const rawKey = segment.key === 'otherContext' ? 'conversation' : segment.key;
+  if (!CONTEXT_SEGMENT_KEYS.has(rawKey)) {
     return null;
   }
-  const key = segment.key as ContextUsageBreakdownSegment['key'];
+  const key = rawKey as ContextUsageBreakdownSegment['key'];
   return {
     key,
     tokens: Math.max(0, Math.round(segment.tokens || 0)),
@@ -330,9 +371,6 @@ export function buildContextUsageBreakdown(
   draft: string,
   snapshot?: ContextUsageSnapshot | null,
 ): ContextUsageBreakdown {
-  const conversationTokens = messages.reduce((total, message) => (
-    message.compacted ? total : total + estimateMessageTokens(message)
-  ), 0);
   const compactedTokens = messages.reduce((total, message) => (
     message.compacted ? total + estimateMessageTokens(message) : total
   ), 0);
@@ -364,14 +402,8 @@ export function buildContextUsageBreakdown(
     };
   }
 
-  const segments: ContextUsageBreakdownSegment[] = [
-    {
-      key: 'conversation',
-      tokens: conversationTokens,
-      colorClass: CONTEXT_SEGMENT_COLORS.conversation,
-      included: true,
-    },
-  ];
+  const activeBreakdown = estimateActiveMessageBreakdown(messages);
+  const segments: ContextUsageBreakdownSegment[] = [...activeBreakdown.segments];
 
   if (draftTokens > 0) {
     segments.push({
@@ -383,7 +415,7 @@ export function buildContextUsageBreakdown(
   }
 
   return {
-    usedTokens: conversationTokens + draftTokens,
+    usedTokens: activeBreakdown.usedTokens + draftTokens,
     compactedTokens,
     segments,
     excludedSegments: compactedTokens > 0
@@ -414,8 +446,8 @@ function getContextUsageLabel(
     skillLoad: 'Skill loads',
     agentDelegation: 'Agent delegation',
     conversation: 'Conversation',
+    reasoning: 'Reasoning',
     draft: 'Current draft',
-    otherContext: 'Other context',
     compactedHistory: 'Compacted history',
   };
   const i18nKey = `chat.contextUsage.breakdown.${key}`;

@@ -66,8 +66,8 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.contextUsage.breakdown.skillLoad': 'Skill loads',
   'chat.contextUsage.breakdown.agentDelegation': 'Agent delegation',
   'chat.contextUsage.breakdown.conversation': 'Conversation',
+  'chat.contextUsage.breakdown.reasoning': 'Reasoning',
   'chat.contextUsage.breakdown.draft': 'Current draft',
-  'chat.contextUsage.breakdown.otherContext': 'Other context',
   'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
@@ -318,7 +318,7 @@ describe('buildContextUsageBreakdown', () => {
         { key: 'skillLoad', tokens: 20, included: true, source: 'estimated' },
         { key: 'agentDelegation', tokens: 10, included: true, source: 'estimated' },
         { key: 'conversation', tokens: 30, included: true, source: 'estimated' },
-        { key: 'otherContext', tokens: 5, included: true, source: 'observed' },
+        { key: 'reasoning', tokens: 5, included: true, source: 'observed' },
       ],
       excludedSegments: [
         { key: 'compactedHistory', tokens: 50, included: false, source: 'estimated' },
@@ -334,7 +334,7 @@ describe('buildContextUsageBreakdown', () => {
       ['skillLoad', 20],
       ['agentDelegation', 10],
       ['conversation', 30],
-      ['otherContext', 5],
+      ['reasoning', 5],
       ['draft', 10],
     ]);
     expect(breakdown.excludedSegments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([

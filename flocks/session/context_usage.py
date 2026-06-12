@@ -161,34 +161,33 @@ async def build_context_usage_snapshot(
     )
 
     segments: List[ContextUsageSegment] = []
-    attributed_tokens = 0
     segment_tokens = {
         "systemPrompt": system_prompt_tokens,
         "toolDefinitions": tool_definition_tokens,
         **breakdown_tokens,
     }
-    for key in ("systemPrompt", "toolDefinitions", "conversation", "tools", "skillLoad", "agentDelegation"):
+    unattributed_tokens = used_tokens - sum(segment_tokens.values())
+    if unattributed_tokens > 0:
+        segment_tokens["conversation"] = segment_tokens.get("conversation", 0) + unattributed_tokens
+
+    for key in (
+        "systemPrompt",
+        "toolDefinitions",
+        "conversation",
+        "reasoning",
+        "tools",
+        "skillLoad",
+        "agentDelegation",
+    ):
         tokens = segment_tokens.get(key, 0)
         if tokens <= 0 and key not in ZERO_VISIBLE_SEGMENTS:
             continue
-        attributed_tokens += tokens
         segments.append(
             ContextUsageSegment(
                 key=key,
                 tokens=tokens,
                 included=True,
                 source="estimated",
-            )
-        )
-
-    unattributed_tokens = used_tokens - attributed_tokens
-    if unattributed_tokens > 0:
-        segments.append(
-            ContextUsageSegment(
-                key="otherContext",
-                tokens=unattributed_tokens,
-                included=True,
-                source=source,
             )
         )
 
@@ -413,6 +412,7 @@ def _resolve_agent_name(messages: List[Any], session: Optional[SessionInfo]) -> 
 async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> Dict[str, int]:
     tokens_by_key = {
         "conversation": 0,
+        "reasoning": 0,
         "tools": 0,
         "skillLoad": 0,
         "agentDelegation": 0,
@@ -435,8 +435,11 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> D
 
         for part in parts:
             part_type = _field_value(part, "type", "")
-            if part_type in {"text", "reasoning"}:
+            if part_type == "text":
                 tokens_by_key["conversation"] += SessionPrompt.count_tokens(_field_value(part, "text", "") or "")
+                continue
+            if part_type in {"reasoning", "thinking"}:
+                tokens_by_key["reasoning"] += SessionPrompt.count_tokens(_field_value(part, "text", "") or "")
                 continue
             if part_type in {"agent", "subtask"}:
                 tokens_by_key["agentDelegation"] += _estimate_subtask_part_tokens(part)

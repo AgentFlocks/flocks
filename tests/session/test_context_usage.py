@@ -100,6 +100,7 @@ async def test_context_usage_prefers_fresh_observed_tokens(context_usage_mocks):
     context_usage_mocks["parts"] = {
         "assistant-1": [
             SimpleNamespace(type="text", text="c" * 160),
+            SimpleNamespace(type="reasoning", text="r" * 80),
         ]
     }
 
@@ -113,9 +114,9 @@ async def test_context_usage_prefers_fresh_observed_tokens(context_usage_mocks):
     assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
         ("systemPrompt", 30),
         ("toolDefinitions", 20),
-        ("conversation", 40),
+        ("conversation", 55),
+        ("reasoning", 20),
         ("agentDelegation", 0),
-        ("otherContext", 35),
     ]
     assert sum(segment.tokens for segment in snapshot.segments) == snapshot.used_tokens
 
@@ -133,8 +134,8 @@ async def test_context_usage_falls_back_to_estimate_without_provider_tokens(cont
     assert snapshot.observed_tokens is None
     assert snapshot.source == "estimated"
     assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
+        ("conversation", 80),
         ("agentDelegation", 0),
-        ("otherContext", 80),
     ]
 
 
@@ -162,8 +163,8 @@ async def test_context_usage_ignores_observed_tokens_after_later_summary(context
     assert snapshot.observed_tokens is None
     assert snapshot.source == "estimated"
     assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
+        ("conversation", 40),
         ("agentDelegation", 0),
-        ("otherContext", 40),
     ]
 
 

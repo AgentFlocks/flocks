@@ -99,8 +99,8 @@
         "skillLoad": "技能加载",
         "agentDelegation": "智能体委派",
         "conversation": "会话内容",
+        "reasoning": "思考过程",
         "draft": "当前草稿",
-        "otherContext": "其他上下文",
         "compactedHistory": "已压缩历史"
       }
     },
