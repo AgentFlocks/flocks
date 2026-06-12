@@ -37,6 +37,7 @@ def context_usage_mocks(monkeypatch):
         "all": [],
         "estimate": 0,
         "system_prompt": 0,
+        "tool_definitions": 0,
         "parts": {},
     }
 
@@ -51,6 +52,9 @@ def context_usage_mocks(monkeypatch):
 
     async def fake_system_prompt_tokens(*args, **kwargs):
         return state["system_prompt"]
+
+    async def fake_tool_definition_tokens(*args, **kwargs):
+        return state["tool_definitions"], ()
 
     monkeypatch.setattr(context_usage.Message, "list", fake_list)
     monkeypatch.setattr(context_usage.Message, "parts", fake_parts)
@@ -68,6 +72,11 @@ def context_usage_mocks(monkeypatch):
         context_usage,
         "_estimate_system_prompt_tokens",
         fake_system_prompt_tokens,
+    )
+    monkeypatch.setattr(
+        context_usage,
+        "_estimate_tool_definition_tokens",
+        fake_tool_definition_tokens,
     )
     return state
 
@@ -87,6 +96,7 @@ async def test_context_usage_prefers_fresh_observed_tokens(context_usage_mocks):
     context_usage_mocks["all"] = [msg]
     context_usage_mocks["estimate"] = 60
     context_usage_mocks["system_prompt"] = 30
+    context_usage_mocks["tool_definitions"] = 20
     context_usage_mocks["parts"] = {
         "assistant-1": [
             SimpleNamespace(type="text", text="c" * 160),
@@ -97,13 +107,14 @@ async def test_context_usage_prefers_fresh_observed_tokens(context_usage_mocks):
 
     assert snapshot.used_tokens == 125
     assert snapshot.observed_tokens == 125
-    assert snapshot.estimated_tokens == 90
+    assert snapshot.estimated_tokens == 110
     assert snapshot.source == "observed"
     assert snapshot.percent == 63
     assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
         ("systemPrompt", 30),
+        ("toolDefinitions", 20),
         ("conversation", 40),
-        ("otherContext", 55),
+        ("otherContext", 35),
     ]
     assert sum(segment.tokens for segment in snapshot.segments) == snapshot.used_tokens
 

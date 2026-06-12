@@ -94,6 +94,7 @@
       "noAttributedSegments": "No attributed breakdown",
       "breakdown": {
         "systemPrompt": "System prompt",
+        "toolDefinitions": "Tool definitions",
         "tools": "Tool calls",
         "skillLoad": "Skill loads",
         "agentDelegation": "Agent delegation",

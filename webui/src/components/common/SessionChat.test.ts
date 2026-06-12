@@ -61,6 +61,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.contextUsage.excludedTokens': '100 excluded',
   'chat.contextUsage.noAttributedSegments': 'No attributed breakdown',
   'chat.contextUsage.breakdown.systemPrompt': 'System prompt',
+  'chat.contextUsage.breakdown.toolDefinitions': 'Tool definitions',
   'chat.contextUsage.breakdown.tools': 'Tool calls',
   'chat.contextUsage.breakdown.skillLoad': 'Skill loads',
   'chat.contextUsage.breakdown.agentDelegation': 'Agent delegation',
@@ -312,11 +313,12 @@ describe('buildContextUsageBreakdown', () => {
       compactedTokens: 50,
       segments: [
         { key: 'systemPrompt', tokens: 15, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 10, included: true, source: 'estimated' },
         { key: 'tools', tokens: 40, included: true, source: 'estimated' },
         { key: 'skillLoad', tokens: 20, included: true, source: 'estimated' },
         { key: 'agentDelegation', tokens: 10, included: true, source: 'estimated' },
         { key: 'conversation', tokens: 30, included: true, source: 'estimated' },
-        { key: 'otherContext', tokens: 15, included: true, source: 'observed' },
+        { key: 'otherContext', tokens: 5, included: true, source: 'observed' },
       ],
       excludedSegments: [
         { key: 'compactedHistory', tokens: 50, included: false, source: 'estimated' },
@@ -327,11 +329,12 @@ describe('buildContextUsageBreakdown', () => {
     expect(breakdown.compactedTokens).toBe(50);
     expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
       ['systemPrompt', 15],
+      ['toolDefinitions', 10],
       ['tools', 40],
       ['skillLoad', 20],
       ['agentDelegation', 10],
       ['conversation', 30],
-      ['otherContext', 15],
+      ['otherContext', 5],
       ['draft', 10],
     ]);
     expect(breakdown.excludedSegments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([

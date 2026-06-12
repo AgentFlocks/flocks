@@ -269,6 +269,7 @@ function estimatePartTokens(part: MessagePart): number {
 export interface ContextUsageBreakdownSegment {
   key:
     | 'systemPrompt'
+    | 'toolDefinitions'
     | 'tools'
     | 'skillLoad'
     | 'agentDelegation'
@@ -290,6 +291,7 @@ export interface ContextUsageBreakdown {
 
 const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
   systemPrompt: 'bg-zinc-400',
+  toolDefinitions: 'bg-violet-400',
   tools: 'bg-indigo-400',
   skillLoad: 'bg-amber-400',
   agentDelegation: 'bg-emerald-500',
@@ -406,6 +408,7 @@ function getContextUsageLabel(
 ): string {
   const fallback: Record<ContextUsageBreakdownSegment['key'], string> = {
     systemPrompt: 'System prompt',
+    toolDefinitions: 'Tool definitions',
     tools: 'Tool calls',
     skillLoad: 'Skill loads',
     agentDelegation: 'Agent delegation',

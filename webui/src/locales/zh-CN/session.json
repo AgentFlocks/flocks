@@ -94,6 +94,7 @@
       "noAttributedSegments": "暂无可归因明细",
       "breakdown": {
         "systemPrompt": "系统提示词",
+        "toolDefinitions": "工具定义",
         "tools": "工具调用",
         "skillLoad": "技能加载",
         "agentDelegation": "智能体委派",

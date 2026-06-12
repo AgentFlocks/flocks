@@ -8,7 +8,8 @@ token usage or after compaction changes the prompt shape.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+import json
+from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -122,14 +123,20 @@ async def build_context_usage_snapshot(
     provider_id = provider_id or inferred_provider_id or getattr(session, "provider", None)
     model_id = model_id or inferred_model_id or getattr(session, "model", None)
     context_window = _resolve_context_window(provider_id, model_id)
+    tool_definition_tokens, prompt_tool_names = await _estimate_tool_definition_tokens(
+        session_id,
+        session=session,
+        messages=active_messages,
+    )
     system_prompt_tokens = await _estimate_system_prompt_tokens(
         session_id,
         session=session,
         messages=active_messages,
         provider_id=provider_id,
         model_id=model_id,
+        prompt_tool_names=prompt_tool_names,
     )
-    estimated_tokens = system_prompt_tokens + message_estimate_tokens
+    estimated_tokens = system_prompt_tokens + tool_definition_tokens + message_estimate_tokens
 
     latest_observed = _latest_fresh_observation(
         active_messages,
@@ -156,9 +163,10 @@ async def build_context_usage_snapshot(
     attributed_tokens = 0
     segment_tokens = {
         "systemPrompt": system_prompt_tokens,
+        "toolDefinitions": tool_definition_tokens,
         **breakdown_tokens,
     }
-    for key in ("systemPrompt", "conversation", "tools", "skillLoad", "agentDelegation"):
+    for key in ("systemPrompt", "toolDefinitions", "conversation", "tools", "skillLoad", "agentDelegation"):
         tokens = segment_tokens.get(key, 0)
         if tokens <= 0:
             continue
@@ -291,26 +299,18 @@ async def _estimate_system_prompt_tokens(
     messages: List[Any],
     provider_id: Optional[str],
     model_id: Optional[str],
+    prompt_tool_names: Iterable[str] = (),
 ) -> int:
     if not provider_id or not model_id:
         return 0
     try:
         from flocks.agent.registry import Agent
-        from flocks.agent.toolset import resolve_agent_initial_tools
         from flocks.tool.registry import ToolRegistry
 
         agent_name = _resolve_agent_name(messages, session) or await Agent.default_agent()
         agent = await Agent.get(agent_name)
         if agent is None:
             agent = await Agent.get("rex")
-
-        prompt_tool_names: List[str] = []
-        if agent is not None:
-            prompt_tool_names, _permission_rules = resolve_agent_initial_tools(
-                getattr(agent, "tools", None),
-                getattr(agent, "permission", None),
-                getattr(agent, "name", agent_name),
-            )
 
         prompts = await SessionPrompt.build_system_prompts(
             session_id=session_id,
@@ -331,6 +331,73 @@ async def _estimate_system_prompt_tokens(
             "error": str(exc),
         })
         return 0
+
+
+async def _estimate_tool_definition_tokens(
+    session_id: str,
+    *,
+    session: Optional[SessionInfo],
+    messages: List[Any],
+) -> tuple[int, tuple[str, ...]]:
+    try:
+        from flocks.agent.registry import Agent
+        from flocks.agent.toolset import resolve_agent_initial_tools
+        from flocks.session.callable_schema import (
+            _resolve_dynamic_always_load_tool_names,
+            resolve_callable_tool_infos,
+        )
+        from flocks.session.callable_state import get_session_callable_tools
+        from flocks.tool.catalog import get_always_load_tool_names
+
+        agent_name = _resolve_agent_name(messages, session) or await Agent.default_agent()
+        agent = await Agent.get(agent_name)
+        if agent is None:
+            agent = await Agent.get("rex")
+
+        callable_tool_names = await get_session_callable_tools(session_id)
+        if callable_tool_names:
+            effective_tool_names = set(callable_tool_names)
+        elif agent is not None:
+            initial_tool_names, _permission_rules = resolve_agent_initial_tools(
+                getattr(agent, "tools", None),
+                getattr(agent, "permission", None),
+                getattr(agent, "name", agent_name),
+            )
+            effective_tool_names = set(initial_tool_names)
+        else:
+            effective_tool_names = set()
+
+        effective_tool_names.update(get_always_load_tool_names())
+        effective_tool_names.update(await _resolve_dynamic_always_load_tool_names())
+        tool_infos, _enabled_count = resolve_callable_tool_infos(effective_tool_names)
+
+        tools = []
+        for tool_info in tool_infos:
+            schema = tool_info.get_schema()
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_info.name,
+                    "description": tool_info.description,
+                    "parameters": schema.to_json_schema(),
+                },
+            })
+        if not tools:
+            return 0, ()
+
+        prompt_tool_names = tuple(sorted(
+            str(tool.get("function", {}).get("name", "")).strip()
+            for tool in tools
+            if isinstance(tool, dict)
+        ))
+        encoded = json.dumps(tools, ensure_ascii=False, sort_keys=True)
+        return SessionPrompt.count_tokens(encoded), tuple(name for name in prompt_tool_names if name)
+    except Exception as exc:
+        log.debug("context_usage.tool_definition_estimate_failed", {
+            "session_id": session_id,
+            "error": str(exc),
+        })
+        return 0, ()
 
 
 def _resolve_agent_name(messages: List[Any], session: Optional[SessionInfo]) -> Optional[str]:
