@@ -833,6 +833,11 @@ export function getMessageGroupClassName({
   return isEditing ? 'w-[80%] max-w-[80%]' : 'w-fit max-w-[80%]';
 }
 
+export function getCompactionDividerClassName(compact: boolean): string {
+  const messageInset = compact ? 'pl-[38px]' : 'pl-[42px]';
+  return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-zinc-500`;
+}
+
 export function getRegenerateTruncateTarget(
   messages: Message[],
   messageId: string,
@@ -3377,7 +3382,7 @@ function ChatMessageBubbleInner({
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
     return (
-      <div className={`${compact ? 'my-3' : 'my-4'} flex w-full items-center gap-3 px-1 text-xs text-zinc-500`}>
+      <div className={getCompactionDividerClassName(compact)}>
         <span className="h-px flex-1 bg-zinc-200" />
         <span className="shrink-0 rounded-full border border-zinc-200 bg-white px-2.5 py-1 font-medium text-zinc-500">
           {t('chat.contextCompressed')}

@@ -12,6 +12,7 @@ import {
   ChatToolPart,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
+  getCompactionDividerClassName,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageErrorText,
@@ -415,6 +416,20 @@ describe('getMessageGroupClassName', () => {
     });
 
     expect(className).toBe('w-full');
+  });
+});
+
+describe('getCompactionDividerClassName', () => {
+  it('insets the divider into the assistant content column in full layout', () => {
+    const className = getCompactionDividerClassName(false);
+
+    expect(className).toContain('pl-[42px]');
+    expect(className).toContain('w-full');
+    expect(className).toContain('min-w-0');
+  });
+
+  it('uses the compact assistant inset in compact layout', () => {
+    expect(getCompactionDividerClassName(true)).toContain('pl-[38px]');
   });
 });
 
