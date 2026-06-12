@@ -48,11 +48,13 @@ function normalizeGuideActions(value: unknown): ChatGuideAction[] {
       const label = String(raw.label ?? '').trim();
       const description = String(raw.description ?? '').trim();
       const prompt = String(raw.prompt ?? '').trim();
+      const group = String(raw.group ?? '').trim();
       if (!label || !prompt) return null;
       return {
         label,
         description: description || prompt,
         prompt,
+        ...(group ? { group } : {}),
       };
     })
     .filter((item): item is ChatGuideAction => Boolean(item));
@@ -69,10 +71,13 @@ export default function CreateChatTab({
   const { t } = useTranslation('workflow');
   const navigate = useNavigate();
   const defaultSupportsVision = useDefaultModelVision();
+  const guideSectionTitle = t('create.chat.guideSectionTitle');
+  const caseSectionTitle = t('create.chat.caseSectionTitle');
 
   const guideActions = useMemo(() => (
     normalizeGuideActions(t('create.chat.guideActions', { returnObjects: true }))
-  ), [t]);
+      .map((action) => ({ ...action, group: guideSectionTitle }))
+  ), [guideSectionTitle, t]);
   const exampleQuestions = t('create.chat.exampleQuestions', { returnObjects: true }) as string[];
   const exampleQuestionLabels = t('create.chat.exampleQuestionLabels', { returnObjects: true }) as string[];
   const { agents: workflowChatAgents } = useChatAgentOptions({
@@ -93,8 +98,9 @@ export default function CreateChatTab({
         : question,
       description: question,
       prompt: question,
+      group: caseSectionTitle,
     }))
-  ), [exampleQuestionLabels, exampleQuestions]);
+  ), [caseSectionTitle, exampleQuestionLabels, exampleQuestions]);
   const quickActions = useMemo(() => (
     [...guideActions, ...exampleActions]
   ), [exampleActions, guideActions]);

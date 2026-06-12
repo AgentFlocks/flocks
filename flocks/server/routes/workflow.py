@@ -2037,6 +2037,7 @@ class WorkflowPollerConfigRequest(BaseModel):
 
     enabled: bool = False
     intervalSeconds: int = Field(30, ge=1)
+    cronExpression: Optional[str] = None
     timeoutSeconds: int = Field(7200, ge=1)
     noOverlap: bool = True
     inputs: Dict[str, Any] = Field(default_factory=dict)
@@ -2720,10 +2721,25 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
+        cron_expression = (req.cronExpression or "").strip()
+        trigger_source: Dict[str, Any]
+        if cron_expression:
+            trigger_source = {
+                "mode": "cron",
+                "intervalSeconds": req.intervalSeconds,
+                "cron": cron_expression,
+            }
+        else:
+            trigger_source = {
+                "mode": "interval",
+                "intervalSeconds": req.intervalSeconds,
+            }
+
         config = {
             "workflowId": workflow_id,
             "enabled": req.enabled,
             "intervalSeconds": req.intervalSeconds,
+            "cronExpression": cron_expression or None,
             "timeoutSeconds": req.timeoutSeconds,
             "noOverlap": req.noOverlap,
             "inputs": req.inputs,
@@ -2735,10 +2751,7 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
                 "id": "schedule-default",
                 "type": "schedule",
                 "enabled": req.enabled,
-                "source": {
-                    "mode": "interval",
-                    "intervalSeconds": req.intervalSeconds,
-                },
+                "source": trigger_source,
                 "runtime": {
                     "timeoutSeconds": req.timeoutSeconds,
                     "noOverlap": req.noOverlap,

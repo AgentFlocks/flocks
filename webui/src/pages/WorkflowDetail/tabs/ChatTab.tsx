@@ -658,37 +658,44 @@ function buildWorkflowPromptParams(workflow: Workflow) {
 
 function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
   const promptParams = buildWorkflowPromptParams(workflow);
+  const group = t('detail.chat.welcome.editSectionTitle');
   return [
     {
       label: t('detail.chat.welcome.editRequirementShort'),
       description: t('detail.chat.welcome.editRequirementDesc'),
       prompt: t('detail.chat.welcome.editRequirementPrompt', promptParams),
+      group,
     },
     {
       label: t('detail.chat.welcome.editNodeFunctionShort'),
       description: t('detail.chat.welcome.editNodeFunctionDesc'),
       prompt: t('detail.chat.welcome.editNodeFunctionPrompt', promptParams),
+      group,
     },
     {
       label: t('detail.chat.welcome.editNodeShort'),
       description: t('detail.chat.welcome.editNodeDesc'),
       prompt: t('detail.chat.welcome.editNodePrompt', promptParams),
+      group,
     },
     {
       label: t('detail.chat.welcome.editFlowShort'),
       description: t('detail.chat.welcome.editFlowDesc'),
       prompt: t('detail.chat.welcome.editFlowPrompt', promptParams),
+      group,
     },
     {
       label: t('detail.chat.welcome.editRegenerateShort'),
       description: t('detail.chat.welcome.editRegenerateDesc'),
       prompt: t('detail.chat.welcome.editRegeneratePrompt', promptParams),
+      group,
     },
   ];
 }
 
 function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
   const promptParams = buildWorkflowPromptParams(workflow);
+  const group = t('detail.chat.welcome.configSectionTitle');
   const buildQuestionPrompt = (focus: string, instruction: string) => t(
     'detail.chat.welcome.guideQuestionPrompt',
     {
@@ -702,6 +709,7 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
       label: t('detail.chat.welcome.guidePrimaryShort'),
       description: t('detail.chat.welcome.guidePrimaryDesc'),
       prompt: t('detail.chat.welcome.guidePrompt', promptParams),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideInputModeShort'),
@@ -710,6 +718,7 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
         t('detail.chat.welcome.guideInputModeShort'),
         t('detail.chat.welcome.guideInputModeInstruction'),
       ),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideSourceShapeShort'),
@@ -718,6 +727,7 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
         t('detail.chat.welcome.guideSourceShapeShort'),
         t('detail.chat.welcome.guideSourceShapeInstruction'),
       ),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideOutputShort'),
@@ -726,6 +736,7 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
         t('detail.chat.welcome.guideOutputShort'),
         t('detail.chat.welcome.guideOutputInstruction'),
       ),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideFilterShort'),
@@ -734,6 +745,7 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
         t('detail.chat.welcome.guideFilterShort'),
         t('detail.chat.welcome.guideFilterInstruction'),
       ),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideSampleShort'),
@@ -742,6 +754,7 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
         t('detail.chat.welcome.guideSampleShort'),
         t('detail.chat.welcome.guideSampleInstruction'),
       ),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideApplyShort'),
@@ -750,11 +763,13 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
         t('detail.chat.welcome.guideApplyShort'),
         t('detail.chat.welcome.guideApplyInstruction'),
       ),
+      group,
     },
     {
       label: t('detail.chat.welcome.guideAuditShort'),
       description: t('detail.chat.welcome.guideAuditDesc'),
       prompt: t('detail.chat.welcome.auditPrompt', promptParams),
+      group,
     },
   ];
 }

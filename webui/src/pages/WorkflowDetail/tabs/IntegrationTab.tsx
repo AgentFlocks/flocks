@@ -1044,9 +1044,12 @@ function TemplateTriggersSection({
       return;
     }
     if (trigger.type === 'schedule') {
+      const cronExpression = String(source.cron ?? source.cronExpression ?? '').trim();
+      const scheduleMode = source.mode ?? (cronExpression ? 'cron' : 'interval');
       await workflowAPI.savePollerConfig(workflow.id, {
         enabled,
         intervalSeconds: Math.max(1, Number(source.intervalSeconds ?? 300)),
+        cronExpression: scheduleMode === 'cron' ? (cronExpression || '*/5 * * * *') : null,
         timeoutSeconds: Math.max(1, Number(trigger.runtime?.timeoutSeconds ?? 7200)),
         noOverlap: Boolean(trigger.runtime?.noOverlap ?? true),
         inputs: asObject(trigger.inputs ?? {}),

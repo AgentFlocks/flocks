@@ -353,6 +353,53 @@ describe('IntegrationTab trigger workspace', () => {
     });
   });
 
+  it('starts cron schedule templates with a cron poller config', async () => {
+    const user = userEvent.setup();
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          triggers: [
+            {
+              id: 'schedule-default',
+              type: 'schedule',
+              name: 'Cron Schedule',
+              source: { mode: 'cron', cron: '*/10 * * * *', intervalSeconds: 300 },
+              runtime: { timeoutSeconds: 1800, noOverlap: false },
+              inputs: { source: 'cron' },
+            },
+          ],
+        },
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} />);
+
+    expect(await screen.findByText('触发能力')).toBeInTheDocument();
+    expect(screen.getByText('Cron: */10 * * * *')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '启动定时' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.savePollerConfig).toHaveBeenCalledWith(
+        'wf-1',
+        {
+          enabled: true,
+          intervalSeconds: 300,
+          cronExpression: '*/10 * * * *',
+          timeoutSeconds: 1800,
+          noOverlap: false,
+          inputs: { source: 'cron' },
+        },
+      );
+    });
+  });
+
   it('shows template empty state when config declares no publish capability', async () => {
     workflowAPI.getConfig.mockResolvedValue({
       data: {

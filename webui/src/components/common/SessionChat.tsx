@@ -2566,26 +2566,6 @@ export default function SessionChat({
             )}
           </div>
         )}
-        {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
-        {conversationBottomSlot && !hideInput && (
-          <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
-            <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pl-4 pr-8' : ''}`}>
-              {typeof conversationBottomSlot === 'function'
-                ? conversationBottomSlot({
-                  sendPrompt: (text, options) => { void handleComposerPrompt(text, options); },
-                  setInput: (text) => {
-                    setInput(text);
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  },
-                  focusInput: () => textareaRef.current?.focus(),
-                  sending,
-                  streaming: isStreaming,
-                  sessionId,
-                })
-                : conversationBottomSlot}
-            </div>
-          </div>
-        )}
         <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
@@ -2614,6 +2594,23 @@ export default function SessionChat({
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
           <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]') : ''}`}>
+            {conversationBottomSlot && (
+              <div className="mb-2 min-w-0">
+                {typeof conversationBottomSlot === 'function'
+                  ? conversationBottomSlot({
+                    sendPrompt: (text, options) => { void handleComposerPrompt(text, options); },
+                    setInput: (text) => {
+                      setInput(text);
+                      requestAnimationFrame(() => textareaRef.current?.focus());
+                    },
+                    focusInput: () => textareaRef.current?.focus(),
+                    sending,
+                    streaming: isStreaming,
+                    sessionId,
+                  })
+                  : conversationBottomSlot}
+              </div>
+            )}
             <QueuedPromptPanel
               items={queuedPrompts}
               expanded={queueExpanded}

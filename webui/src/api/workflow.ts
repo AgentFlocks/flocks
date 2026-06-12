@@ -335,6 +335,7 @@ export interface WorkflowPollerConfig {
   workflowId?: string;
   enabled?: boolean;
   intervalSeconds?: number;
+  cronExpression?: string | null;
   timeoutSeconds?: number;
   noOverlap?: boolean;
   inputs?: Record<string, any>;
