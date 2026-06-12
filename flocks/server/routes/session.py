@@ -2443,7 +2443,7 @@ async def _process_session_message(
             unique_name = f"{Identifier.create('part')}{ext}"
             target = uploads_root / unique_name
             target.write_bytes(raw_bytes)
-            return f"file://{target.resolve()}"
+            return target.resolve().as_uri()
         except Exception as exc:
             log.warn("session.message.file_part.materialize_failed", {
                 "sessionID": sessionID,
@@ -2937,7 +2937,7 @@ def _materialize_data_url_part(
                 ext = "." + tail.lower()
         target = uploads_root / f"{Identifier.create('part')}{ext}"
         target.write_bytes(raw_bytes)
-        return f"file://{target.resolve()}"
+        return target.resolve().as_uri()
     except Exception as exc:
         log.warn("session.prompt_queue.materialize_failed", {
             "sessionID": session_id,

@@ -12,7 +12,7 @@ import io
 import logging
 from pathlib import Path
 from typing import Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 _log = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ _TEXT_EXTRACTABLE_MIMES = frozenset(
 
 _DEFAULT_MAX_CHARS = 12_000
 _DEFAULT_MAX_PAGES = 20
+_LOCAL_DOWNLOAD_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def file_url_to_path(url: str) -> str:
@@ -47,8 +48,29 @@ def file_url_to_path(url: str) -> str:
     return path
 
 
+def file_download_url_to_path(url: str) -> Optional[str]:
+    """Extract the local file path from the WebUI file download URL."""
+    parsed = urlparse(url)
+    if parsed.hostname and parsed.hostname not in _LOCAL_DOWNLOAD_HOSTS:
+        return None
+    if parsed.path != "/api/file/download":
+        return None
+    path_values = parse_qs(parsed.query).get("path")
+    if not path_values:
+        return None
+    return path_values[0]
+
+
+def _read_local_path(path: str) -> Optional[bytes]:
+    try:
+        return Path(path).read_bytes()
+    except Exception as e:
+        _log.debug("read_file_part_bytes: file read failed: %s (path=%s)", e, path)
+        return None
+
+
 def read_file_part_bytes(url: str) -> Optional[bytes]:
-    """Read raw bytes from a data URI or file:// URL.
+    """Read raw bytes from a data URI, file:// URL, or local download URL.
 
     Returns None when the URL is empty, has an unsupported scheme, or the
     underlying read fails.
@@ -63,12 +85,10 @@ def read_file_part_bytes(url: str) -> Optional[bytes]:
             _log.debug("read_file_part_bytes: data URI decode failed: %s", e)
             return None
     if url.startswith("file://"):
-        path = file_url_to_path(url)
-        try:
-            return Path(path).read_bytes()
-        except Exception as e:
-            _log.debug("read_file_part_bytes: file read failed: %s (path=%s)", e, path)
-            return None
+        return _read_local_path(file_url_to_path(url))
+    path = file_download_url_to_path(url)
+    if path:
+        return _read_local_path(path)
     return None
 
 
@@ -154,6 +174,7 @@ def extract_file_text(
 __all__ = [
     "extract_pdf_text_from_bytes",
     "extract_file_text",
+    "file_download_url_to_path",
     "file_url_to_path",
     "is_text_extractable_mime",
     "read_file_part_bytes",
