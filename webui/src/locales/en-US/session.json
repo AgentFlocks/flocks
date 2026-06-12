@@ -122,7 +122,7 @@
     },
     "you": "You",
     "sending": "Sending...",
-    "contextCompressed": "Session context compressed",
+    "contextCompressed": "Context compressed",
     "historyMessages": "{{count}} archived messages",
     "compacting": "Compacting context…",
     "queue": {

@@ -55,7 +55,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.compacting': '压缩中...',
-  'chat.contextCompressed': '会话上下文已压缩',
+  'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
   'chat.contextUsage.full': '13% Full',
@@ -272,12 +272,15 @@ describe('buildContextUsageBreakdown', () => {
     expect(breakdown.usedTokens).toBe(110);
     expect(breakdown.compactedTokens).toBe(200);
     expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
-      ['conversation', 100],
-      ['draft', 10],
+      ['systemPrompt', 0],
+      ['toolDefinitions', 0],
+      ['conversation', 110],
+      ['reasoning', 0],
+      ['tools', 0],
+      ['skillLoad', 0],
+      ['agentDelegation', 0],
     ]);
-    expect(breakdown.excludedSegments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
-      ['compactedHistory', 200, false],
-    ]);
+    expect(breakdown.excludedSegments).toEqual([]);
   });
 
   it('counts compacted tool outputs as a small placeholder', () => {
@@ -332,16 +335,13 @@ describe('buildContextUsageBreakdown', () => {
     expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
       ['systemPrompt', 15],
       ['toolDefinitions', 10],
+      ['conversation', 40],
+      ['reasoning', 5],
       ['tools', 40],
       ['skillLoad', 20],
       ['agentDelegation', 10],
-      ['conversation', 30],
-      ['reasoning', 5],
-      ['draft', 10],
     ]);
-    expect(breakdown.excludedSegments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
-      ['compactedHistory', 50, false],
-    ]);
+    expect(breakdown.excludedSegments).toEqual([]);
   });
 });
 
@@ -983,7 +983,7 @@ describe('ChatToolPart todo rendering', () => {
 });
 
 describe('SessionChat context usage popover', () => {
-  it('shows zero agent delegation when no subagent delegation happened', async () => {
+  it('always shows fixed usage rows and hides compacted history', async () => {
     const user = userEvent.setup();
     sessionApiGetContextUsageMock.mockResolvedValue({
       sessionID: 'sess-1',
@@ -997,7 +997,9 @@ describe('SessionChat context usage popover', () => {
         { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
         { key: 'agentDelegation', tokens: 0, included: true, source: 'estimated' },
       ],
-      excludedSegments: [],
+      excludedSegments: [
+        { key: 'compactedHistory', tokens: 12000, included: false, source: 'estimated' },
+      ],
     });
 
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
@@ -1006,8 +1008,15 @@ describe('SessionChat context usage popover', () => {
     expect(contextButton).toHaveClass('h-6', 'w-6');
     await user.click(contextButton);
 
+    expect(screen.getByText('System prompt')).toBeInTheDocument();
+    expect(screen.getByText('Tool definitions')).toBeInTheDocument();
+    expect(screen.getByText('Conversation')).toBeInTheDocument();
+    expect(screen.getByText('Reasoning')).toBeInTheDocument();
+    expect(screen.getByText('Tool calls')).toBeInTheDocument();
+    expect(screen.getByText('Skill loads')).toBeInTheDocument();
     expect(screen.getByText('Agent delegation')).toBeInTheDocument();
-    expect(screen.getByText('0')).toBeInTheDocument();
+    expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(4);
+    expect(screen.queryByText('Compacted history')).not.toBeInTheDocument();
   });
 
   it('clears stale usage while recalculating after compaction succeeds', async () => {
@@ -1058,9 +1067,10 @@ describe('SessionChat context usage popover', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText('No attributed breakdown')).toBeInTheDocument();
+      expect(screen.queryByText('900')).not.toBeInTheDocument();
     });
-    expect(screen.queryByText('Conversation')).not.toBeInTheDocument();
+    expect(screen.getByText('Conversation')).toBeInTheDocument();
+    expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -1098,7 +1108,11 @@ describe('SessionChat compaction divider', () => {
 
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 
-    expect(screen.getByText('会话上下文已压缩')).toBeInTheDocument();
+    const dividerLabel = screen.getByText('上下文已压缩');
+    expect(dividerLabel).toBeInTheDocument();
+    expect(dividerLabel).not.toHaveClass('rounded-full');
+    expect(dividerLabel).not.toHaveClass('border');
+    expect(dividerLabel).not.toHaveClass('bg-white');
     expect(screen.getByText('old visible request')).toBeInTheDocument();
     expect(screen.getByText('current answer')).toBeInTheDocument();
   });
@@ -1150,7 +1164,7 @@ describe('SessionChat compaction divider', () => {
 
     expect(screen.getByText('first archived turn')).toBeInTheDocument();
     expect(screen.getByText('second archived turn')).toBeInTheDocument();
-    expect(screen.getAllByText('会话上下文已压缩')).toHaveLength(2);
+    expect(screen.getAllByText('上下文已压缩')).toHaveLength(2);
   });
 });
 

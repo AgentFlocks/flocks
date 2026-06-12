@@ -122,7 +122,7 @@
     },
     "you": "你",
     "sending": "发送中...",
-    "contextCompressed": "会话上下文已压缩",
+    "contextCompressed": "上下文已压缩",
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
     "queue": {

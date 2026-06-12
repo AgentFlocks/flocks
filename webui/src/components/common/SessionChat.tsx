@@ -302,7 +302,18 @@ const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string
 };
 
 const CONTEXT_SEGMENT_KEYS = new Set(Object.keys(CONTEXT_SEGMENT_COLORS));
-const ZERO_VISIBLE_CONTEXT_SEGMENTS = new Set<ContextUsageBreakdownSegment['key']>(['agentDelegation']);
+const CONTEXT_USAGE_FIXED_SEGMENT_KEYS = [
+  'systemPrompt',
+  'toolDefinitions',
+  'conversation',
+  'reasoning',
+  'tools',
+  'skillLoad',
+  'agentDelegation',
+] as const satisfies readonly ContextUsageBreakdownSegment['key'][];
+const CONTEXT_USAGE_FIXED_SEGMENT_KEY_SET = new Set<ContextUsageBreakdownSegment['key']>(
+  CONTEXT_USAGE_FIXED_SEGMENT_KEYS,
+);
 
 function estimateMessageTokens(message: Message): number {
   return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
@@ -366,6 +377,55 @@ function normalizeContextSegment(segment: {
   };
 }
 
+function addContextSegmentTokens(
+  segments: ContextUsageBreakdownSegment[],
+  key: ContextUsageBreakdownSegment['key'],
+  tokens: number,
+): void {
+  if (tokens <= 0) return;
+  const existing = segments.find((segment) => segment.key === key);
+  if (existing) {
+    existing.tokens += tokens;
+    return;
+  }
+  segments.push({
+    key,
+    tokens,
+    colorClass: CONTEXT_SEGMENT_COLORS[key],
+    included: true,
+  });
+}
+
+function normalizeFixedContextSegments(
+  segments: ContextUsageBreakdownSegment[],
+): ContextUsageBreakdownSegment[] {
+  const byKey = new Map<ContextUsageBreakdownSegment['key'], ContextUsageBreakdownSegment>();
+  for (const segment of segments) {
+    if (!CONTEXT_USAGE_FIXED_SEGMENT_KEY_SET.has(segment.key)) {
+      continue;
+    }
+    const existing = byKey.get(segment.key);
+    if (existing) {
+      existing.tokens += segment.tokens;
+    } else {
+      byKey.set(segment.key, { ...segment, included: true });
+    }
+  }
+
+  return CONTEXT_USAGE_FIXED_SEGMENT_KEYS.map((key) => {
+    const segment = byKey.get(key);
+    if (segment) {
+      return segment;
+    }
+    return {
+      key,
+      tokens: 0,
+      colorClass: CONTEXT_SEGMENT_COLORS[key],
+      included: true,
+    };
+  });
+}
+
 export function buildContextUsageBreakdown(
   messages: Message[],
   draft: string,
@@ -380,52 +440,28 @@ export function buildContextUsageBreakdown(
     const serverSegments = (snapshot.segments || [])
       .map(normalizeContextSegment)
       .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
-    const serverExcludedSegments = (snapshot.excludedSegments || [])
-      .map(normalizeContextSegment)
-      .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
     const segments = [...serverSegments];
 
-    if (draftTokens > 0) {
-      segments.push({
-        key: 'draft',
-        tokens: draftTokens,
-        colorClass: CONTEXT_SEGMENT_COLORS.draft,
-        included: true,
-      });
-    }
+    addContextSegmentTokens(segments, 'conversation', draftTokens);
 
     return {
       usedTokens: Math.max(0, snapshot.usedTokens || 0) + draftTokens,
       compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
-      segments,
-      excludedSegments: serverExcludedSegments,
+      segments: normalizeFixedContextSegments(segments),
+      excludedSegments: [],
     };
   }
 
   const activeBreakdown = estimateActiveMessageBreakdown(messages);
   const segments: ContextUsageBreakdownSegment[] = [...activeBreakdown.segments];
 
-  if (draftTokens > 0) {
-    segments.push({
-      key: 'draft',
-      tokens: draftTokens,
-      colorClass: CONTEXT_SEGMENT_COLORS.draft,
-      included: true,
-    });
-  }
+  addContextSegmentTokens(segments, 'conversation', draftTokens);
 
   return {
     usedTokens: activeBreakdown.usedTokens + draftTokens,
     compactedTokens,
-    segments,
-    excludedSegments: compactedTokens > 0
-      ? [{
-          key: 'compactedHistory',
-          tokens: compactedTokens,
-          colorClass: CONTEXT_SEGMENT_COLORS.compactedHistory,
-          included: false,
-        }]
-      : [],
+    segments: normalizeFixedContextSegments(segments),
+    excludedSegments: [],
   };
 }
 
@@ -482,12 +518,7 @@ function ContextUsageRing({
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
-  const rows = [
-    ...breakdown.segments.filter((segment) => (
-      segment.tokens > 0 || ZERO_VISIBLE_CONTEXT_SEGMENTS.has(segment.key)
-    )),
-    ...breakdown.excludedSegments,
-  ];
+  const rows = breakdown.segments;
   const activeSegments = breakdown.segments.filter((segment) => segment.tokens > 0);
 
   useEffect(() => {
@@ -583,11 +614,7 @@ function ContextUsageRing({
           </div>
 
           <div className="max-h-[13.5rem] space-y-0.5 overflow-y-auto p-1.5">
-            {rows.length === 0 ? (
-              <div className="px-2 py-2 text-xs text-zinc-400">
-                {t('chat.contextUsage.noAttributedSegments')}
-              </div>
-            ) : rows.map((segment) => (
+            {rows.map((segment) => (
               <div
                 key={segment.key}
                 role="menuitem"
@@ -3384,7 +3411,7 @@ function ChatMessageBubbleInner({
     return (
       <div className={getCompactionDividerClassName(compact)}>
         <span className="h-px flex-1 bg-zinc-200" />
-        <span className="shrink-0 rounded-full border border-zinc-200 bg-white px-2.5 py-1 font-medium text-zinc-500">
+        <span className="shrink-0 px-1.5 font-medium text-zinc-500">
           {t('chat.contextCompressed')}
         </span>
         <span className="h-px flex-1 bg-zinc-200" />
