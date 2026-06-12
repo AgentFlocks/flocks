@@ -33,6 +33,16 @@ async def test_run_session_compaction_uses_latest_user_and_publishes_status():
     async def publish_event(event_name: str, payload: dict) -> None:
         events.append((event_name, payload))
 
+    async def publish_context_usage_update(
+        event_publish_callback,
+        session_id: str,
+        **kwargs,
+    ) -> None:  # noqa: ARG001
+        await event_publish_callback(
+            "context.usage.updated",
+            {"sessionID": session_id, "sections": []},
+        )
+
     with patch(
         "flocks.server.routes.session.Session.get_by_id",
         new=AsyncMock(return_value=session),
@@ -51,7 +61,10 @@ async def test_run_session_compaction_uses_latest_user_and_publishes_status():
     ), patch(
         "flocks.session.lifecycle.compaction.compaction.SessionCompaction.process",
         new=AsyncMock(return_value="continue"),
-    ) as process_mock:
+    ) as process_mock, patch(
+        "flocks.server.routes.session._publish_context_usage_update",
+        new=publish_context_usage_update,
+    ):
         result = await _run_session_compaction(
             "ses_test",
             event_publish_callback=publish_event,
@@ -67,10 +80,17 @@ async def test_run_session_compaction_uses_latest_user_and_publishes_status():
             "status": {"type": "compacting", "message": "Compacting context…"},
         },
     )
-    assert events[-1] == (
+    idle_event = (
         "session.status",
         {"sessionID": "ses_test", "status": {"type": "idle"}},
     )
+    usage_event = (
+        "context.usage.updated",
+        {"sessionID": "ses_test", "sections": []},
+    )
+    assert idle_event in events
+    assert usage_event in events
+    assert events.index(idle_event) < events.index(usage_event)
 
 
 @pytest.mark.asyncio

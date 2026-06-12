@@ -16,15 +16,6 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional, Dict, Any, Literal
 
-# Optional progress sink injected by the route layer so the front-end can
-# render a multi-stage "Compacting..." panel instead of a 30–60 s opaque
-# spinner.  Kept dependency-free: the callback signature is just
-# ``(stage, data) -> Awaitable[None]``.  Producers MUST tolerate a
-# ``None`` callback (silent / no-op) and any exception raised by the
-# sink — progress reporting is observability, never a correctness
-# contract for compaction itself.  See ``_emit_progress`` below.
-ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
-
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
 from .policy import CompactionPolicy
@@ -37,6 +28,15 @@ from .models import (
 from . import pruning, summary
 
 log = Log.create(service="session.compaction")
+
+# Optional progress sink injected by the route layer so the front-end can
+# render a multi-stage "Compacting..." panel instead of a 30–60 s opaque
+# spinner.  Kept dependency-free: the callback signature is just
+# ``(stage, data) -> Awaitable[None]``.  Producers MUST tolerate a
+# ``None`` callback (silent / no-op) and any exception raised by the
+# sink — progress reporting is observability, never a correctness
+# contract for compaction itself.  See ``_emit_progress`` below.
+ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1024,7 @@ class SessionCompaction:
         # caller supplied a custom prompt (e.g. ``/compact <focus>``),
         # which we honour verbatim.  Every Nth compaction the cached
         # summary is dropped to force a full rebuild and prevent drift.
+        force_full_rebuild = False
         if not custom_prompt:
             previous_summary, prior_compaction_count = _get_iterative_summary_state(session_id)
             if _should_force_full_rebuild(prior_compaction_count):
@@ -1032,6 +1033,7 @@ class SessionCompaction:
                     "compaction_count": prior_compaction_count,
                     "rebuild_interval": ITERATIVE_SUMMARY_REBUILD_INTERVAL,
                 })
+                force_full_rebuild = True
                 previous_summary = None
         else:
             previous_summary, prior_compaction_count = None, 0
@@ -1044,13 +1046,66 @@ class SessionCompaction:
             log.warn("compaction.process.load_parts_error", {"error": str(e)})
             msgs_with_parts = []
 
+        summary_msgs_with_parts = [
+            msg for msg in msgs_with_parts
+            if not cls._is_compaction_control_message(msg)
+        ]
+        summary_input_mode = "full_active"
+        previous_summary_source = "cache" if previous_summary else "none"
+
+        if not custom_prompt and not force_full_rebuild:
+            latest_summary_idx, persisted_previous_summary = cls._latest_summary_boundary(
+                msgs_with_parts,
+            )
+            if latest_summary_idx >= 0 and persisted_previous_summary:
+                previous_summary = persisted_previous_summary
+                previous_summary_source = "latest_summary_message"
+                delta_msgs = [
+                    msg for msg in msgs_with_parts[latest_summary_idx + 1:]
+                    if not cls._is_summary_message(msg)
+                    and not cls._is_compaction_control_message(msg)
+                ]
+                if not delta_msgs:
+                    log.info("compaction.process.skipped_no_delta", {
+                        "session_id": session_id,
+                        "latest_summary_index": latest_summary_idx,
+                        "with_parts_count": len(msgs_with_parts),
+                    })
+                    await _emit_progress(progress_callback, "load", {
+                        "message_count": 0,
+                        "total_chars": 0,
+                    })
+                    await _emit_progress(progress_callback, "complete", {
+                        "result": "skipped_no_new_messages",
+                    })
+                    history.total_skipped += 1
+                    return "skipped"
+                summary_msgs_with_parts = delta_msgs
+                summary_input_mode = "delta_after_latest_summary"
+
+        if not summary_msgs_with_parts:
+            log.info("compaction.process.skipped_no_summary_input", {
+                "session_id": session_id,
+                "with_parts_count": len(msgs_with_parts),
+                "input_mode": summary_input_mode,
+            })
+            await _emit_progress(progress_callback, "load", {
+                "message_count": 0,
+                "total_chars": 0,
+            })
+            await _emit_progress(progress_callback, "complete", {
+                "result": "skipped_no_summary_input",
+            })
+            history.total_skipped += 1
+            return "skipped"
+
         # Extract once; keep the original (un-pruned) list for memory flush
         # so daily memory extraction sees the full content density of every
         # turn.  Only the *summary LLM* path gets the hermes-style pruned
         # view — collapsing old tool outputs to a 1-line placeholder is
         # the wrong input for a fact extractor.
         original_chat_messages = cls._extract_chat_messages(
-            msgs_with_parts, ChatMessage, session_id, policy,
+            summary_msgs_with_parts, ChatMessage, session_id, policy,
         )
 
         # Hermes-style pre-prune: MD5 dedup + compress large old messages to
@@ -1065,8 +1120,11 @@ class SessionCompaction:
             "session_id": session_id,
             "raw_count": len(messages),
             "with_parts_count": len(msgs_with_parts),
+            "summary_with_parts_count": len(summary_msgs_with_parts),
             "chat_messages_count": len(chat_messages),
             "total_chars": loaded_total_chars,
+            "input_mode": summary_input_mode,
+            "previous_summary_source": previous_summary_source,
         })
         await _emit_progress(progress_callback, "load", {
             "message_count": len(chat_messages),
@@ -1502,6 +1560,59 @@ class SessionCompaction:
             + "\n…(content truncated)…\n"
             + text[-tail_budget:]
         )
+
+    @classmethod
+    def _message_text_from_parts(cls, parts: list) -> str:
+        """Extract prompt-facing text from simple text/reasoning parts."""
+        text_parts: list[str] = []
+        for part in parts or []:
+            ptype = getattr(part, "type", None)
+            if ptype not in ("text", "reasoning", "thinking"):
+                continue
+            text = getattr(part, "text", "") or ""
+            if text:
+                text_parts.append(text)
+        return "\n".join(text_parts).strip()
+
+    @classmethod
+    def _is_summary_message(cls, msg_with_parts: Any) -> bool:
+        """Return True for persisted compaction summary messages."""
+        info = getattr(msg_with_parts, "info", None)
+        finish = getattr(info, "finish", None)
+        return finish == "summary" or bool(getattr(info, "summary", None))
+
+    @classmethod
+    def _latest_summary_boundary(cls, msgs_with_parts: list) -> tuple[int, Optional[str]]:
+        """Find the latest summary message and return ``(index, text)``."""
+        for idx in range(len(msgs_with_parts) - 1, -1, -1):
+            msg = msgs_with_parts[idx]
+            if not cls._is_summary_message(msg):
+                continue
+            summary_text = cls._message_text_from_parts(getattr(msg, "parts", []) or [])
+            return idx, summary_text or None
+        return -1, None
+
+    @classmethod
+    def _is_compaction_control_message(cls, msg_with_parts: Any) -> bool:
+        """Exclude slash-command control messages from summary deltas."""
+        info = getattr(msg_with_parts, "info", None)
+        role = getattr(info, "role", "")
+        if hasattr(role, "value"):
+            role = role.value
+        if role != "user":
+            return False
+
+        parts = getattr(msg_with_parts, "parts", []) or []
+        if parts and all(bool(getattr(part, "synthetic", None)) for part in parts):
+            return True
+        if any(getattr(part, "type", None) == "compaction" for part in parts):
+            return True
+
+        text = cls._message_text_from_parts(parts).strip()
+        if not text:
+            return False
+        first_line = text.splitlines()[0].strip()
+        return first_line == "/compact" or first_line.startswith("/compact ")
 
     @classmethod
     def _extract_chat_messages(

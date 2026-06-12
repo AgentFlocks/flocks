@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from flocks.session.lifecycle.compaction import (
     DEFAULT_COMPACTION_PROMPT,
     DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS,
     ITERATIVE_SUMMARY_REBUILD_INTERVAL,
+    SessionCompaction,
 )
 from flocks.session.lifecycle.compaction import compaction as compaction_module
 from flocks.session.lifecycle.compaction.summary import (
@@ -150,6 +152,278 @@ def _structured_summary(label: str) -> str:
 class _FakeResponse:
     def __init__(self, content: str) -> None:
         self.content = content
+
+
+def _mwp(
+    message_id: str,
+    role: str,
+    text: str,
+    *,
+    finish: str | None = None,
+    summary: bool | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        info=SimpleNamespace(
+            id=message_id,
+            role=role,
+            finish=finish,
+            summary=summary,
+        ),
+        parts=[
+            SimpleNamespace(
+                type="text",
+                text=text,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+class TestSessionCompactionDeltaInput:
+    async def test_process_summarizes_only_messages_after_latest_summary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compaction_module.reset_iterative_summary_cache("ses_delta")
+        captured: dict[str, Any] = {}
+        progress_events: list[tuple[str, dict[str, Any]]] = []
+
+        async def fake_summarize_single_pass(*args: Any, **kwargs: Any) -> str:
+            captured["previous_summary"] = kwargs["previous_summary"]
+            captured["chat_messages"] = kwargs["chat_messages"]
+            return _structured_summary("delta")
+
+        async def fake_archive_and_write_summary(cls, **kwargs: Any) -> str:  # noqa: ARG001
+            return "continue"
+
+        async def fake_dispatch_memory_flush(cls, **kwargs: Any) -> None:  # noqa: ARG001
+            return None
+
+        async def fake_progress(stage: str, data: dict[str, Any]) -> None:
+            progress_events.append((stage, data))
+
+        async def fake_apply_config(cls, **kwargs: Any) -> None:  # noqa: ARG001
+            return None
+
+        async def fake_list_with_parts(cls, session_id: str) -> list:  # noqa: ARG001
+            return msgs_with_parts
+
+        msgs_with_parts = [
+            _mwp("old-user", "user", "old request"),
+            _mwp("old-assistant", "assistant", "old answer", finish="stop"),
+            _mwp(
+                "summary-1",
+                "assistant",
+                "persisted previous summary",
+                finish="summary",
+                summary=True,
+            ),
+            _mwp("new-user", "user", "new request"),
+            _mwp("new-assistant", "assistant", "new answer", finish="stop"),
+            _mwp("compact-command", "user", "/compact"),
+        ]
+
+        from flocks.provider.provider import Provider
+        from flocks.session.message import Message
+
+        monkeypatch.setattr(
+            Provider,
+            "get",
+            classmethod(lambda cls, provider_id: MagicMock()),
+        )
+        monkeypatch.setattr(
+            Provider,
+            "apply_config",
+            classmethod(fake_apply_config),
+        )
+        monkeypatch.setattr(
+            Message,
+            "list_with_parts",
+            classmethod(fake_list_with_parts),
+        )
+        monkeypatch.setattr(
+            compaction_module.summary,
+            "summarize_single_pass",
+            fake_summarize_single_pass,
+        )
+        monkeypatch.setattr(
+            SessionCompaction,
+            "_archive_and_write_summary",
+            classmethod(fake_archive_and_write_summary),
+        )
+        monkeypatch.setattr(
+            SessionCompaction,
+            "_dispatch_memory_flush",
+            classmethod(fake_dispatch_memory_flush),
+        )
+
+        result = await SessionCompaction.process(
+            session_id="ses_delta",
+            parent_id="compact-command",
+            messages=[{"id": "compact-command"}],
+            model_id="test-model",
+            provider_id="test-provider",
+            auto=False,
+            progress_callback=fake_progress,
+        )
+
+        assert result == "continue"
+        assert captured["previous_summary"] == "persisted previous summary"
+        assert [
+            message.content
+            for message in captured["chat_messages"]
+        ] == ["new request", "new answer"]
+        assert ("load", {
+            "message_count": 2,
+            "total_chars": len("new request") + len("new answer"),
+        }) in progress_events
+
+    async def test_process_skips_when_only_compact_command_follows_summary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compaction_module.reset_iterative_summary_cache("ses_no_delta")
+        progress_events: list[tuple[str, dict[str, Any]]] = []
+        summarize_spy = AsyncMock(return_value=_structured_summary("unexpected"))
+        archive_spy = AsyncMock(return_value="continue")
+
+        async def fake_progress(stage: str, data: dict[str, Any]) -> None:
+            progress_events.append((stage, data))
+
+        async def fake_apply_config(cls, **kwargs: Any) -> None:  # noqa: ARG001
+            return None
+
+        async def fake_list_with_parts(cls, session_id: str) -> list:  # noqa: ARG001
+            return msgs_with_parts
+
+        msgs_with_parts = [
+            _mwp(
+                "summary-1",
+                "assistant",
+                "persisted previous summary",
+                finish="summary",
+                summary=True,
+            ),
+            _mwp("compact-command", "user", "/compact"),
+        ]
+
+        from flocks.provider.provider import Provider
+        from flocks.session.message import Message
+
+        monkeypatch.setattr(
+            Provider,
+            "get",
+            classmethod(lambda cls, provider_id: MagicMock()),
+        )
+        monkeypatch.setattr(
+            Provider,
+            "apply_config",
+            classmethod(fake_apply_config),
+        )
+        monkeypatch.setattr(
+            Message,
+            "list_with_parts",
+            classmethod(fake_list_with_parts),
+        )
+        monkeypatch.setattr(
+            compaction_module.summary,
+            "summarize_single_pass",
+            summarize_spy,
+        )
+        monkeypatch.setattr(
+            SessionCompaction,
+            "_archive_and_write_summary",
+            classmethod(lambda cls, **kwargs: archive_spy(**kwargs)),
+        )
+
+        result = await SessionCompaction.process(
+            session_id="ses_no_delta",
+            parent_id="compact-command",
+            messages=[{"id": "compact-command"}],
+            model_id="test-model",
+            provider_id="test-provider",
+            auto=False,
+            progress_callback=fake_progress,
+        )
+
+        assert result == "skipped"
+        summarize_spy.assert_not_awaited()
+        archive_spy.assert_not_awaited()
+        assert ("load", {"message_count": 0, "total_chars": 0}) in progress_events
+        assert (
+            "complete",
+            {"result": "skipped_no_new_messages"},
+        ) in progress_events
+
+    async def test_process_skips_when_only_control_message_exists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compaction_module.reset_iterative_summary_cache("ses_empty_delta")
+        progress_events: list[tuple[str, dict[str, Any]]] = []
+        summarize_spy = AsyncMock(return_value=_structured_summary("unexpected"))
+        archive_spy = AsyncMock(return_value="continue")
+
+        async def fake_progress(stage: str, data: dict[str, Any]) -> None:
+            progress_events.append((stage, data))
+
+        async def fake_apply_config(cls, **kwargs: Any) -> None:  # noqa: ARG001
+            return None
+
+        async def fake_list_with_parts(cls, session_id: str) -> list:  # noqa: ARG001
+            return msgs_with_parts
+
+        msgs_with_parts = [
+            _mwp("compact-command", "user", "/compact"),
+        ]
+
+        from flocks.provider.provider import Provider
+        from flocks.session.message import Message
+
+        monkeypatch.setattr(
+            Provider,
+            "get",
+            classmethod(lambda cls, provider_id: MagicMock()),
+        )
+        monkeypatch.setattr(
+            Provider,
+            "apply_config",
+            classmethod(fake_apply_config),
+        )
+        monkeypatch.setattr(
+            Message,
+            "list_with_parts",
+            classmethod(fake_list_with_parts),
+        )
+        monkeypatch.setattr(
+            compaction_module.summary,
+            "summarize_single_pass",
+            summarize_spy,
+        )
+        monkeypatch.setattr(
+            SessionCompaction,
+            "_archive_and_write_summary",
+            classmethod(lambda cls, **kwargs: archive_spy(**kwargs)),
+        )
+
+        result = await SessionCompaction.process(
+            session_id="ses_empty_delta",
+            parent_id="compact-command",
+            messages=[{"id": "compact-command"}],
+            model_id="test-model",
+            provider_id="test-provider",
+            auto=False,
+            progress_callback=fake_progress,
+        )
+
+        assert result == "skipped"
+        summarize_spy.assert_not_awaited()
+        archive_spy.assert_not_awaited()
+        assert ("load", {"message_count": 0, "total_chars": 0}) in progress_events
+        assert (
+            "complete",
+            {"result": "skipped_no_summary_input"},
+        ) in progress_events
 
 
 @pytest.mark.asyncio
@@ -336,4 +610,3 @@ class TestSummarizeSinglePassWithPrevious:
         body = call.kwargs["messages"][0].content
         assert "<<<PREVIOUS_SUMMARY>>>" not in body
         assert "## Decisions" in body
-
