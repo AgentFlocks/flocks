@@ -2256,18 +2256,31 @@ async def _run_session_compaction(
                 "data": data,
             })
 
-    result = await run_compaction(
-        session_id,
-        parent_message_id=parent_message_id,
-        messages=messages,
-        provider_id=provider_id,
-        model_id=model_id,
-        auto=auto,
-        event_publish_callback=event_publish_callback,
-        status_after="idle",
-        focus_instruction=focus_instruction,
-        progress_callback=progress_callback,
-    )
+    async def publish_current_context_usage() -> None:
+        await _publish_context_usage_update(
+            event_publish_callback,
+            session_id,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
+    try:
+        result = await run_compaction(
+            session_id,
+            parent_message_id=parent_message_id,
+            messages=messages,
+            provider_id=provider_id,
+            model_id=model_id,
+            auto=auto,
+            event_publish_callback=event_publish_callback,
+            status_after="idle",
+            focus_instruction=focus_instruction,
+            progress_callback=progress_callback,
+        )
+    except Exception:
+        await publish_current_context_usage()
+        raise
     if result == "stop":
         # ``SessionCompaction.process`` swallows the underlying provider
         # exception (so the loop path stays simple) but stashes the
@@ -2275,15 +2288,10 @@ async def _run_session_compaction(
         # it verbatim here so the SSE ``session.error`` payload — and
         # therefore the front-end toast — shows the provider's original
         # error text instead of an opaque "Compaction failed".
+        await publish_current_context_usage()
         detail = pop_last_compaction_error(session_id) or "Compaction failed"
         raise RuntimeError(detail)
-    await _publish_context_usage_update(
-        event_publish_callback,
-        session_id,
-        session=session,
-        provider_id=provider_id,
-        model_id=model_id,
-    )
+    await publish_current_context_usage()
     return agent_name, provider_id, model_id
 
 

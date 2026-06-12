@@ -1679,6 +1679,7 @@ export default function SessionChat({
         setIsCompacting(false);
         setCompactionStages([]);
         setContextUsageRefreshing(false);
+        void refreshContextUsage();
         abortingRef.current = false;
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();

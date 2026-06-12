@@ -94,6 +94,76 @@ async def test_run_session_compaction_uses_latest_user_and_publishes_status():
 
 
 @pytest.mark.asyncio
+async def test_run_session_compaction_publishes_usage_when_compaction_stops():
+    session = SimpleNamespace(id="ses_test", directory="/tmp")
+    messages = [
+        SimpleNamespace(
+            id="msg_user",
+            role=MessageRole.USER,
+            agent="rex",
+            model={"providerID": "anthropic", "modelID": "claude-test"},
+        ),
+    ]
+    events: list[tuple[str, dict]] = []
+
+    async def publish_event(event_name: str, payload: dict) -> None:
+        events.append((event_name, payload))
+
+    async def publish_context_usage_update(
+        event_publish_callback,
+        session_id: str,
+        **kwargs,
+    ) -> None:  # noqa: ARG001
+        await event_publish_callback(
+            "context.usage.updated",
+            {"sessionID": session_id, "usedTokens": 321, "segments": []},
+        )
+
+    with patch(
+        "flocks.server.routes.session.Session.get_by_id",
+        new=AsyncMock(return_value=session),
+    ), patch(
+        "flocks.server.routes.session._resolve_compaction_context",
+        new=AsyncMock(return_value=("rex", "anthropic", "claude-test")),
+    ), patch(
+        "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+        new=AsyncMock(),
+    ), patch(
+        "flocks.session.message.Message.list",
+        new=AsyncMock(return_value=messages),
+    ), patch(
+        "flocks.provider.provider.Provider.resolve_model_info",
+        return_value=(200_000, 8_192, None),
+    ), patch(
+        "flocks.session.lifecycle.compaction.compaction.SessionCompaction.process",
+        new=AsyncMock(return_value="stop"),
+    ), patch(
+        "flocks.session.lifecycle.compaction.compaction.pop_last_compaction_error",
+        return_value="provider unavailable",
+    ), patch(
+        "flocks.server.routes.session._publish_context_usage_update",
+        new=publish_context_usage_update,
+    ):
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            await _run_session_compaction(
+                "ses_test",
+                event_publish_callback=publish_event,
+            )
+
+    idle_event = (
+        "session.status",
+        {"sessionID": "ses_test", "status": {"type": "idle"}},
+    )
+    usage_event = (
+        "context.usage.updated",
+        {"sessionID": "ses_test", "usedTokens": 321, "segments": []},
+    )
+    assert idle_event in events
+    assert usage_event in events
+    assert events.index(idle_event) < events.index(usage_event)
+
+
+@pytest.mark.asyncio
 async def test_session_compaction_create_adds_compaction_part():
     created_message = SimpleNamespace(id="msg_compact")
 
