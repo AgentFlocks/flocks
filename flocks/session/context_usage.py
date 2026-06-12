@@ -264,10 +264,10 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> D
         "agentDelegation": 0,
     }
     for message in messages:
-        content = getattr(message, "content", "") if not isinstance(message, dict) else message.get("content", "")
+        content = _field_value(message, "content", "")
         tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
 
-        message_id = getattr(message, "id", None) if not isinstance(message, dict) else message.get("id")
+        message_id = _field_value(message, "id")
         if not message_id:
             continue
         try:
@@ -280,20 +280,54 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> D
             continue
 
         for part in parts:
-            part_type = getattr(part, "type", "")
+            part_type = _field_value(part, "type", "")
             if part_type in {"text", "reasoning"}:
-                tokens_by_key["conversation"] += SessionPrompt.count_tokens(getattr(part, "text", "") or "")
+                tokens_by_key["conversation"] += SessionPrompt.count_tokens(_field_value(part, "text", "") or "")
                 continue
-            if part_type == "subtask":
+            if part_type in {"agent", "subtask"}:
                 tokens_by_key["agentDelegation"] += _estimate_subtask_part_tokens(part)
                 continue
             if part_type != "tool":
                 continue
-            state = getattr(part, "state", None)
+            state = _field_value(part, "state")
             if state is None:
                 continue
-            tokens_by_key[_context_key_for_tool(getattr(part, "tool", ""))] += _estimate_tool_state_tokens(state)
+            tokens_by_key[_context_key_for_tool(_tool_name_for_part(part))] += _estimate_tool_state_tokens(state)
     return tokens_by_key
+
+
+def _field_value(value: Any, field: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(field, default)
+    return getattr(value, field, default)
+
+
+def _mapping_value(value: Any, *fields: str) -> Any:
+    if not isinstance(value, dict):
+        return None
+    for field in fields:
+        field_value = value.get(field)
+        if field_value:
+            return field_value
+    return None
+
+
+def _tool_name_for_part(part: Any) -> str:
+    direct = _field_value(part, "tool", "")
+    if direct:
+        return str(direct)
+
+    tool_name_fields = ("tool", "toolName", "tool_name", "name")
+    metadata_name = _mapping_value(_field_value(part, "metadata"), *tool_name_fields)
+    if metadata_name:
+        return str(metadata_name)
+
+    state = _field_value(part, "state")
+    state_metadata_name = _mapping_value(_field_value(state, "metadata"), *tool_name_fields)
+    if state_metadata_name:
+        return str(state_metadata_name)
+
+    return ""
 
 
 def _context_key_for_tool(tool_name: str) -> str:
@@ -306,26 +340,29 @@ def _context_key_for_tool(tool_name: str) -> str:
 
 def _estimate_subtask_part_tokens(part: Any) -> int:
     total = 0
-    for field in ("prompt", "description"):
-        value = getattr(part, field, "")
-        total += SessionPrompt.count_tokens(value or "")
+    for field in ("prompt", "description", "name"):
+        value = _field_value(part, field, "")
+        total += SessionPrompt.count_tokens(value if isinstance(value, str) else str(value or ""))
+    source = _field_value(part, "source")
+    if source:
+        total += SessionPrompt.count_tokens(source if isinstance(source, str) else str(source))
     return total
 
 
 def _estimate_tool_state_tokens(state: Any) -> int:
     total = 0
-    tool_input = getattr(state, "input", None)
+    tool_input = _field_value(state, "input")
     if tool_input:
         total += SessionPrompt.count_tokens(
             tool_input if isinstance(tool_input, str) else str(tool_input)
         )
 
-    time_info = getattr(state, "time", None)
+    time_info = _field_value(state, "time")
     is_compacted = isinstance(time_info, dict) and bool(time_info.get("compacted"))
     if is_compacted:
         return total + 10
 
-    tool_output = getattr(state, "output", None)
+    tool_output = _field_value(state, "output")
     if tool_output:
         total += SessionPrompt.count_tokens(
             tool_output if isinstance(tool_output, str) else str(tool_output)

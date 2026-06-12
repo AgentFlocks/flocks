@@ -162,18 +162,38 @@ async def test_context_usage_splits_skill_and_delegation_tools(context_usage_moc
     msg = _message("assistant-1", tokens=None)
     context_usage_mocks["active"] = [msg]
     context_usage_mocks["all"] = [msg]
-    context_usage_mocks["estimate"] = 40
+    context_usage_mocks["estimate"] = 110
     context_usage_mocks["parts"] = {
         "assistant-1": [
             SimpleNamespace(
                 type="tool",
+                tool="read",
+                state=SimpleNamespace(input={}, output="r" * 120, time={"start": 1}),
+            ),
+            SimpleNamespace(
+                type="tool",
                 tool="skill_load",
-                state=SimpleNamespace(input={}, output="s" * 80, time={"start": 1}),
+                state=SimpleNamespace(input={}, output="s" * 80, time={"start": 2}),
             ),
             SimpleNamespace(
                 type="tool",
                 tool="task",
-                state=SimpleNamespace(input={}, output="t" * 80, time={"start": 2}),
+                state=SimpleNamespace(input={}, output="t" * 80, time={"start": 3}),
+            ),
+            SimpleNamespace(
+                type="tool",
+                tool="delegate_task",
+                state=SimpleNamespace(input={}, output="d" * 40, time={"start": 4}),
+            ),
+            SimpleNamespace(
+                type="tool",
+                metadata={"tool": "skill_load"},
+                state=SimpleNamespace(input={}, output="m" * 40, time={"start": 5}),
+            ),
+            SimpleNamespace(
+                type="subtask",
+                prompt="p" * 40,
+                description="q" * 40,
             ),
         ]
     }
@@ -181,6 +201,9 @@ async def test_context_usage_splits_skill_and_delegation_tools(context_usage_moc
     snapshot = await context_usage.build_context_usage_snapshot("sess-1")
 
     assert [(segment.key, segment.tokens) for segment in snapshot.segments] == [
-        ("skillLoad", 20),
-        ("agentDelegation", 20),
+        ("tools", 30),
+        ("skillLoad", 30),
+        ("agentDelegation", 50),
     ]
+    tools_segment = next(segment for segment in snapshot.segments if segment.key == "tools")
+    assert tools_segment.tokens == 30
