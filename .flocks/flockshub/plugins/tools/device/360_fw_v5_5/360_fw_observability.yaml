@@ -1,0 +1,68 @@
+name: 360_fw_observability
+description: >
+  360 FW v5.5 监控观测工具。用于 CPU、内存、流量、连接、应用、URL、威胁、
+  用户、接口、QoS、隧道和 VXLAN 监控查询。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 监控观测操作名称。
+      enum:
+        - fw_cpu_state
+        - fw_memory_state
+        - fw_device_state
+        - fw_device_link_state
+        - fw_interface_flow_state
+        - fw_interface_flow_bar_state
+        - fw_user_flow_state
+        - fw_user_flow_bar_state
+        - fw_monitor_user
+        - fw_app_flow_state
+        - fw_app_flow_bar_state
+        - fw_url_state
+        - fw_url_bar_state
+        - fw_threaten_state
+        - fw_threaten_bar_state
+        - fw_get_app_detail_monitor
+        - fw_interface_monitor
+        - fw_interface_monitor_vlan
+        - fw_qos_monitor
+        - fw_tunnel_status_table
+        - fw_tunnel_status_line
+        - fw_vxlan_monitor
+        - fw_observability_call
+        - test
+    type:
+      type: integer
+    period:
+      type: integer
+    flow:
+      type: integer
+    inf_type:
+      type: integer
+    stat_type:
+      type: integer
+    status_type:
+      type: integer
+    page:
+      type: integer
+    length:
+      type: integer
+    method:
+      type: string
+      enum: [GET]
+    path:
+      type: string
+    query:
+      type: object
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: observability

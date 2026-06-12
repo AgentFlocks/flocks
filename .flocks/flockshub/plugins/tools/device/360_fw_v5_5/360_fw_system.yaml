@@ -1,0 +1,48 @@
+name: 360_fw_system
+description: >
+  360 FW v5.5 系统与基础状态工具。用于登录检测、系统信息、接口/HA/授权/NTP/syslog
+  等系统类只读查询。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 系统类操作名称。
+      enum:
+        - fw_check_login
+        - fw_system_info_get
+        - fw_interface_list
+        - fw_interface_get
+        - fw_ha_config_get
+        - fw_ha_config_syn_get
+        - fw_ha_status_all_get
+        - fw_lte_config_get
+        - fw_lte_info_get
+        - fw_loopback_list
+        - fw_ntp_config_get
+        - fw_v0_0_1_ntp_config_get
+        - fw_ntp_key_get
+        - fw_syslog_server_get
+        - fw_v0_0_1_syslog_server_get
+        - fw_log_filter_get
+        - fw_fw_policy_config_get
+        - fw_license_config_get
+        - fw_virtual_route_list
+        - fw_diagnose_get
+        - test
+    name:
+      type: string
+      description: 接口名称等查询条件。
+    query:
+      type: object
+      description: 附加查询参数。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: system

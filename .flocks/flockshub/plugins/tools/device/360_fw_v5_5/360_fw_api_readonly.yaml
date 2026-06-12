@@ -1,0 +1,30 @@
+name: 360_fw_api_readonly
+description: >
+  360 FW v5.5 官方 REST 只读调用工具。可用 fw_api_catalog 查看已收录接口，
+  或用 fw_call_raw_readonly 调用已收录 GET 接口。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: REST 只读操作名称。
+      enum:
+        - fw_api_catalog
+        - fw_call_raw_readonly
+        - test
+    path:
+      type: string
+      description: 已收录的 /API 相对路径，例如 /sys_info。
+    query:
+      type: object
+      description: 可选查询参数，会编码为普通 URL query string。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: api_readonly
