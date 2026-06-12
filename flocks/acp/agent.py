@@ -1189,6 +1189,16 @@ class ACPAgent:
         self._session_manager.set_mode(session_id, mode_id)
         
         return {"_meta": {}}
+
+    @staticmethod
+    def _parse_command_arguments(raw_args: str) -> Any:
+        stripped = (raw_args or "").strip()
+        if not stripped or stripped[0] not in "{[":
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
     
     async def prompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1313,6 +1323,7 @@ class ACPAgent:
             session_id=session_id,
             command=cmd["name"],
             arguments=cmd["args"],
+            arguments_json=self._parse_command_arguments(cmd["args"]),
             model=f"{model['providerID']}/{model['modelID']}",
             agent=agent,
             directory=directory,

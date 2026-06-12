@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft, PanelRight, PanelRightClose } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 interface TopBarProps {
   workflow: Workflow;
@@ -11,7 +12,8 @@ interface TopBarProps {
 }
 
 export default function TopBar({ workflow, latestExecution, panelOpen, onTogglePanel }: TopBarProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
+  const displayName = getWorkflowDisplayName(workflow, i18n?.language);
 
   const statusConfig = {
     draft:    { label: t('status.draft'),    className: 'bg-gray-100 text-gray-700' },
@@ -43,7 +45,7 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
       {/* Workflow name + status */}
       <div className="flex flex-col flex-1 min-w-0">
         <div className="flex items-center gap-2 min-w-0">
-          <h1 className="text-sm font-semibold text-gray-900 truncate">{workflow.name}</h1>
+          <h1 className="text-sm font-semibold text-gray-900 truncate">{displayName}</h1>
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${status.className}`}>
             {status.label}
           </span>

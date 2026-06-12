@@ -214,6 +214,7 @@ export function useSessionMessages(sessionId?: string) {
         model: msg.info.model,
         timestamp: msg.info.time?.created || Date.now(),
         finish: msg.info.finish || null,
+        error: msg.info.error || null,
         compacted: msg.info.compacted || null,
       }));
       

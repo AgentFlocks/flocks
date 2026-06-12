@@ -18,6 +18,10 @@
 {
   "format": "flocks-workflow-composition-v1",
   "name": "your_workflow_name",
+  "nameI18n": {
+    "zh-CN": "你的工作流名称",
+    "en-US": "Your Workflow Name"
+  },
   "start": "node_id",
   "nodes": [
     {

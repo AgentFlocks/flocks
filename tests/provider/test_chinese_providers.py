@@ -266,6 +266,11 @@ class TestCuratedCatalogModels:
         qwen = next(m for m in models if m.id == "qwen3.6-plus")
         assert qwen.capabilities.supports_vision is True
 
+        m3 = next(m for m in models if m.id == "minimax-m3")
+        assert m3.capabilities.supports_vision is True
+        assert m3.capabilities.supports_reasoning is True
+        assert m3.capabilities.interleaved["field"] == "reasoning_details"
+
         flash_cn = next(m for m in models if m.id == "deepseek-v4-flash")
         assert flash_cn.pricing.input == 1.0
         assert flash_cn.pricing.output == 2.0

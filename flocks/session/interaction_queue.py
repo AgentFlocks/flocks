@@ -29,6 +29,7 @@ class QueuedPrompt(BaseModel):
     agent: Optional[str] = None
     model: Optional[Dict[str, Any]] = None
     variant: Optional[str] = None
+    display_text: Optional[str] = None
     messageID: Optional[str] = None
     noReply: Optional[bool] = None
     mockReply: Optional[str] = None
@@ -62,6 +63,7 @@ class InteractionQueue:
         agent: Optional[str] = None,
         model: Optional[Dict[str, Any]] = None,
         variant: Optional[str] = None,
+        display_text: Optional[str] = None,
         message_id: Optional[str] = None,
         no_reply: Optional[bool] = None,
         mock_reply: Optional[str] = None,
@@ -79,6 +81,7 @@ class InteractionQueue:
                 agent=agent,
                 model=dict(model) if isinstance(model, dict) else model,
                 variant=variant,
+                display_text=display_text,
                 messageID=message_id,
                 noReply=no_reply,
                 mockReply=mock_reply,
@@ -114,6 +117,7 @@ class InteractionQueue:
                 parts.insert(0, {"type": "text", "text": text})
 
             item.parts = parts
+            item.display_text = None
             item.updatedAt = int(time.time() * 1000)
             return item.model_copy(deep=True)
 

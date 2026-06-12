@@ -90,6 +90,26 @@ Additional content here.
         assert skill_info.description == "Skill with frontmatter"
 
 
+def test_parse_skill_md_with_ui_hidden_flag(tmp_path):
+    """SKILL.md can opt out of user-facing skill UI with ui_hidden: true."""
+    skill_dir = tmp_path / "ui-hidden-skill"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("""---
+name: ui-hidden-skill
+description: UI-hidden internal skill
+ui_hidden: true
+---
+
+# UI Hidden Skill
+""")
+
+    skill_info = Skill._parse_skill_md(str(skill_file))
+
+    assert skill_info is not None
+    assert skill_info.ui_hidden is True
+
+
 @pytest.mark.asyncio
 async def test_discover_skills():
     """Test skill discovery"""

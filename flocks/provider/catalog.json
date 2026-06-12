@@ -57,6 +57,7 @@
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_details",

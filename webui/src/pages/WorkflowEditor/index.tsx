@@ -39,6 +39,7 @@ import {
   type WorkflowGraphEdgeRoute,
   type WorkflowGraphOutputHandle,
 } from '@/utils/workflowGraphLayout';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 // 自定义节点组件
 import PythonNode from './nodes/PythonNode';
@@ -325,7 +326,7 @@ function convertToWorkflowJSON(nodes: Node[], edges: Edge[], workflow: Workflow)
 }
 
 export default function WorkflowEditor() {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
@@ -770,7 +771,7 @@ export default function WorkflowEditor() {
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
-            <h1 className="text-xl font-semibold text-gray-900">{workflow.name}</h1>
+            <h1 className="text-xl font-semibold text-gray-900">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
             <p className="text-sm text-gray-500">{workflow.description || t('editor.noDescription')}</p>
           </div>
           {validationResult && (

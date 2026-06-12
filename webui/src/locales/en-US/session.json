@@ -108,6 +108,11 @@
     "regenerate": "Regenerate",
     "thinking": "Thinking...",
     "streaming": "Streaming...",
+    "process": {
+      "title": "Process ({{count}})",
+      "reasoningCount": "{{count}} reasoning",
+      "toolCount": "{{count}} tool calls"
+    },
     "you": "You",
     "sending": "Sending...",
     "contextCompressed": "Context compressed",
@@ -172,6 +177,18 @@
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
       "todoStages": "Todo stages",
+      "todoStatus": {
+        "pending": "pending",
+        "inProgress": "in progress",
+        "completed": "completed",
+        "cancelled": "cancelled"
+      },
+      "todoSummary": {
+        "progress": "Progress",
+        "inProgress": "In progress",
+        "completed": "Completed",
+        "done": "Done"
+      },
       "errorLabel": "Error",
       "elapsed": "Elapsed",
       "workflowStage": "Current stage: {{phase}}",

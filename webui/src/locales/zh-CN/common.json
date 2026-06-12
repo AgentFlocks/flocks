@@ -145,6 +145,7 @@
     "yes": "✓ 是",
     "no": "✗ 否",
     "needsAnswer": "需要你的回答",
+    "customAnswer": "自定义 / 补充说明",
     "confirm": "确认",
     "skip": "跳过"
   },

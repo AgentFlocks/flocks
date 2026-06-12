@@ -347,6 +347,71 @@ class TestDispatchShape:
         )
         assert options["extra_body"]["enable_thinking"] is False
 
+    @pytest.mark.parametrize(
+        "configured_extra_body",
+        [
+            {"chat_template_kwargs": {"enable_thinking": True}},
+            {"chat_template_kwargs": {"thinking": True}},
+        ],
+    )
+    def test_configured_extra_body_overrides_auto_generic_shape(
+        self,
+        configured_extra_body: Dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OpenAI-compatible users can declare provider-specific request bodies.
+
+        vLLM/SGLang thinking switches are nested under
+        ``chat_template_kwargs``.  If configured, Flocks should forward the
+        exact shape instead of adding its default ``enable_thinking`` flag for
+        qwen-style generic chat models.
+        """
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args, **_kw: configured_extra_body,
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "qwen3-7b",
+            resolve_max_tokens=False,
+        )
+
+        assert options.get("extra_body") == configured_extra_body
+
+    @pytest.mark.parametrize(
+        "configured_extra_body",
+        [
+            {"chat_template_kwargs": {"enable_thinking": True}},
+            {"chat_template_kwargs": {"thinking": True}},
+        ],
+    )
+    def test_configured_extra_body_emits_without_interleaved_inference(
+        self,
+        configured_extra_body: Dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit extra_body config should not depend on model-name inference."""
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args, **_kw: configured_extra_body,
+        )
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args, **_kw: None,
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "local-sglang-model",
+            resolve_max_tokens=False,
+        )
+
+        assert options.get("extra_body") == configured_extra_body
+
     def test_anthropic_transport_still_uses_thinking_field(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

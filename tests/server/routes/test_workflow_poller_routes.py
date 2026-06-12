@@ -57,6 +57,64 @@ async def test_save_poller_config_restarts_manager(
 
 
 @pytest.mark.asyncio
+async def test_save_poller_config_preserves_cron_schedule(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[tuple[str, dict[str, Any]]] = []
+    persisted_sources: list[dict[str, Any]] = []
+
+    async def _fake_write(key: Any, value: dict[str, Any]) -> None:
+        writes.append((key, value))
+
+    async def _fake_persist(
+        _workflow_id: str,
+        _workflow_data: dict[str, Any],
+        triggers: list[Any],
+    ) -> None:
+        persisted_sources.extend(dict(trigger.source or {}) for trigger in triggers if trigger.type == "schedule")
+
+    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+        assert workflow_id == "wf-1"
+        return {"workflowId": workflow_id, "state": "running", "cronExpression": "*/10 * * * *"}
+
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None,
+    )
+    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_write)
+    monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist)
+    monkeypatch.setattr(
+        "flocks.workflow.poller_manager.default_manager",
+        SimpleNamespace(restart_workflow=_fake_restart),
+    )
+
+    response = await client.post(
+        "/api/workflow/wf-1/poller-config",
+        json={
+            "enabled": True,
+            "intervalSeconds": 300,
+            "cronExpression": "*/10 * * * *",
+            "timeoutSeconds": 3600,
+            "noOverlap": True,
+            "inputs": {"source": "cron"},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    poller_payload = next(value for key, value in writes if key == "workflow_poller_config/wf-1")
+    assert poller_payload["cronExpression"] == "*/10 * * * *"
+    assert persisted_sources == [
+        {
+            "mode": "cron",
+            "intervalSeconds": 300,
+            "cron": "*/10 * * * *",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_get_poller_config_returns_saved_data(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

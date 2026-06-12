@@ -19,12 +19,14 @@ Source scheme routing:
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import platform
 import re
 import shutil
 import sys
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
@@ -34,6 +36,10 @@ from flocks.utils.log import Log
 
 
 log = Log.create(service="skill.installer")
+
+_NETWORK_TIMEOUT_SEC = 20
+_SKILLS_SH_CLI_TIMEOUT_SEC = 45
+_INSTALL_TIMEOUT_SEC = 90
 
 # ---------------------------------------------------------------------------
 # Result Types
@@ -161,6 +167,42 @@ def _resolve_source(source: str) -> dict:
 class SkillInstaller:
     """Install skills from external sources and manage skill dependencies."""
 
+    @staticmethod
+    async def _run_subprocess(
+        cmd: list[str],
+        *,
+        timeout_sec: float,
+        cwd: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=cwd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=5)
+            except Exception:
+                pass
+            raise TimeoutError(f"Command timed out after {timeout_sec:g}s: {' '.join(cmd)}")
+        return (
+            proc.returncode if proc.returncode is not None else 0,
+            stdout_b.decode(errors="replace"),
+            stderr_b.decode(errors="replace"),
+        )
+
     # ------------------------------------------------------------------
     # Install skill itself
     # ------------------------------------------------------------------
@@ -191,22 +233,30 @@ class SkillInstaller:
 
         log.info("skill.install.start", {"source": source, "kind": kind, "scope": scope, "yes": yes})
 
-        if kind == "skills_sh":
-            return await cls._install_from_skills_sh(value, scope, yes=yes)
-        elif kind == "safeskill":
-            return await cls._install_from_safeskill(value, scope)
-        elif kind == "clawhub":
-            return await cls._install_from_clawhub(value, scope)
-        elif kind == "github":
-            return await cls._install_from_github(value, scope)
-        elif kind == "url":
-            return await cls._install_from_url(value, scope)
-        elif kind == "local":
-            return await cls._install_from_local(value, scope)
-        else:
+        async def _install() -> SkillInstallResult:
+            if kind == "skills_sh":
+                return await cls._install_from_skills_sh(value, scope, yes=yes)
+            elif kind == "safeskill":
+                return await cls._install_from_safeskill(value, scope)
+            elif kind == "clawhub":
+                return await cls._install_from_clawhub(value, scope)
+            elif kind == "github":
+                return await cls._install_from_github(value, scope)
+            elif kind == "url":
+                return await cls._install_from_url(value, scope)
+            elif kind == "local":
+                return await cls._install_from_local(value, scope)
             return SkillInstallResult(
                 success=False,
                 error=f"Unsupported source kind: {kind}",
+            )
+
+        try:
+            return await asyncio.wait_for(_install(), timeout=_INSTALL_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill install timed out after {_INSTALL_TIMEOUT_SEC}s: {source}",
             )
 
     @classmethod
@@ -267,22 +317,25 @@ class SkillInstaller:
             cmd = [npx, "-y", "skills", "add", identifier]
             if yes:
                 cmd.append("-y")
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(staging),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_b, stderr_b = await proc.communicate()
-            output = (
-                stdout_b.decode(errors="replace")
-                + stderr_b.decode(errors="replace")
-            ).strip()
-            if proc.returncode != 0:
+            try:
+                returncode, stdout, stderr = await cls._run_subprocess(
+                    cmd,
+                    cwd=str(staging),
+                    env=env,
+                    timeout_sec=_SKILLS_SH_CLI_TIMEOUT_SEC,
+                )
+            except TimeoutError as exc:
+                return SkillInstallResult(success=False, error=str(exc))
+            except Exception as exc:
                 return SkillInstallResult(
                     success=False,
-                    error=output or f"skills.sh CLI failed with exit {proc.returncode}",
+                    error=f"Failed to run skills.sh CLI: {exc}",
+                )
+            output = (stdout + stderr).strip()
+            if returncode != 0:
+                return SkillInstallResult(
+                    success=False,
+                    error=output or f"skills.sh CLI failed with exit {returncode}",
                 )
 
             imported = cls._import_staged_skill_dirs(staging, scope)
@@ -337,21 +390,24 @@ class SkillInstaller:
                 "-a",
                 "universal",
             ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(staging),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_b, stderr_b = await proc.communicate()
-            output = (
-                stdout_b.decode(errors="replace")
-                + stderr_b.decode(errors="replace")
-            ).strip()
-            if proc.returncode != 0:
+            try:
+                returncode, stdout, stderr = await cls._run_subprocess(
+                    cmd,
+                    cwd=str(staging),
+                    timeout_sec=_SKILLS_SH_CLI_TIMEOUT_SEC,
+                )
+            except TimeoutError as exc:
+                return SkillInstallResult(success=False, error=str(exc))
+            except Exception as exc:
                 return SkillInstallResult(
                     success=False,
-                    error=output or f"SafeSkill CLI failed with exit {proc.returncode}",
+                    error=f"Failed to run SafeSkill CLI: {exc}",
+                )
+            output = (stdout + stderr).strip()
+            if returncode != 0:
+                return SkillInstallResult(
+                    success=False,
+                    error=output or f"SafeSkill CLI failed with exit {returncode}",
                 )
 
             imported = cls._import_staged_skill_dirs(staging, scope)
@@ -404,7 +460,7 @@ class SkillInstaller:
             return None
 
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(f"https://skills.sh/{normalized}")
                 if resp.status_code != 200:
                     return None
@@ -492,7 +548,7 @@ class SkillInstaller:
 
         zip_url = f"https://wry-manatee-359.convex.site/api/v1/download?slug={name}"
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(zip_url)
                 if resp.status_code == 404:
                     return SkillInstallResult(
@@ -633,34 +689,56 @@ class SkillInstaller:
             candidate_paths = [""]
 
         errors: List[str] = []
-        async with httpx.AsyncClient(
-            timeout=30,
-            follow_redirects=True,
-            headers={"Accept": "application/vnd.github+json"},
-        ) as client:
-            for branch in ("main", "master"):
-                for dir_path in candidate_paths:
-                    result = await cls._download_github_dir(
-                        client, owner, repo, branch, dir_path, scope
-                    )
-                    if result.success:
-                        return result
-                    if result.error:
-                        errors.append(result.error)
+        try:
+            async with httpx.AsyncClient(
+                timeout=_NETWORK_TIMEOUT_SEC,
+                follow_redirects=True,
+                headers={"Accept": "application/vnd.github+json"},
+            ) as client:
+                for branch in ("main", "master"):
+                    for dir_path in candidate_paths:
+                        result = await cls._download_github_dir(
+                            client, owner, repo, branch, dir_path, scope
+                        )
+                        if result.success:
+                            return result
+                        if result.error:
+                            errors.append(result.error)
 
-            # Unauthenticated GitHub Contents API can return 403 rate-limit
-            # errors while raw.githubusercontent.com still works. In that case
-            # install the SKILL.md directly instead of reporting a misleading
-            # "directory not found" error.
-            for branch in ("main", "master"):
-                for dir_path in candidate_paths:
-                    result = await cls._download_github_skill_md_raw(
-                        client, owner, repo, branch, dir_path, scope
+                # Unauthenticated GitHub Contents API can return 403 rate-limit
+                # errors while raw.githubusercontent.com still works. In that case
+                # install the SKILL.md directly instead of reporting a misleading
+                # "directory not found" error.
+                for branch in ("main", "master"):
+                    for dir_path in candidate_paths:
+                        result = await cls._download_github_skill_md_raw(
+                            client, owner, repo, branch, dir_path, scope
+                        )
+                        if result.success:
+                            return result
+                        if result.error:
+                            errors.append(result.error)
+
+                skill_hint = Path(subpath).name if subpath else None
+                for branch in ("main", "master"):
+                    result = await cls._download_github_archive_skill(
+                        client,
+                        owner,
+                        repo,
+                        branch,
+                        candidate_paths,
+                        skill_hint,
+                        scope,
                     )
                     if result.success:
                         return result
                     if result.error:
                         errors.append(result.error)
+        except Exception as exc:
+            return SkillInstallResult(
+                success=False,
+                error=f"GitHub download failed for {owner}/{repo}: {exc}",
+            )
 
         if errors and any("GitHub API 403" in error for error in errors):
             return SkillInstallResult(
@@ -675,6 +753,114 @@ class SkillInstaller:
         return SkillInstallResult(
             success=False,
             error=f"Could not find a skill directory in GitHub repo: {owner}/{repo}",
+        )
+
+    @classmethod
+    async def _download_github_archive_skill(
+        cls,
+        client: Any,
+        owner: str,
+        repo: str,
+        branch: str,
+        candidate_paths: list[str],
+        skill_hint: Optional[str],
+        scope: str,
+    ) -> SkillInstallResult:
+        """Download a GitHub zip archive and import the matching skill directory."""
+        archive_url = f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}"
+        resp = await client.get(archive_url)
+        if resp.status_code != 200:
+            return SkillInstallResult(
+                success=False,
+                error=f"GitHub archive HTTP {resp.status_code} for {archive_url}",
+            )
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                return cls._import_skill_from_github_zip(
+                    zf,
+                    owner,
+                    repo,
+                    branch,
+                    candidate_paths,
+                    skill_hint,
+                    scope,
+                )
+        except zipfile.BadZipFile:
+            return SkillInstallResult(
+                success=False,
+                error=f"GitHub archive for {owner}/{repo}@{branch} is not a valid ZIP file",
+            )
+
+    @classmethod
+    def _import_skill_from_github_zip(
+        cls,
+        zf: zipfile.ZipFile,
+        owner: str,
+        repo: str,
+        branch: str,
+        candidate_paths: list[str],
+        skill_hint: Optional[str],
+        scope: str,
+    ) -> SkillInstallResult:
+        normalized_candidates = {path.strip("/") for path in candidate_paths}
+        skill_hint = (skill_hint or "").strip()
+        skill_mds = [name for name in zf.namelist() if name.endswith("/SKILL.md")]
+
+        for skill_md in skill_mds:
+            parts = Path(skill_md).parts
+            if len(parts) < 2:
+                continue
+            skill_dir = "/".join(parts[:-1])
+            relative_dir = "/".join(parts[1:-1])
+            dir_name = parts[-2]
+            try:
+                content = zf.read(skill_md).decode("utf-8")
+            except Exception:
+                continue
+            data = Skill._parse_frontmatter(content)
+            name = (data.get("name") or dir_name).strip()
+            if not name or not Skill._is_valid_name(name):
+                continue
+
+            if relative_dir not in normalized_candidates:
+                if not skill_hint or (name != skill_hint and dir_name != skill_hint):
+                    continue
+
+            skill_root = _resolve_install_root(scope) / name
+            skill_root.mkdir(parents=True, exist_ok=True)
+            skill_root_resolved = skill_root.resolve()
+            prefix = f"{skill_dir}/"
+            file_count = 0
+            for member in zf.namelist():
+                if not member.startswith(prefix) or member.endswith("/"):
+                    continue
+                rel_path = member[len(prefix):]
+                if not rel_path:
+                    continue
+                dest = (skill_root / rel_path).resolve()
+                try:
+                    dest.relative_to(skill_root_resolved)
+                except ValueError:
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(member))
+                file_count += 1
+
+            Skill.clear_cache()
+            return SkillInstallResult(
+                success=True,
+                skill_name=name,
+                location=str(skill_root / "SKILL.md"),
+                message=(
+                    f"Skill '{name}' installed to {skill_root} "
+                    f"from GitHub archive {owner}/{repo}@{branch} ({file_count} files)"
+                ),
+            )
+
+        return SkillInstallResult(
+            success=False,
+            error=f"No matching SKILL.md found in GitHub archive for {owner}/{repo}@{branch}",
         )
 
     @classmethod
@@ -852,7 +1038,7 @@ class SkillInstaller:
             )
 
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return SkillInstallResult(

@@ -296,7 +296,7 @@ def run_workflow(
     on_step_start: Optional[Any] = None,
     on_step_complete: Optional[Any] = None,
     max_parallel_workers: int = 4,
-    history_mode: Literal["full", "summary"] = "full",
+    history_mode: Literal["full", "summary"] = "summary",
     cancel: Optional[Callable[[], bool]] = None,
 ) -> RunWorkflowResult:
     # 确保日志已配置

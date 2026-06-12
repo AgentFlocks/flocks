@@ -2,9 +2,12 @@
 Tests for flocks.skill.installer and eligibility checking.
 """
 
+import asyncio
 import os
 import shutil
 import tempfile
+import io
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -312,6 +315,37 @@ class TestInstallFromSource:
         assert (tmp_skills_dir / "demo" / "SKILL.md").exists()
 
     @pytest.mark.asyncio
+    async def test_skills_sh_cli_timeout_returns_error(self):
+        with (
+            patch("flocks.skill.installer.shutil.which", return_value="/usr/bin/npx"),
+            patch.object(
+                SkillInstaller,
+                "_run_subprocess",
+                AsyncMock(side_effect=TimeoutError("Command timed out after 45s")),
+            ),
+        ):
+            result = await SkillInstaller._install_from_skills_sh_cli(
+                "owner/repo/demo",
+                "global",
+                yes=True,
+            )
+
+        assert result.success is False
+        assert "timed out" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_install_from_source_overall_timeout_returns_error(self):
+        async def fake_wait_for(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError()
+
+        with patch("flocks.skill.installer.asyncio.wait_for", fake_wait_for):
+            result = await SkillInstaller.install_from_source("github:owner/repo/demo")
+
+        assert result.success is False
+        assert "timed out" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
     async def test_safeskill_requires_npx(self, tmp_skills_dir):
         with patch("flocks.skill.installer.shutil.which", return_value=None):
             result = await SkillInstaller.install_from_source("safeskill:test")
@@ -434,6 +468,110 @@ class TestInstallFromSource:
         assert result.skill_name == "web-design-guidelines"
         assert "raw GitHub SKILL.md fallback" in result.message
         assert (tmp_skills_dir / "web-design-guidelines" / "SKILL.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_github_archive_fallback_finds_skill_by_name(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: improve-codebase-architecture\n"
+            "description: Improve codebase architecture\n"
+            "---\n"
+            "# Improve Codebase Architecture\n"
+        )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr(
+                "skills-main/skills/engineering/improve-codebase-architecture/SKILL.md",
+                skill_content,
+            )
+            zf.writestr(
+                "skills-main/skills/engineering/improve-codebase-architecture/references/checklist.md",
+                "checklist",
+            )
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = "", content: bytes = b""):
+                self.status_code = status_code
+                self.text = text
+                self.content = content
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if "codeload.github.com" in url:
+                    return Resp(200, content=zip_buffer.getvalue())
+                return Resp(404, "not found")
+
+        with (
+            patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "github:mattpocock/skills/improve-codebase-architecture"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "improve-codebase-architecture"
+        assert "GitHub archive" in result.message
+        assert (
+            tmp_skills_dir
+            / "improve-codebase-architecture"
+            / "references"
+            / "checklist.md"
+        ).exists()
+
+    @pytest.mark.asyncio
+    async def test_github_archive_fallback_rejects_zip_slip_members(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: demo\n"
+            "description: Demo skill\n"
+            "---\n"
+            "# Demo\n"
+        )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("repo-main/demo/SKILL.md", skill_content)
+            zf.writestr("repo-main/demo/../demo2/pwned.txt", "pwned")
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = "", content: bytes = b""):
+                self.status_code = status_code
+                self.text = text
+                self.content = content
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if "codeload.github.com" in url:
+                    return Resp(200, content=zip_buffer.getvalue())
+                return Resp(404, "not found")
+
+        with (
+            patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source("github:owner/repo/demo")
+
+        assert result.success is True
+        assert (tmp_skills_dir / "demo" / "SKILL.md").exists()
+        assert not (tmp_skills_dir / "demo2" / "pwned.txt").exists()
 
 
 # ---------------------------------------------------------------------------

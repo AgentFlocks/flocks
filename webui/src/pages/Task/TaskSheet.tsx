@@ -21,6 +21,7 @@ import { describeCron, CRON_PRESETS, formatDuration, formatTime } from './helper
 import { agentAPI, Agent } from '@/api/agent';
 import { workflowAPI, Workflow } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { StatusBadge } from './components';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -558,7 +559,7 @@ function TaskFormContent({
                 )}
                 {workflows.map((wf) => (
                   <option key={wf.id} value={wf.id}>
-                    {wf.name}{wf.description ? ` — ${wf.description.slice(0, 30)}${wf.description.length > 30 ? '…' : ''}` : ''}
+                    {getWorkflowDisplayName(wf, i18n.language)}{wf.description ? ` — ${wf.description.slice(0, 30)}${wf.description.length > 30 ? '…' : ''}` : ''}
                   </option>
                 ))}
               </select>

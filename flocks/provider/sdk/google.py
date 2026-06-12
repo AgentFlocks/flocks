@@ -3,6 +3,7 @@ Google (Gemini) provider implementation - High Quality Version
 """
 
 import os
+import base64
 import json
 import re
 from typing import List, AsyncIterator, Optional, Dict, Any
@@ -18,6 +19,20 @@ from flocks.provider.provider import (
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.google")
+
+
+def _image_block_to_gemini_part(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert a Flocks internal image block to a Gemini inline_data part."""
+    data = block.get("data")
+    mime = block.get("mimeType")
+    if not data or not mime:
+        return None
+    return {
+        "inline_data": {
+            "data": data,
+            "mime_type": mime,
+        }
+    }
 
 
 class GoogleProvider(BaseProvider):
@@ -132,12 +147,16 @@ class GoogleProvider(BaseProvider):
                         elif p.type == "file":
                             mime = getattr(p, "mime", "")
                             if mime.startswith("image/"):
-                                parts.append({
-                                    "inline_data": {
-                                        "data": p.url.split(",")[-1] if "," in p.url else p.url,
-                                        "mime_type": mime
-                                    }
-                                })
+                                from flocks.session.utils.file_extractor import read_file_part_bytes
+
+                                data = read_file_part_bytes(getattr(p, "url", ""))
+                                if data:
+                                    parts.append({
+                                        "inline_data": {
+                                            "data": base64.b64encode(data).decode("utf-8"),
+                                            "mime_type": mime,
+                                        }
+                                    })
 
                     gemini_role = "model" if role == "assistant" else "user"
                     if parts:
@@ -179,6 +198,10 @@ class GoogleProvider(BaseProvider):
                     for p in msg.content:
                         if isinstance(p, dict) and p.get("type") == "text":
                             parts.append({"text": p["text"]})
+                        elif isinstance(p, dict) and p.get("type") == "image":
+                            image_part = _image_block_to_gemini_part(p)
+                            if image_part:
+                                parts.append(image_part)
                 
                 if msg.tool_calls:
                     for tc in msg.tool_calls:

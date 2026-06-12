@@ -19,8 +19,10 @@ Targeted regression tests for the three issues raised in the PR review of
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import quote
 
 import pytest
 
@@ -454,6 +456,83 @@ class TestSessionIdForwarding:
             "history would be duplicated"
         )
         assert "memory user" in all_text, "fallback did not emit in-memory message"
+
+    def test_convert_messages_db_image_file_part_reads_bytes(self, tmp_path):
+        provider = GoogleProvider()
+        image_path = tmp_path / "screenshot.png"
+        image_path.write_bytes(b"png-bytes")
+
+        mwp = MagicMock()
+        mwp.info = MagicMock(role="user")
+        part = MagicMock()
+        part.type = "file"
+        part.mime = "image/png"
+        part.url = image_path.as_uri()
+        mwp.parts = [part]
+
+        with patch("flocks.session.message.MessageSync") as mock_ms:
+            mock_ms.list_with_parts.return_value = [mwp]
+
+            _system, gemini_msgs = provider._convert_messages(
+                [ChatMessage(role="user", content="fallback")],
+                session_id="ses_with_image",
+            )
+
+        inline = gemini_msgs[0]["parts"][0]["inline_data"]
+        assert inline["mime_type"] == "image/png"
+        assert inline["data"] == base64.b64encode(b"png-bytes").decode("utf-8")
+
+    def test_convert_messages_db_download_url_image_file_part_reads_bytes(self, tmp_path):
+        provider = GoogleProvider()
+        image_path = tmp_path / "screenshot.png"
+        image_path.write_bytes(b"png-bytes")
+
+        mwp = MagicMock()
+        mwp.info = MagicMock(role="user")
+        part = MagicMock()
+        part.type = "file"
+        part.mime = "image/png"
+        part.url = f"/api/file/download?path={quote(image_path.as_posix(), safe='')}"
+        mwp.parts = [part]
+
+        with patch("flocks.session.message.MessageSync") as mock_ms:
+            mock_ms.list_with_parts.return_value = [mwp]
+
+            _system, gemini_msgs = provider._convert_messages(
+                [ChatMessage(role="user", content="fallback")],
+                session_id="ses_with_download_url_image",
+            )
+
+        inline = gemini_msgs[0]["parts"][0]["inline_data"]
+        assert inline["mime_type"] == "image/png"
+        assert inline["data"] == base64.b64encode(b"png-bytes").decode("utf-8")
+
+    def test_convert_messages_in_memory_image_block_is_preserved(self):
+        provider = GoogleProvider()
+
+        _system, gemini_msgs = provider._convert_messages(
+            [
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "what is this?"},
+                        {
+                            "type": "image",
+                            "mimeType": "image/png",
+                            "data": base64.b64encode(b"png-bytes").decode("utf-8"),
+                        },
+                    ],
+                )
+            ],
+            session_id=None,
+        )
+
+        parts = gemini_msgs[0]["parts"]
+        assert parts[0] == {"text": "what is this?"}
+        assert parts[1]["inline_data"] == {
+            "data": base64.b64encode(b"png-bytes").decode("utf-8"),
+            "mime_type": "image/png",
+        }
 
     @pytest.mark.asyncio
     async def test_chat_stream_passes_session_id_to_convert_messages(self):
