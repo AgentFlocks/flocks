@@ -1,15 +1,17 @@
-"""Windows restart handoff helper for the self-updater.
+"""Restart handoff helper for the self-updater.
 
 The updater process owns the backend port while it is spawning the restart
-command.  On Windows, starting the new backend before that process has fully
-exited can race with port release and fail with WinError 10048.  This helper is
-spawned instead; it waits for the old backend to exit, clears any remaining
-backend listener, and then starts the real restart command.
+command. Starting the new backend before that process has fully exited can race
+with port release. This helper is spawned instead; it waits for the old backend
+to exit, clears any remaining backend listener, runs post-apply upgrade tasks,
+and then starts the real restart command.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -113,7 +115,7 @@ def _record_backend_runtime_if_direct_serve(
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Flocks Windows restart handoff helper")
+    parser = argparse.ArgumentParser(description="Flocks restart handoff helper")
     parser.add_argument("--parent-pid", type=int, required=True)
     parser.add_argument("--backend-host", required=True)
     parser.add_argument("--backend-port", type=int, required=True)
@@ -121,11 +123,63 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--frontend-port", type=int, required=True)
     parser.add_argument("--backend-pid-file", required=True)
     parser.add_argument("--install-root", required=True)
+    parser.add_argument("--uv-path", required=True)
+    parser.add_argument("--sync-timeout", type=int, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--current-version", required=True)
+    parser.add_argument("--backup-path")
+    parser.add_argument("--uv-default-index")
+    parser.add_argument("--npm-registry")
+    parser.add_argument("--pro-wheel-path")
+    parser.add_argument("--pro-bundle-manifest-path")
+    parser.add_argument("--bundle-sha256")
+    parser.add_argument("--cleanup-dir")
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.restart_argv and args.restart_argv[0] == "--":
         args.restart_argv = args.restart_argv[1:]
     return args
+
+
+def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
+    from flocks.updater import updater
+
+    return asyncio.run(
+        updater.run_handoff_upgrade_tasks(
+            install_root=Path(args.install_root),
+            uv_path=args.uv_path,
+            version=args.version,
+            uv_default_index=args.uv_default_index,
+            npm_registry=args.npm_registry,
+            pro_wheel_path=Path(args.pro_wheel_path) if args.pro_wheel_path else None,
+            pro_bundle_manifest_path=(
+                Path(args.pro_bundle_manifest_path) if args.pro_bundle_manifest_path else None
+            ),
+            bundle_sha256=args.bundle_sha256,
+            sync_timeout=args.sync_timeout,
+        )
+    )
+
+
+def _rollback_failed_upgrade(args: argparse.Namespace, error: str) -> None:
+    from flocks.updater import updater
+
+    _record_handoff_log(f"upgrade_tasks_failed error={error}")
+    backup_path = Path(args.backup_path) if args.backup_path else None
+    try:
+        updater._rollback_failed_update(
+            backup_path,
+            Path(args.install_root),
+            args.current_version,
+        )
+    except Exception as exc:
+        _record_handoff_log(f"rollback_failed error={exc}")
+
+
+def _cleanup_dir(path_value: str | None) -> None:
+    if not path_value:
+        return
+    shutil.rmtree(Path(path_value), ignore_errors=True)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -143,11 +197,22 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if not _wait_for_parent_exit(args.parent_pid):
         _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
+        _cleanup_dir(args.cleanup_dir)
         return 1
 
     backend_pid_file = Path(args.backend_pid_file)
     if not _ensure_backend_port_free(args.backend_port, backend_pid_file):
         _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    try:
+        task_error = _run_upgrade_tasks(args)
+    except Exception as exc:
+        task_error = f"upgrade tasks crashed: {exc}"
+    if task_error is not None:
+        _rollback_failed_upgrade(args, task_error)
+        _cleanup_dir(args.cleanup_dir)
         return 1
 
     try:
@@ -158,6 +223,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
     except OSError as exc:
         _record_handoff_log(f"restart_spawn_failed error={exc}")
+        _cleanup_dir(args.cleanup_dir)
         return 1
 
     _record_backend_runtime_if_direct_serve(
@@ -168,6 +234,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         backend_pid_file=backend_pid_file,
     )
     _record_handoff_log(f"restart_spawned pid={process.pid}")
+    _cleanup_dir(args.cleanup_dir)
     return 0
 
 
