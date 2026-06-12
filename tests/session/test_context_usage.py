@@ -39,9 +39,11 @@ def context_usage_mocks(monkeypatch):
         "system_prompt": 0,
         "tool_definitions": 0,
         "parts": {},
+        "list_calls": [],
     }
 
     async def fake_list(session_id: str, include_archived: bool = False):
+        state["list_calls"].append(include_archived)
         return list(state["all"] if include_archived else state["active"])
 
     async def fake_parts(message_id: str, session_id: str | None = None):
@@ -153,7 +155,7 @@ async def test_context_usage_ignores_observed_tokens_after_later_summary(context
         finish="summary",
         summary={"tokens": 40},
     )
-    context_usage_mocks["active"] = [observed]
+    context_usage_mocks["active"] = [observed, summary]
     context_usage_mocks["all"] = [observed, summary]
     context_usage_mocks["estimate"] = 40
 
@@ -166,6 +168,21 @@ async def test_context_usage_ignores_observed_tokens_after_later_summary(context
         ("conversation", 40),
         ("agentDelegation", 0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_context_usage_does_not_scan_archived_history(context_usage_mocks):
+    active = _message("assistant-1", tokens=None)
+    archived = _message("archived-1", tokens=None, compacted={"summary": "old"})
+    context_usage_mocks["active"] = [active]
+    context_usage_mocks["all"] = [active, archived]
+    context_usage_mocks["estimate"] = 40
+
+    snapshot = await context_usage.build_context_usage_snapshot("sess-1")
+
+    assert context_usage_mocks["list_calls"] == [False]
+    assert snapshot.compacted_tokens == 0
+    assert snapshot.excluded_segments == []
 
 
 @pytest.mark.asyncio

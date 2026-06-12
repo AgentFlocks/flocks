@@ -1153,6 +1153,56 @@ describe('SessionChat context usage popover', () => {
 
     expect(screen.getByText('420')).toBeInTheDocument();
   });
+
+  it('does not refetch immediately after a pushed context usage snapshot', async () => {
+    sessionApiGetContextUsageMock.mockResolvedValueOnce({
+      sessionID: 'sess-1',
+      usedTokens: 900,
+      contextWindow: 1000,
+      percent: 90,
+      source: 'estimated',
+      estimatedTokens: 900,
+      compactedTokens: 0,
+      segments: [
+        { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: {
+          sessionID: 'sess-1',
+          usedTokens: 420,
+          contextWindow: 1000,
+          percent: 42,
+          source: 'estimated',
+          estimatedTokens: 420,
+          compactedTokens: 0,
+          segments: [
+            { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+          ],
+          excludedSegments: [],
+        },
+      });
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'idle' },
+        },
+      });
+    });
+
+    expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('SessionChat compaction divider', () => {

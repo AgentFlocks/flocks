@@ -108,18 +108,15 @@ async def build_context_usage_snapshot(
     value.  Otherwise we fall back to ``SessionPrompt.estimate_full_context_tokens``.
     """
     active_messages = await Message.list(session_id)
-    all_messages = await Message.list(session_id, include_archived=True)
-    archived_messages = [
-        msg for msg in all_messages
-        if bool(getattr(msg, "compacted", None))
-    ]
 
-    breakdown_tokens = await _estimate_message_breakdown(session_id, active_messages)
+    breakdown_tokens, latest_compacted_part_ms = await _estimate_message_breakdown(
+        session_id,
+        active_messages,
+    )
     message_estimate_tokens = max(
         await _estimate_messages(session_id, active_messages),
         sum(breakdown_tokens.values()),
     )
-    compacted_tokens = await _estimate_messages(session_id, archived_messages)
     inferred_provider_id, inferred_model_id = _resolve_message_model(active_messages)
     provider_id = provider_id or inferred_provider_id or getattr(session, "provider", None)
     model_id = model_id or inferred_model_id or getattr(session, "model", None)
@@ -141,7 +138,10 @@ async def build_context_usage_snapshot(
 
     latest_observed = _latest_fresh_observation(
         active_messages,
-        latest_context_mutation_ms=await _latest_context_mutation_ms(session_id, all_messages),
+        latest_context_mutation_ms=max(
+            _latest_summary_message_ms(active_messages),
+            latest_compacted_part_ms,
+        ),
     )
 
     observed_tokens: Optional[int] = None
@@ -191,17 +191,6 @@ async def build_context_usage_snapshot(
             )
         )
 
-    excluded_segments: List[ContextUsageSegment] = []
-    if compacted_tokens > 0:
-        excluded_segments.append(
-            ContextUsageSegment(
-                key="compactedHistory",
-                tokens=compacted_tokens,
-                included=False,
-                source="estimated",
-            )
-        )
-
     return ContextUsageSnapshot(
         sessionID=session_id,
         usedTokens=used_tokens,
@@ -211,11 +200,11 @@ async def build_context_usage_snapshot(
         lastMessageID=last_message_id,
         observedTokens=observed_tokens,
         estimatedTokens=estimated_tokens,
-        compactedTokens=compacted_tokens,
+        compactedTokens=0,
         providerID=provider_id,
         modelID=model_id,
         segments=segments,
-        excludedSegments=excluded_segments,
+        excludedSegments=[],
     )
 
 
@@ -240,6 +229,14 @@ def _time_created_ms(message: Any) -> int:
 
 def _is_summary_message(message: Any) -> bool:
     return bool(getattr(message, "summary", None)) or getattr(message, "finish", None) == "summary"
+
+
+def _latest_summary_message_ms(messages: List[Any]) -> int:
+    latest = 0
+    for message in messages:
+        if _is_summary_message(message):
+            latest = max(latest, _time_created_ms(message))
+    return latest
 
 
 def _observed_tokens_for_message(message: Any) -> Optional[_ObservedTokens]:
@@ -409,7 +406,7 @@ def _resolve_agent_name(messages: List[Any], session: Optional[SessionInfo]) -> 
     return str(agent_name) if agent_name else None
 
 
-async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> Dict[str, int]:
+async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> tuple[Dict[str, int], int]:
     tokens_by_key = {
         "conversation": 0,
         "reasoning": 0,
@@ -417,6 +414,7 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> D
         "skillLoad": 0,
         "agentDelegation": 0,
     }
+    latest_compacted_part_ms = 0
     for message in messages:
         content = _field_value(message, "content", "")
         tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
@@ -449,8 +447,12 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> D
             state = _field_value(part, "state")
             if state is None:
                 continue
+            latest_compacted_part_ms = max(
+                latest_compacted_part_ms,
+                _compacted_time_ms(state),
+            )
             tokens_by_key[_context_key_for_tool(_tool_name_for_part(part))] += _estimate_tool_state_tokens(state)
-    return tokens_by_key
+    return tokens_by_key, latest_compacted_part_ms
 
 
 def _field_value(value: Any, field: str, default: Any = None) -> Any:
@@ -514,9 +516,7 @@ def _estimate_tool_state_tokens(state: Any) -> int:
             tool_input if isinstance(tool_input, str) else str(tool_input)
         )
 
-    time_info = _field_value(state, "time")
-    is_compacted = isinstance(time_info, dict) and bool(time_info.get("compacted"))
-    if is_compacted:
+    if _compacted_time_ms(state) > 0:
         return total + 10
 
     tool_output = _field_value(state, "output")
@@ -525,6 +525,13 @@ def _estimate_tool_state_tokens(state: Any) -> int:
             tool_output if isinstance(tool_output, str) else str(tool_output)
         )
     return total
+
+
+def _compacted_time_ms(state: Any) -> int:
+    time_info = _field_value(state, "time")
+    if not isinstance(time_info, dict):
+        return 0
+    return _coerce_int(time_info.get("compacted"))
 
 
 def _resolve_message_model(messages: List[Any]) -> tuple[Optional[str], Optional[str]]:
@@ -558,30 +565,3 @@ def _resolve_context_window(provider_id: Optional[str], model_id: Optional[str])
             "error": str(exc),
         })
         return 0
-
-
-async def _latest_context_mutation_ms(session_id: str, messages: List[Any]) -> int:
-    latest = 0
-    for message in messages:
-        if _is_summary_message(message):
-            latest = max(latest, _time_created_ms(message))
-        latest = max(latest, await _latest_compacted_part_ms(session_id, message))
-    return latest
-
-
-async def _latest_compacted_part_ms(session_id: str, message: Any) -> int:
-    message_id = getattr(message, "id", "")
-    if not message_id:
-        return 0
-    try:
-        parts = await Message.parts(message_id, session_id)
-    except Exception:
-        return 0
-
-    latest = 0
-    for part in parts:
-        state = getattr(part, "state", None)
-        time_info = getattr(state, "time", None) if state is not None else None
-        if isinstance(time_info, dict):
-            latest = max(latest, _coerce_int(time_info.get("compacted")))
-    return latest

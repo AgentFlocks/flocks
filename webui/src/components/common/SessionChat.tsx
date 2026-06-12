@@ -1369,6 +1369,9 @@ export default function SessionChat({
   const [contextUsageSnapshot, setContextUsageSnapshot] = useState<ContextUsageSnapshot | null>(null);
   const [contextUsageRefreshing, setContextUsageRefreshing] = useState(false);
   const [contextUsageWindowTokens, setContextUsageWindowTokens] = useState(0);
+  const contextUsageRequestRef = useRef<{ sessionId: string; promise: Promise<void> } | null>(null);
+  const contextUsageRequestSeqRef = useRef(0);
+  const lastContextUsagePushAtRef = useRef(0);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1503,30 +1506,54 @@ export default function SessionChat({
     }
   }, [sessionId]);
 
-  const refreshContextUsage = useCallback(async (options?: { clear?: boolean }) => {
+  const refreshContextUsage = useCallback((options?: { clear?: boolean; skipIfFreshMs?: number }) => {
     if (!sessionId) {
       setContextUsageSnapshot(null);
       setContextUsageRefreshing(false);
       setContextUsageWindowTokens(0);
+      contextUsageRequestSeqRef.current += 1;
+      contextUsageRequestRef.current = null;
+      lastContextUsagePushAtRef.current = 0;
       return;
     }
     if (options?.clear) {
       setContextUsageSnapshot(null);
       setContextUsageRefreshing(true);
+      contextUsageRequestSeqRef.current += 1;
+      contextUsageRequestRef.current = null;
+      lastContextUsagePushAtRef.current = 0;
+    } else if (
+      options?.skipIfFreshMs &&
+      Date.now() - lastContextUsagePushAtRef.current < options.skipIfFreshMs
+    ) {
+      return;
     }
-    try {
-      const snapshot = await sessionApi.getContextUsage(sessionId);
-      if (snapshot.sessionID === sessionId) {
+
+    const existingRequest = contextUsageRequestRef.current;
+    if (existingRequest?.sessionId === sessionId) {
+      return existingRequest.promise;
+    }
+
+    const requestSessionId = sessionId;
+    const requestSeq = contextUsageRequestSeqRef.current;
+    const request = sessionApi.getContextUsage(requestSessionId).then((snapshot) => {
+      if (requestSeq === contextUsageRequestSeqRef.current && snapshot.sessionID === sessionId) {
         setContextUsageSnapshot(snapshot);
         if (snapshot.contextWindow && snapshot.contextWindow > 0) {
           setContextUsageWindowTokens(snapshot.contextWindow);
         }
         setContextUsageRefreshing(false);
       }
-    } catch (err) {
+    }).catch((err) => {
       setContextUsageRefreshing(false);
       console.warn('[SessionChat] Failed to fetch context usage:', err);
-    }
+    }).finally(() => {
+      if (contextUsageRequestRef.current?.promise === request) {
+        contextUsageRequestRef.current = null;
+      }
+    });
+    contextUsageRequestRef.current = { sessionId: requestSessionId, promise: request };
+    return request;
   }, [sessionId]);
 
   useEffect(() => {
@@ -1582,7 +1609,7 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
           refetch();
-          void refreshContextUsage();
+          void refreshContextUsage({ skipIfFreshMs: 500 });
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -1642,7 +1669,7 @@ export default function SessionChat({
         const data = (properties.data ?? {}) as Record<string, unknown>;
         if (!stage) return;
         if (stage === 'complete' && data.result === 'continue') {
-          void refreshContextUsage();
+          void refreshContextUsage({ skipIfFreshMs: 500 });
         }
         // Single source of truth: append into ``compactionStages`` and let
         // the progress bar derive ``done/total`` from it via useMemo.
@@ -1665,19 +1692,22 @@ export default function SessionChat({
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
       } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
-        void refreshContextUsage();
+        void refreshContextUsage({ skipIfFreshMs: 500 });
       } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
         setContextUsageSnapshot(properties as ContextUsageSnapshot);
         if (typeof properties.contextWindow === 'number' && properties.contextWindow > 0) {
           setContextUsageWindowTokens(properties.contextWindow);
         }
+        contextUsageRequestSeqRef.current += 1;
+        contextUsageRequestRef.current = null;
+        lastContextUsagePushAtRef.current = Date.now();
         setContextUsageRefreshing(false);
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
         setCompactionStages([]);
         setContextUsageRefreshing(false);
-        void refreshContextUsage();
+        void refreshContextUsage({ skipIfFreshMs: 500 });
         abortingRef.current = false;
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
