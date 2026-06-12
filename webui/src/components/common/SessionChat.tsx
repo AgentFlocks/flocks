@@ -231,11 +231,64 @@ function estimatePartTokens(part: MessagePart): number {
   return 0;
 }
 
-function estimateContextTokens(messages: Message[], draft: string): number {
-  const messageTokens = messages.reduce((total, message) => (
-    total + message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0)
+export interface ContextUsageBreakdownSegment {
+  key: 'conversation' | 'draft' | 'compactedHistory';
+  tokens: number;
+  colorClass: string;
+  included: boolean;
+}
+
+export interface ContextUsageBreakdown {
+  usedTokens: number;
+  compactedTokens: number;
+  segments: ContextUsageBreakdownSegment[];
+  excludedSegments: ContextUsageBreakdownSegment[];
+}
+
+function estimateMessageTokens(message: Message): number {
+  return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
+}
+
+export function buildContextUsageBreakdown(messages: Message[], draft: string): ContextUsageBreakdown {
+  const conversationTokens = messages.reduce((total, message) => (
+    message.compacted ? total : total + estimateMessageTokens(message)
   ), 0);
-  return messageTokens + countTokensLikeCompaction(draft);
+  const compactedTokens = messages.reduce((total, message) => (
+    message.compacted ? total + estimateMessageTokens(message) : total
+  ), 0);
+  const draftTokens = countTokensLikeCompaction(draft);
+
+  const segments: ContextUsageBreakdownSegment[] = [
+    {
+      key: 'conversation',
+      tokens: conversationTokens,
+      colorClass: 'bg-slate-500',
+      included: true,
+    },
+  ];
+
+  if (draftTokens > 0) {
+    segments.push({
+      key: 'draft',
+      tokens: draftTokens,
+      colorClass: 'bg-sky-400',
+      included: true,
+    });
+  }
+
+  return {
+    usedTokens: conversationTokens + draftTokens,
+    compactedTokens,
+    segments,
+    excludedSegments: compactedTokens > 0
+      ? [{
+          key: 'compactedHistory',
+          tokens: compactedTokens,
+          colorClass: 'bg-zinc-700',
+          included: false,
+        }]
+      : [],
+  };
 }
 
 function formatTokenCount(tokens: number): string {
@@ -244,7 +297,22 @@ function formatTokenCount(tokens: number): string {
   return String(tokens);
 }
 
-function ContextUsageRing({ percent, title }: { percent: number; title: string }) {
+function ContextUsageRing({
+  percent,
+  title,
+  usedTokens,
+  totalTokens,
+  breakdown,
+}: {
+  percent: number;
+  title: string;
+  usedTokens: number;
+  totalTokens: number;
+  breakdown: ContextUsageBreakdown;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const clamped = Math.max(0, Math.min(100, percent));
   const radius = 13;
   const circumference = 2 * Math.PI * radius;
@@ -256,27 +324,127 @@ function ContextUsageRing({ percent, title }: { percent: number; title: string }
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
+  const rows = [
+    ...breakdown.segments.filter((segment) => segment.tokens > 0 || segment.key === 'conversation'),
+    ...breakdown.excludedSegments,
+  ];
+  const activeSegments = breakdown.segments.filter((segment) => segment.tokens > 0);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!wrapperRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
 
   return (
     <div
-      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
-      title={title}
-      aria-label={title}
+      ref={wrapperRef}
+      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center"
     >
-      <svg className="absolute inset-0 h-8 w-8 -rotate-90" viewBox="0 0 32 32" aria-hidden="true">
-        <circle cx="16" cy="16" r={radius} fill="none" strokeWidth="2.5" className="stroke-zinc-200" />
-        <circle
-          cx="16"
-          cy="16"
-          r={radius}
-          fill="none"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className={strokeClass}
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-        />
-      </svg>
+      <button
+        type="button"
+        className="relative inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+        title={title}
+        aria-label={title}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <svg className="absolute inset-0 h-8 w-8 -rotate-90" viewBox="0 0 32 32" aria-hidden="true">
+          <circle cx="16" cy="16" r={radius} fill="none" strokeWidth="2.5" className="stroke-zinc-200" />
+          <circle
+            cx="16"
+            cy="16"
+            r={radius}
+            fill="none"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            className={strokeClass}
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+          />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label={t('chat.contextUsage.title')}
+          className="absolute bottom-full right-0 z-50 mb-2 w-[27rem] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-800 bg-zinc-950 p-4 text-zinc-200 shadow-2xl"
+        >
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <h3 className="text-sm font-semibold text-zinc-200">{t('chat.contextUsage.title')}</h3>
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              aria-label={t('chat.contextUsage.close')}
+              title={t('chat.contextUsage.close')}
+              onClick={() => setOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="mb-2 flex items-center justify-between gap-4 text-sm font-medium text-zinc-300">
+            <span>{t('chat.contextUsage.full', { percent: clamped })}</span>
+            <span className="text-zinc-400">
+              {t('chat.contextUsage.tokens', {
+                used: formatTokenCount(usedTokens),
+                total: formatTokenCount(totalTokens),
+              })}
+            </span>
+          </div>
+
+          <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className="flex h-full overflow-hidden rounded-full"
+              style={{ width: `${clamped}%` }}
+            >
+              {activeSegments.map((segment) => (
+                <div
+                  key={segment.key}
+                  className={segment.colorClass}
+                  style={{ flexBasis: 0, flexGrow: Math.max(1, segment.tokens) }}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {rows.map((segment) => (
+              <div key={segment.key} className="flex items-center justify-between gap-4 text-sm">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className={`h-3.5 w-3.5 shrink-0 rounded-[3px] ${segment.colorClass}`} />
+                  <span className="truncate font-semibold text-zinc-200">
+                    {t(`chat.contextUsage.breakdown.${segment.key}`)}
+                  </span>
+                </div>
+                <span className={segment.included ? 'shrink-0 text-zinc-300' : 'shrink-0 text-zinc-500'}>
+                  {segment.included
+                    ? formatTokenCount(segment.tokens)
+                    : t('chat.contextUsage.excludedTokens', { tokens: formatTokenCount(segment.tokens) })}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1028,10 +1196,11 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
-  const estimatedContextTokens = useMemo(
-    () => estimateContextTokens(messages, input),
+  const contextUsageBreakdown = useMemo(
+    () => buildContextUsageBreakdown(messages, input),
     [messages, input],
   );
+  const estimatedContextTokens = contextUsageBreakdown.usedTokens;
   const contextUsagePercent = contextWindowTokens && contextWindowTokens > 0
     ? Math.min(100, Math.round((estimatedContextTokens / contextWindowTokens) * 100))
     : 0;
@@ -2738,6 +2907,9 @@ export default function SessionChat({
                     <ContextUsageRing
                       percent={contextUsagePercent}
                       title={contextUsageTitle}
+                      usedTokens={estimatedContextTokens}
+                      totalTokens={contextWindowTokens}
+                      breakdown={contextUsageBreakdown}
                     />
                   )}
 

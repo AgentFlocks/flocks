@@ -7,6 +7,7 @@ import type { Message } from '@/types';
 
 import {
   areChatMessagePartsRenderEqual,
+  buildContextUsageBreakdown,
   buildTodoSummary,
   ChatToolPart,
   dedupeUploadedDocumentAttachments,
@@ -43,6 +44,14 @@ const tMock = (key: string) => ({
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
   'chat.compacting': '压缩中...',
+  'chat.contextUsage.title': 'Context Usage',
+  'chat.contextUsage.close': 'Close',
+  'chat.contextUsage.full': '13% Full',
+  'chat.contextUsage.tokens': '~13 / 100 Tokens',
+  'chat.contextUsage.excludedTokens': '100 excluded',
+  'chat.contextUsage.breakdown.conversation': 'Conversation',
+  'chat.contextUsage.breakdown.draft': 'Current draft',
+  'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
@@ -197,6 +206,55 @@ describe('listUploadedDocumentPaths', () => {
       { status: 'success', workspacePath: '/tmp/uploads/image.png', isImage: true },
       { status: 'error', workspacePath: '/tmp/uploads/c.pdf', isImage: false },
     ])).toEqual(['/tmp/uploads/a.pdf', '/tmp/uploads/b.pdf']);
+  });
+});
+
+describe('buildContextUsageBreakdown', () => {
+  it('excludes compacted history from the current used-token total', () => {
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'active',
+        role: 'user',
+        parts: [{ id: 'active-text', type: 'text', text: 'a'.repeat(400) }],
+      }),
+      makeMessage({
+        id: 'archived',
+        compacted: true,
+        parts: [{ id: 'archived-text', type: 'text', text: 'b'.repeat(800) }],
+      }),
+    ], 'c'.repeat(40));
+
+    expect(breakdown.usedTokens).toBe(110);
+    expect(breakdown.compactedTokens).toBe(200);
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
+      ['conversation', 100],
+      ['draft', 10],
+    ]);
+    expect(breakdown.excludedSegments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
+      ['compactedHistory', 200, false],
+    ]);
+  });
+
+  it('counts compacted tool outputs as a small placeholder', () => {
+    const compactedTime = { start: 1, compacted: 2 };
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'tool-msg',
+        parts: [{
+          id: 'tool-part',
+          type: 'tool',
+          tool: 'bash',
+          state: {
+            status: 'completed',
+            input: { command: 'x'.repeat(40) },
+            output: 'y'.repeat(800),
+            time: compactedTime,
+          },
+        }],
+      }),
+    ], '');
+
+    expect(breakdown.usedTokens).toBe(23);
   });
 });
 

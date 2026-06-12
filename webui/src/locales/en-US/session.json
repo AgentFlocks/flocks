@@ -85,6 +85,18 @@
     "stopTitle": "Stop execution",
     "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
     "contextUsageUnknown": "Context usage unknown",
+    "contextUsage": {
+      "title": "Context Usage",
+      "close": "Close",
+      "full": "{{percent}}% Full",
+      "tokens": "~{{used}} / {{total}} Tokens",
+      "excludedTokens": "{{tokens}} excluded",
+      "breakdown": {
+        "conversation": "Conversation",
+        "draft": "Current draft",
+        "compactedHistory": "Compacted history"
+      }
+    },
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",

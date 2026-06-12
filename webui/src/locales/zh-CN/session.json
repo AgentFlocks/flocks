@@ -85,6 +85,18 @@
     "stopTitle": "停止执行",
     "contextUsageTitle": "上下文已用：{{used}} / {{total}}（{{percent}}%）",
     "contextUsageUnknown": "上下文使用量未知",
+    "contextUsage": {
+      "title": "上下文使用量",
+      "close": "关闭",
+      "full": "{{percent}}% 已用",
+      "tokens": "~{{used}} / {{total}} Tokens",
+      "excludedTokens": "已排除 {{tokens}}",
+      "breakdown": {
+        "conversation": "会话内容",
+        "draft": "当前草稿",
+        "compactedHistory": "已压缩历史"
+      }
+    },
     "edit": "编辑",
     "editRawHint": "当前显示的是原始未渲染内容，保存后会直接更新这条消息文本。",
     "editRawTitle": "编辑原始内容",
