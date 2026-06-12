@@ -71,6 +71,27 @@ def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool
         return None
 
 
+def _resolve_default_extra_body(provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
+    """Read model-level OpenAI-compatible extra_body from flocks.json."""
+    try:
+        from flocks.provider.model_manager import get_model_manager
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if not setting:
+            return None
+
+        default_parameters = setting.default_parameters or {}
+        extra_body = default_parameters.get("extra_body")
+        return dict(extra_body) if isinstance(extra_body, dict) else None
+    except Exception as exc:
+        log.debug("options.extra_body_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
 def _lookup_raw_model_metadata(provider_id: str, model_id: str) -> Optional[Any]:
     """Return provider/model metadata without applying inferred defaults."""
     try:
@@ -269,6 +290,7 @@ def build_provider_options(
         if reasoning_enabled is not None
         else _resolve_reasoning_enabled(provider_id, model_id)
     )
+    configured_extra_body = _resolve_default_extra_body(provider_id, model_id)
     interleaved_enabled = interleaved_capability is not None
     if interleaved_enabled and reasoning_enabled is None:
         reasoning_enabled = True
@@ -322,11 +344,12 @@ def build_provider_options(
     # most reasoning_content models use enable_thinking, while MiniMax's
     # OpenAI-compatible interleaved format uses reasoning_split so the model
     # returns reasoning_details that can be replayed in later tool turns.
-    elif (
-        (interleaved_enabled or reasoning_enabled is True)
-        and reasoning_transport == REASONING_TRANSPORT_GENERIC_CHAT
+    elif reasoning_transport == REASONING_TRANSPORT_GENERIC_CHAT and (
+        configured_extra_body
+        or interleaved_enabled
+        or reasoning_enabled is True
     ):
-        extra_body = _build_generic_chat_extra_body(
+        extra_body = configured_extra_body or _build_generic_chat_extra_body(
             provider_id,
             model_id,
             interleaved_capability,
@@ -391,4 +414,3 @@ def _apply_max_tokens_from_config(
             "model_id": model_id,
             "max_tokens": model_info.capabilities.max_tokens,
         })
-
