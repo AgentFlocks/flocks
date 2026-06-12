@@ -2690,16 +2690,12 @@ export default function SessionChat({
     }
   }, [editingMessageId, messages, resetEditingState]);
 
-  // ── Merged messages with compaction grouping ──
-  // The compaction divider is rendered at the position of the first compacted
-  // message, marking where archived history was replaced by the summary.
-  const { merged, summaryRedirectMap, skipIndices } = useMemo(() => {
+  // ── Merged messages ──
+  // Archived-by-compaction messages stay visible in the UI timeline. The
+  // summary message itself renders as a divider, so multiple compactions
+  // naturally appear as multiple chronological separators.
+  const { merged, skipIndices } = useMemo(() => {
     const merged = mergeConsecutiveAssistantMessages(messages);
-    // Maps: first-compacted-index → summary-message-index, so we can
-    // render the summary message at the earlier position.
-    const summaryRedirectMap = new Map<number, number>();
-    const compactedBuffer: MergedMessage[] = [];
-    let firstCompactedIdx = -1;
     const skipIndices = new Set<number>();
 
     for (let idx = 0; idx < merged.length; idx++) {
@@ -2712,32 +2708,9 @@ export default function SessionChat({
         skipIndices.add(idx);
         continue;
       }
-      if (msg.compacted) {
-        if (compactedBuffer.length === 0) firstCompactedIdx = idx;
-        compactedBuffer.push(msg);
-        skipIndices.add(idx);
-      } else if (msg.finish === 'summary' && compactedBuffer.length > 0) {
-        skipIndices.delete(firstCompactedIdx);
-        summaryRedirectMap.set(firstCompactedIdx, idx);
-        // Skip the summary at its natural (later) position
-        skipIndices.add(idx);
-        compactedBuffer.length = 0;
-        firstCompactedIdx = -1;
-      }
     }
 
-    // Orphaned compacted messages (no summary found yet — e.g. compaction
-    // still in progress or summary missed during SSE race).  Un-skip them
-    // so they remain visible rather than silently disappearing.
-    if (compactedBuffer.length > 0) {
-      for (const orphan of compactedBuffer) {
-        const orphanIdx = merged.indexOf(orphan);
-        if (orphanIdx >= 0) skipIndices.delete(orphanIdx);
-      }
-      compactedBuffer.length = 0;
-    }
-
-    return { merged, summaryRedirectMap, skipIndices };
+    return { merged, skipIndices };
   }, [messages]);
 
   // ── Styling based on compact mode ──
@@ -2780,18 +2753,15 @@ export default function SessionChat({
           <div ref={messagesContentRef} className={msgListClass}>
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
-              // If this position is a redirect, render the summary message here
-              const redirectIdx = summaryRedirectMap.get(i);
-              const messageToRender = redirectIdx !== undefined ? merged[redirectIdx] : msg;
               return (
                 <ChatMessageBubble
-                  key={messageToRender.id}
-                  message={messageToRender}
+                  key={msg.id}
+                  message={msg}
                   isActive={
                     isStreaming &&
                     i === merged.length - 1 &&
-                    messageToRender.role === 'assistant' &&
-                    !messageToRender.finish
+                    msg.role === 'assistant' &&
+                    !msg.finish
                   }
                   pendingQuestions={pendingQuestions}
                   onQuestionAnswer={handleQuestionAnswer}

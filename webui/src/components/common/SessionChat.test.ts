@@ -1012,14 +1012,14 @@ describe('SessionChat context usage popover', () => {
 });
 
 describe('SessionChat compaction divider', () => {
-  it('shows a compressed-context divider at the archived history boundary', () => {
+  it('keeps archived history visible before the compressed-context divider', () => {
     useSessionMessagesMock.mockReturnValue({
       messages: [
         makeMessage({
           id: 'old-user',
           role: 'user',
           compacted: true,
-          parts: [{ id: 'old-user-part', type: 'text', text: 'old hidden request' }] as Message['parts'],
+          parts: [{ id: 'old-user-part', type: 'text', text: 'old visible request' }] as Message['parts'],
         }),
         makeMessage({
           id: 'summary-1',
@@ -1046,8 +1046,58 @@ describe('SessionChat compaction divider', () => {
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 
     expect(screen.getByText('会话上下文已压缩')).toBeInTheDocument();
-    expect(screen.queryByText('old hidden request')).not.toBeInTheDocument();
+    expect(screen.getByText('old visible request')).toBeInTheDocument();
     expect(screen.getByText('current answer')).toBeInTheDocument();
+  });
+
+  it('renders one chronological divider for each summary message', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'old-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'old-user-part', type: 'text', text: 'first archived turn' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-1',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'middle-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'middle-user-part', type: 'text', text: 'second archived turn' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-2',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'current answer' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('first archived turn')).toBeInTheDocument();
+    expect(screen.getByText('second archived turn')).toBeInTheDocument();
+    expect(screen.getAllByText('会话上下文已压缩')).toHaveLength(2);
   });
 });
 
