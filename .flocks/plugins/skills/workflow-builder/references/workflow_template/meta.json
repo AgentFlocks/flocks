@@ -1,0 +1,19 @@
+{
+  "id": "workflow_template",
+  "name": "Workflow Builder Reference Template",
+  "nameI18n": {
+    "zh-CN": "工作流创建参考模板",
+    "en-US": "Workflow Builder Reference Template"
+  },
+  "description": "Internal workflow-builder reference package for workflow.md, workflow.json, config.json, and guide.md authoring.",
+  "category": "template",
+  "status": "hidden",
+  "hidden": true,
+  "templateOnly": true,
+  "visibility": "hidden",
+  "excludeFromUI": true,
+  "excludeFromPrompt": true,
+  "createdBy": null,
+  "createdAt": 0,
+  "updatedAt": 0
+}

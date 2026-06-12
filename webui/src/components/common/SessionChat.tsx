@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -72,12 +72,35 @@ export interface NodeRef {
 }
 
 export interface ConversationBottomSlotActions {
-  sendPrompt: (text: string) => void;
+  sendPrompt: (text: string, options?: PromptDisplayOptions) => void;
   setInput: (text: string) => void;
   focusInput: () => void;
   sending: boolean;
   streaming: boolean;
   sessionId?: string | null;
+}
+
+export interface PromptDisplayOptions {
+  displayText?: string;
+}
+
+const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
+
+export function buildInstructionDisplayText(label: string): string {
+  return `${INSTRUCTION_DISPLAY_PREFIX}${label}`;
+}
+
+export function parseInstructionDisplayText(text: string): string | null {
+  return text.startsWith(INSTRUCTION_DISPLAY_PREFIX)
+    ? text.slice(INSTRUCTION_DISPLAY_PREFIX.length).trim() || null
+    : null;
+}
+
+function getMessagePartDisplayText(part: MessagePart): string {
+  const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
+  return typeof metadataDisplayText === 'string' && metadataDisplayText
+    ? metadataDisplayText
+    : part.text || '';
 }
 
 /** Display-related options grouped to reduce prop surface. */
@@ -90,6 +113,8 @@ export interface SessionChatDisplay {
   showActions?: boolean;
   /** Show timestamp below each message */
   showTimestamp?: boolean;
+  /** Default-collapse intermediate reasoning and tool-process details in embedded panels. */
+  collapseIntermediateSteps?: boolean;
 }
 
 export interface SessionChatProps {
@@ -163,6 +188,7 @@ export interface SessionChatProps {
     imageParts?: ImagePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
+    options?: PromptDisplayOptions,
   ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
@@ -486,6 +512,10 @@ export function getMessageBubbleClassName({
   }`;
 }
 
+export function getInstructionDisplayBubbleClassName(compact: boolean): string {
+  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-rose-100 bg-rose-50/80 text-sm text-rose-700 shadow-none`;
+}
+
 export function getMessageGroupClassName({
   compact,
   isUser,
@@ -611,13 +641,13 @@ export function getMessageErrorText(message: Pick<Message, 'error'>): string {
 }
 
 export function getUserAvatarContainerClassName(compact: boolean): string {
-  return `pointer-events-none absolute left-full top-0 ml-2.5 translate-y-1/2 flex items-center justify-end ${
+  return `pointer-events-none flex flex-shrink-0 items-start justify-center pt-1 ${
     compact ? 'h-7' : 'h-8'
   }`;
 }
 
-export function getUserAvatarSpacerClassName(compact: boolean): string {
-  return compact ? 'h-3.5' : 'h-4';
+export function getUserAvatarSpacerClassName(_compact: boolean): string {
+  return 'h-0';
 }
 
 function areToolStatesRenderEqual(
@@ -717,6 +747,8 @@ function isAllowedUploadFile(file: File): boolean {
 }
 
 function getQueuedPromptText(item: QueuedPrompt): string {
+  if (typeof item.displayText === 'string' && item.displayText) return item.displayText;
+  if (typeof item.display_text === 'string' && item.display_text) return item.display_text;
   const textPart = item.parts.find((part) => part.type === 'text' && typeof part.text === 'string');
   return typeof textPart?.text === 'string' ? textPart.text : '';
 }
@@ -770,6 +802,7 @@ function QueuedPromptPanel({
             const isEditing = editingId === item.id;
             const isBusy = actionId === item.id || item.status === 'executing';
             const text = getQueuedPromptText(item);
+            const instructionLabel = parseInstructionDisplayText(text);
             return (
               <div key={item.id} className="flex items-start gap-2 px-3 py-2 border-b border-zinc-100 last:border-b-0">
                 <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 flex-shrink-0" />
@@ -782,7 +815,13 @@ function QueuedPromptPanel({
                       rows={2}
                     />
                   ) : (
-                    <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                    instructionLabel ? (
+                      <span className="inline-flex max-w-full items-center truncate rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700">
+                        {instructionLabel}
+                      </span>
+                    ) : (
+                      <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                    )
                   )}
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1">
@@ -914,6 +953,7 @@ export default function SessionChat({
   const fullWidth = display?.fullWidth ?? false;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
+  const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
   const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
   const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
@@ -1753,9 +1793,15 @@ export default function SessionChat({
   };
 
   /** Core send logic */
-  const sendText = async (text: string, imageParts: ImagePartData[] = [], agentOverride?: string) => {
+  const sendText = async (
+    text: string,
+    imageParts: ImagePartData[] = [],
+    agentOverride?: string,
+    options?: PromptDisplayOptions,
+  ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
+    const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     // Force scroll to bottom when user sends a new message
@@ -1766,7 +1812,7 @@ export default function SessionChat({
 
     const tempId = `temp-${Date.now()}`;
     const tempParts: MessagePart[] = [];
-    if (text) tempParts.push({ id: `${tempId}-text`, type: 'text', text });
+    if (visibleText) tempParts.push({ id: `${tempId}-text`, type: 'text', text: visibleText });
     imageParts.forEach((img, i) => {
       tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
     });
@@ -1775,7 +1821,7 @@ export default function SessionChat({
       id: tempId,
       sessionID: sessionId,
       role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text }],
+      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text: visibleText }],
       timestamp: Date.now(),
       agent: effectiveAgent,
     } as Message);
@@ -1786,6 +1832,7 @@ export default function SessionChat({
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
+      if (options?.displayText) payload.displayText = options.displayText;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
@@ -1806,6 +1853,7 @@ export default function SessionChat({
     text: string,
     imageParts: ImagePartData[] = [],
     agentOverride?: string,
+    options?: PromptDisplayOptions,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -1814,6 +1862,7 @@ export default function SessionChat({
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
+        ...(options?.displayText ? { displayText: options.displayText } : {}),
       });
       await fetchPromptQueue();
       setQueueExpanded(true);
@@ -1828,7 +1877,7 @@ export default function SessionChat({
     }
   };
 
-  const handleComposerPrompt = async (text: string) => {
+  const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
 
@@ -1839,7 +1888,7 @@ export default function SessionChat({
 
     if (sessionId && isStreaming) {
       try {
-        await enqueueText(trimmed);
+        await enqueueText(trimmed, [], undefined, options);
       } catch {
         setInput(trimmed);
       }
@@ -1855,7 +1904,7 @@ export default function SessionChat({
       setSending(true);
       try {
         setPendingAgentName(agentName || 'rex');
-        await onCreateAndSend(trimmed, [], agentName);
+        await onCreateAndSend(trimmed, [], agentName, model, options);
       } catch {
         setInput(trimmed);
       } finally {
@@ -1865,7 +1914,7 @@ export default function SessionChat({
     }
 
     try {
-      await sendText(trimmed, [], agentName);
+      await sendText(trimmed, [], agentName, options);
     } catch {
       setInput(trimmed);
     }
@@ -2418,6 +2467,7 @@ export default function SessionChat({
                   onQuestionReject={handleQuestionReject}
                   showActions={showActions}
                   showTimestamp={showTimestamp}
+                  collapseIntermediateSteps={collapseIntermediateSteps}
                   compact={compact}
                   onCopy={handleCopy}
                   editingMessageId={editingMessageId}
@@ -2525,26 +2575,6 @@ export default function SessionChat({
             )}
           </div>
         )}
-        {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
-        {conversationBottomSlot && !hideInput && (
-          <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
-            <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pl-4 pr-8' : ''}`}>
-              {typeof conversationBottomSlot === 'function'
-                ? conversationBottomSlot({
-                  sendPrompt: (text) => { void handleComposerPrompt(text); },
-                  setInput: (text) => {
-                    setInput(text);
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  },
-                  focusInput: () => textareaRef.current?.focus(),
-                  sending,
-                  streaming: isStreaming,
-                  sessionId,
-                })
-                : conversationBottomSlot}
-            </div>
-          </div>
-        )}
         <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
@@ -2573,6 +2603,23 @@ export default function SessionChat({
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
           <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]') : ''}`}>
+            {conversationBottomSlot && (
+              <div className="mb-2 min-w-0">
+                {typeof conversationBottomSlot === 'function'
+                  ? conversationBottomSlot({
+                    sendPrompt: (text, options) => { void handleComposerPrompt(text, options); },
+                    setInput: (text) => {
+                      setInput(text);
+                      requestAnimationFrame(() => textareaRef.current?.focus());
+                    },
+                    focusInput: () => textareaRef.current?.focus(),
+                    sending,
+                    streaming: isStreaming,
+                    sessionId,
+                  })
+                  : conversationBottomSlot}
+              </div>
+            )}
             <QueuedPromptPanel
               items={queuedPrompts}
               expanded={queueExpanded}
@@ -2954,6 +3001,7 @@ export interface ChatMessageBubbleProps {
   onQuestionReject?: (callID: string, requestId: string) => Promise<void>;
   showActions?: boolean;
   showTimestamp?: boolean;
+  collapseIntermediateSteps?: boolean;
   compact?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
@@ -2978,6 +3026,7 @@ function ChatMessageBubbleInner({
   onQuestionReject,
   showActions = false,
   showTimestamp = false,
+  collapseIntermediateSteps = false,
   compact = true,
   onCopy,
   editingMessageId,
@@ -3013,6 +3062,7 @@ function ChatMessageBubbleInner({
                 key={cMsg.id}
                 message={cMsg}
                 showTimestamp={showTimestamp}
+                collapseIntermediateSteps={collapseIntermediateSteps}
                 compact={compact}
                 onCopy={onCopy}
                 editingMessageId={editingMessageId}
@@ -3050,8 +3100,13 @@ function ChatMessageBubbleInner({
   const editableRawText = latestEditablePart?.text || '';
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
+  const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
+    ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0]))
+    : null;
 
-  const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
+  const bubbleClass = instructionDisplayLabel
+    ? getInstructionDisplayBubbleClassName(compact)
+    : getMessageBubbleClassName({ compact, isUser, isEditing });
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
@@ -3115,6 +3170,178 @@ function ChatMessageBubbleInner({
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file' && p.url);
           const displayParts = parts.filter((p) => !(p.type === 'file' && p.url));
+          const isBlockingQuestionToolPart = (part: MessagePart): boolean => {
+            if (part.type !== 'tool') return false;
+            if (part.callID && pendingQuestions?.[part.callID]) return true;
+            const toolName = (part.tool || '').toLowerCase();
+            return toolName === 'question' || toolName === 'request_user_input' || toolName.includes('question');
+          };
+          const isIntermediateProcessPart = (part: MessagePart): boolean => {
+            if (part.type === 'reasoning' || part.type === 'thinking') {
+              return !!getRenderableThinkingText(part);
+            }
+            return part.type === 'tool' && !isBlockingQuestionToolPart(part);
+          };
+          const renderPart = (part: MessagePart, i: number) => (
+            // Spacing between consecutive parts is owned by this wrapper,
+            // not by individual part components. Each part used to set its
+            // own `mt-2 first:mt-0`, but since every part lives in its own
+            // wrapper div, `first:` always matched and the gap collapsed
+            // to zero between, e.g., a tool card and the next thinking
+            // block, making them look glued together.
+            <div key={part.id || i} className="mt-2 first:mt-0">
+              {/* Text */}
+              {part.type === 'text' && part.text && (() => {
+                const rawText = part.text || '';
+                const nodeRefMatch = isUser
+                  ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
+                  : null;
+                const partDisplayText = getMessagePartDisplayText(part);
+                const displayText = nodeRefMatch && partDisplayText === rawText ? nodeRefMatch[3] : partDisplayText;
+                const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
+                if (instructionLabel) {
+                  return (
+                    <span className="inline-flex max-w-full items-center truncate text-sm font-semibold leading-none text-rose-700">
+                      {instructionLabel}
+                    </span>
+                  );
+                }
+                return (
+                  <>
+                    {nodeRefMatch && (
+                      <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                        <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
+                        <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
+                      </div>
+                    )}
+                    <StreamingMarkdown
+                      content={displayText}
+                      isStreaming={isActive && !isUser}
+                    />
+                  </>
+                );
+              })()}
+
+              {/* Tool call */}
+              {part.type === 'tool' && (
+                <ChatToolPart
+                  part={part}
+                  pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
+                  onAnswer={onQuestionAnswer && part.callID
+                    ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
+                    : undefined}
+                  onReject={onQuestionReject && part.callID
+                    ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
+                    : undefined}
+                />
+              )}
+
+              {/* Reasoning / thinking */}
+              {(part.type === 'reasoning' || part.type === 'thinking') && (() => {
+                const thinkingText = getRenderableThinkingText(part);
+                if (!thinkingText) return null;
+                const partKey = part.id || `reasoning-${i}`;
+                const isExpanded = getPartExpanded(partKey);
+                const isThinking = !isReasoningDone;
+                return (
+                  // Vertical spacing is provided by the parent part wrapper
+                  // (see `otherParts.map` above); keep this container neutral
+                  // so wrapper-level `mt-2 first:mt-0` is the single source of
+                  // truth for inter-part gaps.
+                  <div>
+                    <button
+                      onClick={() => togglePart(partKey)}
+                      disabled={isThinking}
+                      className="group/think w-full text-left"
+                    >
+                      <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
+                        isThinking
+                          ? 'bg-sky-50 border-sky-100'
+                          : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
+                      }`}>
+                        {isThinking ? (
+                          <>
+                            <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                            <span className="text-violet-600">{t('chat.thinking')}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                            <span className="text-zinc-500 truncate min-w-0">
+                              {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
+                            </span>
+                            <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
+                          </>
+                        )}
+                      </div>
+                    </button>
+                    {isExpanded && (
+                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
+                        {thinkingText}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          );
+          const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
+            const reasoningCount = group.filter(({ part }) => part.type === 'reasoning' || part.type === 'thinking').length;
+            const toolCount = group.filter(({ part }) => part.type === 'tool').length;
+            const summary = [
+              reasoningCount > 0 ? t('chat.process.reasoningCount', { count: reasoningCount }) : '',
+              toolCount > 0 ? t('chat.process.toolCount', { count: toolCount }) : '',
+            ].filter(Boolean).join(' · ');
+            const groupKey = group.map(({ part, index }) => part.id || index).join('-');
+            return (
+              <details
+                key={`process-${groupIndex}-${groupKey}`}
+                data-testid="chat-process-group"
+                className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+              >
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50">
+                  <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
+                  <span className="flex-shrink-0 font-semibold text-zinc-700">
+                    {t('chat.process.title', { count: group.length })}
+                  </span>
+                  {summary && (
+                    <span className="min-w-0 truncate text-zinc-500">
+                      {summary}
+                    </span>
+                  )}
+                  <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
+                </summary>
+                <div className="border-t border-zinc-200/70 px-2.5 py-2">
+                  {group.map(({ part, index }) => renderPart(part, index))}
+                </div>
+              </details>
+            );
+          };
+          const renderDisplayParts = () => {
+            if (!collapseIntermediateSteps || isUser) {
+              return displayParts.map(renderPart);
+            }
+            const nodes: React.ReactNode[] = [];
+            let processGroup: Array<{ part: MessagePart; index: number }> = [];
+            let processGroupIndex = 0;
+            const flushProcessGroup = () => {
+              if (processGroup.length === 0) return;
+              nodes.push(renderProcessGroup(processGroup, processGroupIndex));
+              processGroup = [];
+              processGroupIndex += 1;
+            };
+            displayParts.forEach((part, index) => {
+              if (isIntermediateProcessPart(part)) {
+                processGroup.push({ part, index });
+                return;
+              }
+              flushProcessGroup();
+              nodes.push(renderPart(part, index));
+            });
+            flushProcessGroup();
+            return nodes;
+          };
           return (
             <>
               {fileParts.length > 0 && (
@@ -3142,105 +3369,12 @@ function ChatMessageBubbleInner({
                         <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
                       </div>
                     );
-                  })}
-                </div>
-              )}
-              {displayParts.map((part: MessagePart, i: number) => (
-                // Spacing between consecutive parts is owned by this wrapper,
-                // not by individual part components. Each part used to set its
-                // own `mt-2 first:mt-0`, but since every part lives in its own
-                // wrapper div, `first:` always matched and the gap collapsed
-                // to zero between, e.g., a tool card and the next thinking
-                // block, making them look glued together.
-                <div key={part.id || i} className="mt-2 first:mt-0">
-                  {/* Text */}
-                  {part.type === 'text' && part.text && (() => {
-                    const nodeRefMatch = isUser
-                      ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
-                      : null;
-                    const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
-                    return (
-                      <>
-                        {nodeRefMatch && (
-                          <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
-                            <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-                            <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
-                            <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
-                          </div>
-                        )}
-                        <StreamingMarkdown
-                          content={displayText}
-                          isStreaming={isActive && !isUser}
-                        />
-                      </>
-                    );
-                  })()}
-
-                  {/* Tool call */}
-                  {part.type === 'tool' && (
-                    <ChatToolPart
-                      part={part}
-                      pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
-                      onAnswer={onQuestionAnswer && part.callID
-                        ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
-                        : undefined}
-                      onReject={onQuestionReject && part.callID
-                        ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
-                        : undefined}
-                    />
-                  )}
-
-                  {/* Reasoning / thinking */}
-                  {(part.type === 'reasoning' || part.type === 'thinking') && (() => {
-                    const thinkingText = getRenderableThinkingText(part);
-                    if (!thinkingText) return null;
-                    const partKey = part.id || `reasoning-${i}`;
-                    const isExpanded = getPartExpanded(partKey);
-                    const isThinking = !isReasoningDone;
-                    return (
-                      // Vertical spacing is provided by the parent part wrapper
-                      // (see `otherParts.map` above); keep this container neutral
-                      // so wrapper-level `mt-2 first:mt-0` is the single source of
-                      // truth for inter-part gaps.
-                      <div>
-                        <button
-                          onClick={() => togglePart(partKey)}
-                          disabled={isThinking}
-                          className="group/think w-full text-left"
-                        >
-                          <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
-                            isThinking
-                              ? 'bg-sky-50 border-sky-100'
-                              : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
-                          }`}>
-                            {isThinking ? (
-                              <>
-                                <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
-                                <span className="text-violet-600">{t('chat.thinking')}</span>
-                              </>
-                            ) : (
-                              <>
-                                <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
-                                <span className="text-zinc-500 truncate min-w-0">
-                                  {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
-                                </span>
-                                <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
-                              </>
-                            )}
-                          </div>
-                        </button>
-                        {isExpanded && (
-                          <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
-                            {thinkingText}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              ))}
-            </>
-          );
+                    })}
+                  </div>
+                )}
+                {renderDisplayParts()}
+              </>
+            );
         })()
       )}
 
@@ -3359,15 +3493,14 @@ function ChatMessageBubbleInner({
 
   if (isUser) {
     return (
-      <div className={`group relative ${!compact ? 'w-full' : ''} flex justify-end`}>
-        <div className={`relative flex flex-col items-end gap-2 ${messageGroupClass}`}>
-          <div className={getUserAvatarContainerClassName(compact)}>
-            {avatar}
-          </div>
-          <div aria-hidden="true" className={getUserAvatarSpacerClassName(compact)} />
-          <div className={`flex flex-col min-w-0 ${isEditing ? 'w-full' : 'w-fit max-w-full'}`}>
+      <div className={`group relative ${!compact ? 'w-full' : ''} flex min-w-0 justify-end`}>
+        <div className={`flex min-w-0 items-start justify-end gap-2 ${messageGroupClass}`}>
+          <div className={`flex min-w-0 flex-col items-end ${isEditing ? 'w-full' : 'max-w-full'}`}>
             {bubble}
             {footer}
+          </div>
+          <div className={getUserAvatarContainerClassName(compact)}>
+            {avatar}
           </div>
         </div>
         {previewImage && (
@@ -3784,6 +3917,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
 export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
   if (prev.showActions !== next.showActions) return false;
+  if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.editingMessageId !== next.editingMessageId) return false;
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;

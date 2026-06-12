@@ -96,6 +96,11 @@
     "regenerate": "Regenerate",
     "thinking": "Thinking...",
     "streaming": "Streaming...",
+    "process": {
+      "title": "Process ({{count}})",
+      "reasoningCount": "{{count}} reasoning",
+      "toolCount": "{{count}} tool calls"
+    },
     "you": "You",
     "sending": "Sending...",
     "contextCompressed": "Context compressed",

@@ -3,6 +3,7 @@ import { X, Code2, FileText, Key, Settings, Wrench, Sparkles, Globe, Workflow as
 import { Node } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { workflowAPI, Workflow } from '@/api/workflow';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 interface PropertyPanelProps {
   selectedNode: Node | null;
@@ -74,7 +75,7 @@ export default function PropertyPanel({
   onClose,
   onUpdate,
 }: PropertyPanelProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const nodeTypeLabels: Record<string, string> = {
     python: t('editor.nodeTypes.python'),
     logic: t('editor.nodeTypes.logic'),
@@ -426,7 +427,7 @@ export default function PropertyPanel({
                 <option value="">{t('editor.selectWorkflow')}</option>
                 {availableWorkflows.map((wf) => (
                   <option key={wf.id} value={wf.id}>
-                    {wf.name}
+                    {getWorkflowDisplayName(wf, i18n.language)}
                   </option>
                 ))}
               </select>

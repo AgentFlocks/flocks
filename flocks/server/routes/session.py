@@ -1051,6 +1051,7 @@ class PromptRequest(BaseModel):
     model: Optional[ModelInfo] = Field(None, description="Model selection")
     messageID: Optional[str] = Field(None, description="Message ID")
     agent: Optional[str] = Field(None, description="Agent name")
+    display_text: Optional[str] = Field(None, alias="displayText", description="User-visible message text")
     noReply: Optional[bool] = Field(None, description="Skip AI response")
     mockReply: Optional[str] = Field(None, description="Inject a mock assistant message after noReply user message")
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool settings (deprecated)")
@@ -2350,22 +2351,23 @@ async def _process_session_message(
     user_message_id = request.messageID or Identifier.create("message")
     user_part_id = Identifier.create("part")
 
-    # display_text (optional) is the user-visible text shown in the chat bubble.
-    # It differs from text_content when a command generates a derived LLM prompt
-    # (e.g. "/tools create foo" stores the slash command text, not the full skill
-    # prompt that is sent to the LLM).
-    display_text = getattr(request, "display_text", None) or text_content
+    # display_text (optional) is UI-only. The stored text part must stay as the
+    # real prompt so SessionLoop, hooks, title generation, and queued prompts keep
+    # seeing the same content the model receives.
+    display_text = getattr(request, "display_text", None)
+    display_metadata = {"displayText": display_text} if display_text else None
 
     _is_no_reply = bool(request.noReply)
     user_message = await Message.create(
         session_id=sessionID,
         role=MessageRole.USER,
-        content=display_text,
+        content=text_content,
         id=user_message_id,
         time={"created": now_ms},
         agent=agent_name,
         model={"providerID": provider_id, "modelID": model_id},
         part_id=user_part_id,
+        part_metadata=display_metadata,
         synthetic=True if _is_no_reply else None,
     )
     user_message_id = user_message.id
@@ -2385,9 +2387,11 @@ async def _process_session_message(
         "messageID": user_message_id,
         "sessionID": sessionID,
         "type": "text",
-        "text": display_text,
+        "text": text_content,
         "time": {"start": now_ms},
     }
+    if display_metadata:
+        _part_event["metadata"] = display_metadata
     if _is_no_reply:
         _part_event["synthetic"] = True
     await publish_event("message.part.updated", {"part": _part_event})
@@ -2957,7 +2961,7 @@ def _event_from_queued_prompt(item, working_directory: str):
         agent=item.agent,
         model=item.model,
         variant=item.variant,
-        display_text=None,
+        display_text=item.display_text,
         messageID=item.messageID,
         noReply=item.noReply,
         mockReply=item.mockReply,
@@ -3251,6 +3255,7 @@ async def _enqueue_prompt_request(
         agent=request.agent,
         model=model,
         variant=request.variant,
+        display_text=request.display_text,
         message_id=request.messageID,
         no_reply=request.noReply,
         mock_reply=request.mockReply,
@@ -3417,7 +3422,7 @@ async def send_session_message_async(
         agent=request.agent,
         model=request.model.model_dump(by_alias=True) if request.model else None,
         variant=request.variant,
-        display_text=None,
+        display_text=request.display_text,
         messageID=request.messageID,
         noReply=request.noReply,
         mockReply=request.mockReply,

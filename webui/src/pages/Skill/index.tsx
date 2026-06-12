@@ -93,12 +93,12 @@ export default function SkillPage() {
     void fetchSkills();
   }, [fetchSkills]);
 
-  // Skills visible to this page: everything except the internal "system"
-  // category.  Counter chips operate on this set so the totals reflect
-  // what the user can actually see — search and statusFilter both narrow
-  // it further into ``filteredSkills``.
+  // Skills visible to this page: hide skills explicitly marked UI-hidden and
+  // the legacy "system" category. Counter chips operate on this set so the
+  // totals reflect what the user can actually see — search and statusFilter
+  // both narrow it further into ``filteredSkills``.
   const visibleSkills = useMemo(
-    () => skills.filter(s => s.category !== 'system'),
+    () => skills.filter(s => !s.ui_hidden && s.category !== 'system'),
     [skills],
   );
 

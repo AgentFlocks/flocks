@@ -1,20 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import IntegrationTab from './IntegrationTab';
 
 const { workflowAPI } = vi.hoisted(() => ({
   workflowAPI: {
     get: vi.fn(),
+    getConfig: vi.fn(),
+    updateConfig: vi.fn(),
     getService: vi.fn(),
     publish: vi.fn(),
     unpublish: vi.fn(),
+    syncConfig: vi.fn(),
     getTriggers: vi.fn(),
     createTrigger: vi.fn(),
     updateTrigger: vi.fn(),
     deleteTrigger: vi.fn(),
     listTriggerPlugins: vi.fn(),
     runPollerOnce: vi.fn(),
+    saveSyslogConfig: vi.fn(),
+    getSyslogStatus: vi.fn(),
+    saveKafkaConfig: vi.fn(),
+    getKafkaStatus: vi.fn(),
+    savePollerConfig: vi.fn(),
+    getPollerStatus: vi.fn(),
   },
 }));
 
@@ -36,11 +45,12 @@ vi.mock('@/components/common/WorkflowStatusBadge', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => {
+    t: (key: string, params?: Record<string, unknown>) => {
       const translations: Record<string, string> = {
         'detail.run.publishSection': '发布为 API',
         'detail.run.publishDesc': 'publish desc',
         'detail.run.publishAsApi': '发布为 API 服务',
+        'detail.run.triggerSection': '触发能力',
         'detail.run.publishFailed': '发布失败',
         'detail.run.stopFailed': '停止失败',
         'detail.run.stopping': '停止中...',
@@ -51,8 +61,28 @@ vi.mock('react-i18next', () => ({
         'detail.run.driverDockerDesc': 'docker desc',
         'detail.run.apiKeyHide': '隐藏',
         'detail.run.apiKeyShow': '显示',
+        'detail.run.guidePanelTitle': 'Rex 辅助发布',
+        'detail.run.guidePanelDesc': '选择一种发布方式',
+        'detail.run.guideApiShort': '发布为 API',
+        'detail.run.guideApiDesc': '配置 API 发布',
+        'detail.run.guideApiInstruction': '围绕 API 发布读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideSyslogShort': 'Syslog 接入',
+        'detail.run.guideSyslogDesc': '配置 Syslog 接入',
+        'detail.run.guideSyslogInstruction': '围绕 Syslog 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideKafkaShort': 'Kafka 接入',
+        'detail.run.guideKafkaDesc': '配置 Kafka 接入',
+        'detail.run.guideKafkaInstruction': '围绕 Kafka 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideWebhookShort': 'Webhook 接入',
+        'detail.run.guideWebhookDesc': '配置 Webhook 接入',
+        'detail.run.guideWebhookInstruction': '围绕 Webhook 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideScheduleShort': '定时触发',
+        'detail.run.guideScheduleDesc': '配置定时触发',
+        'detail.run.guideScheduleInstruction': '围绕定时触发读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.chat.welcome.guideQuestionPrompt': '用户点击了「{{focus}}」按钮。这个按钮的意图是：{{instruction}} 工作流 ID 是 {{id}}，工作流目录是 {{dir}}，工作流配置引导文件是 {{guidePath}}。配置模板接口是 {{configEndpoint}}。第一步必须读取 {{guidePath}}，必须调用 question 工具。',
       };
-      return translations[key] ?? key;
+      return (translations[key] ?? key).replace(/{{(\w+)}}/g, (_match, name: string) => (
+        params?.[name] === undefined ? '' : String(params[name])
+      ));
     },
   }),
 }));
@@ -83,20 +113,34 @@ const workflow = {
 };
 
 describe('IntegrationTab trigger workspace', () => {
-  const getFieldTextarea = (label: string): HTMLTextAreaElement => {
-    const field = screen.getByText(label).closest('div');
-    const textarea = field?.querySelector('textarea');
-    if (!(textarea instanceof HTMLTextAreaElement)) {
-      throw new Error(`textarea not found for field: ${label}`);
-    }
-    return textarea;
-  };
-
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal('confirm', vi.fn(() => true));
     workflowAPI.get.mockResolvedValue({ data: workflow });
+    workflowAPI.getConfig.mockResolvedValue({ data: { exists: false, path: '/tmp/config.json', config: {} } });
+    workflowAPI.updateConfig.mockImplementation(async (_id: string, config: unknown) => ({
+      data: {
+        ok: true,
+        exists: true,
+        path: '/tmp/config.json',
+        config,
+      },
+    }));
     workflowAPI.getService.mockResolvedValue({ data: null });
+    workflowAPI.publish.mockResolvedValue({
+      data: {
+        workflowId: 'wf-1',
+        workflowName: 'Demo Workflow',
+        serviceUrl: 'http://127.0.0.1:8080',
+        invokeUrl: 'http://127.0.0.1:8080/invoke',
+        apiKey: 'secret',
+        status: 'running',
+        publishedAt: Date.now(),
+        driver: 'local',
+      },
+    });
+    workflowAPI.unpublish.mockResolvedValue({ data: { ok: true } });
+    workflowAPI.syncConfig.mockResolvedValue({ data: { ok: true, path: '/tmp/config.json', config: {} } });
     workflowAPI.getTriggers.mockResolvedValue({ data: [] });
     workflowAPI.createTrigger.mockResolvedValue({ data: { trigger: { id: 'hook-created' } } });
     workflowAPI.updateTrigger.mockImplementation(async (_workflowId: string, _triggerId: string, trigger: unknown) => ({
@@ -105,317 +149,348 @@ describe('IntegrationTab trigger workspace', () => {
     workflowAPI.deleteTrigger.mockResolvedValue({ data: { ok: true, triggerId: 'hook-1' } });
     workflowAPI.listTriggerPlugins.mockResolvedValue({ data: [] });
     workflowAPI.runPollerOnce.mockResolvedValue({ data: { ok: true, status: { state: 'running' } } });
+    workflowAPI.saveSyslogConfig.mockResolvedValue({ data: { ok: true, listener: { state: 'listening' } } });
+    workflowAPI.getSyslogStatus.mockResolvedValue({ data: { state: 'stopped' } });
+    workflowAPI.saveKafkaConfig.mockResolvedValue({ data: { ok: true, consumer: { state: 'running' } } });
+    workflowAPI.getKafkaStatus.mockResolvedValue({ data: { state: 'stopped' } });
+    workflowAPI.savePollerConfig.mockResolvedValue({ data: { ok: true, status: { state: 'running' } } });
+    workflowAPI.getPollerStatus.mockResolvedValue({ data: { state: 'stopped' } });
   });
 
-  it('renders publish section first and unified trigger workspace below', async () => {
-    render(<IntegrationTab workflow={workflow} />);
+  it('shows guided empty state when no publish capability is returned', async () => {
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
 
-    expect(await screen.findByText('发布为 API')).toBeInTheDocument();
-    expect(await screen.findByText('集成')).toBeInTheDocument();
+    expect(await screen.findByText('当前工作流还没有发布或配置接入方式。')).toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /发布为 API/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Syslog 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Kafka 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
+    expect(workflowAPI.getConfig).toHaveBeenCalledWith('wf-1');
+    expect(workflowAPI.syncConfig).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '发布为 API 服务' })).not.toBeInTheDocument();
+    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
     expect(screen.queryByText('Kafka 配置')).not.toBeInTheDocument();
     expect(screen.queryByText('Workflow Poller')).not.toBeInTheDocument();
   });
 
-  it('shows only one empty-state box when there is no trigger', async () => {
-    render(<IntegrationTab workflow={workflow} />);
-
-    expect(await screen.findByText('还没有配置任何 Trigger。可以从上面的快捷按钮开始。')).toBeInTheDocument();
-    expect(screen.queryByText('选择或创建一个 Trigger 后，在这里编辑配置。')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Schedule' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Webhook' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Syslog' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Kafka' })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: 'Custom Adapter' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '刷新' })).not.toBeInTheDocument();
-  });
-
-  it('renders trigger list in the unified workspace', async () => {
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'schedule-1',
-            name: 'Daily Scan',
-            type: 'schedule',
-            enabled: true,
-            source: { intervalSeconds: 60 },
-            mapping: {},
-            inputs: {},
-            testSamples: [{ name: 'default', payload: {} }],
-          },
-          status: { state: 'running' },
-        },
-      ],
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    expect((await screen.findAllByText('Daily Scan')).length).toBeGreaterThan(0);
-    expect(screen.getByText('Inputs（JSON）')).toBeInTheDocument();
-    expect(screen.queryByText('Mapping（JSON）')).not.toBeInTheDocument();
-    expect(screen.queryByText('Filter Expr')).not.toBeInTheDocument();
-    expect(screen.queryByText('测试样例')).not.toBeInTheDocument();
-  });
-
-  it('does not render duplicated trigger card when only one trigger exists', async () => {
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'kafka-1',
-            name: 'Kafka Trigger',
-            type: 'kafka',
-            enabled: false,
-            source: {
-              inputBroker: 'localhost:9092',
-              inputTopic: 'wf-1.events',
-              inputGroupId: 'wf-1-group',
+  it('renders generated publish config capabilities even without a stored template', async () => {
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: false,
+        path: '/tmp/config.json',
+        source: 'generated',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          publish: { type: 'api_service', enabled: false, driver: 'local' },
+          triggers: [
+            {
+              id: 'syslog-default',
+              type: 'syslog',
+              name: 'Syslog Listener',
+              source: { protocol: 'udp', host: '0.0.0.0', port: 5140, format: 'auto' },
+              mapping: { syslog_message: '$.body' },
             },
-            mapping: {},
-            inputs: {},
-            testSamples: [],
-          },
-          status: { state: 'stopped' },
+          ],
         },
-      ],
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+
+    expect((await screen.findAllByText('发布为 API')).length).toBeGreaterThan(0);
+    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '发布为 API 服务' })).toBeInTheDocument();
+    expect(screen.getByText('触发能力')).toBeInTheDocument();
+    expect(screen.getByText('Syslog Listener')).toBeInTheDocument();
+    expect(screen.queryByText('当前工作流还没有发布或配置接入方式。')).not.toBeInTheDocument();
+  });
+
+  it('uses publish config template to render only API publishing', async () => {
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          publish: { type: 'api_service', driver: 'local' },
+          triggers: [],
+        },
+      },
     });
 
     render(<IntegrationTab workflow={workflow} />);
 
-    expect(await screen.findByText('Kafka Trigger')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1);
+    expect(await screen.findByText('发布为 API')).toBeInTheDocument();
+    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '发布为 API 服务' })).toBeInTheDocument();
+    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Webhook' })).not.toBeInTheDocument();
   });
 
-  it('creates a webhook trigger from the unified toolbar', async () => {
+  it('treats api trigger entries as publish templates instead of runtime triggers', async () => {
     const user = userEvent.setup();
+    workflowAPI.getService.mockResolvedValue({
+      data: {
+        workflowId: 'wf-1',
+        workflowName: 'Demo Workflow',
+        serviceUrl: 'http://127.0.0.1:8080',
+        invokeUrl: 'http://127.0.0.1:8080/invoke',
+        apiKey: 'secret',
+        status: 'running',
+        publishedAt: Date.now(),
+        driver: 'local',
+      },
+    });
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          triggers: [
+            {
+              id: 'api-default',
+              type: 'api',
+              name: 'Demo API',
+              enabled: true,
+              source: { method: 'POST', path: '/api/workflow/wf-1/run' },
+            },
+          ],
+        },
+      },
+    });
 
     render(<IntegrationTab workflow={workflow} />);
 
-    await user.click(await screen.findByRole('button', { name: 'Webhook' }));
+    expect(await screen.findByText('发布为 API')).toBeInTheDocument();
+    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '停止服务' })).toBeInTheDocument();
+    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
+    expect(screen.queryByText('Demo API')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '停止服务' }));
 
     await waitFor(() => {
-      expect(workflowAPI.createTrigger).toHaveBeenCalledWith(
+      expect(workflowAPI.unpublish).toHaveBeenCalledWith('wf-1');
+    });
+    expect(workflowAPI.createTrigger).not.toHaveBeenCalled();
+    expect(workflowAPI.updateTrigger).not.toHaveBeenCalled();
+  });
+
+  it('uses syslog template with editable config and runtime start/stop', async () => {
+    const user = userEvent.setup();
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          triggers: [
+            {
+              id: 'syslog-default',
+              type: 'syslog',
+              name: 'Syslog Listener',
+              source: { protocol: 'udp', host: '0.0.0.0', port: 5514, format: 'auto' },
+              mapping: { syslog_message: '$.body' },
+            },
+          ],
+        },
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} />);
+
+    expect(await screen.findByText('触发能力')).toBeInTheDocument();
+    expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
+    expect(screen.getByText('模板来自配置库')).toBeInTheDocument();
+    expect(screen.getByText('协议')).toBeInTheDocument();
+    expect(screen.getByText('Inputs（JSON）')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.updateConfig).toHaveBeenCalledWith(
         'wf-1',
         expect.objectContaining({
-          type: 'custom_webhook',
-          name: 'Webhook Trigger',
-          enabled: false,
+          triggers: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'syslog-default',
+              type: 'syslog',
+              source: expect.objectContaining({
+                port: 5514,
+              }),
+            }),
+          ]),
         }),
       );
     });
-  });
 
-  it('saves edited schedule trigger through the unified editor', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'schedule-1',
-            name: 'Daily Scan',
-            type: 'schedule',
-            enabled: true,
-            source: { mode: 'interval', intervalSeconds: 60 },
-            runtime: { timeoutSeconds: 7200, noOverlap: true },
-            mapping: {},
-            inputs: {},
-            testSamples: [{ name: 'default', payload: {} }],
-          },
-          status: { state: 'running' },
-        },
-      ],
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    const nameInput = await screen.findByDisplayValue('Daily Scan');
-    fireEvent.change(nameInput, { target: { value: 'Updated Scan' } });
-    await waitFor(() => {
-      expect(nameInput).toHaveValue('Updated Scan');
-    });
-    await user.click(screen.getByRole('button', { name: '保存' }));
+    await user.click(await screen.findByRole('button', { name: '启动监听' }));
 
     await waitFor(() => {
-      expect(workflowAPI.updateTrigger).toHaveBeenCalledWith(
+      expect(workflowAPI.saveSyslogConfig).toHaveBeenCalledWith(
         'wf-1',
-        'schedule-1',
-        expect.objectContaining({
-          id: 'schedule-1',
-          type: 'schedule',
-          name: 'Updated Scan',
-        }),
+        {
+          enabled: true,
+          protocol: 'udp',
+          host: '0.0.0.0',
+          port: 5514,
+          format: 'auto',
+          inputKey: 'syslog_message',
+        },
       );
     });
   });
 
-  it('persists the current inputs JSON text instead of stale draft data', async () => {
+  it('starts cron schedule templates with a cron poller config', async () => {
     const user = userEvent.setup();
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'hook-1',
-            name: 'Webhook Trigger',
-            type: 'custom_webhook',
-            enabled: true,
-            source: { method: 'POST', path: '/demo' },
-            auth: { type: 'none' },
-            mapping: { event: '$.body' },
-            inputs: { original: true },
-            testSamples: [{ name: 'default', payload: { example: true } }],
-          },
-          status: { state: 'ready' },
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          triggers: [
+            {
+              id: 'schedule-default',
+              type: 'schedule',
+              name: 'Cron Schedule',
+              source: { mode: 'cron', cron: '*/10 * * * *', intervalSeconds: 300 },
+              runtime: { timeoutSeconds: 1800, noOverlap: false },
+              inputs: { source: 'cron' },
+            },
+          ],
         },
-      ],
+      },
     });
 
     render(<IntegrationTab workflow={workflow} />);
 
-    await screen.findByText('Inputs（JSON）');
-    const inputsEditor = getFieldTextarea('Inputs（JSON）');
-    fireEvent.change(inputsEditor, { target: { value: '{\n  "fresh": true\n}' } });
-    await user.click(screen.getByRole('button', { name: '保存' }));
+    expect(await screen.findByText('触发能力')).toBeInTheDocument();
+    expect(screen.getByText('Cron: */10 * * * *')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '启动定时' }));
 
     await waitFor(() => {
-      expect(workflowAPI.updateTrigger).toHaveBeenCalledWith(
+      expect(workflowAPI.savePollerConfig).toHaveBeenCalledWith(
         'wf-1',
-        'hook-1',
-        expect.objectContaining({
-          inputs: { fresh: true },
-        }),
+        {
+          enabled: true,
+          intervalSeconds: 300,
+          cronExpression: '*/10 * * * *',
+          timeoutSeconds: 1800,
+          noOverlap: false,
+          inputs: { source: 'cron' },
+        },
       );
     });
   });
 
-  it('disables creating a second schedule trigger', async () => {
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'schedule-1',
-            name: 'Daily Scan',
-            type: 'schedule',
-            enabled: true,
-            source: { mode: 'interval', intervalSeconds: 60 },
-            mapping: {},
-            inputs: {},
-            testSamples: [{ name: 'default', payload: {} }],
-          },
-          status: { state: 'running' },
+  it('shows template empty state when config declares no publish capability', async () => {
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          triggers: [],
         },
-      ],
+      },
     });
 
-    render(<IntegrationTab workflow={workflow} />);
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
 
-    expect(await screen.findByRole('button', { name: 'Schedule' })).toBeDisabled();
+    expect(await screen.findByText('发布配置中没有声明可发布的 API 或触发能力。')).toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /发布为 API/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
+    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
   });
 
-  it('toggles trigger enabled state from the trigger list', async () => {
+  it('offers publish guide actions and routes the selected guide prompt', async () => {
     const user = userEvent.setup();
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'hook-1',
-            name: 'Webhook Trigger',
-            type: 'custom_webhook',
-            enabled: false,
-            source: { method: 'POST', path: '/demo' },
-            auth: { type: 'none' },
-            mapping: { event: '$.body' },
-            inputs: {},
-            testSamples: [{ name: 'default', payload: { example: true } }],
-          },
-          status: { state: 'stopped' },
+    const onGuidePrompt = vi.fn();
+    workflowAPI.getConfig.mockResolvedValue({
+      data: {
+        exists: true,
+        path: '/tmp/config.json',
+        config: {
+          version: 1,
+          kind: 'workflow.integration-config',
+          workflow: { id: 'wf-1' },
+          updatedAt: Date.now(),
+          publish: { type: 'api_service', driver: 'local' },
+          triggers: [
+            {
+              id: 'syslog-default',
+              type: 'syslog',
+              name: 'Syslog Listener',
+              source: { protocol: 'udp', host: '0.0.0.0', port: 5514 },
+            },
+            {
+              id: 'kafka-default',
+              type: 'kafka',
+              name: 'Kafka Consumer',
+              source: { inputBroker: 'localhost:9092', inputTopic: 'alerts' },
+            },
+          ],
         },
-        {
-          trigger: {
-            id: 'hook-2',
-            name: 'Webhook Trigger 2',
-            type: 'custom_webhook',
-            enabled: true,
-            source: { method: 'POST', path: '/demo-2' },
-            auth: { type: 'none' },
-            mapping: { event: '$.body' },
-            inputs: {},
-            testSamples: [{ name: 'default', payload: { example: true } }],
-          },
-          status: { state: 'ready' },
-        },
-      ],
+      },
     });
 
-    render(<IntegrationTab workflow={workflow} />);
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={onGuidePrompt} />);
 
-    await user.click((await screen.findAllByRole('button', { name: '启用' }))[0]);
-
-    await waitFor(() => {
-      expect(workflowAPI.updateTrigger).toHaveBeenCalledWith(
-        'wf-1',
-        'hook-1',
-        expect.objectContaining({ enabled: true }),
-      );
-    });
-  });
-
-  it('runs schedule trigger once from the editor', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'schedule-1',
-            name: 'Daily Scan',
-            type: 'schedule',
-            enabled: true,
-            source: { mode: 'interval', intervalSeconds: 60 },
-            runtime: { timeoutSeconds: 7200, noOverlap: true },
-            mapping: {},
-            inputs: {},
-            testSamples: [{ name: 'default', payload: {} }],
-          },
-          status: { state: 'running' },
-        },
-      ],
+    expect((await screen.findAllByRole('button', { name: /^发布为 API$/ })).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: /Syslog 接入/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: /Kafka 接入/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: /Webhook 接入/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: /定时触发/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Rex 辅助发布')).toHaveLength(1);
+    expect(screen.getAllByTestId('publish-guide-actions-inline')).toHaveLength(1);
+    screen.getAllByTestId('publish-guide-actions-inline').forEach((group) => {
+      expect(group).toHaveClass('flex-wrap');
+      expect(group).not.toHaveClass('overflow-x-auto');
     });
 
-    render(<IntegrationTab workflow={workflow} />);
+    await user.click(screen.getAllByRole('button', { name: /Syslog 接入/ })[0]);
 
-    await user.click(await screen.findByRole('button', { name: '立即执行一轮' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.runPollerOnce).toHaveBeenCalledWith('wf-1');
-    });
-  });
-
-  it('deletes selected trigger from the workspace', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'hook-1',
-            name: 'Webhook Trigger',
-            type: 'custom_webhook',
-            enabled: true,
-            source: { method: 'POST', path: '/demo' },
-            auth: { type: 'none' },
-            mapping: { event: '$.body' },
-            inputs: {},
-            testSamples: [{ name: 'default', payload: { example: true } }],
-          },
-          status: { state: 'ready' },
-        },
-      ],
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    await user.click(await screen.findByRole('button', { name: '删除' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.deleteTrigger).toHaveBeenCalledWith('wf-1', 'hook-1');
-    });
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('用户点击了「Syslog 接入」按钮'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('guide.md'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('必须调用 question 工具'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('/api/workflow/wf-1/config'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('config.json 不是直接写入目标'),
+      'Syslog 接入',
+    );
   });
 });

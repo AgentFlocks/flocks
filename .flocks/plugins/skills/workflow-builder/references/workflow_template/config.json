@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "kind": "workflow.integration-config",
+  "workflow": {
+    "id": null,
+    "name": "<workflow_name>",
+    "source": "project"
+  },
+  "updatedAt": 0,
+  "publish": {
+    "type": "api_service",
+    "enabled": false,
+    "status": "stopped",
+    "driver": "local",
+    "apiKeyConfigured": false,
+    "allowedActions": [
+      "publish",
+      "stop",
+      "copyInvokeUrl",
+      "rotateApiKey"
+    ]
+  },
+  "triggers": [
+    {
+      "id": "syslog-default",
+      "type": "syslog",
+      "name": "Syslog Listener",
+      "enabled": false,
+      "status": "stopped",
+      "source": {
+        "host": "0.0.0.0",
+        "port": 1514,
+        "protocol": "udp",
+        "format": "auto"
+      },
+      "mapping": {
+        "syslog_message": "$.body"
+      },
+      "inputs": {},
+      "allowedActions": [
+        "start",
+        "stop"
+      ]
+    },
+    {
+      "id": "kafka-default",
+      "type": "kafka",
+      "name": "Kafka Consumer",
+      "enabled": false,
+      "status": "stopped",
+      "source": {
+        "inputBroker": "localhost:9092",
+        "inputTopic": "<topic>",
+        "inputGroupId": "<workflow_id>-group",
+        "autoOffsetReset": "latest"
+      },
+      "mapping": {
+        "kafka_message": "$.body"
+      },
+      "inputs": {},
+      "allowedActions": [
+        "start",
+        "stop"
+      ]
+    },
+    {
+      "id": "schedule-default",
+      "type": "schedule",
+      "name": "Cron Schedule",
+      "enabled": false,
+      "status": "stopped",
+      "source": {
+        "mode": "cron",
+        "cron": "*/5 * * * *",
+        "intervalSeconds": 300,
+        "timezone": "Asia/Shanghai"
+      },
+      "runtime": {
+        "timeoutSeconds": 7200,
+        "noOverlap": true
+      },
+      "inputs": {
+        "trigger": "schedule"
+      },
+      "allowedActions": [
+        "start",
+        "stop"
+      ]
+    },
+    {
+      "id": "webhook-default",
+      "type": "custom_webhook",
+      "name": "Webhook Trigger",
+      "enabled": false,
+      "status": "stopped",
+      "source": {
+        "method": "POST",
+        "path": "/workflows/<workflow_id>/hook"
+      },
+      "auth": {
+        "type": "api_key",
+        "apiKeyConfigured": false,
+        "headerName": "x-api-key"
+      },
+      "mapping": {
+        "event": "$.body"
+      },
+      "inputs": {},
+      "allowedActions": [
+        "enable",
+        "disable",
+        "copyWebhookUrl"
+      ]
+    }
+  ],
+  "rendering": {
+    "rule": "The publish page renders only configured publish and trigger modes.",
+    "hideUnconfiguredModes": true,
+    "secretsPolicy": "Do not store plaintext secrets; store secret references or configured booleans."
+  },
+  "referenceNotes": {
+    "templateOnly": true,
+    "usage": "Copy only the publish mode and trigger entries needed by the real workflow. Remove unused trigger examples before saving the workflow config.",
+    "runtimePolicy": "This file is a desired capability template. Publishing, unpublishing, and trigger start or stop actions must call runtime APIs instead of editing config.json."
+  }
+}

@@ -15,6 +15,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useWorkflows } from '@/hooks/useWorkflow';
 import { Workflow } from '@/api/workflow';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 // ---------------------------------------------------------------------------
 // Color helpers (mirrors Agent page)
@@ -71,6 +72,15 @@ export default function WorkflowPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+
+  const openFreshCreate = () => {
+    navigate('/workflows/new', {
+      state: {
+        freshCreate: true,
+        ts: Date.now(),
+      },
+    });
+  };
 
   const builtinWorkflows = useMemo(() => workflows.filter(isBuiltin), [workflows]);
   const customWorkflows  = useMemo(() => workflows.filter(w => !isBuiltin(w)), [workflows]);
@@ -183,7 +193,7 @@ export default function WorkflowPage() {
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
-            onClick={() => navigate('/workflows/new')}
+            onClick={openFreshCreate}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
             <Plus className="w-4 h-4" />
@@ -204,7 +214,7 @@ export default function WorkflowPage() {
             description={t('emptyState.description')}
             action={
               <button
-                onClick={() => navigate('/workflows/new')}
+                onClick={openFreshCreate}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
               >
                 <Plus className="w-5 h-5" />
@@ -324,10 +334,11 @@ function WorkflowSection({
 // ---------------------------------------------------------------------------
 
 function WorkflowCard({ workflow }: { workflow: Workflow }) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
   const color = resolveWorkflowColor(workflow);
   const builtin = isBuiltin(workflow);
+  const displayName = getWorkflowDisplayName(workflow, i18n?.language);
 
   const successRate =
     workflow.stats.callCount > 0
@@ -357,7 +368,7 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
 
           <div className="min-w-0 flex-1">
             <span className="block text-sm font-semibold text-gray-900 truncate leading-snug">
-              {workflow.name}
+              {displayName}
             </span>
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               {/* Source badge */}

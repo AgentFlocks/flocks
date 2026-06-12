@@ -163,6 +163,7 @@ export interface WorkflowTriggerPlugin {
 export interface WorkflowJSON {
   version?: string;
   name?: string;
+  nameI18n?: Record<string, string>;
   start: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -173,8 +174,10 @@ export interface WorkflowJSON {
 export interface Workflow {
   id: string;
   name: string;
+  nameI18n?: Record<string, string>;
   description?: string;
   markdownContent?: string;
+  editMarkdownContent?: string;
   category: string;
   workflowJson: WorkflowJSON;
   status: 'draft' | 'active' | 'archived';
@@ -251,6 +254,35 @@ export interface WorkflowService {
 
 export type WorkflowServiceDriver = 'local' | 'docker';
 
+export interface WorkflowIntegrationConfig {
+  version: number;
+  kind: string;
+  workflow: {
+    id: string;
+    name?: string;
+    category?: string;
+    source?: string;
+  };
+  updatedAt: number;
+  publish: Record<string, any>;
+  triggers: WorkflowTrigger[];
+  [key: string]: any;
+}
+
+export interface WorkflowIntegrationConfigResponse {
+  ok?: boolean;
+  exists?: boolean;
+  path: string;
+  storageKey?: string;
+  source?: 'storage' | 'file_migrated' | 'generated' | string;
+  config: WorkflowIntegrationConfig;
+  runtime?: {
+    publish?: Record<string, any>;
+    triggers?: WorkflowTriggerRecord[];
+    [key: string]: any;
+  };
+}
+
 /** Saved syslog listener config (per workflow). */
 export interface SyslogConfig {
   workflowId?: string;
@@ -303,6 +335,7 @@ export interface WorkflowPollerConfig {
   workflowId?: string;
   enabled?: boolean;
   intervalSeconds?: number;
+  cronExpression?: string | null;
   timeoutSeconds?: number;
   noOverlap?: boolean;
   inputs?: Record<string, any>;
@@ -353,6 +386,8 @@ export const workflowAPI = {
     description?: string;
     category?: string;
     workflowJson?: WorkflowJSON;
+    markdownContent?: string;
+    editMarkdownContent?: string;
     status?: 'draft' | 'active' | 'archived';
   }) =>
     client.put<Workflow>(`/api/workflow/${id}`, data),
@@ -401,6 +436,15 @@ export const workflowAPI = {
 
   getService: (id: string) =>
     client.get<WorkflowService | null>(`/api/workflow/${id}/service`),
+
+  getConfig: (id: string) =>
+    client.get<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`),
+
+  updateConfig: (id: string, config: WorkflowIntegrationConfig) =>
+    client.put<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`, config),
+
+  syncConfig: (id: string) =>
+    client.post<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config/sync`),
 
   listServices: () =>
     client.get<WorkflowService[]>('/api/workflow-services'),

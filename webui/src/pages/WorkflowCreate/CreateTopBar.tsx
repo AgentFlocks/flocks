@@ -2,6 +2,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ExternalLink, PanelRight, PanelRightClose } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow } from '@/api/workflow';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 interface CreateTopBarProps {
   workflow: Workflow | null;
@@ -10,8 +11,9 @@ interface CreateTopBarProps {
 }
 
 export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: CreateTopBarProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
+  const displayName = workflow ? getWorkflowDisplayName(workflow, i18n?.language) : '';
 
   return (
     <div className="h-14 bg-white border-b border-gray-200 flex items-center px-4 gap-3 flex-shrink-0 z-10">
@@ -27,7 +29,7 @@ export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: Cre
 
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <h1 className="text-sm font-semibold text-gray-900 truncate">
-          {workflow ? workflow.name : t('create.topBar.newWorkflow')}
+          {workflow ? displayName : t('create.topBar.newWorkflow')}
         </h1>
         {!workflow ? (
           <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-600 flex-shrink-0 border border-red-200">

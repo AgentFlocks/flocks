@@ -23,6 +23,7 @@ export interface Skill {
   source?: string;
   content?: string;
   category?: string;
+  ui_hidden?: boolean;
   disabled?: boolean;
   // Eligibility
   eligible?: boolean;

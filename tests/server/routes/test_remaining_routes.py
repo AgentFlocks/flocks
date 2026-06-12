@@ -225,6 +225,30 @@ class TestWorkflowRoutes:
         assert resp.json()["name"] == "updated-workflow"
 
     @pytest.mark.asyncio
+    async def test_update_workflow_writes_workflow_md_only(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+    ):
+        """PUT /api/workflow/{id} stores editable markdown in workflow.md."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+        workflow_dir = isolated_workflow_filesystem["global_root"] / wf_id
+        legacy_edit_file = workflow_dir / "workflow.edit.md"
+        legacy_edit_file.write_text("# legacy\n", encoding="utf-8")
+
+        resp = await client.put(
+            f"/api/workflow/{wf_id}",
+            json={"markdownContent": "# current\n"},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["markdownContent"] == "# current\n"
+        assert resp.json()["editMarkdownContent"] == "# current\n"
+        assert (workflow_dir / "workflow.md").read_text(encoding="utf-8") == "# current\n"
+        assert not legacy_edit_file.exists()
+
+    @pytest.mark.asyncio
     async def test_delete_workflow(self, client: AsyncClient):
         """DELETE /api/workflow/{id} removes the workflow."""
         create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)

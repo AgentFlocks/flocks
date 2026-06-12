@@ -195,7 +195,11 @@ function renderHomeWithLayout() {
 
 async function flushEffects() {
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
+    if (vi.isFakeTimers()) {
+      await vi.advanceTimersByTimeAsync(0);
+      return;
+    }
+    await Promise.resolve();
   });
 }
 

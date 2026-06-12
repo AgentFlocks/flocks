@@ -120,4 +120,22 @@ describe('useSessionChat.createAndSend — image forwarding', () => {
     );
     expect(promptCall![1]).toMatchObject({ agent: 'my-agent' });
   });
+
+  it('resumes from an initial session id without creating another session', async () => {
+    const { result } = renderHook(() =>
+      useSessionChat({ title: 'Test', autoCreate: false, initialSessionId: 'existing-session' }),
+    );
+
+    expect(result.current.sessionId).toBe('existing-session');
+
+    await act(async () => {
+      await result.current.createAndSend({ text: 'continue' });
+    });
+
+    expect(mockPost.mock.calls.some(([url]) => url === '/api/session')).toBe(false);
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/existing-session/prompt_async',
+      { parts: [{ type: 'text', text: 'continue' }] },
+    );
+  });
 });

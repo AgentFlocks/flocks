@@ -41,12 +41,16 @@ const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
-const tMock = (key: string) => ({
+const tMock = (key: string, options?: Record<string, unknown>) => {
+  const value = ({
   'chat.placeholder': '请输入消息',
   'chat.emptyText': '暂无消息',
   'chat.sending': '发送中...',
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
+  'chat.process.title': '过程（{{count}} 项）',
+  'chat.process.reasoningCount': '{{count}} 段思考',
+  'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.compacting': '压缩中...',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
@@ -67,7 +71,9 @@ const tMock = (key: string) => ({
   'chat.tool.todoSummary.completed': '完成',
   'chat.tool.todoSummary.done': '完成',
   'smartAssistant': '智能助手',
-}[key] ?? key);
+  }[key] ?? key);
+  return value.replace(/\{\{(\w+)\}\}/g, (_, name) => String(options?.[name] ?? ''));
+};
 const pendingQuestionsHookMock = {
   pendingQuestions: {},
   handleQuestionAsked: vi.fn(),
@@ -341,13 +347,12 @@ describe('getRenderableFileUrl', () => {
 });
 
 describe('getUserAvatarContainerClassName', () => {
-  it('moves the user avatar to the bubble side without affecting bubble spacing', () => {
+  it('keeps the user avatar inside the message row', () => {
     const className = getUserAvatarContainerClassName(false);
 
-    expect(className).toContain('absolute');
-    expect(className).toContain('left-full');
-    expect(className).toContain('ml-2.5');
-    expect(className).toContain('translate-y-1/2');
+    expect(className).toContain('flex-shrink-0');
+    expect(className).not.toContain('absolute');
+    expect(className).not.toContain('left-full');
     expect(className).toContain('h-8');
   });
 
@@ -357,12 +362,12 @@ describe('getUserAvatarContainerClassName', () => {
 });
 
 describe('getUserAvatarSpacerClassName', () => {
-  it('uses a shorter spacer in full layout to keep the top gap compact', () => {
-    expect(getUserAvatarSpacerClassName(false)).toBe('h-4');
+  it('does not reserve out-of-flow space in full layout', () => {
+    expect(getUserAvatarSpacerClassName(false)).toBe('h-0');
   });
 
-  it('uses a proportional spacer in compact layout', () => {
-    expect(getUserAvatarSpacerClassName(true)).toBe('h-3.5');
+  it('does not reserve out-of-flow space in compact layout', () => {
+    expect(getUserAvatarSpacerClassName(true)).toBe('h-0');
   });
 });
 
@@ -401,6 +406,37 @@ describe('SessionChat standalone thinking indicator', () => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
       expect(container.textContent).not.toContain('思考中...');
     });
+  });
+});
+
+describe('SessionChat instruction display text', () => {
+  it('renders metadata displayText while keeping the raw prompt out of the bubble', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-instruction',
+          role: 'user',
+          parts: [{
+            id: 'user-instruction-part',
+            type: 'text',
+            text: 'Please read guide.md and generate the full workflow configuration.',
+            metadata: { displayText: '@@flocks-instruction:智能配置' },
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('智能配置')).toBeInTheDocument();
+    expect(screen.queryByText(/Please read guide\.md/)).not.toBeInTheDocument();
   });
 });
 
@@ -522,6 +558,73 @@ describe('SessionChat error rendering', () => {
 
     expect(screen.getByText('Connection error.')).toBeInTheDocument();
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+});
+
+describe('SessionChat intermediate process collapse', () => {
+  it('collapses reasoning and tool steps by default in embedded workflow panels', async () => {
+    const user = userEvent.setup();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-1',
+              messageID: 'assistant-process',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '需要先读取工作流文件',
+            } as any,
+            {
+              id: 'tool-1',
+              messageID: 'assistant-process',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-1',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.md' },
+                output: 'workflow content',
+              },
+            } as any,
+            {
+              id: 'text-1',
+              messageID: 'assistant-process',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '已读取当前 workflow.md。',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(processGroup.open).toBe(false);
+    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
+    expect(screen.getByText('1 段思考 · 1 次工具调用')).toBeInTheDocument();
+    expect(screen.getByText('已读取当前 workflow.md。')).toBeInTheDocument();
+
+    await user.click(screen.getByText('过程（2 项）'));
+
+    expect(processGroup.open).toBe(true);
+    expect(screen.getByText('read')).toBeInTheDocument();
   });
 });
 

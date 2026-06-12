@@ -1,18 +1,38 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
-import { X, GitBranch, FileText, Code2, Layout, Download, FileJson } from 'lucide-react';
+import { X, GitBranch, FileText, Code2, FileJson, Bot } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
+import { sessionApi } from '@/api/session';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import WorkflowDocumentPanel, { type WorkflowDocumentMode } from '@/components/common/WorkflowDocumentPanel';
+import WorkflowMarkdownDiffReview from '@/components/common/WorkflowMarkdownDiffReview';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
-import RightPanel from './RightPanel';
+import RightPanel, { type RightPanelTabId, type WorkflowChatLaunchRequest } from './RightPanel';
 import { extractErrorMessage } from '@/utils/error';
 import NodeInfoPanel from './NodeInfoPanel';
+import { buildWorkflowMarkdown } from '@/utils/workflowMarkdown';
+import {
+  acceptTextDiffHunk,
+  buildLineDiff,
+  buildTextDiffHunks,
+  rejectTextDiffHunk,
+  type TextDiffHunk,
+} from '@/utils/textDiff';
+import { useConfirm } from '@/components/common/ConfirmDialog';
 
 type CanvasTab = 'flow' | 'md' | 'json';
+
+interface EditDocDiff {
+  before: string;
+  after: string;
+}
+
+interface WorkflowChatSessionRef {
+  workflowId: string;
+  sessionId: string;
+}
 
 const PANEL_MIN = 240;
 const PANEL_RATIO = 0.40; // 初始占可用宽度的 40%
@@ -24,10 +44,20 @@ function getInitialPanelWidth() {
   return Math.max(PANEL_MIN, Math.round(available * PANEL_RATIO));
 }
 
+function hasWorkflowJsonDefinition(workflow: Workflow | null) {
+  if (!workflow) return false;
+  return Boolean(
+    workflow.workflowJson.start
+    || workflow.workflowJson.nodes.length > 0
+    || workflow.workflowJson.edges.length > 0
+  );
+}
+
 export default function WorkflowDetail() {
   const { t } = useTranslation('workflow');
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const confirm = useConfirm();
 
   const CANVAS_TABS: { id: CanvasTab; label: string; icon: React.ReactNode }[] = [
     { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <GitBranch className="w-3.5 h-3.5" /> },
@@ -43,10 +73,21 @@ export default function WorkflowDetail() {
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
   const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
-  const [layoutKey, setLayoutKey] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>('flow');
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTabId>('overview');
   const [showMdHint, setShowMdHint] = useState(false);
+  const [editDocDraft, setEditDocDraft] = useState('');
+  const [editDocBase, setEditDocBase] = useState('');
+  const [editDocMode, setEditDocMode] = useState<WorkflowDocumentMode>('preview');
+  const [editDocDiff, setEditDocDiff] = useState<EditDocDiff | null>(null);
+  const [editDocSaving, setEditDocSaving] = useState(false);
+  const [editDocReviewing, setEditDocReviewing] = useState<string | null>(null);
+  const [chatLaunchRequest, setChatLaunchRequest] = useState<WorkflowChatLaunchRequest | null>(null);
+  const [workflowChatSession, setWorkflowChatSession] = useState<WorkflowChatSessionRef | null>(null);
   const hasAutoSwitchedRef = useRef(false);
+  const chatLaunchSeqRef = useRef(0);
+  const editDocWorkflowIdRef = useRef<string | null>(null);
+  const missingMarkdownAutoLaunchRef = useRef<string | null>(null);
   const dragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
@@ -119,6 +160,17 @@ export default function WorkflowDetail() {
     void loadWorkflow();
   }, [id, loadWorkflow]);
 
+  useEffect(() => {
+    const next = workflow?.markdownContent ?? workflow?.editMarkdownContent ?? '';
+    const workflowIdChanged = (workflow?.id ?? null) !== editDocWorkflowIdRef.current;
+    editDocWorkflowIdRef.current = workflow?.id ?? null;
+    setEditDocDraft(next);
+    setEditDocBase(next);
+    if (workflowIdChanged) {
+      setEditDocMode(next ? 'preview' : 'edit');
+    }
+  }, [workflow?.id, workflow?.markdownContent, workflow?.editMarkdownContent]);
+
   const refreshWorkflowStats = useCallback(() => {
     void loadWorkflow({ preserveExecution: true, silent: true });
   }, [loadWorkflow]);
@@ -128,9 +180,25 @@ export default function WorkflowDetail() {
     setTimeout(() => setRunToast(null), 3000);
   }, []);
 
-  // 自动布局：递增 layoutKey 触发 FlowCanvas 重新 BFS 布局
-  const handleAutoLayout = useCallback(() => {
-    setLayoutKey((k) => k + 1);
+  const openAiEditPanel = useCallback(() => {
+    setPanelOpen(true);
+    setCanvasTab('md');
+    setEditDocMode('edit');
+    setShowMdHint(false);
+    setRightPanelTab('chat');
+  }, []);
+
+  const handleFlocksHelp = useCallback(() => {
+    openAiEditPanel();
+  }, [openAiEditPanel]);
+
+  const handleRightPanelTabChange = useCallback((tab: RightPanelTabId) => {
+    setRightPanelTab(tab);
+    if (tab === 'chat') {
+      setCanvasTab('md');
+      setEditDocMode('edit');
+      setShowMdHint(false);
+    }
   }, []);
 
   // 删除工作流
@@ -161,17 +229,336 @@ export default function WorkflowDetail() {
     }
   }, [workflow, showToast]);
 
-  // 导出 MD 文件
-  const handleExportMd = useCallback(() => {
-    if (!workflow?.markdownContent) return;
-    const blob = new Blob([workflow.markdownContent], { type: 'text/markdown' });
+  const editDocDirty = editDocDraft !== editDocBase;
+  const editDocDiffLines = useMemo(() => (
+    editDocDiff ? buildLineDiff(editDocDiff.before, editDocDiff.after) : []
+  ), [editDocDiff]);
+  const editDocDiffStats = useMemo(() => ({
+    added: editDocDiffLines.filter((line) => line.type === 'add').length,
+    removed: editDocDiffLines.filter((line) => line.type === 'remove').length,
+  }), [editDocDiffLines]);
+  const editDocDiffHunks = useMemo(() => (
+    editDocDiff ? buildTextDiffHunks(editDocDiff.before, editDocDiff.after) : []
+  ), [editDocDiff]);
+
+  const handleWorkflowChatSessionChange = useCallback((sessionId: string | null) => {
+    const workflowId = workflow?.id;
+    setWorkflowChatSession(sessionId && workflowId ? { workflowId, sessionId } : null);
+  }, [workflow?.id]);
+
+  const recordEditDocReviewResult = useCallback(async ({
+    decision,
+    scope,
+    hunk,
+    remainingHunks,
+  }: {
+    decision: 'accepted' | 'rejected';
+    scope: 'full_diff' | 'hunk';
+    hunk?: TextDiffHunk;
+    remainingHunks?: number;
+  }) => {
+    const workflowId = workflow?.id;
+    const chatSession = workflowChatSession;
+    const sessionId = chatSession && chatSession.workflowId === workflowId
+      ? chatSession.sessionId
+      : null;
+    if (!workflowId || !sessionId) return;
+
+    const proposedChangeApplied = decision === 'accepted'
+      ? (scope === 'full_diff' ? 'true' : 'true_for_this_hunk')
+      : (scope === 'full_diff' ? 'false' : 'false_for_this_hunk');
+    const reviewState = remainingHunks && remainingHunks > 0 ? 'pending_remaining_hunks' : 'completed';
+    const summary = decision === 'accepted'
+      ? (scope === 'full_diff'
+        ? 'The user accepted the AI-proposed workflow.md diff. Treat the current workflow.md content as successfully applied.'
+        : 'The user accepted this workflow.md diff hunk. Treat this hunk as successfully applied while the remaining hunks may still need review.')
+      : (scope === 'full_diff'
+        ? 'The user rejected the AI-proposed workflow.md diff. Treat the proposed change as not applied; workflow.md was restored to the previous content.'
+        : 'The user rejected this workflow.md diff hunk. Treat this hunk as not applied; workflow.md was saved with this hunk reverted.');
+
+    const text = [
+      '[Workflow markdown diff review result]',
+      'Use this hidden context in future assistant turns. Do not claim a proposed workflow.md change succeeded unless proposed_change_applied is true or true_for_this_hunk.',
+      `workflow_id: ${workflowId}`,
+      'file: workflow.md',
+      `decision: ${decision}`,
+      `scope: ${scope}`,
+      `proposed_change_applied: ${proposedChangeApplied}`,
+      `review_state: ${reviewState}`,
+      ...(hunk ? [
+        `hunk_id: ${hunk.id}`,
+        `hunk_added_lines: ${hunk.added}`,
+        `hunk_removed_lines: ${hunk.removed}`,
+      ] : []),
+      remainingHunks !== undefined ? `remaining_diff_hunks: ${remainingHunks}` : null,
+      `summary: ${summary}`,
+    ].filter(Boolean).join('\n');
+
+    try {
+      await sessionApi.sendMessage(sessionId, {
+        parts: [{ type: 'text', text }],
+        noReply: true,
+      });
+    } catch (err) {
+      console.warn('[WorkflowDetail] failed to record workflow markdown review result', err);
+    }
+  }, [workflow?.id, workflowChatSession]);
+
+  // 导出 workflow.md
+  const handleExportEditDoc = useCallback(() => {
+    if (!workflow || !editDocDraft.trim()) return;
+    const blob = new Blob([editDocDraft], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `workflow-${workflow.name || workflow.id}.md`;
+    a.download = `${workflow.id || workflow.name}.md`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [workflow]);
+  }, [editDocDraft, workflow]);
+
+  const buildEditDocGenerationPrompt = useCallback(() => {
+    if (!workflow) return '';
+    const workflowDir = workflow.source === 'global'
+      ? `~/.flocks/plugins/workflows/${workflow.id}/`
+      : `.flocks/plugins/workflows/${workflow.id}/`;
+
+    return t('detail.generateEditDocPrompt', {
+      name: workflow.name,
+      dir: workflowDir,
+      mdPath: `${workflowDir}workflow.md`,
+      jsonPath: `${workflowDir}workflow.json`,
+      workflowJson: JSON.stringify(workflow.workflowJson, null, 2),
+    });
+  }, [t, workflow]);
+
+  const launchEditDocGeneration = useCallback(() => {
+    if (!workflow) return;
+
+    openAiEditPanel();
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt: buildEditDocGenerationPrompt(),
+      displayLabel: t('detail.generateEditDoc'),
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [buildEditDocGenerationPrompt, openAiEditPanel, t, workflow]);
+
+  const handleGenerateEditDoc = useCallback(() => {
+    if (!workflow) return;
+    if (!editDocDraft.trim()) {
+      launchEditDocGeneration();
+      return;
+    }
+
+    setEditDocDraft(buildWorkflowMarkdown(workflow));
+    setEditDocDiff(null);
+    setEditDocMode('edit');
+    setShowMdHint(false);
+  }, [editDocDraft, launchEditDocGeneration, workflow]);
+
+  const buildWorkflowGenerationPrompt = useCallback((editDocContent: string) => {
+    if (!workflow) return '';
+    const workflowDir = workflow.source === 'global'
+      ? `~/.flocks/plugins/workflows/${workflow.id}/`
+      : `.flocks/plugins/workflows/${workflow.id}/`;
+
+    return t('detail.generateWorkflowPrompt', {
+      name: workflow.name,
+      dir: workflowDir,
+      mdPath: `${workflowDir}workflow.md`,
+      jsonPath: `${workflowDir}workflow.json`,
+      editDocContent,
+    });
+  }, [t, workflow]);
+
+  const launchWorkflowGeneration = useCallback((content: string) => {
+    if (!workflow) return;
+
+    openAiEditPanel();
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt: buildWorkflowGenerationPrompt(content),
+      displayLabel: t('detail.generateWorkflow'),
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [buildWorkflowGenerationPrompt, openAiEditPanel, t, workflow]);
+
+  const launchWorkflowGuidePrompt = useCallback((prompt: string, displayLabel: string) => {
+    openAiEditPanel();
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt,
+      displayLabel,
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [openAiEditPanel]);
+
+  const handleGenerateWorkflow = useCallback(() => {
+    if (!workflow) return;
+    const content = editDocDraft.trim();
+    if (!content) {
+      launchEditDocGeneration();
+      return;
+    }
+
+    launchWorkflowGeneration(editDocDraft);
+  }, [editDocDraft, launchEditDocGeneration, launchWorkflowGeneration, workflow]);
+
+  useEffect(() => {
+    if (rightPanelTab !== 'chat') return;
+    if (!workflow || editDocDraft.trim() || !hasWorkflowJsonDefinition(workflow)) return;
+    if (chatLaunchRequest) return;
+    if (missingMarkdownAutoLaunchRef.current === workflow.id) return;
+    missingMarkdownAutoLaunchRef.current = workflow.id;
+    launchEditDocGeneration();
+  }, [chatLaunchRequest, editDocDraft, launchEditDocGeneration, rightPanelTab, workflow]);
+
+  const handleChatLaunchRequestHandled = useCallback((requestId: number) => {
+    setChatLaunchRequest((current) => (
+      current?.id === requestId ? null : current
+    ));
+  }, []);
+
+  const handleSaveEditDoc = useCallback(async () => {
+    if (!workflow || editDocSaving) return;
+    const regenerateAfterSave = await confirm({
+      title: t('detail.regenerateWorkflowConfirmTitle'),
+      description: t('detail.regenerateWorkflowConfirmDesc'),
+      confirmText: t('detail.regenerateWorkflowConfirmYes'),
+      cancelText: t('detail.regenerateWorkflowConfirmNo'),
+      variant: 'default',
+    });
+    const content = editDocDraft.endsWith('\n') ? editDocDraft : `${editDocDraft}\n`;
+    setEditDocSaving(true);
+    try {
+      const response = await workflowAPI.update(workflow.id, {
+        markdownContent: content,
+      });
+      const updated = {
+        ...response.data,
+        markdownContent: response.data.markdownContent ?? content,
+        editMarkdownContent: response.data.editMarkdownContent ?? response.data.markdownContent ?? content,
+      };
+      setWorkflow(updated);
+      setEditDocDraft(updated.markdownContent ?? content);
+      setEditDocBase(updated.markdownContent ?? content);
+      setEditDocDiff(null);
+      setEditDocMode('preview');
+      showToast('success', t('detail.editDocSaveSuccess'));
+      if (regenerateAfterSave) {
+        launchWorkflowGeneration(updated.markdownContent ?? content);
+      }
+    } catch (err: unknown) {
+      showToast('error', `${t('detail.editDocSaveFailed')}: ${extractErrorMessage(err)}`);
+    } finally {
+      setEditDocSaving(false);
+    }
+  }, [confirm, editDocDraft, editDocSaving, launchWorkflowGeneration, showToast, t, workflow]);
+
+  const handleAcceptEditDocDiff = useCallback(() => {
+    setEditDocDiff(null);
+    setShowMdHint(false);
+    showToast('success', t('detail.editDocDiffAcceptSuccess'));
+    void recordEditDocReviewResult({
+      decision: 'accepted',
+      scope: 'full_diff',
+      remainingHunks: 0,
+    });
+  }, [recordEditDocReviewResult, showToast, t]);
+
+  const handleAcceptEditDocDiffHunk = useCallback((hunk: TextDiffHunk) => {
+    if (!editDocDiff) return;
+    const nextBefore = acceptTextDiffHunk(editDocDiff.before, hunk);
+    if (nextBefore === editDocDiff.after) {
+      setEditDocDiff(null);
+      setShowMdHint(false);
+    } else {
+      setEditDocDiff({
+        before: nextBefore,
+        after: editDocDiff.after,
+      });
+    }
+    showToast('success', t('detail.editDocDiffAcceptHunkSuccess'));
+    void recordEditDocReviewResult({
+      decision: 'accepted',
+      scope: 'hunk',
+      hunk,
+      remainingHunks: nextBefore === editDocDiff.after ? 0 : Math.max(0, editDocDiffHunks.length - 1),
+    });
+  }, [editDocDiff, editDocDiffHunks.length, recordEditDocReviewResult, showToast, t]);
+
+  const handleRejectEditDocDiff = useCallback(async () => {
+    if (!workflow || !editDocDiff || editDocReviewing) return;
+    const content = editDocDiff.before;
+    setEditDocReviewing('reject');
+    try {
+      const response = await workflowAPI.update(workflow.id, {
+        markdownContent: content,
+      });
+      const updated = {
+        ...response.data,
+        markdownContent: response.data.markdownContent ?? content,
+        editMarkdownContent: response.data.editMarkdownContent ?? response.data.markdownContent ?? content,
+      };
+      setWorkflow(updated);
+      setEditDocDraft(updated.markdownContent ?? content);
+      setEditDocBase(updated.markdownContent ?? content);
+      setEditDocDiff(null);
+      setEditDocMode('edit');
+      setShowMdHint(false);
+      showToast('success', t('detail.editDocDiffRejectSuccess'));
+      void recordEditDocReviewResult({
+        decision: 'rejected',
+        scope: 'full_diff',
+        remainingHunks: 0,
+      });
+    } catch (err: unknown) {
+      showToast('error', `${t('detail.editDocDiffRejectFailed')}: ${extractErrorMessage(err)}`);
+    } finally {
+      setEditDocReviewing(null);
+    }
+  }, [editDocDiff, editDocReviewing, recordEditDocReviewResult, showToast, t, workflow]);
+
+  const handleRejectEditDocDiffHunk = useCallback(async (hunk: TextDiffHunk) => {
+    if (!workflow || !editDocDiff || editDocReviewing) return;
+    const content = rejectTextDiffHunk(editDocDiff.after, hunk);
+    setEditDocReviewing(`reject:${hunk.id}`);
+    try {
+      const response = await workflowAPI.update(workflow.id, {
+        markdownContent: content,
+      });
+      const updated = {
+        ...response.data,
+        markdownContent: response.data.markdownContent ?? content,
+        editMarkdownContent: response.data.editMarkdownContent ?? response.data.markdownContent ?? content,
+      };
+      const nextAfter = updated.markdownContent ?? content;
+      setWorkflow(updated);
+      setEditDocDraft(nextAfter);
+      setEditDocBase(nextAfter);
+      if (nextAfter === editDocDiff.before) {
+        setEditDocDiff(null);
+        setShowMdHint(false);
+      } else {
+        setEditDocDiff({
+          before: editDocDiff.before,
+          after: nextAfter,
+        });
+      }
+      setEditDocMode('edit');
+      showToast('success', t('detail.editDocDiffRejectHunkSuccess'));
+      void recordEditDocReviewResult({
+        decision: 'rejected',
+        scope: 'hunk',
+        hunk,
+        remainingHunks: nextAfter === editDocDiff.before ? 0 : Math.max(0, editDocDiffHunks.length - 1),
+      });
+    } catch (err: unknown) {
+      showToast('error', `${t('detail.editDocDiffRejectHunkFailed')}: ${extractErrorMessage(err)}`);
+    } finally {
+      setEditDocReviewing(null);
+    }
+  }, [editDocDiff, editDocDiffHunks.length, editDocReviewing, recordEditDocReviewResult, showToast, t, workflow]);
 
   // 用户手动切换 canvas tab 时，阻止后续自动跳转
   const handleCanvasTabChange = useCallback((tab: CanvasTab) => {
@@ -191,14 +578,28 @@ export default function WorkflowDetail() {
 
   // 对话编辑模式：Rex 修改工作流后，ChatTab 即时通知刷新画布和节点抽屉
   const handleWorkflowUpdated = useCallback((updated: Workflow) => {
+    const previousMarkdown = workflow?.markdownContent ?? workflow?.editMarkdownContent ?? '';
+    const nextMarkdown = updated.markdownContent ?? updated.editMarkdownContent ?? '';
+    const markdownChanged = (
+      nextMarkdown !== previousMarkdown
+    );
     setWorkflow(updated);
+    if (markdownChanged) {
+      setEditDocDiff({
+        before: previousMarkdown,
+        after: nextMarkdown,
+      });
+      setCanvasTab('md');
+      setEditDocMode('edit');
+      setShowMdHint(true);
+    }
     // 同步更新节点抽屉：若当前打开的节点在新版本中存在则用最新数据，否则关闭抽屉
     setDrawerNode((prev) => {
       if (!prev) return null;
       const fresh = updated.workflowJson.nodes.find((n) => n.id === prev.id);
       return fresh ?? null;
     });
-  }, []);
+  }, [workflow?.editMarkdownContent, workflow?.markdownContent]);
 
   if (loading) {
     return (
@@ -254,9 +655,9 @@ export default function WorkflowDetail() {
       )}
 
       {/* 主体区域：画布 + 拖动分隔条 + 右侧面板 */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="relative isolate flex flex-1 min-h-0 overflow-hidden">
         {/* 左侧画布区域（含三 Tab） */}
-        <div className="flex flex-col flex-1 min-w-0">
+        <div className="relative z-0 flex flex-col flex-1 min-w-0 overflow-hidden">
           {/* Canvas Tab 栏 */}
           <div className="flex items-center border-b border-gray-200 bg-white flex-shrink-0 px-2">
             {CANVAS_TABS.map((tab) => (
@@ -299,52 +700,58 @@ export default function WorkflowDetail() {
                 workflowJson={workflow.workflowJson}
                 editable={false}
                 onNodeClick={(node) => setDrawerNode(node)}
-                layoutKey={layoutKey}
               />
-              {/* 重置布局按钮 - 右上角浮动 */}
+              {/* 流程图快捷操作 */}
               <button
-                onClick={handleAutoLayout}
-                className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm transition-colors"
-                title={t('detail.resetLayout')}
+                onClick={handleFlocksHelp}
+                className="absolute left-3 top-2 z-20 inline-flex max-w-[calc(100%-7rem)] items-center gap-2 truncate whitespace-nowrap rounded-lg border border-emerald-100 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 backdrop-blur transition-colors hover:border-emerald-200 hover:bg-emerald-50/80 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                title={t('detail.flocksHelpTitle')}
               >
-                <Layout className="w-3.5 h-3.5" />
-                {t('detail.resetLayout')}
+                <Bot className="h-4 w-4 flex-shrink-0 text-emerald-500" />
+                <span className="truncate">{t('detail.flocksHelp')}</span>
               </button>
             </div>
 
             {/* MD 描述 */}
             {canvasTab === 'md' && (
-              <div className="absolute inset-0 overflow-y-auto bg-white p-6">
-                {/* 下载 MD 按钮 - 右上角浮动 */}
-                <button
-                  onClick={handleExportMd}
-                  disabled={!workflow.markdownContent}
-                  className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  title={t('detail.downloadMdTitle')}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  {t('detail.downloadMd')}
-                </button>
-                {workflow.markdownContent ? (
-                  <div className="max-w-3xl mx-auto prose prose-sm prose-gray leading-relaxed">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {workflow.markdownContent}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-400">
-                    <FileText className="w-10 h-10 opacity-40" />
-                    <p className="text-sm">{t('detail.noMdDesc')}</p>
-                    <p className="text-xs">{t('detail.noMdDescHint')}</p>
-                  </div>
-                )}
-              </div>
+              <WorkflowDocumentPanel
+                mode={editDocMode}
+                value={editDocDraft}
+                dirty={editDocDirty}
+                saving={editDocSaving}
+                saveDisabled={!editDocDirty || editDocSaving}
+                onModeChange={setEditDocMode}
+                onChange={(value) => {
+                  setEditDocDraft(value);
+                  setEditDocDiff(null);
+                }}
+                onResetDocument={handleGenerateEditDoc}
+                onSave={() => void handleSaveEditDoc()}
+                onGenerateWorkflow={handleGenerateWorkflow}
+                onDownload={handleExportEditDoc}
+                diffReview={
+                  editDocDiff ? (
+                    <WorkflowMarkdownDiffReview
+                      lines={editDocDiffLines}
+                      hunks={editDocDiffHunks}
+                      added={editDocDiffStats.added}
+                      removed={editDocDiffStats.removed}
+                      reviewingId={editDocReviewing}
+                      disabled={editDocSaving || editDocReviewing !== null}
+                      onAccept={handleAcceptEditDocDiff}
+                      onReject={() => void handleRejectEditDocDiff()}
+                      onAcceptHunk={handleAcceptEditDocDiffHunk}
+                      onRejectHunk={(hunk) => void handleRejectEditDocDiffHunk(hunk)}
+                    />
+                  ) : undefined
+                }
+              />
             )}
 
             {/* JSON */}
             {canvasTab === 'json' && (
               <div className="absolute inset-0 overflow-y-auto bg-gray-900 p-4">
-                {/* 下载 JSON 按钮 - 右上角浮动 */}
+                {/* 下载工作流文件按钮 - 右上角浮动 */}
                 <button
                   onClick={handleExport}
                   className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 border border-gray-600 text-gray-200 text-xs rounded-lg hover:bg-gray-600 shadow-sm transition-colors"
@@ -380,7 +787,7 @@ export default function WorkflowDetail() {
         {panelOpen && (
           <div
             onMouseDown={onDragStart}
-            className="w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 relative group"
+            className="relative z-20 w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group"
             title={t('detail.dragAdjust')}
           >
             <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
@@ -393,10 +800,16 @@ export default function WorkflowDetail() {
           latestExecution={latestExecution}
           open={panelOpen}
           width={panelWidth}
+          activeTab={rightPanelTab}
+          onActiveTabChange={handleRightPanelTabChange}
+          chatLaunchRequest={chatLaunchRequest}
+          onChatLaunchRequestHandled={handleChatLaunchRequestHandled}
           onLatestExecutionChange={setLatestExecution}
           onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}
           onFirstMessageSent={handleFirstMessageSent}
+          onSessionChange={handleWorkflowChatSessionChange}
+          onGuidePrompt={launchWorkflowGuidePrompt}
           selectedNode={drawerNode}
           onDeselectNode={() => setDrawerNode(null)}
           onDelete={handleDelete}

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from flocks.storage.storage import Storage
+from flocks.config.config import Config
 from flocks.workflow import center
 
 
@@ -44,6 +45,7 @@ async def test_scan_skill_workflows_is_idempotent(
     workflow_path = wf_dir / "workflow.json"
     workflow_path.write_text(json.dumps(_workflow_payload("demo")), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(center, "resolve_global_workflow_roots", lambda: [])
 
     first = await center.scan_skill_workflows()
     assert len(first) == 1
@@ -61,6 +63,37 @@ async def test_scan_skill_workflows_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_scan_skill_workflows_skips_hidden_templates(
+    tmp_path: Path,
+    isolated_storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hidden workflow templates should not enter prompt-visible registry entries."""
+    visible_dir = tmp_path / ".flocks" / "plugins" / "workflows" / "visible"
+    hidden_dir = tmp_path / ".flocks" / "plugins" / "workflows" / "__hidden_template"
+    visible_dir.mkdir(parents=True)
+    hidden_dir.mkdir(parents=True)
+    (visible_dir / "workflow.json").write_text(
+        json.dumps(_workflow_payload("visible")),
+        encoding="utf-8",
+    )
+    (hidden_dir / "workflow.json").write_text(
+        json.dumps(_workflow_payload("hidden-template")),
+        encoding="utf-8",
+    )
+    (hidden_dir / "meta.json").write_text(
+        json.dumps({"hidden": True, "templateOnly": True}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(center, "resolve_global_workflow_roots", lambda: [])
+
+    scanned = await center.scan_skill_workflows(tmp_path)
+
+    assert [item["name"] for item in scanned] == ["visible"]
+
+
+@pytest.mark.asyncio
 async def test_publish_invoke_stop_workflow_service(
     tmp_path: Path,
     isolated_storage,
@@ -74,13 +107,16 @@ async def test_publish_invoke_stop_workflow_service(
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(center, "resolve_global_workflow_roots", lambda: [])
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(Config, "_global_config", None)
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_DRIVER", "docker")
     scanned = await center.scan_skill_workflows()
     workflow_id = scanned[0]["workflowId"]
 
     docker_calls = []
 
-    async def fake_exec_docker(args, allow_failure=False):
+    async def fake_exec_docker(args, allow_failure=False, **_kwargs):
         docker_calls.append((args, allow_failure))
         return ("container-abc\n", "", 0)
 
