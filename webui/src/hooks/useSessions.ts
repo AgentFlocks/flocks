@@ -212,6 +212,10 @@ export function useSessionMessages(sessionId?: string) {
         parentID: msg.info.parentID,
         agent: msg.info.agent,
         model: msg.info.model,
+        modelID: msg.info.modelID,
+        providerID: msg.info.providerID,
+        cost: msg.info.cost,
+        tokens: msg.info.tokens,
         timestamp: msg.info.time?.created || Date.now(),
         finish: msg.info.finish || null,
         error: msg.info.error || null,
@@ -267,6 +271,10 @@ export function useSessionMessages(sessionId?: string) {
             // overwrite them with undefined.
             compacted: messageInfo.compacted ?? existing.compacted,
             finish: messageInfo.finish ?? existing.finish,
+            tokens: messageInfo.tokens ?? existing.tokens,
+            modelID: messageInfo.modelID ?? existing.modelID,
+            providerID: messageInfo.providerID ?? existing.providerID,
+            cost: messageInfo.cost ?? existing.cost,
           };
           // When a message finishes streaming, evict its part IDs from the
           // known-parts registry to reclaim memory.
@@ -296,6 +304,10 @@ export function useSessionMessages(sessionId?: string) {
               parts: updated[tempIndex].parts,
               agent: messageInfo.agent,
               model: messageInfo.model,
+              modelID: messageInfo.modelID,
+              providerID: messageInfo.providerID,
+              cost: messageInfo.cost,
+              tokens: messageInfo.tokens,
               timestamp: messageInfo.time?.created || updated[tempIndex].timestamp,
             };
             return updated;
@@ -311,6 +323,10 @@ export function useSessionMessages(sessionId?: string) {
           parentID: messageInfo.parentID,
           agent: messageInfo.agent,
           model: messageInfo.model,
+          modelID: messageInfo.modelID,
+          providerID: messageInfo.providerID,
+          cost: messageInfo.cost,
+          tokens: messageInfo.tokens,
           timestamp: messageInfo.time?.created || Date.now(),
         };
 
@@ -331,13 +347,13 @@ export function useSessionMessages(sessionId?: string) {
       });
     },
     /**
-     * 增量更新 message part（用于流式展示）
-     * @param partInfo - part 对象，包含 id, messageID, sessionID, type, text 等
-     * @param delta - 本次增量文本（如果有的话）
+     * Incrementally update a message part for streaming rendering.
+     * @param partInfo - Part object containing id, messageID, sessionID, type, text, etc.
+     * @param delta - Optional text delta for this update.
      *
-     * 首次出现的 part（结构性变化）立即同步更新，确保"思考中"等指示符
-     * 即时显示；已知 part 的内容增量则用 startTransition 降低优先级，
-     * 允许 React 合批调度以避免高频 SSE chunk 阻塞主线程。
+     * New parts are structural changes and update synchronously so thinking or
+     * streaming indicators appear immediately. Deltas for known parts are
+     * lowered with startTransition so React can batch high-frequency SSE chunks.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
       const isNewPart = !knownPartIdsRef.current.has(partInfo.id);

@@ -18,6 +18,11 @@ from flocks.auth.context import get_current_auth_user, set_current_auth_user, re
 from flocks.server.routes._timing import log_route_timing
 from flocks.audit import emit_audit_event
 from flocks.license import assert_license_active
+from flocks.session.context_usage import (
+    ContextUsageSnapshot,
+    build_context_usage_snapshot,
+    token_usage_to_dict,
+)
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
@@ -194,6 +199,37 @@ async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionMode
         return await Session.get_by_id(session_id)
     finally:
         reset_current_auth_user(token)
+
+
+async def _publish_context_usage_update(
+    event_publish_callback,
+    session_id: str,
+    *,
+    session: Optional[SessionModel] = None,
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
+) -> None:
+    """Best-effort SSE update for the composer context-usage meter."""
+    if event_publish_callback is None:
+        return
+    try:
+        if session is None:
+            session = await _get_session_by_id_unfiltered(session_id)
+        snapshot = await build_context_usage_snapshot(
+            session_id,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        await event_publish_callback(
+            "context.usage.updated",
+            snapshot.model_dump(by_alias=True),
+        )
+    except Exception as exc:
+        log.debug("session.context_usage.publish_failed", {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
 
 
 # =============================================================================
@@ -405,6 +441,25 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
         )
     _require_session_read_access(session, _current_user)
     return _session_to_response(session)
+
+
+@router.get(
+    "/{sessionID}/context-usage",
+    response_model=ContextUsageSnapshot,
+    summary="Get session context usage",
+    description="Get the current context usage snapshot for the composer meter",
+)
+async def get_session_context_usage(sessionID: str, request: Request) -> ContextUsageSnapshot:
+    """Return current prompt/context usage for a session."""
+    current_user = require_user(request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_read_access(session, current_user)
+    return await build_context_usage_snapshot(sessionID, session=session)
 
 
 @router.get(
@@ -1693,10 +1748,12 @@ async def _run_existing_user_message(
     final_content = ""
     assistant_message_id = None
     created_ms = end_ms
+    final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
 
     if result.last_message:
         assistant_message_id = result.last_message.id
         final_content = await Message.get_text_content(result.last_message)
+        final_tokens = token_usage_to_dict(getattr(result.last_message, "tokens", None))
         finish = getattr(result.last_message, "finish", None)
         if finish:
             finish_reason = finish
@@ -1725,10 +1782,17 @@ async def _run_existing_user_message(
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
             "cost": 0,
-            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "tokens": final_tokens,
             "finish": finish_reason,
         }
     })
+    await _publish_context_usage_update(
+        publish_event,
+        session_id,
+        session=session,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
 
     log.info("session.message.replay.completed", {
         "sessionID": session_id,
@@ -2192,27 +2256,42 @@ async def _run_session_compaction(
                 "data": data,
             })
 
-    result = await run_compaction(
-        session_id,
-        parent_message_id=parent_message_id,
-        messages=messages,
-        provider_id=provider_id,
-        model_id=model_id,
-        auto=auto,
-        event_publish_callback=event_publish_callback,
-        status_after="idle",
-        focus_instruction=focus_instruction,
-        progress_callback=progress_callback,
-    )
+    async def publish_current_context_usage() -> None:
+        await _publish_context_usage_update(
+            event_publish_callback,
+            session_id,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
+    try:
+        result = await run_compaction(
+            session_id,
+            parent_message_id=parent_message_id,
+            messages=messages,
+            provider_id=provider_id,
+            model_id=model_id,
+            auto=auto,
+            event_publish_callback=event_publish_callback,
+            status_after="idle",
+            focus_instruction=focus_instruction,
+            progress_callback=progress_callback,
+        )
+    except Exception:
+        await publish_current_context_usage()
+        raise
     if result == "stop":
         # ``SessionCompaction.process`` swallows the underlying provider
         # exception (so the loop path stays simple) but stashes the
         # user-facing message via ``_record_compaction_error``.  Surface
         # it verbatim here so the SSE ``session.error`` payload — and
-        # therefore the front-end toast — shows e.g. "Error code: 529
-        # — 模型服务暂时不可用" instead of an opaque "Compaction failed".
+        # therefore the front-end toast — shows the provider's original
+        # error text instead of an opaque "Compaction failed".
+        await publish_current_context_usage()
         detail = pop_last_compaction_error(session_id) or "Compaction failed"
         raise RuntimeError(detail)
+    await publish_current_context_usage()
     return agent_name, provider_id, model_id
 
 
@@ -2223,16 +2302,16 @@ _repair_json_string = repair_truncated_json
 
 def _check_session_aborted(sessionID: str, checkpoint: str, step: int, **extra_context) -> bool:
     """
-    检查 session 是否被 abort
+    Check whether the session has been aborted.
     
     Args:
         sessionID: Session ID
-        checkpoint: 检查点名称（如 "before_step", "in_stream", "skip_tool_processing"）
-        step: 当前 step 数
-        **extra_context: 额外的日志上下文信息
+        checkpoint: Checkpoint name, such as "before_step", "in_stream", or "skip_tool_processing".
+        step: Current step number.
+        **extra_context: Additional log context.
     
     Returns:
-        True 表示 session 已被 abort，应该停止执行
+        True when the session has been aborted and execution should stop.
     """
     from flocks.session.core.status import SessionStatus
     
@@ -2537,6 +2616,14 @@ async def _process_session_message(
                 },
             })
 
+        await _publish_context_usage_update(
+            publish_event,
+            sessionID,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
         return {
             "id": user_message_id,
             "sessionID": sessionID,
@@ -2593,10 +2680,12 @@ async def _process_session_message(
     finish_reason = "stop"
     final_content = ""
     assistant_message_id = None
+    final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
     
     if result.last_message:
         assistant_message_id = result.last_message.id
         final_content = await Message.get_text_content(result.last_message)
+        final_tokens = token_usage_to_dict(getattr(result.last_message, "tokens", None))
         finish = getattr(result.last_message, 'finish', None)
         if finish:
             finish_reason = finish
@@ -2623,10 +2712,17 @@ async def _process_session_message(
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
             "cost": 0,
-            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "tokens": final_tokens,
             "finish": finish_reason,
         }
     })
+    await _publish_context_usage_update(
+        publish_event,
+        sessionID,
+        session=session,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
     
     # Collect parts for the response
     all_parts = []
@@ -3189,6 +3285,13 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "time": {"start": asst_now, "end": asst_now},
             }
         })
+        await _publish_context_usage_update(
+            publish_event,
+            sessionID,
+            session=session,
+            provider_id="builtin",
+            model_id="command",
+        )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
         request = _build_prompt_request_from_event(output_event, prompt_text, display_text)

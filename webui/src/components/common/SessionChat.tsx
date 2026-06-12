@@ -1,19 +1,19 @@
 /**
- * SessionChat — 统一的 Agent Session 对话组件
+ * SessionChat — shared Agent Session conversation component.
  *
- * 产品中所有需要 AI 对话能力的地方都应使用此组件：
- * - Session 会话主页面 (compact=false)
- * - 工作流编辑对话面板
- * - 任务执行详情面板
- * - ChatDialog 弹窗
- * - EntitySheet Rex 对话 Tab
+ * Use this component anywhere the product needs an AI conversation surface:
+ * - Main Session page (compact=false)
+ * - Workflow edit chat panel
+ * - Task execution detail panel
+ * - ChatDialog modal
+ * - EntitySheet Rex chat tab
  *
- * 功能：
- * - 加载并展示指定 session 的完整对话消息
- * - SSE 实时流式更新
- * - 渲染 text / reasoning / tool 三种 part 类型
- * - 底部追问输入框（可通过 hideInput 隐藏）
- * - 消息复制、时间戳等可选功能
+ * Capabilities:
+ * - Load and render the complete conversation for a session
+ * - Stream live updates over SSE
+ * - Render text, reasoning, and tool parts
+ * - Provide a follow-up composer that can be hidden with hideInput
+ * - Support optional copy actions, timestamps, and related affordances
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
@@ -29,7 +29,7 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
-import { sessionApi, type QueuedPrompt } from '@/api/session';
+import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
@@ -252,7 +252,7 @@ function estimatePartTokens(part: MessagePart): number {
   if (part.type === 'text') {
     return countTokensLikeCompaction(part.text);
   }
-  if (part.type === 'reasoning') {
+  if (part.type === 'reasoning' || part.type === 'thinking') {
     return countTokensLikeCompaction(part.text);
   }
   if (part.type === 'tool' && part.state) {
@@ -266,11 +266,203 @@ function estimatePartTokens(part: MessagePart): number {
   return 0;
 }
 
-function estimateContextTokens(messages: Message[], draft: string): number {
-  const messageTokens = messages.reduce((total, message) => (
-    total + message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0)
+export interface ContextUsageBreakdownSegment {
+  key:
+    | 'systemPrompt'
+    | 'toolDefinitions'
+    | 'tools'
+    | 'skillLoad'
+    | 'agentDelegation'
+    | 'conversation'
+    | 'reasoning'
+    | 'draft'
+    | 'compactedHistory';
+  tokens: number;
+  colorClass: string;
+  included: boolean;
+}
+
+export interface ContextUsageBreakdown {
+  usedTokens: number;
+  compactedTokens: number;
+  segments: ContextUsageBreakdownSegment[];
+  excludedSegments: ContextUsageBreakdownSegment[];
+}
+
+const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
+  systemPrompt: 'bg-zinc-400',
+  toolDefinitions: 'bg-violet-400',
+  tools: 'bg-indigo-400',
+  skillLoad: 'bg-amber-400',
+  agentDelegation: 'bg-emerald-500',
+  conversation: 'bg-slate-500',
+  reasoning: 'bg-rose-400',
+  draft: 'bg-sky-400',
+  compactedHistory: 'bg-zinc-300',
+};
+
+const CONTEXT_SEGMENT_KEYS = new Set(Object.keys(CONTEXT_SEGMENT_COLORS));
+const CONTEXT_USAGE_FIXED_SEGMENT_KEYS = [
+  'systemPrompt',
+  'toolDefinitions',
+  'conversation',
+  'reasoning',
+  'tools',
+  'skillLoad',
+  'agentDelegation',
+] as const satisfies readonly ContextUsageBreakdownSegment['key'][];
+const CONTEXT_USAGE_FIXED_SEGMENT_KEY_SET = new Set<ContextUsageBreakdownSegment['key']>(
+  CONTEXT_USAGE_FIXED_SEGMENT_KEYS,
+);
+
+function estimateMessageTokens(message: Message): number {
+  return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
+}
+
+function estimateActiveMessageBreakdown(messages: Message[]): Pick<ContextUsageBreakdown, 'segments' | 'usedTokens'> {
+  let conversationTokens = 0;
+  let reasoningTokens = 0;
+
+  messages.forEach((message) => {
+    if (message.compacted) return;
+    message.parts.forEach((part) => {
+      const tokens = estimatePartTokens(part);
+      if (part.type === 'reasoning' || part.type === 'thinking') {
+        reasoningTokens += tokens;
+      } else {
+        conversationTokens += tokens;
+      }
+    });
+  });
+
+  const segments: ContextUsageBreakdownSegment[] = [];
+  if (conversationTokens > 0) {
+    segments.push({
+      key: 'conversation',
+      tokens: conversationTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.conversation,
+      included: true,
+    });
+  }
+  if (reasoningTokens > 0) {
+    segments.push({
+      key: 'reasoning',
+      tokens: reasoningTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.reasoning,
+      included: true,
+    });
+  }
+
+  return {
+    usedTokens: conversationTokens + reasoningTokens,
+    segments,
+  };
+}
+
+function normalizeContextSegment(segment: {
+  key: string;
+  tokens: number;
+  included?: boolean;
+}): ContextUsageBreakdownSegment | null {
+  const rawKey = segment.key === 'otherContext' ? 'conversation' : segment.key;
+  if (!CONTEXT_SEGMENT_KEYS.has(rawKey)) {
+    return null;
+  }
+  const key = rawKey as ContextUsageBreakdownSegment['key'];
+  return {
+    key,
+    tokens: Math.max(0, Math.round(segment.tokens || 0)),
+    colorClass: CONTEXT_SEGMENT_COLORS[key],
+    included: segment.included !== false,
+  };
+}
+
+function addContextSegmentTokens(
+  segments: ContextUsageBreakdownSegment[],
+  key: ContextUsageBreakdownSegment['key'],
+  tokens: number,
+): void {
+  if (tokens <= 0) return;
+  const existing = segments.find((segment) => segment.key === key);
+  if (existing) {
+    existing.tokens += tokens;
+    return;
+  }
+  segments.push({
+    key,
+    tokens,
+    colorClass: CONTEXT_SEGMENT_COLORS[key],
+    included: true,
+  });
+}
+
+function normalizeFixedContextSegments(
+  segments: ContextUsageBreakdownSegment[],
+): ContextUsageBreakdownSegment[] {
+  const byKey = new Map<ContextUsageBreakdownSegment['key'], ContextUsageBreakdownSegment>();
+  for (const segment of segments) {
+    if (!CONTEXT_USAGE_FIXED_SEGMENT_KEY_SET.has(segment.key)) {
+      continue;
+    }
+    const existing = byKey.get(segment.key);
+    if (existing) {
+      existing.tokens += segment.tokens;
+    } else {
+      byKey.set(segment.key, { ...segment, included: true });
+    }
+  }
+
+  return CONTEXT_USAGE_FIXED_SEGMENT_KEYS.map((key) => {
+    const segment = byKey.get(key);
+    if (segment) {
+      return segment;
+    }
+    return {
+      key,
+      tokens: 0,
+      colorClass: CONTEXT_SEGMENT_COLORS[key],
+      included: true,
+    };
+  });
+}
+
+export function buildContextUsageBreakdown(
+  messages: Message[],
+  draft: string,
+  snapshot?: ContextUsageSnapshot | null,
+): ContextUsageBreakdown {
+  const compactedTokens = messages.reduce((total, message) => (
+    message.compacted ? total + estimateMessageTokens(message) : total
   ), 0);
-  return messageTokens + countTokensLikeCompaction(draft);
+  const draftTokens = countTokensLikeCompaction(draft);
+
+  if (snapshot) {
+    const serverSegments = (snapshot.segments || [])
+      .map(normalizeContextSegment)
+      .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
+    const segments = [...serverSegments];
+
+    addContextSegmentTokens(segments, 'conversation', draftTokens);
+
+    return {
+      usedTokens: Math.max(0, snapshot.usedTokens || 0) + draftTokens,
+      compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      segments: normalizeFixedContextSegments(segments),
+      excludedSegments: [],
+    };
+  }
+
+  const activeBreakdown = estimateActiveMessageBreakdown(messages);
+  const segments: ContextUsageBreakdownSegment[] = [...activeBreakdown.segments];
+
+  addContextSegmentTokens(segments, 'conversation', draftTokens);
+
+  return {
+    usedTokens: activeBreakdown.usedTokens + draftTokens,
+    compactedTokens,
+    segments: normalizeFixedContextSegments(segments),
+    excludedSegments: [],
+  };
 }
 
 function formatTokenCount(tokens: number): string {
@@ -279,9 +471,44 @@ function formatTokenCount(tokens: number): string {
   return String(tokens);
 }
 
-function ContextUsageRing({ percent, title }: { percent: number; title: string }) {
+function getContextUsageLabel(
+  t: ReturnType<typeof useTranslation>['t'],
+  key: ContextUsageBreakdownSegment['key'],
+): string {
+  const fallback: Record<ContextUsageBreakdownSegment['key'], string> = {
+    systemPrompt: 'System prompt',
+    toolDefinitions: 'Tool definitions',
+    tools: 'Tool calls',
+    skillLoad: 'Skill loads',
+    agentDelegation: 'Agent delegation',
+    conversation: 'Conversation',
+    reasoning: 'Reasoning',
+    draft: 'Current draft',
+    compactedHistory: 'Compacted history',
+  };
+  const i18nKey = `chat.contextUsage.breakdown.${key}`;
+  const label = t(i18nKey);
+  return label === i18nKey ? fallback[key] : label;
+}
+
+function ContextUsageRing({
+  percent,
+  title,
+  usedTokens,
+  totalTokens,
+  breakdown,
+}: {
+  percent: number;
+  title: string;
+  usedTokens: number;
+  totalTokens: number;
+  breakdown: ContextUsageBreakdown;
+}) {
+  const { t } = useTranslation('session');
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const clamped = Math.max(0, Math.min(100, percent));
-  const radius = 13;
+  const radius = 9;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference * (1 - clamped / 100);
   const strokeClass = clamped >= 90
@@ -291,27 +518,124 @@ function ContextUsageRing({ percent, title }: { percent: number; title: string }
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
+  const rows = breakdown.segments;
+  const activeSegments = breakdown.segments.filter((segment) => segment.tokens > 0);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!wrapperRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
 
   return (
     <div
-      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
-      title={title}
-      aria-label={title}
+      ref={wrapperRef}
+      className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center"
     >
-      <svg className="absolute inset-0 h-8 w-8 -rotate-90" viewBox="0 0 32 32" aria-hidden="true">
-        <circle cx="16" cy="16" r={radius} fill="none" strokeWidth="2.5" className="stroke-zinc-200" />
-        <circle
-          cx="16"
-          cy="16"
-          r={radius}
-          fill="none"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className={strokeClass}
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-        />
-      </svg>
+      <button
+        type="button"
+        className="relative inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <svg className="absolute inset-0 h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200" />
+          <circle
+            cx="12"
+            cy="12"
+            r={radius}
+            fill="none"
+            strokeWidth="2"
+            strokeLinecap="round"
+            className={strokeClass}
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+          />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          aria-label={t('chat.contextUsage.title')}
+          className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm"
+        >
+          <div className="border-b border-zinc-100 px-2.5 py-1.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-semibold text-zinc-700">{t('chat.contextUsage.title')}</div>
+                <div className="truncate text-[10px] text-zinc-400">
+                  {t('chat.contextUsage.tokens', {
+                    used: formatTokenCount(usedTokens),
+                    total: formatTokenCount(totalTokens),
+                  })}
+                </div>
+              </div>
+              <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
+                {t('chat.contextUsage.full', { percent: clamped })}
+              </span>
+            </div>
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-zinc-100">
+              <div
+                className="flex h-full overflow-hidden rounded-full"
+                style={{ width: `${clamped}%` }}
+              >
+                {activeSegments.map((segment) => (
+                  <div
+                    key={segment.key}
+                    className={segment.colorClass}
+                    style={{
+                      flex: '0 0 auto',
+                      width: `${Math.min(100, (segment.tokens / Math.max(1, usedTokens)) * 100)}%`,
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="max-h-[13.5rem] space-y-0.5 overflow-y-auto p-1.5">
+            {rows.map((segment) => (
+              <div
+                key={segment.key}
+                role="menuitem"
+                className="flex min-w-0 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={`h-3 w-3 shrink-0 rounded-[3px] ${segment.colorClass}`} />
+                  <span className="truncate font-medium text-zinc-800">
+                    {getContextUsageLabel(t, segment.key)}
+                  </span>
+                </div>
+                <span className={segment.included ? 'shrink-0 text-zinc-600' : 'shrink-0 text-zinc-400'}>
+                  {segment.included
+                    ? formatTokenCount(segment.tokens)
+                    : t('chat.contextUsage.excludedTokens', { tokens: formatTokenCount(segment.tokens) })}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -534,6 +858,11 @@ export function getMessageGroupClassName({
   }
 
   return isEditing ? 'w-[80%] max-w-[80%]' : 'w-fit max-w-[80%]';
+}
+
+export function getCompactionDividerClassName(compact: boolean): string {
+  const messageInset = compact ? 'pl-[38px]' : 'pl-[42px]';
+  return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-zinc-500`;
 }
 
 export function getRegenerateTruncateTarget(
@@ -1037,6 +1366,12 @@ export default function SessionChat({
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
   const [editingText, setEditingText] = useState('');
   const [actionMessageId, setActionMessageId] = useState<string | null>(null);
+  const [contextUsageSnapshot, setContextUsageSnapshot] = useState<ContextUsageSnapshot | null>(null);
+  const [contextUsageRefreshing, setContextUsageRefreshing] = useState(false);
+  const [contextUsageWindowTokens, setContextUsageWindowTokens] = useState(0);
+  const contextUsageRequestRef = useRef<{ sessionId: string; promise: Promise<void> } | null>(null);
+  const contextUsageRequestSeqRef = useRef(0);
+  const lastContextUsagePushAtRef = useRef(0);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1128,17 +1463,24 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
-  const estimatedContextTokens = useMemo(
-    () => estimateContextTokens(messages, input),
-    [messages, input],
+  const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
+  const contextUsageBreakdown = useMemo(
+    () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
+    [contextUsageMessages, input, contextUsageSnapshot],
   );
-  const contextUsagePercent = contextWindowTokens && contextWindowTokens > 0
-    ? Math.min(100, Math.round((estimatedContextTokens / contextWindowTokens) * 100))
+  const estimatedContextTokens = contextUsageBreakdown.usedTokens;
+  const resolvedContextWindowTokens = contextUsageSnapshot?.contextWindow && contextUsageSnapshot.contextWindow > 0
+    ? contextUsageSnapshot.contextWindow
+    : contextUsageWindowTokens > 0
+      ? contextUsageWindowTokens
+    : (contextWindowTokens || 0);
+  const contextUsagePercent = resolvedContextWindowTokens > 0
+    ? Math.min(100, Math.round((estimatedContextTokens / resolvedContextWindowTokens) * 100))
     : 0;
-  const contextUsageTitle = contextWindowTokens && contextWindowTokens > 0
+  const contextUsageTitle = resolvedContextWindowTokens > 0
     ? t('chat.contextUsageTitle', {
         used: formatTokenCount(estimatedContextTokens),
-        total: formatTokenCount(contextWindowTokens),
+        total: formatTokenCount(resolvedContextWindowTokens),
         percent: contextUsagePercent,
       })
     : t('chat.contextUsageUnknown');
@@ -1164,6 +1506,60 @@ export default function SessionChat({
     }
   }, [sessionId]);
 
+  const refreshContextUsage = useCallback((options?: { clear?: boolean; skipIfFreshMs?: number }) => {
+    if (!sessionId) {
+      setContextUsageSnapshot(null);
+      setContextUsageRefreshing(false);
+      setContextUsageWindowTokens(0);
+      contextUsageRequestSeqRef.current += 1;
+      contextUsageRequestRef.current = null;
+      lastContextUsagePushAtRef.current = 0;
+      return;
+    }
+    if (options?.clear) {
+      setContextUsageSnapshot(null);
+      setContextUsageRefreshing(true);
+      contextUsageRequestSeqRef.current += 1;
+      contextUsageRequestRef.current = null;
+      lastContextUsagePushAtRef.current = 0;
+    } else if (
+      options?.skipIfFreshMs &&
+      Date.now() - lastContextUsagePushAtRef.current < options.skipIfFreshMs
+    ) {
+      return;
+    }
+
+    const existingRequest = contextUsageRequestRef.current;
+    if (existingRequest?.sessionId === sessionId) {
+      return existingRequest.promise;
+    }
+
+    const requestSessionId = sessionId;
+    const requestSeq = contextUsageRequestSeqRef.current;
+    const request = sessionApi.getContextUsage(requestSessionId).then((snapshot) => {
+      if (requestSeq === contextUsageRequestSeqRef.current && snapshot.sessionID === sessionId) {
+        setContextUsageSnapshot(snapshot);
+        if (snapshot.contextWindow && snapshot.contextWindow > 0) {
+          setContextUsageWindowTokens(snapshot.contextWindow);
+        }
+        setContextUsageRefreshing(false);
+      }
+    }).catch((err) => {
+      setContextUsageRefreshing(false);
+      console.warn('[SessionChat] Failed to fetch context usage:', err);
+    }).finally(() => {
+      if (contextUsageRequestRef.current?.promise === request) {
+        contextUsageRequestRef.current = null;
+      }
+    });
+    contextUsageRequestRef.current = { sessionId: requestSessionId, promise: request };
+    return request;
+  }, [sessionId]);
+
+  useEffect(() => {
+    void refreshContextUsage({ clear: true });
+  }, [refreshContextUsage]);
+
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
       const { type, properties } = event;
@@ -1179,8 +1575,12 @@ export default function SessionChat({
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
+        setContextUsageSnapshot(null);
+        setContextUsageRefreshing(true);
+        setContextUsageWindowTokens(0);
         setIsStreaming(false);
         refetch();
+        void refreshContextUsage({ clear: true });
       } else if (
         (type === 'session.status' && properties.sessionID === sessionId)
         || (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle')
@@ -1209,6 +1609,7 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
           refetch();
+          void refreshContextUsage({ skipIfFreshMs: 500 });
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -1226,6 +1627,7 @@ export default function SessionChat({
               setIsStreaming(false);
             }
           }
+          void refreshContextUsage();
           abortingRef.current = false;
           abortedMessageIdRef.current = null;
         } else if (
@@ -1266,6 +1668,9 @@ export default function SessionChat({
         const stage = properties.stage as CompactionStage | undefined;
         const data = (properties.data ?? {}) as Record<string, unknown>;
         if (!stage) return;
+        if (stage === 'complete' && data.result === 'continue') {
+          void refreshContextUsage({ skipIfFreshMs: 500 });
+        }
         // Single source of truth: append into ``compactionStages`` and let
         // the progress bar derive ``done/total`` from it via useMemo.
         // ``chunk_done`` arrives in non-deterministic order under
@@ -1286,10 +1691,23 @@ export default function SessionChat({
         const items = Array.isArray(properties.items) ? properties.items : [];
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
+      } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
+        void refreshContextUsage({ skipIfFreshMs: 500 });
+      } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
+        setContextUsageSnapshot(properties as ContextUsageSnapshot);
+        if (typeof properties.contextWindow === 'number' && properties.contextWindow > 0) {
+          setContextUsageWindowTokens(properties.contextWindow);
+        }
+        contextUsageRequestSeqRef.current += 1;
+        contextUsageRequestRef.current = null;
+        lastContextUsagePushAtRef.current = Date.now();
+        setContextUsageRefreshing(false);
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
         setCompactionStages([]);
+        setContextUsageRefreshing(false);
+        void refreshContextUsage({ skipIfFreshMs: 500 });
         abortingRef.current = false;
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
@@ -1301,6 +1719,7 @@ export default function SessionChat({
       updateMessage,
       updateMessagePart,
       refetch,
+      refreshContextUsage,
       handleQuestionAsked,
       removeByRequestId,
       onSSEEvent,
@@ -1337,6 +1756,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       refetch();
+      refreshContextUsage();
       fetchPromptQueue();
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
@@ -1399,6 +1819,7 @@ export default function SessionChat({
     setEditingQueueId(null);
     setEditingQueueText('');
     setQueueActionId(null);
+    setContextUsageWindowTokens(0);
     setMentionRange(null);
     setMentionQuery('');
     setSelectedMentionIndex(0);
@@ -2355,18 +2776,12 @@ export default function SessionChat({
     }
   }, [editingMessageId, messages, resetEditingState]);
 
-  // ── Merged messages with compaction grouping ──
-  // The compaction divider is rendered at the position of the FIRST
-  // compacted message (not the summary), so it appears before the
-  // preserved messages rather than after them.
-  const { merged, compactedGroupMap, summaryRedirectMap, skipIndices } = useMemo(() => {
+  // ── Merged messages ──
+  // Archived-by-compaction messages stay visible in the UI timeline. The
+  // summary message itself renders as a divider, so multiple compactions
+  // naturally appear as multiple chronological separators.
+  const { merged, skipIndices } = useMemo(() => {
     const merged = mergeConsecutiveAssistantMessages(messages);
-    const compactedGroupMap = new Map<number, MergedMessage[]>();
-    // Maps: first-compacted-index → summary-message-index, so we can
-    // render the summary message at the earlier position.
-    const summaryRedirectMap = new Map<number, number>();
-    const compactedBuffer: MergedMessage[] = [];
-    let firstCompactedIdx = -1;
     const skipIndices = new Set<number>();
 
     for (let idx = 0; idx < merged.length; idx++) {
@@ -2379,34 +2794,9 @@ export default function SessionChat({
         skipIndices.add(idx);
         continue;
       }
-      if (msg.compacted) {
-        if (compactedBuffer.length === 0) firstCompactedIdx = idx;
-        compactedBuffer.push(msg);
-        skipIndices.add(idx);
-      } else if (msg.finish === 'summary' && compactedBuffer.length > 0) {
-        // Render the divider at the first compacted message's position
-        skipIndices.delete(firstCompactedIdx);
-        compactedGroupMap.set(firstCompactedIdx, [...compactedBuffer]);
-        summaryRedirectMap.set(firstCompactedIdx, idx);
-        // Skip the summary at its natural (later) position
-        skipIndices.add(idx);
-        compactedBuffer.length = 0;
-        firstCompactedIdx = -1;
-      }
     }
 
-    // Orphaned compacted messages (no summary found yet — e.g. compaction
-    // still in progress or summary missed during SSE race).  Un-skip them
-    // so they remain visible rather than silently disappearing.
-    if (compactedBuffer.length > 0) {
-      for (const orphan of compactedBuffer) {
-        const orphanIdx = merged.indexOf(orphan);
-        if (orphanIdx >= 0) skipIndices.delete(orphanIdx);
-      }
-      compactedBuffer.length = 0;
-    }
-
-    return { merged, compactedGroupMap, summaryRedirectMap, skipIndices };
+    return { merged, skipIndices };
   }, [messages]);
 
   // ── Styling based on compact mode ──
@@ -2449,18 +2839,15 @@ export default function SessionChat({
           <div ref={messagesContentRef} className={msgListClass}>
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
-              // If this position is a redirect, render the summary message here
-              const redirectIdx = summaryRedirectMap.get(i);
-              const messageToRender = redirectIdx !== undefined ? merged[redirectIdx] : msg;
               return (
                 <ChatMessageBubble
-                  key={messageToRender.id}
-                  message={messageToRender}
+                  key={msg.id}
+                  message={msg}
                   isActive={
                     isStreaming &&
                     i === merged.length - 1 &&
-                    messageToRender.role === 'assistant' &&
-                    !messageToRender.finish
+                    msg.role === 'assistant' &&
+                    !msg.finish
                   }
                   pendingQuestions={pendingQuestions}
                   onQuestionAnswer={handleQuestionAnswer}
@@ -2480,7 +2867,6 @@ export default function SessionChat({
                   onEditSave={handleSaveEditedMessage}
                   onEditSend={handleSendEditedUserMessage}
                   onRegenerate={handleRegenerateMessage}
-                  compactedMessages={compactedGroupMap.get(i)}
                 />
               );
             })}
@@ -2874,10 +3260,13 @@ export default function SessionChat({
 
                   <div className="flex-1" />
 
-                  {contextWindowTokens && contextWindowTokens > 0 && (
+                  {resolvedContextWindowTokens > 0 && (
                     <ContextUsageRing
                       percent={contextUsagePercent}
                       title={contextUsageTitle}
+                      usedTokens={estimatedContextTokens}
+                      totalTokens={resolvedContextWindowTokens}
+                      breakdown={contextUsageBreakdown}
                     />
                   )}
 
@@ -3014,8 +3403,6 @@ export interface ChatMessageBubbleProps {
   onEditSave?: () => Promise<void>;
   onEditSend?: () => Promise<void>;
   onRegenerate?: (messageId: string) => Promise<void>;
-  /** Compacted messages that precede this summary message */
-  compactedMessages?: MergedMessage[];
 }
 
 function ChatMessageBubbleInner({
@@ -3039,7 +3426,6 @@ function ChatMessageBubbleInner({
   onEditSave,
   onEditSend,
   onRegenerate,
-  compactedMessages,
 }: ChatMessageBubbleProps) {
   const { t } = useTranslation('session');
   const isUser = message.role === 'user';
@@ -3051,34 +3437,13 @@ function ChatMessageBubbleInner({
   // instead — same UX, no popup blocker / data-URL restriction headaches.
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
-    const hasArchived = compactedMessages && compactedMessages.length > 0;
     return (
-      <div className="my-3 px-1">
-        {/* Archived messages shown inline without collapse */}
-        {hasArchived && (
-          <div className="mb-3 space-y-3">
-            {compactedMessages!.map((cMsg) => (
-              <ChatMessageBubble
-                key={cMsg.id}
-                message={cMsg}
-                showTimestamp={showTimestamp}
-                collapseIntermediateSteps={collapseIntermediateSteps}
-                compact={compact}
-                onCopy={onCopy}
-                editingMessageId={editingMessageId}
-                editingText={editingText}
-                actionsDisabled={actionsDisabled}
-                actionMessageId={actionMessageId}
-                onEditStart={onEditStart}
-                onEditChange={onEditChange}
-                onEditCancel={onEditCancel}
-                onEditSave={onEditSave}
-                onEditSend={onEditSend}
-                onRegenerate={onRegenerate}
-              />
-            ))}
-          </div>
-        )}
+      <div className={getCompactionDividerClassName(compact)}>
+        <span className="h-px flex-1 bg-zinc-200" />
+        <span className="shrink-0 px-1.5 font-medium text-zinc-500">
+          {t('chat.contextCompressed')}
+        </span>
+        <span className="h-px flex-1 bg-zinc-200" />
       </div>
     );
   }
@@ -3722,7 +4087,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   type StatusCfg = {
     icon: React.ReactNode;
     iconColor: string;
-    pill: string;      // 状态 pill 样式
+    pill: string;      // Status pill classes.
     label: string;
   };
   const statusConfig: Record<string, StatusCfg> = {

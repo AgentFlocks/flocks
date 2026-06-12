@@ -7,10 +7,12 @@ import type { Message } from '@/types';
 
 import {
   areChatMessagePartsRenderEqual,
+  buildContextUsageBreakdown,
   buildTodoSummary,
   ChatToolPart,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
+  getCompactionDividerClassName,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageErrorText,
@@ -39,6 +41,7 @@ const sessionApiRunQueuedPromptNowMock = vi.fn();
 const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
+const sessionApiGetContextUsageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string, options?: Record<string, unknown>) => {
@@ -52,6 +55,22 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.compacting': '压缩中...',
+  'chat.contextCompressed': '上下文已压缩',
+  'chat.contextUsage.title': 'Context Usage',
+  'chat.contextUsage.close': 'Close',
+  'chat.contextUsage.full': '13% Full',
+  'chat.contextUsage.tokens': '~13 / 100 Tokens',
+  'chat.contextUsage.excludedTokens': '100 excluded',
+  'chat.contextUsage.noAttributedSegments': 'No attributed breakdown',
+  'chat.contextUsage.breakdown.systemPrompt': 'System prompt',
+  'chat.contextUsage.breakdown.toolDefinitions': 'Tool definitions',
+  'chat.contextUsage.breakdown.tools': 'Tool calls',
+  'chat.contextUsage.breakdown.skillLoad': 'Skill loads',
+  'chat.contextUsage.breakdown.agentDelegation': 'Agent delegation',
+  'chat.contextUsage.breakdown.conversation': 'Conversation',
+  'chat.contextUsage.breakdown.reasoning': 'Reasoning',
+  'chat.contextUsage.breakdown.draft': 'Current draft',
+  'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
@@ -142,6 +161,7 @@ vi.mock('@/api/session', () => ({
     updateMessagePart: (...args: unknown[]) => sessionApiUpdateMessagePartMock(...args),
     resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
     regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
+    getContextUsage: (...args: unknown[]) => sessionApiGetContextUsageMock(...args),
   },
 }));
 
@@ -173,6 +193,17 @@ beforeEach(() => {
   sessionApiUpdateMessagePartMock.mockResolvedValue({});
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
+  sessionApiGetContextUsageMock.mockResolvedValue({
+    sessionID: 'sess-1',
+    usedTokens: 0,
+    contextWindow: 0,
+    percent: 0,
+    source: 'estimated',
+    estimatedTokens: 0,
+    compactedTokens: 0,
+    segments: [],
+    excludedSegments: [],
+  });
   pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
   useSSEOptionsRef.current = null;
   useSessionMessagesMock.mockReturnValue({
@@ -220,6 +251,97 @@ describe('listUploadedDocumentPaths', () => {
       { status: 'success', workspacePath: '/tmp/uploads/image.png', isImage: true },
       { status: 'error', workspacePath: '/tmp/uploads/c.pdf', isImage: false },
     ])).toEqual(['/tmp/uploads/a.pdf', '/tmp/uploads/b.pdf']);
+  });
+});
+
+describe('buildContextUsageBreakdown', () => {
+  it('excludes compacted history from the current used-token total', () => {
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'active',
+        role: 'user',
+        parts: [{ id: 'active-text', type: 'text', text: 'a'.repeat(400) }],
+      }),
+      makeMessage({
+        id: 'archived',
+        compacted: true,
+        parts: [{ id: 'archived-text', type: 'text', text: 'b'.repeat(800) }],
+      }),
+    ], 'c'.repeat(40));
+
+    expect(breakdown.usedTokens).toBe(110);
+    expect(breakdown.compactedTokens).toBe(200);
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
+      ['systemPrompt', 0],
+      ['toolDefinitions', 0],
+      ['conversation', 110],
+      ['reasoning', 0],
+      ['tools', 0],
+      ['skillLoad', 0],
+      ['agentDelegation', 0],
+    ]);
+    expect(breakdown.excludedSegments).toEqual([]);
+  });
+
+  it('counts compacted tool outputs as a small placeholder', () => {
+    const compactedTime = { start: 1, compacted: 2 };
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'tool-msg',
+        parts: [{
+          id: 'tool-part',
+          type: 'tool',
+          tool: 'bash',
+          state: {
+            status: 'completed',
+            input: { command: 'x'.repeat(40) },
+            output: 'y'.repeat(800),
+            time: compactedTime,
+          },
+        }],
+      }),
+    ], '');
+
+    expect(breakdown.usedTokens).toBe(23);
+  });
+
+  it('uses backend snapshots when available and adds the local draft on top', () => {
+    const breakdown = buildContextUsageBreakdown([], 'd'.repeat(40), {
+      sessionID: 'sess-1',
+      usedTokens: 130,
+      contextWindow: 1000,
+      percent: 13,
+      source: 'observed',
+      lastMessageID: 'assistant-1',
+      observedTokens: 130,
+      estimatedTokens: 100,
+      compactedTokens: 50,
+      segments: [
+        { key: 'systemPrompt', tokens: 15, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 10, included: true, source: 'estimated' },
+        { key: 'tools', tokens: 40, included: true, source: 'estimated' },
+        { key: 'skillLoad', tokens: 20, included: true, source: 'estimated' },
+        { key: 'agentDelegation', tokens: 10, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 30, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 5, included: true, source: 'observed' },
+      ],
+      excludedSegments: [
+        { key: 'compactedHistory', tokens: 50, included: false, source: 'estimated' },
+      ],
+    });
+
+    expect(breakdown.usedTokens).toBe(140);
+    expect(breakdown.compactedTokens).toBe(50);
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
+      ['systemPrompt', 15],
+      ['toolDefinitions', 10],
+      ['conversation', 40],
+      ['reasoning', 5],
+      ['tools', 40],
+      ['skillLoad', 20],
+      ['agentDelegation', 10],
+    ]);
+    expect(breakdown.excludedSegments).toEqual([]);
   });
 });
 
@@ -294,6 +416,20 @@ describe('getMessageGroupClassName', () => {
     });
 
     expect(className).toBe('w-full');
+  });
+});
+
+describe('getCompactionDividerClassName', () => {
+  it('insets the divider into the assistant content column in full layout', () => {
+    const className = getCompactionDividerClassName(false);
+
+    expect(className).toContain('pl-[42px]');
+    expect(className).toContain('w-full');
+    expect(className).toContain('min-w-0');
+  });
+
+  it('uses the compact assistant inset in compact layout', () => {
+    expect(getCompactionDividerClassName(true)).toContain('pl-[38px]');
   });
 });
 
@@ -843,6 +979,323 @@ describe('ChatToolPart todo rendering', () => {
     expect(container.textContent).not.toContain('输入参数');
     expect(container.textContent).not.toContain('输出结果');
     expect(container.textContent).not.toContain('[object Object]');
+  });
+});
+
+describe('SessionChat context usage popover', () => {
+  it('always shows fixed usage rows and hides compacted history', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 120,
+      contextWindow: 1000,
+      percent: 12,
+      source: 'estimated',
+      estimatedTokens: 120,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'agentDelegation', tokens: 0, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [
+        { key: 'compactedHistory', tokens: 12000, included: false, source: 'estimated' },
+      ],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveClass('h-6', 'w-6');
+    await user.click(contextButton);
+
+    expect(screen.getByText('System prompt')).toBeInTheDocument();
+    expect(screen.getByText('Tool definitions')).toBeInTheDocument();
+    expect(screen.getByText('Conversation')).toBeInTheDocument();
+    expect(screen.getByText('Reasoning')).toBeInTheDocument();
+    expect(screen.getByText('Tool calls')).toBeInTheDocument();
+    expect(screen.getByText('Skill loads')).toBeInTheDocument();
+    expect(screen.getByText('Agent delegation')).toBeInTheDocument();
+    expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(4);
+    expect(screen.queryByText('Compacted history')).not.toBeInTheDocument();
+  });
+
+  it('keeps usage visible while recalculating after compaction succeeds', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 900,
+        contextWindow: 1000,
+        percent: 90,
+        source: 'estimated',
+        estimatedTokens: 900,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 420,
+        contextWindow: 1000,
+        percent: 42,
+        source: 'estimated',
+        estimatedTokens: 420,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'stale-user',
+          role: 'user',
+          parts: [{ id: 'stale-user-part', type: 'text', text: 'x'.repeat(4000) }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+    expect(await screen.findByText('Conversation')).toBeInTheDocument();
+    expect(screen.getByText('900')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.compacted',
+        properties: { sessionID: 'sess-1' },
+      });
+    });
+
+    expect(screen.getByText('900')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('420')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Conversation')).toBeInTheDocument();
+  });
+
+  it('refreshes context usage after compaction fails', async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 900,
+        contextWindow: 1000,
+        percent: 90,
+        source: 'estimated',
+        estimatedTokens: 900,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 420,
+        contextWindow: 1000,
+        percent: 42,
+        source: 'estimated',
+        estimatedTokens: 420,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true, onError }));
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'compacting', message: 'Compacting context…' },
+        },
+      });
+    });
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+    expect(screen.getByText('900')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: 'sess-1',
+          error: { message: 'provider unavailable' },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(2);
+    });
+    expect(onError).toHaveBeenCalledWith('provider unavailable');
+
+    expect(screen.getByText('420')).toBeInTheDocument();
+  });
+
+  it('does not refetch immediately after a pushed context usage snapshot', async () => {
+    sessionApiGetContextUsageMock.mockResolvedValueOnce({
+      sessionID: 'sess-1',
+      usedTokens: 900,
+      contextWindow: 1000,
+      percent: 90,
+      source: 'estimated',
+      estimatedTokens: 900,
+      compactedTokens: 0,
+      segments: [
+        { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: {
+          sessionID: 'sess-1',
+          usedTokens: 420,
+          contextWindow: 1000,
+          percent: 42,
+          source: 'estimated',
+          estimatedTokens: 420,
+          compactedTokens: 0,
+          segments: [
+            { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+          ],
+          excludedSegments: [],
+        },
+      });
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'idle' },
+        },
+      });
+    });
+
+    expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat compaction divider', () => {
+  it('keeps archived history visible before the compressed-context divider', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'old-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'old-user-part', type: 'text', text: 'old visible request' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-1',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'current answer' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const dividerLabel = screen.getByText('上下文已压缩');
+    expect(dividerLabel).toBeInTheDocument();
+    expect(dividerLabel).not.toHaveClass('rounded-full');
+    expect(dividerLabel).not.toHaveClass('border');
+    expect(dividerLabel).not.toHaveClass('bg-white');
+    expect(screen.getByText('old visible request')).toBeInTheDocument();
+    expect(screen.getByText('current answer')).toBeInTheDocument();
+  });
+
+  it('renders one chronological divider for each summary message', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'old-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'old-user-part', type: 'text', text: 'first archived turn' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-1',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'middle-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'middle-user-part', type: 'text', text: 'second archived turn' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-2',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'current answer' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('first archived turn')).toBeInTheDocument();
+    expect(screen.getByText('second archived turn')).toBeInTheDocument();
+    expect(screen.getAllByText('上下文已压缩')).toHaveLength(2);
   });
 });
 
