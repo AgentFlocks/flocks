@@ -1340,6 +1340,8 @@ export default function SessionChat({
   const [editingText, setEditingText] = useState('');
   const [actionMessageId, setActionMessageId] = useState<string | null>(null);
   const [contextUsageSnapshot, setContextUsageSnapshot] = useState<ContextUsageSnapshot | null>(null);
+  const [contextUsageRefreshing, setContextUsageRefreshing] = useState(false);
+  const [contextUsageWindowTokens, setContextUsageWindowTokens] = useState(0);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1431,13 +1433,16 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
   const contextUsageBreakdown = useMemo(
-    () => buildContextUsageBreakdown(messages, input, contextUsageSnapshot),
-    [messages, input, contextUsageSnapshot],
+    () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
+    [contextUsageMessages, input, contextUsageSnapshot],
   );
   const estimatedContextTokens = contextUsageBreakdown.usedTokens;
   const resolvedContextWindowTokens = contextUsageSnapshot?.contextWindow && contextUsageSnapshot.contextWindow > 0
     ? contextUsageSnapshot.contextWindow
+    : contextUsageWindowTokens > 0
+      ? contextUsageWindowTokens
     : (contextWindowTokens || 0);
   const contextUsagePercent = resolvedContextWindowTokens > 0
     ? Math.min(100, Math.round((estimatedContextTokens / resolvedContextWindowTokens) * 100))
@@ -1471,24 +1476,34 @@ export default function SessionChat({
     }
   }, [sessionId]);
 
-  const refreshContextUsage = useCallback(async () => {
+  const refreshContextUsage = useCallback(async (options?: { clear?: boolean }) => {
     if (!sessionId) {
       setContextUsageSnapshot(null);
+      setContextUsageRefreshing(false);
+      setContextUsageWindowTokens(0);
       return;
+    }
+    if (options?.clear) {
+      setContextUsageSnapshot(null);
+      setContextUsageRefreshing(true);
     }
     try {
       const snapshot = await sessionApi.getContextUsage(sessionId);
       if (snapshot.sessionID === sessionId) {
         setContextUsageSnapshot(snapshot);
+        if (snapshot.contextWindow && snapshot.contextWindow > 0) {
+          setContextUsageWindowTokens(snapshot.contextWindow);
+        }
+        setContextUsageRefreshing(false);
       }
     } catch (err) {
+      setContextUsageRefreshing(false);
       console.warn('[SessionChat] Failed to fetch context usage:', err);
     }
   }, [sessionId]);
 
   useEffect(() => {
-    setContextUsageSnapshot(null);
-    void refreshContextUsage();
+    void refreshContextUsage({ clear: true });
   }, [refreshContextUsage]);
 
   const handleSSEEvent = useCallback(
@@ -1507,9 +1522,11 @@ export default function SessionChat({
         activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
         setContextUsageSnapshot(null);
+        setContextUsageRefreshing(true);
+        setContextUsageWindowTokens(0);
         setIsStreaming(false);
         refetch();
-        void refreshContextUsage();
+        void refreshContextUsage({ clear: true });
       } else if (
         (type === 'session.status' && properties.sessionID === sessionId)
         || (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle')
@@ -1525,6 +1542,8 @@ export default function SessionChat({
           if (!abortingRef.current) setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
+          setContextUsageSnapshot(null);
+          setContextUsageRefreshing(true);
           setCompactingMessage(properties.status?.message || t('chat.compacting'));
           // Reset progress state on each new compaction cycle so a stale
           // run's stages do not leak into a fresh "Compacting..." panel.
@@ -1538,7 +1557,7 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
           refetch();
-          void refreshContextUsage();
+          void refreshContextUsage({ clear: true });
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -1597,6 +1616,9 @@ export default function SessionChat({
         const stage = properties.stage as CompactionStage | undefined;
         const data = (properties.data ?? {}) as Record<string, unknown>;
         if (!stage) return;
+        if (stage === 'complete' && data.result === 'continue') {
+          void refreshContextUsage({ clear: true });
+        }
         // Single source of truth: append into ``compactionStages`` and let
         // the progress bar derive ``done/total`` from it via useMemo.
         // ``chunk_done`` arrives in non-deterministic order under
@@ -1617,12 +1639,19 @@ export default function SessionChat({
         const items = Array.isArray(properties.items) ? properties.items : [];
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
+      } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
+        void refreshContextUsage({ clear: true });
       } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
         setContextUsageSnapshot(properties as ContextUsageSnapshot);
+        if (typeof properties.contextWindow === 'number' && properties.contextWindow > 0) {
+          setContextUsageWindowTokens(properties.contextWindow);
+        }
+        setContextUsageRefreshing(false);
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
         setCompactionStages([]);
+        setContextUsageRefreshing(false);
         abortingRef.current = false;
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
@@ -1734,6 +1763,7 @@ export default function SessionChat({
     setEditingQueueId(null);
     setEditingQueueText('');
     setQueueActionId(null);
+    setContextUsageWindowTokens(0);
     setMentionRange(null);
     setMentionQuery('');
     setSelectedMentionIndex(0);

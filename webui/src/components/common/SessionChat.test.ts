@@ -1009,6 +1009,59 @@ describe('SessionChat context usage popover', () => {
     expect(screen.getByText('Agent delegation')).toBeInTheDocument();
     expect(screen.getByText('0')).toBeInTheDocument();
   });
+
+  it('clears stale usage while recalculating after compaction succeeds', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 900,
+        contextWindow: 1000,
+        percent: 90,
+        source: 'estimated',
+        estimatedTokens: 900,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockReturnValueOnce(new Promise(() => {}));
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'stale-user',
+          role: 'user',
+          parts: [{ id: 'stale-user-part', type: 'text', text: 'x'.repeat(4000) }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+    expect(await screen.findByText('Conversation')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.compacted',
+        properties: { sessionID: 'sess-1' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('No attributed breakdown')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Conversation')).not.toBeInTheDocument();
+  });
 });
 
 describe('SessionChat compaction divider', () => {
