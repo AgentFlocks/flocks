@@ -706,7 +706,7 @@ async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
     assert captured["headers"] == {"Authorization": "Bearer secret"}
 
 
-def test_build_restart_argv_uses_windows_service_restart(
+def test_build_restart_argv_uses_windows_venv_python(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -720,34 +720,14 @@ def test_build_restart_argv_uses_windows_service_restart(
         "argv",
         [r"C:\Users\worker\.local\bin\flocks", "start", "--reload", "--port", "8000"],
     )
-    monkeypatch.setattr(
-        updater,
-        "_current_service_config",
-        lambda: service_manager.ServiceConfig(
-            backend_host="127.0.0.1",
-            backend_port=8000,
-            frontend_host="127.0.0.1",
-            frontend_port=5173,
-            no_browser=True,
-            skip_frontend_build=True,
-        ),
-    )
 
     assert updater._build_restart_argv(tmp_path) == [
         str(tmp_path / ".venv" / "Scripts" / "python.exe"),
         "-m",
         "flocks.cli.main",
-        "restart",
-        "--no-browser",
-        "--skip-webui-build",
-        "--server-host",
-        "127.0.0.1",
-        "--server-port",
+        "start",
+        "--port",
         "8000",
-        "--webui-host",
-        "127.0.0.1",
-        "--webui-port",
-        "5173",
     ]
 
 
@@ -768,38 +748,6 @@ def test_build_restart_argv_uses_venv_python_on_non_windows(
         "-m",
         "flocks.cli.main",
         "start",
-    ]
-
-
-def test_build_restart_argv_uses_service_restart_on_windows(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
-    python_exe.parent.mkdir(parents=True)
-    python_exe.write_text("", encoding="utf-8")
-
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(
-        updater,
-        "_build_service_restart_argv",
-        lambda install_root=None: [
-            str(python_exe),
-            "-m",
-            "flocks.cli.main",
-            "restart",
-            "--no-browser",
-            "--skip-webui-build",
-        ],
-    )
-
-    assert updater._build_restart_argv(tmp_path) == [
-        str(python_exe),
-        "-m",
-        "flocks.cli.main",
-        "restart",
-        "--no-browser",
-        "--skip-webui-build",
     ]
 
 
@@ -3156,6 +3104,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
         return None
 
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
@@ -3183,8 +3132,18 @@ async def test_perform_update_spawns_restart_process_on_windows(
         async for _step in updater.perform_update("2026.4.1"):
             pass
 
-    assert popen_calls == [
-        ([r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"], tmp_path / "install-root", True),
+    assert len(popen_calls) == 1
+    handoff_argv, cwd, close_fds = popen_calls[0]
+    assert cwd == tmp_path / "install-root"
+    assert close_fds is True
+    assert handoff_argv[:3] == [r"C:\tool\python.exe", "-m", "flocks.updater.restart_handoff"]
+    assert "--parent-pid" in handoff_argv
+    assert "--backend-port" in handoff_argv
+    assert handoff_argv[handoff_argv.index("--") + 1 :] == [
+        r"C:\tool\python.exe",
+        "-m",
+        "flocks.cli.main",
+        "start",
     ]
     assert events == ["handover"]
     assert "execv" not in events
