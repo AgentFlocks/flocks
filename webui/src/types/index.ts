@@ -109,6 +109,7 @@ export interface MessagePart {
   text?: string;
   synthetic?: boolean;
   ignored?: boolean;
+  metadata?: Record<string, any>;
   // Tool part
   tool?: string;
   callID?: string;

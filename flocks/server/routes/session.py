@@ -2351,22 +2351,23 @@ async def _process_session_message(
     user_message_id = request.messageID or Identifier.create("message")
     user_part_id = Identifier.create("part")
 
-    # display_text (optional) is the user-visible text shown in the chat bubble.
-    # It differs from text_content when a command generates a derived LLM prompt
-    # (e.g. "/tools create foo" stores the slash command text, not the full skill
-    # prompt that is sent to the LLM).
-    display_text = getattr(request, "display_text", None) or text_content
+    # display_text (optional) is UI-only. The stored text part must stay as the
+    # real prompt so SessionLoop, hooks, title generation, and queued prompts keep
+    # seeing the same content the model receives.
+    display_text = getattr(request, "display_text", None)
+    display_metadata = {"displayText": display_text} if display_text else None
 
     _is_no_reply = bool(request.noReply)
     user_message = await Message.create(
         session_id=sessionID,
         role=MessageRole.USER,
-        content=display_text,
+        content=text_content,
         id=user_message_id,
         time={"created": now_ms},
         agent=agent_name,
         model={"providerID": provider_id, "modelID": model_id},
         part_id=user_part_id,
+        part_metadata=display_metadata,
         synthetic=True if _is_no_reply else None,
     )
     user_message_id = user_message.id
@@ -2386,9 +2387,11 @@ async def _process_session_message(
         "messageID": user_message_id,
         "sessionID": sessionID,
         "type": "text",
-        "text": display_text,
+        "text": text_content,
         "time": {"start": now_ms},
     }
+    if display_metadata:
+        _part_event["metadata"] = display_metadata
     if _is_no_reply:
         _part_event["synthetic"] = True
     await publish_event("message.part.updated", {"part": _part_event})

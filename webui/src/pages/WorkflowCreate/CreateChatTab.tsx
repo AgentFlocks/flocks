@@ -116,6 +116,8 @@ export default function CreateChatTab({
   const knownIdsRef = useRef<Set<string>>(new Set());
   const snapshotStartedAtRef = useRef<number | null>(null);
   const createdWorkflowRef = useRef<string | null>(null);
+  const pendingWorkflowEventIdsRef = useRef<Set<string>>(new Set());
+  const pendingDetectionRef = useRef(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const onWorkflowCreatedRef = useRef(onWorkflowCreated);
   onWorkflowCreatedRef.current = onWorkflowCreated;
@@ -127,57 +129,106 @@ export default function CreateChatTab({
   // Snapshot existing workflow IDs on mount
   useEffect(() => {
     (async () => {
-      snapshotStartedAtRef.current = Date.now();
+      setSnapshotReady(false);
+      const snapshotStartedAt = Date.now();
+      const freshBoundary = Math.max(creationStartedAt ?? 0, snapshotStartedAt) - 500;
+      snapshotStartedAtRef.current = snapshotStartedAt;
       try {
         const snap = await workflowAPI.list();
-        knownIdsRef.current = new Set((snap.data as Workflow[]).map((w) => w.id));
+        knownIdsRef.current = new Set((snap.data as Workflow[])
+          .filter((w) => {
+            const createdAt = Number(w.createdAt ?? 0);
+            return !(createdAt > 0 && createdAt >= freshBoundary);
+          })
+          .map((w) => w.id));
       } catch {
         knownIdsRef.current = new Set();
       }
       setSnapshotReady(true);
     })();
-  }, []);
+  }, [creationStartedAt]);
 
-  // Check for new workflows (used by both SSE and polling)
+  const attachCreatedWorkflow = useCallback((workflow?: Workflow | null): boolean => {
+    if (!workflow?.id || !snapshotReady) return false;
+    if (knownIdsRef.current.has(workflow.id) || workflow.id === createdWorkflowRef.current) {
+      return false;
+    }
+    const createdAt = Number(workflow.createdAt ?? 0);
+    const startedAt = Math.max(creationStartedAt ?? 0, snapshotStartedAtRef.current ?? 0);
+    if (startedAt > 0 && createdAt > 0 && createdAt < startedAt - 500) {
+      return false;
+    }
+    createdWorkflowRef.current = workflow.id;
+    onWorkflowCreatedRef.current(workflow);
+    return true;
+  }, [creationStartedAt, snapshotReady]);
+
+  const attachCreatedWorkflowById = useCallback(async (workflowId: string) => {
+    if (!workflowId) return;
+    if (!snapshotReady) {
+      pendingWorkflowEventIdsRef.current.add(workflowId);
+      return;
+    }
+    try {
+      const res = await workflowAPI.get(workflowId);
+      attachCreatedWorkflow(res.data);
+    } catch {
+      // The workflow file may still be settling; polling can recover it.
+    }
+  }, [attachCreatedWorkflow, snapshotReady]);
+
+  // Check for new workflows (used by fallback polling and post-stream refresh)
   const detectNewWorkflow = useCallback(async () => {
-    if (!snapshotReady) return;
+    if (!snapshotReady) {
+      pendingDetectionRef.current = true;
+      return;
+    }
     try {
       const res = await workflowAPI.list();
       const workflows: Workflow[] = res.data;
       const sortedWorkflows = [...workflows].sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
-      const freshBySnapshot = sortedWorkflows.find(
-        (w) =>
-          !knownIdsRef.current.has(w.id) &&
-          w.id !== createdWorkflowRef.current,
-      );
-      const freshByCreateTime = creationStartedAt
-        ? sortedWorkflows.find(
-          (w) =>
-            w.id !== createdWorkflowRef.current &&
-            Number(w.createdAt ?? 0) >= Math.max(creationStartedAt, snapshotStartedAtRef.current ?? creationStartedAt) - 500,
-        )
-        : undefined;
-      const fresh = freshBySnapshot ?? freshByCreateTime;
-      if (fresh) {
-        createdWorkflowRef.current = fresh.id;
-        onWorkflowCreatedRef.current(fresh);
+      const startedAt = Math.max(creationStartedAt ?? 0, snapshotStartedAtRef.current ?? 0);
+      const freshCandidates = sortedWorkflows.filter((w) => {
+        if (knownIdsRef.current.has(w.id) || w.id === createdWorkflowRef.current) return false;
+        const createdAt = Number(w.createdAt ?? 0);
+        return !(startedAt > 0 && createdAt > 0 && createdAt < startedAt - 500);
+      });
+      if (freshCandidates.length === 1) {
+        attachCreatedWorkflow(freshCandidates[0]);
       }
     } catch { /* ignore */ }
-  }, [creationStartedAt, snapshotReady]);
+  }, [attachCreatedWorkflow, creationStartedAt, snapshotReady]);
+
+  useEffect(() => {
+    if (!snapshotReady) return;
+
+    if (pendingWorkflowEventIdsRef.current.size > 0) {
+      const ids = Array.from(pendingWorkflowEventIdsRef.current);
+      pendingWorkflowEventIdsRef.current.clear();
+      ids.forEach((id) => {
+        void attachCreatedWorkflowById(id);
+      });
+    }
+
+    if (pendingDetectionRef.current) {
+      pendingDetectionRef.current = false;
+      void detectNewWorkflow();
+    }
+  }, [attachCreatedWorkflowById, detectNewWorkflow, snapshotReady]);
 
   // SSE: react to workflow.created events immediately
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
       if (event.type === 'workflow.created' && event.properties?.id) {
-        detectNewWorkflow();
+        void attachCreatedWorkflowById(String(event.properties.id));
       }
     },
-    [detectNewWorkflow],
+    [attachCreatedWorkflowById],
   );
 
   // Primary: check right after AI finishes streaming
   const handleStreamingDone = useCallback(() => {
-    detectNewWorkflow();
+    void detectNewWorkflow();
   }, [detectNewWorkflow]);
 
   // Fallback polling for filesystem-driven creation (Rex writes directly)

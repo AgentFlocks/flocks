@@ -96,6 +96,9 @@ function templateHasApi(config?: WorkflowIntegrationConfig | null): boolean {
   if (!config) return false;
   const raw = config as JsonObject;
   const publish = asObject(raw.publish ?? raw.api);
+  if (isTemplateApiMode(publish.type)) {
+    return true;
+  }
   if (Object.keys(publish).length > 0 && publish.enabled !== false) {
     return true;
   }

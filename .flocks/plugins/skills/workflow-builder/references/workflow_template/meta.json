@@ -1,11 +1,11 @@
 {
   "id": "workflow_template",
-  "name": "Hidden Workflow Publish Template",
+  "name": "Workflow Builder Reference Template",
   "nameI18n": {
-    "zh-CN": "隐藏工作流发布模板",
-    "en-US": "Hidden Workflow Publish Template"
+    "zh-CN": "工作流创建参考模板",
+    "en-US": "Workflow Builder Reference Template"
   },
-  "description": "Internal template for workflow authoring and config-driven publish pages.",
+  "description": "Internal workflow-builder reference package for workflow.md, workflow.json, config.json, and guide.md authoring.",
   "category": "template",
   "status": "hidden",
   "hidden": true,

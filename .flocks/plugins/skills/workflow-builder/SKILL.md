@@ -20,7 +20,7 @@ description: 根据自然语言描述生成 flocks 内置工作流（workflow.md
 | [references/composition.md](references/composition.md) | 嵌套工作流（subworkflow）组合格式与展开规则 | 仅在用户需要嵌套工作流时读取 |
 | [references/workflow_zh.md](references/workflow_zh.md) | 中文 `workflow.md` 结构模板 | 用户选择中文流程说明文档时读取 |
 | [references/workflow_en.md](references/workflow_en.md) | English `workflow.md` structure template | 用户选择英文流程说明文档时读取 |
-| `.flocks/plugins/workflows/workflow_template/workflow.md` | 项目内标准工作流文档模板 | **创建 `workflow.md` 前建议读取** |
+| [references/workflow_template/](references/workflow_template/) | 工作流创建参考包，包含标准 `workflow.md`、`workflow.json`、`config.json`、`guide.md` 和 `meta.json` 模板 | **创建工作流、生成配置模板或补齐 guide.md 前按需读取** |
 | `~/.flocks/plugins/workflows/stream_alert_denoise/workflow.md` | 已成型业务工作流示例，展示“功能、流程、输入输出、模块逻辑、发布配置、编辑指南”的写法 | 文件存在且需要参考真实工作流表达时读取 |
 
 ---
@@ -145,14 +145,15 @@ flowchart TD
 
 创建 `workflow.md` 前，必须用 `Question` 工具询问用户需要哪种流程说明文档：
 
-- 中文流程说明文档：读取 [references/workflow_zh.md](references/workflow_zh.md)，生成中文 `workflow.md`。
-- English workflow specification：读取 [references/workflow_en.md](references/workflow_en.md)，生成英文 `workflow.md`。
+- 中文流程说明文档：读取 [references/workflow_zh.md](references/workflow_zh.md)，并可参考 [references/workflow_template/workflow.md](references/workflow_template/workflow.md) 的章节完整性，生成中文 `workflow.md`。
+- English workflow specification：读取 [references/workflow_en.md](references/workflow_en.md)，并可参考 [references/workflow_template/workflow.md](references/workflow_template/workflow.md) 的章节完整性，生成英文 `workflow.md`。
 
 规则：
 
 - 工作流目录里最终只写一份 `workflow.md`。
 - 不要在工作流目录里创建 `workflow_zh.md`、`workflow_en.md`、`workflow.en.md` 或其它语言副本。
 - `workflow_zh.md` / `workflow_en.md` 只是本 skill 内部的结构模板。
+- `references/workflow_template/` 只是本 skill 内部的创建参考包，严禁复制成可扫描的 `workflow_template` 工作流目录；需要模板内容时，只读取其中的文件并改造成当前真实工作流。
 - 不要根据用户当前会话语言自动猜测文档语言；创建 `workflow.md` 前必须明确询问并得到选择。
 
 ### 2.1 核心要求

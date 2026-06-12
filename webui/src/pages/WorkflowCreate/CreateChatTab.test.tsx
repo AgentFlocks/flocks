@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -48,6 +48,7 @@ vi.mock('@/hooks/useSessionChat', () => ({
 vi.mock('@/api/workflow', () => ({
   workflowAPI: {
     list: vi.fn().mockResolvedValue({ data: [] }),
+    get: vi.fn().mockResolvedValue({ data: null }),
   },
 }));
 
@@ -141,6 +142,8 @@ describe('WorkflowCreate CreateChatTab', () => {
     vi.clearAllMocks();
     capturedSessionChatProps.length = 0;
     mockCreateAndSend.mockResolvedValue('session-1');
+    vi.mocked(workflowAPI.list).mockResolvedValue({ data: [] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: null as any });
   });
 
   it('renders creation guides and case examples in a centered guide panel', async () => {
@@ -255,6 +258,143 @@ describe('WorkflowCreate CreateChatTab', () => {
       },
     };
     vi.mocked(workflowAPI.list).mockResolvedValue({ data: [recentKnownWorkflow] });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.list).toHaveBeenCalledTimes(1);
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(workflowAPI.list).toHaveBeenCalledTimes(2);
+    });
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('attaches the workflow identified by a workflow.created SSE event', async () => {
+    const creationStartedAt = Date.now();
+    const createdWorkflow = {
+      id: 'created-by-this-event',
+      name: 'Created By This Event',
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt + 100,
+      updatedAt: creationStartedAt + 100,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    };
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: createdWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.list).toHaveBeenCalledTimes(1);
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onSSEEvent?.({
+      type: 'workflow.created',
+      properties: { id: 'created-by-this-event' },
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.get).toHaveBeenCalledWith('created-by-this-event');
+    });
+    expect(onWorkflowCreated).toHaveBeenCalledWith(createdWorkflow);
+  });
+
+  it('replays workflow.created events that arrive before the initial snapshot is ready', async () => {
+    const creationStartedAt = Date.now();
+    const createdWorkflow = {
+      id: 'created-before-snapshot-ready',
+      name: 'Created Before Snapshot Ready',
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt + 100,
+      updatedAt: creationStartedAt + 100,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    };
+    let resolveSnapshot: ((value: { data: typeof createdWorkflow[] }) => void) | undefined;
+    vi.mocked(workflowAPI.list).mockReturnValueOnce(new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }) as any);
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: createdWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onSSEEvent?.({
+      type: 'workflow.created',
+      properties: { id: 'created-before-snapshot-ready' },
+    });
+
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSnapshot?.({ data: [createdWorkflow] });
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.get).toHaveBeenCalledWith('created-before-snapshot-ready');
+    });
+    expect(onWorkflowCreated).toHaveBeenCalledWith(createdWorkflow);
+  });
+
+  it('does not guess when fallback polling sees multiple fresh workflows', async () => {
+    const creationStartedAt = Date.now();
+    const makeWorkflow = (id: string) => ({
+      id,
+      name: id,
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt + 100,
+      updatedAt: creationStartedAt + 100,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    });
+    vi.mocked(workflowAPI.list)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [makeWorkflow('first'), makeWorkflow('second')] });
     const onWorkflowCreated = vi.fn();
 
     renderCreateChatTab({

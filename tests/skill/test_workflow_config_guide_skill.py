@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,22 @@ def test_workflow_config_guide_requires_free_text_question_input() -> None:
     assert "Custom value or notes" in content
 
 
+def test_workflow_builder_references_template_inside_skill() -> None:
+    skill_file = (
+        PROJECT_ROOT
+        / ".flocks"
+        / "plugins"
+        / "skills"
+        / "workflow-builder"
+        / "SKILL.md"
+    )
+
+    content = skill_file.read_text(encoding="utf-8")
+
+    assert "references/workflow_template/" in content
+    assert ".flocks/plugins/workflows/workflow_template" not in content
+
+
 @pytest.mark.asyncio
 async def test_discover_workflow_config_guide_project_skill() -> None:
     skills = await Skill.refresh()
@@ -53,13 +70,31 @@ async def test_discover_workflow_config_guide_project_skill() -> None:
 
 
 def test_workflow_template_no_longer_ships_integration_guide() -> None:
-    old_guide = (
+    old_workflow_template = (
         PROJECT_ROOT
         / ".flocks"
         / "plugins"
         / "workflows"
         / "workflow_template"
-        / "integration_guide.md"
+    )
+    workflow_builder_template = (
+        PROJECT_ROOT
+        / ".flocks"
+        / "plugins"
+        / "skills"
+        / "workflow-builder"
+        / "references"
+        / "workflow_template"
     )
 
-    assert not old_guide.exists()
+    assert not old_workflow_template.exists()
+    assert (workflow_builder_template / "workflow.md").exists()
+    assert (workflow_builder_template / "workflow.json").exists()
+    assert (workflow_builder_template / "config.json").exists()
+    assert (workflow_builder_template / "guide.md").exists()
+
+    config = json.loads((workflow_builder_template / "config.json").read_text(encoding="utf-8"))
+    assert config["kind"] == "workflow.integration-config"
+    assert isinstance(config["publish"], dict)
+    assert isinstance(config["triggers"], list)
+    assert "publishTemplates" not in config

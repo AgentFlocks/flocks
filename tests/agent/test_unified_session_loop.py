@@ -280,3 +280,62 @@ class TestResolveModel:
             model="claude-sonnet-4-5",
             model_pinned=True,
         )
+
+    @pytest.mark.asyncio
+    async def test_display_text_does_not_replace_model_prompt(self, monkeypatch):
+        """displayText is presentation metadata; the stored text remains the real prompt."""
+        from types import SimpleNamespace
+        from flocks.server.routes import session as session_routes
+
+        request = session_routes.PromptRequest(
+            parts=[{"type": "text", "text": "Read guide.md and configure the workflow."}],
+            displayText="@@flocks-instruction:智能配置",
+            noReply=True,
+        )
+        session = SimpleNamespace(
+            id="ses_test",
+            project_id="proj",
+            directory="/tmp/project",
+            agent="rex",
+            provider=None,
+            model=None,
+            model_pinned=False,
+        )
+
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.default_agent",
+            AsyncMock(return_value="rex"),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr("flocks.session.session.Session.update", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: object())
+        monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.init", lambda: None)
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+            AsyncMock(),
+        )
+        message_create = AsyncMock(return_value=SimpleNamespace(id="msg_user_1"))
+        publish_event = AsyncMock()
+        monkeypatch.setattr("flocks.session.message.Message.create", message_create)
+        monkeypatch.setattr("flocks.server.routes.event.publish_event", publish_event)
+
+        await session_routes._process_session_message(
+            "ses_test",
+            session,
+            request,
+            "/tmp/project",
+        )
+
+        create_kwargs = message_create.await_args.kwargs
+        assert create_kwargs["content"] == "Read guide.md and configure the workflow."
+        assert create_kwargs["part_metadata"] == {"displayText": "@@flocks-instruction:智能配置"}
+
+        part_event = publish_event.await_args_list[1].args[1]["part"]
+        assert part_event["text"] == "Read guide.md and configure the workflow."
+        assert part_event["metadata"] == {"displayText": "@@flocks-instruction:智能配置"}

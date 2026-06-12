@@ -5,9 +5,9 @@
 ## 1. Workflow Card
 
 - Workflow ID: `workflow_template`
-- Directory: `.flocks/plugins/workflows/workflow_template/`
+- Reference directory: `.flocks/plugins/skills/workflow-builder/references/workflow_template/`
 - Category: `template`
-- Status: hidden template
+- Status: skill reference template, not a scannable workflow
 - Entry node: `template_entry`
 - Terminal node: `template_entry`
 
@@ -89,8 +89,8 @@ The publish page reads `config.json` as a template and runtime state from storag
 Workflow configuration guidance lives in `guide.md`.
 
 - `workflow-config-guide` defines interaction rules only.
-- `guide.md` defines this workflow's actual configuration questions, defaults, samples, and validation steps.
-- Workflow chat shortcut buttons must read `guide.md` before asking or applying any configuration step.
+- A real workflow's own `guide.md` defines that workflow's actual configuration questions, defaults, samples, and validation steps.
+- Workflow chat shortcut buttons must read the real workflow's `guide.md` before asking or applying any configuration step.
 
 ## 8. Change Guide
 

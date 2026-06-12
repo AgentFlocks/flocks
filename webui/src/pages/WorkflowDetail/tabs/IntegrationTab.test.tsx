@@ -186,7 +186,7 @@ describe('IntegrationTab trigger workspace', () => {
           kind: 'workflow.integration-config',
           workflow: { id: 'wf-1' },
           updatedAt: Date.now(),
-          publish: { type: 'api_service', driver: 'local' },
+          publish: { type: 'api_service', enabled: false, driver: 'local' },
           triggers: [
             {
               id: 'syslog-default',
