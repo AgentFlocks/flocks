@@ -13,6 +13,7 @@ Ported from original SessionPrompt.loop() pattern.
 """
 
 import asyncio
+import inspect
 import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from flocks.session.lifecycle.compaction import (
 from flocks.session.lifecycle.compaction.compaction import _get_compaction_history
 from flocks.session.prompt import SessionPrompt
 from flocks.provider.provider import Provider
+from flocks.session.goal import GoalManager
 
 
 log = Log.create(service="session.loop")
@@ -1251,6 +1253,69 @@ class SessionLoop:
                         "last_assistant_id": last_message.id if last_message else None,
                     })
                     continue
+
+                if not step_result.error and last_message is not None:
+                    try:
+                        content_result = Message.get_text_content(last_message)
+                        last_response = (
+                            await content_result
+                            if inspect.isawaitable(content_result)
+                            else content_result
+                        )
+                    except Exception as exc:
+                        log.warn("goal.last_response.error", {
+                            "session_id": ctx.session.id,
+                            "message_id": getattr(last_message, "id", None),
+                            "error": str(exc),
+                        })
+                        last_response = getattr(last_message, "content", "") or ""
+                    goal_decision = await GoalManager.evaluate_after_turn(
+                        ctx.session.id,
+                        str(last_response or ""),
+                    )
+                    if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
+                        await cls._publish_runtime_event(callbacks, "session.goal.updated", {
+                            "sessionID": ctx.session.id,
+                            "status": goal_decision.status,
+                            "objective": goal_decision.objective,
+                            "reason": goal_decision.reason,
+                        })
+                    if goal_decision.should_continue and goal_decision.continuation_prompt:
+                        goal_user = await Message.create(
+                            session_id=ctx.session.id,
+                            role=MessageRole.USER,
+                            content=goal_decision.continuation_prompt,
+                            agent=last_user.agent if hasattr(last_user, "agent") else ctx.agent_name,
+                            model=last_user.model if hasattr(last_user, "model") else {
+                                "providerID": ctx.provider_id,
+                                "modelID": ctx.model_id,
+                            },
+                            provider=last_user.provider if hasattr(last_user, "provider") else ctx.provider_id,
+                            synthetic=True,
+                            part_metadata={
+                                "goalContinuation": True,
+                                "goalVerdict": goal_decision.verdict,
+                                "goalReason": goal_decision.reason,
+                            },
+                        )
+                        turn_state = set_turn_state(
+                            ctx.session.id,
+                            step=ctx.step,
+                            status="continued",
+                            continue_reason="goal",
+                            queued_message_detected=False,
+                        )
+                        await cls._publish_runtime_event(callbacks, "turn.continued", {
+                            **turn_state.model_dump(by_alias=True),
+                            "goalMessageID": goal_user.id,
+                            "goalVerdict": goal_decision.verdict,
+                        })
+                        log.info("loop.continuing_for_goal", {
+                            "session_id": ctx.session.id,
+                            "goal_message_id": goal_user.id,
+                            "reason": goal_decision.reason,
+                        })
+                        continue
 
                 stop_reason = step_result.error or (getattr(last_message, "finish", None) if last_message else None) or "stop"
                 turn_state = set_turn_state(

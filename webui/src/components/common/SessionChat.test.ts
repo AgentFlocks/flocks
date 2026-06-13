@@ -71,6 +71,11 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.contextUsage.breakdown.reasoning': 'Reasoning',
   'chat.contextUsage.breakdown.draft': 'Current draft',
   'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
+  'chat.goal.dismiss': 'Dismiss goal notice',
+  'chat.goal.status.active': 'Goal',
+  'chat.goal.status.completed': 'Completed',
+  'chat.goal.status.blocked': 'Blocked',
+  'chat.goal.status.paused': 'Paused',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
@@ -1202,6 +1207,47 @@ describe('SessionChat context usage popover', () => {
     });
 
     expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat goal banner', () => {
+  it('shows goal status updates and lets the user dismiss the current notice', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'completed',
+          objective: 'List built-in tools',
+          reason: 'Goal complete: tools listed',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
   });
 });
 

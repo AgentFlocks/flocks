@@ -203,6 +203,17 @@ class Command:
                 visible_surfaces=("webui", "tui", "acp", "cli"),
             ),
             CommandDef(
+                name="goal",
+                description="Set a persistent session goal",
+                template="Set session goal: $ARGUMENTS",
+                agent="rex",
+                execution_kind="direct",
+                allow_attachments=False,
+                visible_surfaces=ALL_SURFACES,
+                requires_existing_session=True,
+                channel_safe=True,
+            ),
+            CommandDef(
                 name="model",
                 description="Change or inspect the current model",
                 template="Switch to model: $1",

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from flocks.session.message import ToolPart, ToolStateCompleted
+from flocks.session.goal import GoalDecision
 from flocks.session.session_loop import SessionLoop, LoopCallbacks, LoopContext, LoopResult
 from flocks.session.runner import SessionRunner, StepResult
 from flocks.session.session import SessionInfo
@@ -355,6 +356,139 @@ class TestTurnLifecycle:
         msg.tokens = tokens
         msg.summary = summary
         return msg
+
+    @pytest.mark.asyncio
+    async def test_run_loop_continues_for_active_goal_after_stop(self):
+        session = SimpleNamespace(
+            id="turn_goal_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        user = self._make_msg("msg_001", "user")
+        assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        synthetic = self._make_msg("msg_003", "user")
+        assistant_after_goal = self._make_msg("msg_004", "assistant", finish="stop")
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=[
+                [user],
+                [user, assistant],
+                [user, assistant, synthetic],
+                [user, assistant, synthetic, assistant_after_goal],
+            ])
+        )
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+        goal_decisions = [
+            GoalDecision(
+                status="active",
+                verdict="continue",
+                should_continue=True,
+                continuation_prompt="continue toward goal",
+                reason="not done",
+            ),
+            GoalDecision(status="completed", verdict="inactive"),
+        ]
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.Message.get_text_content",
+            MagicMock(return_value="still working"),
+        ), patch(
+            "flocks.session.session_loop.Message.create",
+            AsyncMock(return_value=synthetic),
+        ) as create_message, patch(
+            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            AsyncMock(side_effect=goal_decisions),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(side_effect=[StepResult(action="stop"), StepResult(action="stop")]),
+        ):
+            result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        create_message.assert_awaited_once()
+        assert create_message.await_args.kwargs["content"] == "continue toward goal"
+        assert create_message.await_args.kwargs["part_metadata"]["goalContinuation"] is True
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == [
+            "turn.started",
+            "turn.continued",
+            "turn.started",
+            "turn.stopped",
+        ]
+        continued_payload = event_callback.await_args_list[1].args[1]
+        assert continued_payload["continue_reason"] == "goal"
+        assert continued_payload["goalMessageID"] == synthetic.id
+
+    @pytest.mark.asyncio
+    async def test_run_loop_publishes_goal_terminal_status(self):
+        session = SimpleNamespace(
+            id="turn_goal_done_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("msg_001", "user"),
+            self._make_msg("msg_002", "assistant", finish="stop"),
+        ]
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=[[messages[0]], messages])
+        )
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.Message.get_text_content",
+            MagicMock(return_value="Goal complete: done"),
+        ), patch(
+            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            AsyncMock(return_value=GoalDecision(
+                status="completed",
+                verdict="complete",
+                reason="Goal complete: done",
+                objective="finish work",
+            )),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ):
+            result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started", "session.goal.updated", "turn.stopped"]
+        goal_payload = event_callback.await_args_list[1].args[1]
+        assert goal_payload == {
+            "sessionID": session.id,
+            "status": "completed",
+            "objective": "finish work",
+            "reason": "Goal complete: done",
+        }
 
     @pytest.mark.asyncio
     async def test_pre_compact_cleanup_emits_turn_continued_before_next_iteration(self):

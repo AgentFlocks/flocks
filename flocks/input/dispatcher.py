@@ -122,9 +122,12 @@ async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> Dispat
             clear_screen=clear_cb,
             clear_history=clear_history_cb,
             surface=sink.surface,
+            session_id=event.session_id,
         )
         if handled:
             if llm_prompts:
+                if direct_texts:
+                    await sink.publish_direct_response(event, "\n".join(direct_texts))
                 await sink.run_llm(
                     event,
                     llm_prompts[0],

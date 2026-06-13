@@ -71,6 +71,14 @@ export interface NodeRef {
   description?: string;
 }
 
+type GoalBannerStatus = 'active' | 'completed' | 'blocked' | 'paused';
+
+interface GoalBannerState {
+  objective: string;
+  status: GoalBannerStatus;
+  reason?: string;
+}
+
 export interface ConversationBottomSlotActions {
   sendPrompt: (text: string, options?: PromptDisplayOptions) => void;
   setInput: (text: string) => void;
@@ -1082,6 +1090,90 @@ function getQueuedPromptText(item: QueuedPrompt): string {
   return typeof textPart?.text === 'string' ? textPart.text : '';
 }
 
+function getGoalBannerKey(goal: GoalBannerState | null): string {
+  return goal ? `${goal.status}:${goal.objective}` : '';
+}
+
+function getGoalStatusLabel(t: ReturnType<typeof useTranslation>['t'], status: GoalBannerStatus): string {
+  const fallback: Record<GoalBannerStatus, string> = {
+    active: 'Goal',
+    completed: 'Completed',
+    blocked: 'Blocked',
+    paused: 'Paused',
+  };
+  const key = `chat.goal.status.${status}`;
+  const label = t(key);
+  return label === key ? fallback[status] : label;
+}
+
+function getGoalBannerTone(status: GoalBannerStatus): {
+  root: string;
+  dot: string;
+  icon: React.ReactNode;
+} {
+  if (status === 'completed') {
+    return {
+      root: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+      dot: 'bg-emerald-500',
+      icon: <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />,
+    };
+  }
+  if (status === 'blocked') {
+    return {
+      root: 'border-red-200 bg-red-50 text-red-900',
+      dot: 'bg-red-500',
+      icon: <AlertCircle className="h-3.5 w-3.5 text-red-600" />,
+    };
+  }
+  if (status === 'paused') {
+    return {
+      root: 'border-amber-200 bg-amber-50 text-amber-900',
+      dot: 'bg-amber-500',
+      icon: <Clock className="h-3.5 w-3.5 text-amber-600" />,
+    };
+  }
+  return {
+    root: 'border-sky-200 bg-sky-50 text-sky-950',
+    dot: 'bg-sky-500',
+    icon: <ListTree className="h-3.5 w-3.5 text-sky-600" />,
+  };
+}
+
+function GoalBanner({
+  goal,
+  t,
+  onDismiss,
+}: {
+  goal: GoalBannerState;
+  t: ReturnType<typeof useTranslation>['t'];
+  onDismiss: () => void;
+}) {
+  const tone = getGoalBannerTone(goal.status);
+  const statusLabel = getGoalStatusLabel(t, goal.status);
+  return (
+    <div className={`mb-2 flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs shadow-sm ${tone.root}`}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone.dot}`} />
+      <span className="shrink-0">{tone.icon}</span>
+      <span className="shrink-0 font-semibold">{statusLabel}</span>
+      <span className="min-w-0 flex-1 truncate font-medium">{goal.objective}</span>
+      {goal.reason && goal.status !== 'active' && (
+        <span className="hidden min-w-0 max-w-[35%] truncate text-[11px] opacity-70 sm:inline">
+          {goal.reason}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-current opacity-60 transition hover:bg-black/5 hover:opacity-100"
+        title={t('chat.goal.dismiss')}
+        aria-label={t('chat.goal.dismiss')}
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
 interface QueuedPromptPanelProps {
   items: QueuedPrompt[];
   expanded: boolean;
@@ -1302,6 +1394,8 @@ export default function SessionChat({
   const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
+  const [dismissedGoalKey, setDismissedGoalKey] = useState('');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const [queueExpanded, setQueueExpanded] = useState(true);
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
@@ -1579,6 +1673,8 @@ export default function SessionChat({
         setContextUsageRefreshing(true);
         setContextUsageWindowTokens(0);
         setIsStreaming(false);
+        setGoalBanner(null);
+        setDismissedGoalKey('');
         refetch();
         void refreshContextUsage({ clear: true });
       } else if (
@@ -1691,6 +1787,20 @@ export default function SessionChat({
         const items = Array.isArray(properties.items) ? properties.items : [];
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
+      } else if (type === 'session.goal.updated' && properties.sessionID === sessionId) {
+        const objective = typeof properties.objective === 'string' ? properties.objective.trim() : '';
+        const status = typeof properties.status === 'string' ? properties.status : '';
+        if (
+          objective &&
+          (status === 'active' || status === 'completed' || status === 'blocked' || status === 'paused')
+        ) {
+          setGoalBanner({
+            objective,
+            status,
+            reason: typeof properties.reason === 'string' ? properties.reason : undefined,
+          });
+          setDismissedGoalKey('');
+        }
       } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
         void refreshContextUsage({ skipIfFreshMs: 500 });
       } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
@@ -1815,6 +1925,8 @@ export default function SessionChat({
     setIsCompacting(false);
     setCompactingMessage('');
     setCompactionStages([]);
+    setGoalBanner(null);
+    setDismissedGoalKey('');
     setQueuedPrompts([]);
     setEditingQueueId(null);
     setEditingQueueText('');
@@ -2199,6 +2311,10 @@ export default function SessionChat({
         arguments: args,
         agent: agentName,
       });
+      if (command === 'goal' && args.trim()) {
+        setGoalBanner({ objective: args.trim(), status: 'active' });
+        setDismissedGoalKey('');
+      }
     } catch (err: unknown) {
       setIsStreaming(false);
       const axiosErr = err as any;
@@ -2807,6 +2923,9 @@ export default function SessionChat({
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
     : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
+  const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
+    ? goalBanner
+    : null;
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -3005,6 +3124,13 @@ export default function SessionChat({
                   })
                   : conversationBottomSlot}
               </div>
+            )}
+            {visibleGoalBanner && (
+              <GoalBanner
+                goal={visibleGoalBanner}
+                t={t}
+                onDismiss={() => setDismissedGoalKey(getGoalBannerKey(visibleGoalBanner))}
+              />
             )}
             <QueuedPromptPanel
               items={queuedPrompts}
