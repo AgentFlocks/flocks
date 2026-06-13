@@ -16,20 +16,47 @@ from flocks.utils.log import Log
 log = Log.create(service="session.goal")
 
 DEFAULT_GOAL_MAX_TURNS = 20
+JUDGE_RESPONSE_MAX_CHARS = 4096
 GoalStatus = Literal["active", "paused", "completed", "blocked"]
-GoalVerdict = Literal["complete", "blocked", "continue", "inactive"]
+GoalVerdict = Literal["complete", "blocked", "continue", "waiting", "inactive"]
 
-_COMPLETE_PATTERNS = (
-    re.compile(r"\bgoal\s+(?:complete|completed|achieved)\b", re.IGNORECASE),
-    re.compile(r"\bstanding\s+goal\s+(?:is\s+)?(?:complete|completed|achieved)\b", re.IGNORECASE),
-    re.compile(r"(?:目标|任务)已(?:经)?完成"),
-    re.compile(r"(?:目标|任务)完成"),
-)
 _BLOCKED_PATTERNS = (
     re.compile(r"\bgoal\s+blocked\b", re.IGNORECASE),
     re.compile(r"\bblocked\s+on\s+(?:the\s+)?goal\b", re.IGNORECASE),
+    re.compile(r"\b(?:cannot|can't|unable to)\s+(?:proceed|continue|complete)\b", re.IGNORECASE),
     re.compile(r"目标(?:已)?阻塞"),
     re.compile(r"任务(?:已)?阻塞"),
+    re.compile(r"(?:无法|不能)(?:继续|完成|推进)"),
+)
+_WAITING_PATTERNS = (
+    re.compile(r"\bneed(?:s)?\s+(?:user\s+)?(?:input|clarification|approval|confirmation)\b", re.IGNORECASE),
+    re.compile(r"\b(?:please|need to)\s+(?:clarify|confirm|choose|specify)\b", re.IGNORECASE),
+    re.compile(r"\bwaiting\s+(?:for|on)\s+(?:you|user|confirmation|clarification|input)\b", re.IGNORECASE),
+    re.compile(r"\buser\s+(?:hasn't|has not|must|needs? to)\s+(?:answer|confirm|clarify|choose|specify)\b", re.IGNORECASE),
+    re.compile(r"请(?:明确|确认|澄清|选择|说明)"),
+    re.compile(r"需要(?:用户|你)?(?:输入|确认|澄清|批准|明确|选择)"),
+    re.compile(r"等待(?:你|用户)?(?:确认|输入|澄清|回复|回答)"),
+)
+_NEGATED_DONE_PATTERNS = (
+    re.compile(r"\bnot\s+(?:complete|completed|done|finished|resolved|fixed)\b", re.IGNORECASE),
+    re.compile(r"\b(?:incomplete|unfinished|unresolved)\b", re.IGNORECASE),
+    re.compile(r"\b(?:still|not yet)\s+(?:need|needs|pending|remaining|todo|to do)\b", re.IGNORECASE),
+    re.compile(r"(?:尚未|还未|没有|未)(?:完成|解决|修复)"),
+)
+_FUTURE_WORK_PATTERNS = (
+    re.compile(r"\bnext\s+i\s+(?:will|need|should|plan)\b", re.IGNORECASE),
+    re.compile(r"\b(?:remaining|still need|need to|todo|to do|pending)\b", re.IGNORECASE),
+    re.compile(r"(?:下一步|还需要|仍需|待完成|未完成)"),
+)
+_DONE_PATTERNS = (
+    re.compile(r"\bgoal\s+(?:complete|completed|achieved)\b", re.IGNORECASE),
+    re.compile(r"\bstanding\s+goal\s+(?:is\s+)?(?:complete|completed|achieved)\b", re.IGNORECASE),
+    re.compile(r"\b(?:done|completed|finished|resolved|fixed|implemented|delivered)\b", re.IGNORECASE),
+    re.compile(r"\b(?:created|updated|added|removed|changed|verified)\b", re.IGNORECASE),
+    re.compile(r"\b(?:tests?|build|typecheck|lint)\s+(?:pass|passed|succeeded|is green)\b", re.IGNORECASE),
+    re.compile(r"(?:目标|任务)已(?:经)?完成"),
+    re.compile(r"(?:目标|任务)完成"),
+    re.compile(r"(?:已|已经)(?:完成|实现|修复|交付|验证)"),
 )
 
 
@@ -70,24 +97,37 @@ def _trim_reason(text: str, max_chars: int = 240) -> str:
     return normalized[: max_chars - 3].rstrip() + "..."
 
 
-def _agent_self_report(last_response: str) -> tuple[GoalVerdict, str] | None:
+def _judge_input(last_response: str) -> str:
     text = last_response or ""
-    for pattern in _BLOCKED_PATTERNS:
-        if pattern.search(text):
-            return "blocked", _trim_reason(text) or "agent reported the goal is blocked"
-    for pattern in _COMPLETE_PATTERNS:
-        if pattern.search(text):
-            return "complete", _trim_reason(text) or "agent reported the goal is complete"
-    return None
+    if len(text) <= JUDGE_RESPONSE_MAX_CHARS:
+        return text
+    return text[-JUDGE_RESPONSE_MAX_CHARS:]
 
 
-def judge_goal(last_response: str) -> tuple[GoalVerdict, str]:
-    """Conservative fallback judge used when the agent did not self-report."""
-    text = last_response or ""
-    lower = text.lower()
-    if "cannot proceed" in lower or "need user input" in lower:
-        return "blocked", _trim_reason(text) or "judge found the agent needs user input"
-    return "continue", "goal completion was not explicitly proven"
+def _matches_any(patterns: tuple[re.Pattern[str], ...], text: str) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def judge_goal(objective: str, last_response: str) -> tuple[GoalVerdict, str]:
+    """Hermes-style local judge for the latest final response."""
+    text = _judge_input(last_response)
+    reason = _trim_reason(text)
+    if not text.strip():
+        return "continue", "judge received no final response"
+
+    if _matches_any(_WAITING_PATTERNS, text):
+        return "waiting", reason or "judge found the agent is waiting for user input"
+
+    if _matches_any(_BLOCKED_PATTERNS, text):
+        return "blocked", reason or "judge found the goal is blocked"
+
+    if _matches_any(_NEGATED_DONE_PATTERNS, text) or _matches_any(_FUTURE_WORK_PATTERNS, text):
+        return "continue", "judge found remaining work toward the goal"
+
+    if _matches_any(_DONE_PATTERNS, text):
+        return "complete", reason or f"judge found the goal is done: {objective}"
+
+    return "continue", "judge could not determine the goal is done"
 
 
 class GoalManager:
@@ -138,10 +178,9 @@ class GoalManager:
         return (
             "[Goal mode]\n"
             f"Active goal: {objective}\n\n"
-            "Work toward the active goal. When the goal is genuinely complete, "
-            'explicitly state "Goal complete: ..." with the evidence. When blocked '
-            'and unable to proceed without user input, explicitly state "Goal blocked: ...". '
-            "Otherwise take the next concrete step and do not claim completion."
+            "Work toward the active goal. Continue taking concrete steps until the goal "
+            "is complete or blocked. In your final response, make the current outcome "
+            "clear with evidence of completed work or the specific blocker."
         )
 
     @classmethod
@@ -151,9 +190,8 @@ class GoalManager:
             "[Continuing toward active goal]\n"
             f"Goal: {state.objective}\n"
             f"Reason to continue: {reason}\n\n"
-            "Take the next concrete step. If the goal is genuinely complete, "
-            'state "Goal complete: ..." with evidence. If blocked and unable '
-            'to proceed without user input, state "Goal blocked: ...".'
+            "Take the next concrete step. If the goal is complete or blocked, make "
+            "that outcome clear with evidence or the specific blocker."
         )
 
     @classmethod
@@ -171,8 +209,7 @@ class GoalManager:
             )
 
         state.turns_used += 1
-        report = _agent_self_report(last_response)
-        verdict, reason = report if report is not None else judge_goal(last_response)
+        verdict, reason = judge_goal(state.objective, last_response)
         state.last_verdict = verdict
         state.last_reason = reason
 
@@ -188,6 +225,15 @@ class GoalManager:
 
         if verdict == "blocked":
             state.status = "blocked"
+            await cls.save(session_id, state)
+            return GoalDecision(
+                status=state.status,
+                verdict=verdict,
+                reason=reason,
+                objective=state.objective,
+            )
+
+        if verdict == "waiting":
             await cls.save(session_id, state)
             return GoalDecision(
                 status=state.status,

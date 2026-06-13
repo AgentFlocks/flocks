@@ -18,7 +18,7 @@ async def test_goal_command_sets_state_and_prompt():
     assert result.text is None
     assert result.prompt is not None
     assert "Active goal: fix failing tests" in result.prompt
-    assert "Goal complete:" in result.prompt
+    assert "specific blocker" in result.prompt
 
     state = await GoalManager.get("goal_command_session")
 
@@ -42,13 +42,13 @@ async def test_goal_command_rejects_empty_objective():
 
 
 @pytest.mark.asyncio
-async def test_goal_evaluation_prefers_agent_self_report():
+async def test_goal_evaluation_completes_when_judge_finds_done():
     session_id = "goal_complete_session"
     await GoalManager.set_goal(session_id, "finish implementation")
 
     decision = await GoalManager.evaluate_after_turn(
         session_id,
-        "Goal complete: implementation and tests are done.",
+        "Implemented the feature, updated the tests, and the focused test suite passed.",
     )
     state = await GoalManager.get(session_id)
 
@@ -56,6 +56,41 @@ async def test_goal_evaluation_prefers_agent_self_report():
     assert decision.should_continue is False
     assert state is not None
     assert state.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_goal_evaluation_blocks_when_judge_finds_blocker():
+    session_id = "goal_blocked_session"
+    await GoalManager.set_goal(session_id, "finish implementation")
+
+    decision = await GoalManager.evaluate_after_turn(
+        session_id,
+        "I cannot proceed because the repository is unavailable.",
+    )
+    state = await GoalManager.get(session_id)
+
+    assert decision.verdict == "blocked"
+    assert decision.should_continue is False
+    assert state is not None
+    assert state.status == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_goal_evaluation_waits_when_agent_asks_for_clarification():
+    session_id = "goal_waiting_session"
+    await GoalManager.set_goal(session_id, "write tests 10 times")
+
+    decision = await GoalManager.evaluate_after_turn(
+        session_id,
+        "Please clarify what tests to write and where to place them.",
+    )
+    state = await GoalManager.get(session_id)
+
+    assert decision.verdict == "waiting"
+    assert decision.should_continue is False
+    assert state is not None
+    assert state.status == "active"
+    assert state.last_verdict == "waiting"
 
 
 @pytest.mark.asyncio
@@ -74,14 +109,31 @@ async def test_goal_evaluation_continues_until_budget_then_pauses():
 
 
 def test_judge_goal_is_conservative_fallback():
-    verdict, reason = judge_goal("I made progress but the work is not complete.")
+    verdict, reason = judge_goal("finish implementation", "I made progress but the work is not complete.")
 
     assert verdict == "continue"
-    assert reason == "goal completion was not explicitly proven"
+    assert reason == "judge found remaining work toward the goal"
 
 
-def test_judge_goal_does_not_complete_on_tests_only():
-    verdict, reason = judge_goal("All tests pass. Next I will push the branch.")
+def test_judge_goal_does_not_complete_when_response_mentions_next_step():
+    verdict, reason = judge_goal("ship branch", "All tests pass. Next I will push the branch.")
 
     assert verdict == "continue"
-    assert reason == "goal completion was not explicitly proven"
+    assert reason == "judge found remaining work toward the goal"
+
+
+def test_judge_goal_waits_on_user_clarification():
+    verdict, reason = judge_goal(
+        "write tests 10 times",
+        "I need to clarify what tests to write 10 times.",
+    )
+
+    assert verdict == "waiting"
+    assert "need to clarify" in reason
+
+
+def test_judge_goal_completes_on_obvious_delivery():
+    verdict, reason = judge_goal("fix tests", "Fixed the failing tests and verified pytest passed.")
+
+    assert verdict == "complete"
+    assert "Fixed the failing tests" in reason

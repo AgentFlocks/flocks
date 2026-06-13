@@ -66,6 +66,24 @@ class TestSessionCRUD:
         assert resp.json()["category"] == "workflow"
 
     @pytest.mark.asyncio
+    async def test_get_session_includes_persisted_goal(self, client: AsyncClient):
+        """GET /api/session/{id} hydrates persisted goal state for the WebUI."""
+        from flocks.session.goal import GoalManager
+
+        create_resp = await client.post("/api/session", json={"title": "Goal Session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        await GoalManager.set_goal(session_id, "List built-in tools")
+
+        resp = await client.get(f"/api/session/{session_id}")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["goal"] == {
+            "status": "active",
+            "objective": "List built-in tools",
+            "reason": None,
+        }
+
+    @pytest.mark.asyncio
     async def test_list_sessions_empty(self, client: AsyncClient):
         """GET /api/session returns an empty list when no sessions exist."""
         resp = await client.get("/api/session")

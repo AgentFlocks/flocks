@@ -48,7 +48,7 @@ import {
   readFileAsDataUrl,
   type ImagePartData,
 } from '@/utils/imageUpload';
-import type { Message, MessagePart, ToolState } from '@/types';
+import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
 
 export { formatSmartTime };
 export type { SSEConnectionStatus };
@@ -1094,6 +1094,47 @@ function getGoalBannerKey(goal: GoalBannerState | null): string {
   return goal ? `${goal.status}:${goal.objective}` : '';
 }
 
+function getDismissedGoalStorageKey(sessionId?: string | null): string | null {
+  return sessionId ? `flocks:session:${sessionId}:dismissedGoal` : null;
+}
+
+function readDismissedGoalKey(sessionId?: string | null): string {
+  const storageKey = getDismissedGoalStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(storageKey) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeDismissedGoalKey(sessionId: string | null | undefined, goalKey: string): void {
+  const storageKey = getDismissedGoalStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return;
+  try {
+    if (goalKey) {
+      window.localStorage.setItem(storageKey, goalKey);
+    } else {
+      window.localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Ignore unavailable storage; dismissal still works for the current mount.
+  }
+}
+
+function toGoalBannerState(goal: SessionGoalState | null | undefined): GoalBannerState | null {
+  const objective = typeof goal?.objective === 'string' ? goal.objective.trim() : '';
+  const status = typeof goal?.status === 'string' ? goal.status : '';
+  if (!objective || !['active', 'completed', 'blocked', 'paused'].includes(status)) {
+    return null;
+  }
+  return {
+    objective,
+    status: status as GoalBannerStatus,
+    reason: typeof goal?.reason === 'string' ? goal.reason : undefined,
+  };
+}
+
 function getGoalStatusLabel(t: ReturnType<typeof useTranslation>['t'], status: GoalBannerStatus): string {
   const fallback: Record<GoalBannerStatus, string> = {
     active: 'Goal',
@@ -1395,7 +1436,7 @@ export default function SessionChat({
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
-  const [dismissedGoalKey, setDismissedGoalKey] = useState('');
+  const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const [queueExpanded, setQueueExpanded] = useState(true);
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
@@ -1472,6 +1513,7 @@ export default function SessionChat({
   const initialMessageSentRef = useRef('');
   const abortingRef = useRef(false);
   const sessionBusyRef = useRef(false);
+  const goalHydrationVersionRef = useRef(0);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
   const statusCheckedRef = useRef<string | null>(null);
@@ -1654,6 +1696,31 @@ export default function SessionChat({
     void refreshContextUsage({ clear: true });
   }, [refreshContextUsage]);
 
+  useEffect(() => {
+    goalHydrationVersionRef.current += 1;
+    const hydrationVersion = goalHydrationVersionRef.current;
+
+    if (!sessionId) {
+      setGoalBanner(null);
+      setDismissedGoalKey('');
+      return;
+    }
+
+    setGoalBanner(null);
+    setDismissedGoalKey(readDismissedGoalKey(sessionId));
+
+    sessionApi.get(sessionId).then((session) => {
+      if (goalHydrationVersionRef.current !== hydrationVersion) return;
+      setGoalBanner(toGoalBannerState(session.goal));
+      setDismissedGoalKey(readDismissedGoalKey(sessionId));
+    }).catch((err) => {
+      if (goalHydrationVersionRef.current !== hydrationVersion) return;
+      setGoalBanner(null);
+      setDismissedGoalKey(readDismissedGoalKey(sessionId));
+      console.warn('[SessionChat] Failed to fetch session goal:', err);
+    });
+  }, [sessionId]);
+
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
       const { type, properties } = event;
@@ -1788,18 +1855,11 @@ export default function SessionChat({
         setQueuedPrompts(items as QueuedPrompt[]);
         if (items.length > 0) setQueueExpanded(true);
       } else if (type === 'session.goal.updated' && properties.sessionID === sessionId) {
-        const objective = typeof properties.objective === 'string' ? properties.objective.trim() : '';
-        const status = typeof properties.status === 'string' ? properties.status : '';
-        if (
-          objective &&
-          (status === 'active' || status === 'completed' || status === 'blocked' || status === 'paused')
-        ) {
-          setGoalBanner({
-            objective,
-            status,
-            reason: typeof properties.reason === 'string' ? properties.reason : undefined,
-          });
-          setDismissedGoalKey('');
+        const nextGoal = toGoalBannerState(properties as SessionGoalState);
+        if (nextGoal) {
+          goalHydrationVersionRef.current += 1;
+          setGoalBanner(nextGoal);
+          setDismissedGoalKey(readDismissedGoalKey(sessionId));
         }
       } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
         void refreshContextUsage({ skipIfFreshMs: 500 });
@@ -2312,6 +2372,8 @@ export default function SessionChat({
         agent: agentName,
       });
       if (command === 'goal' && args.trim()) {
+        goalHydrationVersionRef.current += 1;
+        writeDismissedGoalKey(sessionId, '');
         setGoalBanner({ objective: args.trim(), status: 'active' });
         setDismissedGoalKey('');
       }
@@ -2926,6 +2988,11 @@ export default function SessionChat({
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
     : null;
+  const handleDismissGoalBanner = useCallback(() => {
+    const goalKey = getGoalBannerKey(visibleGoalBanner);
+    writeDismissedGoalKey(sessionId, goalKey);
+    setDismissedGoalKey(goalKey);
+  }, [sessionId, visibleGoalBanner]);
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -3129,7 +3196,7 @@ export default function SessionChat({
               <GoalBanner
                 goal={visibleGoalBanner}
                 t={t}
-                onDismiss={() => setDismissedGoalKey(getGoalBannerKey(visibleGoalBanner))}
+                onDismiss={handleDismissGoalBanner}
               />
             )}
             <QueuedPromptPanel

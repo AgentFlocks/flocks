@@ -25,6 +25,13 @@ export interface Session {
   canWrite?: boolean;
   canDelete?: boolean;
   isShared?: boolean;
+  goal?: SessionGoalState | null;
+}
+
+export interface SessionGoalState {
+  status: 'active' | 'completed' | 'blocked' | 'paused';
+  objective: string;
+  reason?: string | null;
 }
 
 export interface SessionTime {

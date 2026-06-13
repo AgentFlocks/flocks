@@ -433,6 +433,62 @@ class TestTurnLifecycle:
         assert continued_payload["goalMessageID"] == synthetic.id
 
     @pytest.mark.asyncio
+    async def test_run_loop_waits_for_user_input_after_goal_clarification(self):
+        session = SimpleNamespace(
+            id="turn_goal_waiting_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        user = self._make_msg("msg_001", "user")
+        assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=[
+                [user],
+                [user, assistant],
+            ])
+        )
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.Message.get_text_content",
+            MagicMock(return_value="Please clarify what tests to write."),
+        ), patch(
+            "flocks.session.session_loop.Message.create",
+            AsyncMock(),
+        ) as create_message, patch(
+            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            AsyncMock(return_value=GoalDecision(
+                status="active",
+                verdict="waiting",
+                should_continue=False,
+                reason="waiting for user clarification",
+            )),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ):
+            result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        create_message.assert_not_awaited()
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started", "turn.stopped"]
+
+    @pytest.mark.asyncio
     async def test_run_loop_publishes_goal_terminal_status(self):
         session = SimpleNamespace(
             id="turn_goal_done_session",
