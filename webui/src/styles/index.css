@@ -4,7 +4,7 @@
 
 @layer base {
   body {
-    @apply bg-gray-50 text-gray-900;
+    @apply bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100;
   }
 }
 
@@ -191,4 +191,92 @@
   .prose-invert details[open] summary {
     @apply border-white/20;
   }
+}
+
+/* Dark-mode compatibility for existing neutral Tailwind utilities. */
+.dark .bg-white {
+  background-color: #18181b;
+}
+
+.dark .bg-gray-50,
+.dark .bg-zinc-50 {
+  background-color: #09090b;
+}
+
+.dark .bg-gray-100,
+.dark .bg-zinc-100 {
+  background-color: #18181b;
+}
+
+.dark .bg-gray-200,
+.dark .bg-zinc-200 {
+  background-color: #27272a;
+}
+
+.dark .hover\:bg-white\/60:hover,
+.dark .hover\:bg-white\/70:hover,
+.dark .hover\:bg-gray-50:hover,
+.dark .hover\:bg-zinc-50:hover,
+.dark .hover\:bg-gray-100:hover,
+.dark .hover\:bg-zinc-100:hover {
+  background-color: #27272a;
+}
+
+.dark .border-gray-100,
+.dark .border-zinc-100,
+.dark .border-gray-200,
+.dark .border-zinc-200,
+.dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]),
+.dark .divide-zinc-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #27272a;
+}
+
+.dark .border-gray-300,
+.dark .border-zinc-300 {
+  border-color: #3f3f46;
+}
+
+.dark .text-gray-900,
+.dark .text-zinc-900,
+.dark .text-gray-800,
+.dark .text-zinc-800 {
+  color: #f4f4f5;
+}
+
+.dark .text-gray-700,
+.dark .text-zinc-700,
+.dark .text-gray-600,
+.dark .text-zinc-600 {
+  color: #d4d4d8;
+}
+
+.dark .text-gray-500,
+.dark .text-zinc-500,
+.dark .text-gray-400,
+.dark .text-zinc-400 {
+  color: #a1a1aa;
+}
+
+.dark .hover\:text-gray-900:hover,
+.dark .hover\:text-zinc-900:hover,
+.dark .hover\:text-gray-800:hover,
+.dark .hover\:text-zinc-800:hover,
+.dark .hover\:text-gray-700:hover,
+.dark .hover\:text-zinc-700:hover,
+.dark .hover\:text-gray-600:hover,
+.dark .hover\:text-zinc-600:hover {
+  color: #fafafa;
+}
+
+.dark input,
+.dark textarea,
+.dark select {
+  background-color: #18181b;
+  border-color: #3f3f46;
+  color: #f4f4f5;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #71717a;
 }
