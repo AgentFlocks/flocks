@@ -346,12 +346,9 @@ describe('buildContextUsageBreakdown', () => {
 });
 
 describe('getMessageBubbleClassName', () => {
-  // The bubble's max width is owned by its outer container (`max-w-[80%]` for
-  // user, `w-full` for assistant; see SessionChat.tsx), so the inner bubble
-  // only controls its own intrinsic sizing (`w-auto` vs `w-full`).  Previously
-  // the inner bubble also pinned `max-w-2xl`, but the unified chat redesign
-  // moved that responsibility outward.  Tests here therefore assert width
-  // semantics, not the legacy `max-w-2xl` literal.
+  // The message column owns the available width, so the inner bubble only
+  // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
+  // assert width semantics, not legacy max-width literals.
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -386,26 +383,26 @@ describe('getMessageBubbleClassName', () => {
 });
 
 describe('getMessageGroupClassName', () => {
-  it('caps full-layout user messages at 80% width', () => {
+  it('caps full-layout user messages at 88% width', () => {
     const className = getMessageGroupClassName({
       compact: false,
       isUser: true,
       isEditing: false,
     });
 
-    expect(className).toContain('max-w-[80%]');
+    expect(className).toContain('max-w-[88%]');
     expect(className).toContain('w-fit');
   });
 
-  it('expands editing user messages to the 80% container width', () => {
+  it('expands editing user messages to the full content width', () => {
     const className = getMessageGroupClassName({
       compact: false,
       isUser: true,
       isEditing: true,
     });
 
-    expect(className).toContain('w-[80%]');
-    expect(className).toContain('max-w-[80%]');
+    expect(className).toContain('w-full');
+    expect(className).toContain('max-w-full');
   });
 
   it('keeps assistant messages full width in full layout', () => {

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, memo, type ReactNode } from 'react';
+import { useState, useCallback, useContext, useEffect, useMemo, useRef, memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ReactFlow,
@@ -19,6 +19,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { Code2, Zap, GitBranch, RotateCw, RotateCcw, X, ChevronRight, ChevronUp, ChevronDown, Wrench, Sparkles, Globe, Workflow, ZoomIn, ZoomOut, Scan } from 'lucide-react';
 import { WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import { ThemeContext } from '@/contexts/ThemeContext';
 import {
   buildWorkflowGraphLayout,
   WORKFLOW_GRAPH_NODE_WIDTH,
@@ -471,13 +472,15 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
 // Layout builder
 // ─────────────────────────────────────────────
 
-const EDGE_THEME: Record<WorkflowGraphEdgeRoute['kind'], {
+type FlowEdgeTheme = Record<WorkflowGraphEdgeRoute['kind'], {
   stroke: string;
   label: string;
   labelBg: string;
   strokeWidth: number;
   strokeDasharray?: string;
-}> = {
+}>;
+
+const LIGHT_EDGE_THEME: FlowEdgeTheme = {
   default: {
     stroke: '#94a3b8',
     label: '#64748b',
@@ -505,9 +508,38 @@ const EDGE_THEME: Record<WorkflowGraphEdgeRoute['kind'], {
   },
 };
 
+const DARK_EDGE_THEME: FlowEdgeTheme = {
+  default: {
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
+    strokeWidth: 1.7,
+  },
+  branch: {
+    stroke: '#f59e0b',
+    label: '#fbbf24',
+    labelBg: '#3d3424',
+    strokeWidth: 2.2,
+  },
+  loop: {
+    stroke: '#a78bfa',
+    label: '#c4b5fd',
+    labelBg: '#363047',
+    strokeWidth: 2,
+  },
+  back: {
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
+    strokeWidth: 1.8,
+    strokeDasharray: '6 5',
+  },
+};
+
 function buildLayout(
   workflowJson: WorkflowJSON,
-  onNodeClick: (nodeId: string) => void
+  onNodeClick: (nodeId: string) => void,
+  edgeTheme: FlowEdgeTheme
 ): { nodes: Node[]; edges: Edge[] } {
   const diagram = buildWorkflowGraphLayout(workflowJson);
   const startId = workflowJson.start || workflowJson.nodes[0]?.id;
@@ -534,7 +566,7 @@ function buildLayout(
   const edges: Edge[] = workflowJson.edges.map((edge, idx) => {
     const id = workflowGraphEdgeId(edge, idx);
     const route = diagram.edgeRoutes[id] ?? { kind: 'default' as const };
-    const theme = EDGE_THEME[route.kind];
+    const theme = edgeTheme[route.kind];
 
     return {
       id,
@@ -596,7 +628,7 @@ function buildLayout(
           type: 'smoothstep',
           animated: Boolean(trigger.enabled),
           markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-          style: { stroke: '#7dd3fc', strokeWidth: 1.5, strokeDasharray: '5 4' },
+          style: { stroke: edgeTheme.branch.stroke, strokeWidth: 1.5, strokeDasharray: '5 4' },
         });
       }
     });
@@ -623,10 +655,10 @@ function CanvasControlButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="group relative flex h-8 w-full items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+      className="group relative flex h-8 w-full items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus:ring-zinc-700"
     >
       {children}
-      <span className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+      <span className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 dark:bg-zinc-800 dark:text-zinc-50">
         {label}
       </span>
     </button>
@@ -651,7 +683,10 @@ export interface FlowCanvasProps {
 
 function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: externalOnNodeClick, layoutKey }: FlowCanvasProps) {
   const { t } = useTranslation('workflow');
+  const { theme } = useContext(ThemeContext);
   const { fitView, zoomIn, zoomOut } = useReactFlow();
+  const isDark = theme === 'dark';
+  const edgeTheme = useMemo(() => (isDark ? DARK_EDGE_THEME : LIGHT_EDGE_THEME), [isDark]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [showMiniMap, setShowMiniMap] = useState(false);
@@ -696,7 +731,7 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
   const [edges, setEdges] = useEdgesState<Edge>([]);
 
   const applyLayout = useCallback((options: { reveal?: boolean } = {}) => {
-    const { nodes: newNodes, edges: newEdges } = buildLayout(workflowJson, handleNodeClick);
+    const { nodes: newNodes, edges: newEdges } = buildLayout(workflowJson, handleNodeClick, edgeTheme);
     setNodes(newNodes);
     setEdges(newEdges);
     if (options.reveal) {
@@ -704,7 +739,7 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
     }
     // Re-fit after layout (small delay lets ReactFlow measure node sizes first)
     setTimeout(() => fitView({ padding: 0.2 }), 60);
-  }, [workflowJson, handleNodeClick, setNodes, setEdges, fitView, revealMiniMap]);
+  }, [workflowJson, handleNodeClick, edgeTheme, setNodes, setEdges, fitView, revealMiniMap]);
 
   const resetLayout = useCallback(() => {
     applyLayout({ reveal: true });
@@ -760,7 +795,7 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#e2e8f0" />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color={isDark ? '#5a6573' : '#e2e8f0'} />
         {showMiniMap && (
           <MiniMap
             nodeColor={(node) => {
@@ -773,15 +808,15 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
               const d = node.data as unknown as ViewNodeData | undefined;
               return colors[d?.nodeType ?? ''] ?? '#94a3b8';
             }}
-            className="!rounded-lg !border !border-slate-200 !bg-white/95 !shadow-none"
-            maskColor="rgba(241, 245, 249, 0.68)"
+            className="!rounded-lg !border !border-slate-200 !bg-white/95 !shadow-none dark:!border-zinc-700 dark:!bg-zinc-900"
+            maskColor={isDark ? 'rgba(34, 39, 46, 0.72)' : 'rgba(241, 245, 249, 0.68)'}
           />
         )}
       </ReactFlow>
 
       <div className="absolute right-4 top-4 z-20 flex w-9 flex-col items-stretch gap-1 overflow-visible">
         {!controlsCollapsed && (
-          <div className="flex w-full flex-col divide-y divide-slate-100 overflow-visible rounded-lg border border-slate-200 bg-white/90 backdrop-blur">
+          <div className="flex w-full flex-col divide-y divide-slate-100 overflow-visible rounded-lg border border-slate-200 bg-white/90 backdrop-blur dark:divide-zinc-800 dark:border-zinc-700 dark:bg-zinc-900/90">
             <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
               <ZoomIn className="h-4 w-4" strokeWidth={1.8} />
             </CanvasControlButton>
@@ -800,7 +835,7 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
           type="button"
           onClick={() => setControlsCollapsed((prev) => !prev)}
           aria-label={t(controlsCollapsed ? 'detail.flowControls.expand' : 'detail.flowControls.collapse')}
-          className="flex h-8 w-full items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+          className="flex h-8 w-full items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100 dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus:ring-zinc-700"
         >
           {controlsCollapsed ? (
             <ChevronDown className="h-4 w-4" strokeWidth={1.8} />
