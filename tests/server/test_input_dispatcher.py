@@ -20,6 +20,13 @@ class TestParseSlashCommand:
         assert parsed.command_name == "reset"
         assert parsed.canonical_name == "new"
 
+    def test_resolves_rollback_to_rewind(self):
+        parsed = parse_slash_command("/rollback 2")
+        assert parsed is not None
+        assert parsed.command_name == "rollback"
+        assert parsed.canonical_name == "rewind"
+        assert parsed.args == "2"
+
     def test_reads_structured_arguments_from_metadata(self):
         parsed = parse_slash_command(
             '/bug {"scope":"acp"}',
@@ -106,6 +113,36 @@ class TestDispatchUserInput:
 
         assert result.action == "direct"
         assert clear_history_calls == ["cleared"]
+        assert not direct
+        assert not llm
+
+    @pytest.mark.asyncio
+    async def test_rollback_alias_routes_to_session_control(self):
+        direct = []
+        llm = []
+        session_control = []
+
+        async def _session_control(_event, parsed):
+            session_control.append((parsed.canonical_name, parsed.args))
+            return True
+
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+            session_control=_session_control,
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/rollback 2",
+            parts=[{"type": "text", "text": "/rollback 2"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "session_control"
+        assert session_control == [("rewind", "2")]
         assert not direct
         assert not llm
 

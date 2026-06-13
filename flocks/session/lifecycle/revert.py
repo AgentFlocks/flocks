@@ -106,6 +106,17 @@ class SessionRevertManager:
     Provides functionality to revert sessions to previous states,
     including file changes tracked via snapshots.
     """
+
+    @staticmethod
+    def _part_field(part: Any, field_name: str, default: Any = None) -> Any:
+        if isinstance(part, dict):
+            return part.get(field_name, default)
+        return getattr(part, field_name, default)
+
+    @classmethod
+    def _part_type(cls, part: Any) -> Optional[str]:
+        part_type = cls._part_field(part, "type")
+        return str(part_type) if part_type is not None else None
     
     @classmethod
     async def revert(
@@ -156,21 +167,19 @@ class SessionRevertManager:
             for part in msg_parts:
                 if revert_info:
                     # After revert point, collect patches
-                    if isinstance(part, dict) and part.get("type") == "patch":
+                    if cls._part_type(part) == "patch":
                         patches.append(SnapshotPatch(
-                            hash=part.get("hash", ""),
-                            files=part.get("files", [])
+                            hash=cls._part_field(part, "hash", ""),
+                            files=cls._part_field(part, "files", []),
                         ))
                     continue
                 
                 # Check if this is the revert point
                 if (msg.id == input.message_id and not input.part_id) or \
-                   (hasattr(part, "id") and part.id == input.part_id) or \
-                   (isinstance(part, dict) and part.get("id") == input.part_id):
+                   (cls._part_field(part, "id") == input.part_id):
                     # Check if remaining parts have useful content
                     has_useful = any(
-                        (isinstance(p, dict) and p.get("type") in ["text", "tool"]) or
-                        (hasattr(p, "type") and p.type in ["text", "tool"])
+                        cls._part_type(p) in ["text", "tool"]
                         for p in remaining_parts
                     )
                     

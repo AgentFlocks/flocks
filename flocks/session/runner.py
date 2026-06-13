@@ -23,7 +23,15 @@ from dataclasses import dataclass, field
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
-from flocks.session.message import Message, MessageInfo, MessageRole
+from flocks.session.message import (
+    Message,
+    MessageInfo,
+    MessageRole,
+    PatchPart,
+    StepFinishPart,
+    StepStartPart,
+    TokenUsage,
+)
 from flocks.session.prompt import SessionPrompt
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
@@ -938,6 +946,109 @@ class SessionRunner:
         if self._external_abort is not None and self._external_abort.is_set():
             return True
         return False
+
+    async def _record_step_start_snapshot(self, assistant_msg: MessageInfo) -> Optional[str]:
+        """Record the worktree snapshot at the start of an assistant step.
+
+        Snapshot recording is best-effort infrastructure for conversation
+        rewind. A failure must never break a normal model/tool turn.
+        """
+        try:
+            from flocks.snapshot import Snapshot
+
+            snapshot = await Snapshot.track(
+                self.session.project_id,
+                self.session.directory,
+            )
+            if not snapshot:
+                return None
+
+            part = StepStartPart(
+                id=Identifier.ascending("part"),
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                snapshot=snapshot,
+            )
+            await Message.store_part(self.session.id, assistant_msg.id, part)
+            if self.callbacks.event_publish_callback:
+                await self.callbacks.event_publish_callback(
+                    "message.part.updated",
+                    {"part": part.model_dump(by_alias=True, exclude_none=True)},
+                )
+            return snapshot
+        except Exception as exc:
+            log.debug("runner.step_snapshot.start_failed", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+                "error": str(exc),
+            })
+            return None
+
+    async def _record_step_finish_snapshot(
+        self,
+        assistant_msg: MessageInfo,
+        start_snapshot: Optional[str],
+        step_result: Optional[StepResult],
+    ) -> None:
+        """Record end snapshot and changed files for conversation rewind."""
+        if not start_snapshot:
+            return
+
+        try:
+            from flocks.snapshot import Snapshot
+
+            finish_snapshot = await Snapshot.track(
+                self.session.project_id,
+                self.session.directory,
+            )
+            reason = "error" if step_result and step_result.error else (
+                "tool-calls"
+                if step_result and step_result.tool_calls
+                else "stop"
+            )
+            finish_part = StepFinishPart(
+                id=Identifier.ascending("part"),
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                reason=reason,
+                snapshot=finish_snapshot,
+                cost=0.0,
+                tokens=TokenUsage(),
+            )
+            await Message.store_part(self.session.id, assistant_msg.id, finish_part)
+            if self.callbacks.event_publish_callback:
+                await self.callbacks.event_publish_callback(
+                    "message.part.updated",
+                    {"part": finish_part.model_dump(by_alias=True, exclude_none=True)},
+                )
+
+            patch = await Snapshot.patch(
+                self.session.project_id,
+                self.session.directory,
+                start_snapshot,
+            )
+            if not patch.files:
+                return
+
+            patch_part = PatchPart(
+                id=Identifier.ascending("part"),
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                hash=start_snapshot,
+                files=patch.files,
+            )
+            await Message.store_part(self.session.id, assistant_msg.id, patch_part)
+            if self.callbacks.event_publish_callback:
+                await self.callbacks.event_publish_callback(
+                    "message.part.updated",
+                    {"part": patch_part.model_dump(by_alias=True, exclude_none=True)},
+                )
+        except Exception as exc:
+            log.debug("runner.step_snapshot.finish_failed", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+                "error": str(exc),
+            })
     
     async def _process_step(
         self,
@@ -1211,210 +1322,224 @@ class SessionRunner:
         MAX_EMPTY_RETRIES = 3
         error_attempt = 0
         empty_attempt = 0
+        step_start_snapshot = await self._record_step_start_snapshot(assistant_msg)
+        step_result_for_snapshot: Optional[StepResult] = None
 
-        while not self.is_aborted:
-            try:
-                # Set status to busy
-                SessionStatus.set(self.session.id, SessionStatusBusy())
-                
-                # Call LLM with tools
-                result = await self._call_llm(
-                    provider=provider,
-                    messages=chat_messages,
-                    tools=tools,
-                    agent=agent,
-                    assistant_msg=assistant_msg,
-                )
+        try:
+            while not self.is_aborted:
+                try:
+                    # Set status to busy
+                    SessionStatus.set(self.session.id, SessionStatusBusy())
 
-                if getattr(self, "_llm_call_aborted", False):
-                    await Message.update(
-                        self.session.id,
-                        assistant_msg.id,
-                        error=self._build_message_aborted_error(),
-                        finish="error",
-                    )
-                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                    return StepResult(
-                        action="stop",
-                        content=result.content,
-                        usage=result.usage,
+                    # Call LLM with tools
+                    result = await self._call_llm(
+                        provider=provider,
+                        messages=chat_messages,
+                        tools=tools,
+                        agent=agent,
+                        assistant_msg=assistant_msg,
                     )
 
-                # Detect empty response: some models (e.g. MiniMax) occasionally
-                # return 0 chunks with finish_reason=stop after tool execution,
-                # producing no text and no tool calls. Treat this as a transient
-                # failure and retry with exponential backoff instead of silently
-                # terminating the agent.
-                if (result.action == "stop" and not result.error
-                        and not result.content and not result.tool_calls):
-                    empty_attempt += 1
-                    if empty_attempt <= MAX_EMPTY_RETRIES:
-                        # Record usage for this empty attempt even though we are
-                        # about to retry – the provider may have already charged
-                        # for the tokens returned in this response.
-                        await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                        delay_ms = SessionRetry.delay(empty_attempt)
-                        next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
-                        log.warn("runner.step.empty_response_retry", {
-                            "attempt": empty_attempt,
-                            "delay_ms": delay_ms,
-                            "session_id": self.session.id,
-                            "model": self.model_id,
-                        })
-                        SessionStatus.set(
-                            self.session.id,
-                            SessionStatusRetry(
-                                attempt=empty_attempt,
-                                message="Model returned empty response, retrying...",
-                                next=next_retry_time,
-                            )
-                        )
-                        await SessionRetry.sleep(delay_ms, self._abort)
-                        continue
-                    else:
-                        # All retries exhausted — surface a clear error so the
-                        # user knows the model is incompatible, rather than
-                        # silently hanging or showing a blank response.
-                        empty_error_msg = (
-                            f"Model '{self.model_id}' returned an empty response "
-                            f"after {MAX_EMPTY_RETRIES} retries."
-                        )
-                        log.error("runner.step.empty_response_exhausted", {
-                            "session_id": self.session.id,
-                            "model": self.model_id,
-                            "attempts": empty_attempt,
-                        })
-                        empty_error_dict = {
-                            "name": "EmptyResponseError",
-                            "message": empty_error_msg,
-                            "data": {
-                                "message": empty_error_msg,
-                                "model": self.model_id,
-                                "attempts": empty_attempt,
-                            },
-                        }
-                        if self.callbacks.on_error:
-                            await self.callbacks.on_error(empty_error_msg)
+                    if getattr(self, "_llm_call_aborted", False):
                         await Message.update(
                             self.session.id,
                             assistant_msg.id,
-                            error=empty_error_dict,
+                            error=self._build_message_aborted_error(),
                             finish="error",
                         )
-                        return StepResult(action="stop", error=empty_error_msg)
-
-                tool_loop_guard = self._update_tool_loop_guard(
-                    result,
-                    last_user_id=last_user.id,
-                )
-                if tool_loop_guard.get("action") == "halt":
-                    halt_message = self._build_tool_loop_halt_message(
-                        tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
-                        count=int(tool_loop_guard.get("count", 0) or 0),
-                    )
-                    log.warn("runner.tool_loop_guard_halt", {
-                        "tool_name": tool_loop_guard.get("tool_name"),
-                        "reason": tool_loop_guard.get("reason"),
-                        "count": tool_loop_guard.get("count"),
-                        "step": self._step,
-                    })
-                    await Message.update(
-                        self.session.id,
-                        assistant_msg.id,
-                        content=halt_message,
-                    )
-                    result = StepResult(
-                        action="stop",
-                        content=halt_message,
-                        usage=result.usage,
-                    )
-
-                # Success! Update finish reason
-                finish = "tool-calls" if result.tool_calls else "stop"
-                await Message.update(self.session.id, assistant_msg.id, finish=finish)
-                await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                
-                # Note: Compaction check is now done in the main loop (run()) before processing step
-                # This matches Flocks's logic: check lastFinished.tokens at loop start
-
-                return result
-                
-            except Exception as e:
-                error_attempt += 1
-                log.error("runner.step.error", {
-                    "error": str(e),
-                    "attempt": error_attempt,
-                })
-                
-                # Convert exception to error dict for retry check
-                error_dict = self._exception_to_error_dict(e)
-                
-                # Check if retryable
-                retry_message = SessionRetry.retryable(error_dict)
-
-                if retry_message is not None and error_attempt <= MAX_ERROR_RETRIES:
-                    # Error is retryable and we have budget left
-                    delay_ms = SessionRetry.delay(error_attempt, error_dict)
-                    # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
-                    # headers-present but retry-after-absent 500 response cannot
-                    # cause multi-minute sleeps that block the loop.
-                    from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
-                    delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
-                    next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
-                    
-                    log.info("runner.step.retry", {
-                        "attempt": error_attempt,
-                        "delay_ms": delay_ms,
-                        "reason": retry_message,
-                        "max_retries": MAX_ERROR_RETRIES,
-                    })
-                    
-                    # Set retry status
-                    SessionStatus.set(
-                        self.session.id,
-                        SessionStatusRetry(
-                            attempt=error_attempt,
-                            message=retry_message,
-                            next=next_retry_time,
+                        await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                        step_result_for_snapshot = StepResult(
+                            action="stop",
+                            content=result.content,
+                            usage=result.usage,
                         )
+                        return step_result_for_snapshot
+
+                    # Detect empty response: some models (e.g. MiniMax) occasionally
+                    # return 0 chunks with finish_reason=stop after tool execution,
+                    # producing no text and no tool calls. Treat this as a transient
+                    # failure and retry with exponential backoff instead of silently
+                    # terminating the agent.
+                    if (result.action == "stop" and not result.error
+                            and not result.content and not result.tool_calls):
+                        empty_attempt += 1
+                        if empty_attempt <= MAX_EMPTY_RETRIES:
+                            # Record usage for this empty attempt even though we are
+                            # about to retry – the provider may have already charged
+                            # for the tokens returned in this response.
+                            await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                            delay_ms = SessionRetry.delay(empty_attempt)
+                            next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
+                            log.warn("runner.step.empty_response_retry", {
+                                "attempt": empty_attempt,
+                                "delay_ms": delay_ms,
+                                "session_id": self.session.id,
+                                "model": self.model_id,
+                            })
+                            SessionStatus.set(
+                                self.session.id,
+                                SessionStatusRetry(
+                                    attempt=empty_attempt,
+                                    message="Model returned empty response, retrying...",
+                                    next=next_retry_time,
+                                )
+                            )
+                            await SessionRetry.sleep(delay_ms, self._abort)
+                            continue
+                        else:
+                            # All retries exhausted — surface a clear error so the
+                            # user knows the model is incompatible, rather than
+                            # silently hanging or showing a blank response.
+                            empty_error_msg = (
+                                f"Model '{self.model_id}' returned an empty response "
+                                f"after {MAX_EMPTY_RETRIES} retries."
+                            )
+                            log.error("runner.step.empty_response_exhausted", {
+                                "session_id": self.session.id,
+                                "model": self.model_id,
+                                "attempts": empty_attempt,
+                            })
+                            empty_error_dict = {
+                                "name": "EmptyResponseError",
+                                "message": empty_error_msg,
+                                "data": {
+                                    "message": empty_error_msg,
+                                    "model": self.model_id,
+                                    "attempts": empty_attempt,
+                                },
+                            }
+                            if self.callbacks.on_error:
+                                await self.callbacks.on_error(empty_error_msg)
+                            await Message.update(
+                                self.session.id,
+                                assistant_msg.id,
+                                error=empty_error_dict,
+                                finish="error",
+                            )
+                            step_result_for_snapshot = StepResult(action="stop", error=empty_error_msg)
+                            return step_result_for_snapshot
+
+                    tool_loop_guard = self._update_tool_loop_guard(
+                        result,
+                        last_user_id=last_user.id,
                     )
+                    if tool_loop_guard.get("action") == "halt":
+                        halt_message = self._build_tool_loop_halt_message(
+                            tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
+                            count=int(tool_loop_guard.get("count", 0) or 0),
+                        )
+                        log.warn("runner.tool_loop_guard_halt", {
+                            "tool_name": tool_loop_guard.get("tool_name"),
+                            "reason": tool_loop_guard.get("reason"),
+                            "count": tool_loop_guard.get("count"),
+                            "step": self._step,
+                        })
+                        await Message.update(
+                            self.session.id,
+                            assistant_msg.id,
+                            content=halt_message,
+                        )
+                        result = StepResult(
+                            action="stop",
+                            content=halt_message,
+                            usage=result.usage,
+                        )
+
+                    # Success! Update finish reason
+                    finish = "tool-calls" if result.tool_calls else "stop"
+                    await Message.update(self.session.id, assistant_msg.id, finish=finish)
+                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+
+                    # Note: Compaction check is now done in the main loop (run()) before processing step
+                    # This matches Flocks's logic: check lastFinished.tokens at loop start
+
+                    step_result_for_snapshot = result
+                    return result
                     
-                    # Wait before retry
-                    await SessionRetry.sleep(delay_ms, self._abort)
+                except Exception as e:
+                    error_attempt += 1
+                    log.error("runner.step.error", {
+                        "error": str(e),
+                        "attempt": error_attempt,
+                    })
                     
-                    # Continue to next retry attempt
-                    continue
-                else:
-                    # Error is not retryable, or retry budget exhausted
-                    if retry_message is not None:
-                        log.error("runner.step.max_retries_exceeded", {
-                            "error": str(e),
+                    # Convert exception to error dict for retry check
+                    error_dict = self._exception_to_error_dict(e)
+                    
+                    # Check if retryable
+                    retry_message = SessionRetry.retryable(error_dict)
+
+                    if retry_message is not None and error_attempt <= MAX_ERROR_RETRIES:
+                        # Error is retryable and we have budget left
+                        delay_ms = SessionRetry.delay(error_attempt, error_dict)
+                        # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
+                        # headers-present but retry-after-absent 500 response cannot
+                        # cause multi-minute sleeps that block the loop.
+                        from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+                        delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
+                        next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
+
+                        log.info("runner.step.retry", {
                             "attempt": error_attempt,
+                            "delay_ms": delay_ms,
+                            "reason": retry_message,
                             "max_retries": MAX_ERROR_RETRIES,
                         })
+
+                        # Set retry status
+                        SessionStatus.set(
+                            self.session.id,
+                            SessionStatusRetry(
+                                attempt=error_attempt,
+                                message=retry_message,
+                                next=next_retry_time,
+                            )
+                        )
+
+                        # Wait before retry
+                        await SessionRetry.sleep(delay_ms, self._abort)
+
+                        # Continue to next retry attempt
+                        continue
                     else:
-                        log.error("runner.step.not_retryable", {"error": str(e)})
+                        # Error is not retryable, or retry budget exhausted
+                        if retry_message is not None:
+                            log.error("runner.step.max_retries_exceeded", {
+                                "error": str(e),
+                                "attempt": error_attempt,
+                                "max_retries": MAX_ERROR_RETRIES,
+                            })
+                        else:
+                            log.error("runner.step.not_retryable", {"error": str(e)})
 
-                    final_error_message = str(e)
-                    if SessionRetry.is_connection_error(error_dict):
-                        final_error_message = CONNECTION_ERROR_DISPLAY_MESSAGE
-                        error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
+                        final_error_message = str(e)
+                        if SessionRetry.is_connection_error(error_dict):
+                            final_error_message = CONNECTION_ERROR_DISPLAY_MESSAGE
+                            error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
-                    if self.callbacks.on_error:
-                        await self.callbacks.on_error(final_error_message)
-                    
-                    # Update assistant message with error (must be dict, not string)
-                    await Message.update(
-                        self.session.id,
-                        assistant_msg.id,
-                        error=error_dict,
-                        finish="error",
-                    )
-                    
-                    return StepResult(action="stop", error=final_error_message)
-        
-        # Aborted
-        return StepResult(action="stop", error="Aborted")
+                        if self.callbacks.on_error:
+                            await self.callbacks.on_error(final_error_message)
+
+                        # Update assistant message with error (must be dict, not string)
+                        await Message.update(
+                            self.session.id,
+                            assistant_msg.id,
+                            error=error_dict,
+                            finish="error",
+                        )
+
+                        step_result_for_snapshot = StepResult(action="stop", error=final_error_message)
+                        return step_result_for_snapshot
+
+            # Aborted
+            step_result_for_snapshot = StepResult(action="stop", error="Aborted")
+            return step_result_for_snapshot
+        finally:
+            await self._record_step_finish_snapshot(
+                assistant_msg,
+                step_start_snapshot,
+                step_result_for_snapshot,
+            )
 
     @staticmethod
     def _build_tokens_update(stream_usage: Optional[Dict[str, int]]) -> Optional[Dict[str, Any]]:

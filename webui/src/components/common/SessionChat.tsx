@@ -84,6 +84,12 @@ export interface PromptDisplayOptions {
   displayText?: string;
 }
 
+interface RewindTurnCandidate {
+  index: number;
+  message: Message;
+  preview: string;
+}
+
 const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
 
 export function buildInstructionDisplayText(label: string): string {
@@ -1082,6 +1088,17 @@ function getQueuedPromptText(item: QueuedPrompt): string {
   return typeof textPart?.text === 'string' ? textPart.text : '';
 }
 
+function getUserMessagePreview(message: Message, maxChars = 120): string {
+  const text = (message.parts || [])
+    .filter((part) => part.type === 'text' && !part.synthetic)
+    .map(getMessagePartDisplayText)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const preview = text || message.id;
+  return preview.length > maxChars ? `${preview.slice(0, maxChars - 1).trim()}…` : preview;
+}
+
 interface QueuedPromptPanelProps {
   items: QueuedPrompt[];
   expanded: boolean;
@@ -1403,6 +1420,8 @@ export default function SessionChat({
   const [showCommandDropdown, setShowCommandDropdown] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [showRewindPicker, setShowRewindPicker] = useState(false);
+  const [rewindingMessageId, setRewindingMessageId] = useState<string | null>(null);
   const commandsLoadedRef = useRef(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
@@ -1468,6 +1487,17 @@ export default function SessionChat({
     () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
     [contextUsageMessages, input, contextUsageSnapshot],
   );
+  const rewindCandidates = useMemo<RewindTurnCandidate[]>(() => (
+    messages
+      .filter((message) => message.role === 'user')
+      .slice()
+      .reverse()
+      .map((message, index) => ({
+        index: index + 1,
+        message,
+        preview: getUserMessagePreview(message),
+      }))
+  ), [messages]);
   const estimatedContextTokens = contextUsageBreakdown.usedTokens;
   const resolvedContextWindowTokens = contextUsageSnapshot?.contextWindow && contextUsageSnapshot.contextWindow > 0
     ? contextUsageSnapshot.contextWindow
@@ -2213,6 +2243,21 @@ export default function SessionChat({
     }
   };
 
+  const handleRewindTurnSelect = async (candidate: RewindTurnCandidate) => {
+    if (!sessionId) return;
+    setRewindingMessageId(candidate.message.id);
+    try {
+      await sessionApi.rewind(sessionId, { messageID: candidate.message.id });
+      setShowRewindPicker(false);
+      await refetch();
+      toast.success(`Rewound to turn ${candidate.index}`);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || 'Rewind failed');
+    } finally {
+      setRewindingMessageId(null);
+    }
+  };
+
   /** Core send logic */
   const sendText = async (
     text: string,
@@ -2369,6 +2414,14 @@ export default function SessionChat({
       if (onCreateNewSession) {
         await onCreateNewSession();
       }
+      return;
+    }
+    if ((parsed?.command === 'rewind' || parsed?.command === 'rollback') && !parsed.args.trim()) {
+      if (!sessionId) {
+        setInput(rawText);
+        return;
+      }
+      setShowRewindPicker(true);
       return;
     }
 
@@ -2809,7 +2862,7 @@ export default function SessionChat({
     : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
 
   return (
-    <div className={`flex flex-col min-h-0 ${className}`}>
+    <div className={`relative flex flex-col min-h-0 ${className}`}>
       {/* Messages area */}
       <div
         ref={scrollContainerRef}
@@ -3314,6 +3367,50 @@ export default function SessionChat({
           alt={composerPreview.alt}
           onClose={() => setComposerPreview(null)}
         />
+      )}
+      {showRewindPicker && (
+        <div className="absolute inset-0 z-30 flex items-end justify-center bg-black/20 p-4 sm:items-center">
+          <div className="w-full max-w-2xl overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-zinc-900">Rewind to turn</div>
+                <div className="text-xs text-zinc-500">Choose the user turn to restore the conversation and tracked file changes to.</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRewindPicker(false)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"
+                aria-label="Close rewind picker"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto p-2">
+              {rewindCandidates.length === 0 ? (
+                <div className="px-3 py-8 text-center text-sm text-zinc-500">No user turns are available to rewind.</div>
+              ) : (
+                rewindCandidates.map((candidate) => (
+                  <button
+                    key={candidate.message.id}
+                    type="button"
+                    disabled={Boolean(rewindingMessageId)}
+                    onClick={() => { void handleRewindTurnSelect(candidate); }}
+                    className="flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <span className="mt-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-zinc-100 px-2 text-xs font-semibold text-zinc-600">
+                      {candidate.index}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-zinc-900">{candidate.preview}</span>
+                      <span className="mt-0.5 block text-xs text-zinc-500">{formatSmartTime(candidate.message.timestamp)}</span>
+                    </span>
+                    {rewindingMessageId === candidate.message.id && <Loader2 className="mt-1 h-4 w-4 animate-spin text-zinc-400" />}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

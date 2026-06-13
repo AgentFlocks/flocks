@@ -998,6 +998,13 @@ class RevertRequest(BaseModel):
     partID: Optional[str] = Field(None, description="Part ID for partial revert")
 
 
+class RewindRequest(BaseModel):
+    """Request to rewind a session by conversation turn"""
+
+    count: int = Field(1, ge=1, description="Number of user turns to rewind")
+    messageID: Optional[str] = Field(None, description="Explicit user message ID to rewind to")
+
+
 @router.post(
     "/{sessionID}/revert",
     response_model=SessionResponse,
@@ -1025,6 +1032,50 @@ async def revert_session(sessionID: str, request: RevertRequest, http_request: R
     
     log.info("session.reverted", {"session_id": sessionID, "message_id": request.messageID})
     return _session_to_response(updated)
+
+
+@router.post(
+    "/{sessionID}/rewind",
+    response_model=SessionResponse,
+    summary="Rewind session",
+    description="Rewind the conversation to a previous user turn and restore file changes",
+)
+@router.post(
+    "/{sessionID}/rollback",
+    response_model=SessionResponse,
+    summary="Rollback session",
+    description="Alias for rewinding the conversation to a previous user turn",
+)
+async def rewind_session(sessionID: str, request: RewindRequest, http_request: Request) -> SessionResponse:
+    """Rewind session by user turn."""
+    from flocks.session.lifecycle.rewind import SessionRewind
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found"
+        )
+    _require_session_write_access(session, current_user)
+
+    try:
+        result = await SessionRewind.rewind(
+            session_id=sessionID,
+            count=request.count,
+            message_id=request.messageID,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    log.info("session.rewound", {
+        "session_id": sessionID,
+        "message_id": result.target_message.id,
+        "count": request.count,
+    })
+    return _session_to_response(result.session)
 
 
 @router.post(
@@ -3301,6 +3352,58 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         await _clear_session_history(sessionID)
 
     async def _run_session_control(output_event, parsed) -> bool:
+        if parsed.canonical_name == "rewind":
+            from flocks.session.lifecycle.rewind import SessionRewind
+
+            raw_count = parsed.args.strip()
+            if not raw_count:
+                try:
+                    candidates = await SessionRewind.candidates(sessionID)
+                except ValueError as exc:
+                    await _publish_direct_response(output_event, f"回滚失败：{exc}")
+                    return True
+                if not candidates:
+                    await _publish_direct_response(output_event, "没有可回滚的用户回合。")
+                    return True
+                lines = [
+                    "选择要回滚到的对话回合：",
+                    *[
+                        f"{candidate.index}. {candidate.preview}"
+                        for candidate in candidates[:10]
+                    ],
+                    "",
+                    "在当前入口请输入 `/rewind <序号>`，例如 `/rewind 2`。",
+                ]
+                await _publish_direct_response(output_event, "\n".join(lines))
+                return True
+
+            try:
+                count = int(raw_count)
+                result = await SessionRewind.rewind(sessionID, count=count)
+            except ValueError as exc:
+                await _publish_direct_response(output_event, f"回滚失败：{exc}")
+                return True
+            except RuntimeError as exc:
+                await _publish_direct_response(output_event, f"回滚失败：{exc}")
+                return True
+
+            await publish_event("session.updated", {
+                "id": result.session.id,
+                "revert": (
+                    result.session.revert.model_dump(by_alias=True, exclude_none=True)
+                    if result.session.revert
+                    else None
+                ),
+            })
+            await _publish_context_usage_update(
+                publish_event,
+                sessionID,
+                session=result.session,
+                provider_id="builtin",
+                model_id="command",
+            )
+            return True
+
         if parsed.canonical_name != "compact":
             return False
 

@@ -16,7 +16,9 @@ import pytest
 from pathlib import Path
 
 from flocks.snapshot import Snapshot, SnapshotPatch
-from flocks.session import Session, SessionRevertManager, RevertInput
+from flocks.session import Message, MessageRole, PatchPart, Session, SessionRevertManager, RevertInput
+from flocks.session.lifecycle.rewind import SessionRewind
+from flocks.session.runner import SessionRunner, StepResult
 from flocks.config.config import Config
 
 
@@ -170,7 +172,7 @@ class TestE2ESessionRevert:
     def setup_method(self):
         """Set up test environment"""
         self.test_dir = tempfile.mkdtemp(prefix="flocks_e2e_session_test_")
-        self.project_id = "e2e_session_project"
+        self.project_id = f"e2e_session_project_{Path(self.test_dir).name}"
         os.system(f"cd {self.test_dir} && git init -q")
         
         # Create initial files
@@ -228,6 +230,168 @@ class TestE2ESessionRevert:
         updated_session = await Session.get(self.project_id, session.id)
         assert updated_session.revert is not None
         assert updated_session.revert.snapshot == hash
+
+    @pytest.mark.asyncio
+    async def test_revert_restores_files_from_typed_patch_part(self):
+        """Test session revert recognizes typed PatchPart records."""
+        session = await Session.create(
+            project_id=self.project_id,
+            directory=self.test_dir,
+            title="Typed Patch Revert",
+        )
+        user = await Message.create(
+            session_id=session.id,
+            role=MessageRole.USER,
+            content="Modify code.py",
+        )
+        start_hash = await Snapshot.track(self.project_id, self.test_dir)
+
+        assistant = await Message.create(
+            session_id=session.id,
+            role=MessageRole.ASSISTANT,
+            content="Updated code.py",
+            parentID=user.id,
+            modelID="test-model",
+            providerID="test-provider",
+        )
+        self._create_file("code.py", "# Modified by assistant")
+        self._create_file("new_file.py", "# Added by assistant")
+        patch = await Snapshot.patch(self.project_id, self.test_dir, start_hash)
+        await Message.store_part(
+            session.id,
+            assistant.id,
+            PatchPart(
+                sessionID=session.id,
+                messageID=assistant.id,
+                hash=start_hash,
+                files=patch.files,
+            ),
+        )
+
+        await SessionRevertManager.revert(
+            project_id=self.project_id,
+            input=RevertInput(sessionID=session.id, messageID=user.id),
+            worktree=self.test_dir,
+        )
+
+        assert self._read_file("code.py") == "# Original code"
+        assert not os.path.exists(os.path.join(self.test_dir, "new_file.py"))
+
+    @pytest.mark.asyncio
+    async def test_rewind_restores_files_from_latest_user_turn(self):
+        """Test conversation rewind applies revert and restores files."""
+        session = await Session.create(
+            project_id=self.project_id,
+            directory=self.test_dir,
+            title="Conversation Rewind",
+        )
+        user = await Message.create(
+            session_id=session.id,
+            role=MessageRole.USER,
+            content="Modify code.py",
+        )
+        start_hash = await Snapshot.track(self.project_id, self.test_dir)
+
+        assistant = await Message.create(
+            session_id=session.id,
+            role=MessageRole.ASSISTANT,
+            content="Updated code.py",
+            parentID=user.id,
+            modelID="test-model",
+            providerID="test-provider",
+        )
+        self._create_file("code.py", "# Modified by assistant")
+        patch = await Snapshot.patch(self.project_id, self.test_dir, start_hash)
+        await Message.store_part(
+            session.id,
+            assistant.id,
+            PatchPart(
+                sessionID=session.id,
+                messageID=assistant.id,
+                hash=start_hash,
+                files=patch.files,
+            ),
+        )
+
+        result = await SessionRewind.rewind(session.id)
+
+        assert result.target_message.id == user.id
+        assert result.session.revert is not None
+        assert result.session.revert.message_id == user.id
+        assert self._read_file("code.py") == "# Original code"
+
+    @pytest.mark.asyncio
+    async def test_rewind_candidates_list_user_turns_newest_first(self):
+        """Test bare /rewind can present selectable user-turn candidates."""
+        session = await Session.create(
+            project_id=self.project_id,
+            directory=self.test_dir,
+            title="Conversation Rewind Candidates",
+        )
+        first = await Message.create(
+            session_id=session.id,
+            role=MessageRole.USER,
+            content="First change",
+        )
+        await Message.create(
+            session_id=session.id,
+            role=MessageRole.ASSISTANT,
+            content="First answer",
+            parentID=first.id,
+            modelID="test-model",
+            providerID="test-provider",
+        )
+        second = await Message.create(
+            session_id=session.id,
+            role=MessageRole.USER,
+            content="Second change",
+        )
+
+        candidates = await SessionRewind.candidates(session.id)
+
+        assert [candidate.message.id for candidate in candidates] == [second.id, first.id]
+        assert candidates[0].index == 1
+        assert candidates[0].preview == "Second change"
+
+    @pytest.mark.asyncio
+    async def test_runner_records_patch_parts_for_rewind(self):
+        """Test runner records snapshot and patch parts for a step."""
+        session = await Session.create(
+            project_id=self.project_id,
+            directory=self.test_dir,
+            title="Runner Patch Recording",
+        )
+        user = await Message.create(
+            session_id=session.id,
+            role=MessageRole.USER,
+            content="Modify code.py",
+        )
+        assistant = await Message.create(
+            session_id=session.id,
+            role=MessageRole.ASSISTANT,
+            content="Updated code.py",
+            parentID=user.id,
+            modelID="test-model",
+            providerID="test-provider",
+        )
+        runner = SessionRunner(session)
+
+        start_snapshot = await runner._record_step_start_snapshot(assistant)
+        self._create_file("code.py", "# Modified by runner")
+        await runner._record_step_finish_snapshot(
+            assistant,
+            start_snapshot,
+            StepResult(action="stop", content="done"),
+        )
+
+        parts = await Message.parts(assistant.id, session.id)
+        part_types = [part.type for part in parts]
+        patch_part = next(part for part in parts if part.type == "patch")
+
+        assert "step-start" in part_types
+        assert "step-finish" in part_types
+        assert "patch" in part_types
+        assert os.path.join(self.test_dir, "code.py") in patch_part.files
 
 
 class TestCLISnapshotCommands:

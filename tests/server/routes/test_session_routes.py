@@ -932,6 +932,64 @@ class TestSessionMessagesRemaining:
         assert captured_runtime["provider_id"] == "openai"
         assert captured_runtime["model_id"] == "gpt-4.1"
 
+    @pytest.mark.asyncio
+    async def test_rewind_route_uses_conversation_rewind_helper(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        session = await Session.get_by_id(session_id)
+        rewind_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                session=session,
+                target_message=SimpleNamespace(id="msg_target"),
+            )
+        )
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.rewind.SessionRewind.rewind",
+            rewind_mock,
+        )
+
+        resp = await client.post(f"/api/session/{session_id}/rewind", json={"count": 2})
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["id"] == session_id
+        rewind_mock.assert_awaited_once_with(
+            session_id=session_id,
+            count=2,
+            message_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rollback_route_alias_uses_conversation_rewind_helper(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        session = await Session.get_by_id(session_id)
+        rewind_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                session=session,
+                target_message=SimpleNamespace(id="msg_target"),
+            )
+        )
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.rewind.SessionRewind.rewind",
+            rewind_mock,
+        )
+
+        resp = await client.post(f"/api/session/{session_id}/rollback", json={})
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["id"] == session_id
+        rewind_mock.assert_awaited_once_with(
+            session_id=session_id,
+            count=1,
+            message_id=None,
+        )
+
 
 # ===========================================================================
 # Utility endpoints

@@ -236,6 +236,11 @@ export const sessionApi = {
     return response.data;
   },
 
+  rewind: async (sessionId: string, data: { count?: number; messageID?: string } = {}) => {
+    const response = await client.post(`/api/session/${sessionId}/rewind`, data);
+    return response.data;
+  },
+
   /**
    * 获取会话统计
    */

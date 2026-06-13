@@ -53,6 +53,7 @@ import { TodoItem } from "../../component/todo-item"
 import { DialogMessage } from "./dialog-message"
 import type { PromptInfo } from "../../component/prompt/history"
 import { DialogConfirm } from "@tui/ui/dialog-confirm"
+import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
@@ -325,6 +326,49 @@ export function Session() {
     }, 50)
   }
 
+  const promptFromMessage = (messageID: string): PromptInfo => {
+    const parts = sync.data.part[messageID] ?? []
+    return parts.reduce(
+      (agg, part) => {
+        if (part.type === "text") {
+          if (!part.synthetic) agg.input += part.text
+        }
+        if (part.type === "file") agg.parts.push(part)
+        return agg
+      },
+      { input: "", parts: [] as PromptInfo["parts"] },
+    )
+  }
+
+  const rewindOptions = (): DialogSelectOption<string>[] => {
+    const revert = session()?.revert?.messageID
+    return messages()
+      .filter((message) => (!revert || message.id < revert) && message.role === "user")
+      .map((message) => {
+        const textPart = (sync.data.part[message.id] ?? []).find(
+          (part) => part.type === "text" && !part.synthetic && !part.ignored,
+        ) as TextPart | undefined
+        const title = (textPart?.text || message.id).replace(/\n/g, " ")
+        return {
+          title,
+          value: message.id,
+          footer: Locale.time(message.time.created),
+          onSelect: async (dialog) => {
+            const status = sync.data.session_status?.[route.sessionID]
+            if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+            await sdk.client.session.revert({
+              sessionID: route.sessionID,
+              messageID: message.id,
+            })
+            prompt.set(promptFromMessage(message.id))
+            toBottom()
+            dialog.clear()
+          },
+        }
+      })
+      .reverse()
+  }
+
   const local = useLocal()
 
   function moveChild(direction: number) {
@@ -468,6 +512,23 @@ export function Session() {
           .then(() => toast.show({ message: "Session unshared successfully", variant: "success" }))
           .catch(() => toast.show({ message: "Failed to unshare session", variant: "error" }))
         dialog.clear()
+      },
+    },
+    {
+      title: "Rewind to message",
+      value: "session.rewind",
+      category: "Session",
+      slash: {
+        name: "rewind",
+        aliases: ["rollback"],
+      },
+      onSelect: (dialog) => {
+        dialog.replace(() => (
+          <DialogSelect
+            title="Rewind to message"
+            options={rewindOptions()}
+          />
+        ))
       },
     },
     {

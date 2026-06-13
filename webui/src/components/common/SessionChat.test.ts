@@ -41,6 +41,7 @@ const sessionApiRunQueuedPromptNowMock = vi.fn();
 const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
+const sessionApiRewindMock = vi.fn();
 const sessionApiGetContextUsageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
@@ -161,6 +162,7 @@ vi.mock('@/api/session', () => ({
     updateMessagePart: (...args: unknown[]) => sessionApiUpdateMessagePartMock(...args),
     resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
     regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
+    rewind: (...args: unknown[]) => sessionApiRewindMock(...args),
     getContextUsage: (...args: unknown[]) => sessionApiGetContextUsageMock(...args),
   },
 }));
@@ -193,6 +195,7 @@ beforeEach(() => {
   sessionApiUpdateMessagePartMock.mockResolvedValue({});
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
+  sessionApiRewindMock.mockResolvedValue({});
   sessionApiGetContextUsageMock.mockResolvedValue({
     sessionID: 'sess-1',
     usedTokens: 0,
@@ -881,6 +884,53 @@ describe('SessionChat agent mentions', () => {
         }),
       );
     });
+  });
+
+  it('opens a turn picker for bare /rewind instead of sending a command', async () => {
+    const user = userEvent.setup();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          timestamp: 1000,
+          parts: [{ id: 'user-1-part', type: 'text', text: 'first change' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          parentID: 'user-1',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'done' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'user-2',
+          role: 'user',
+          timestamp: 2000,
+          parts: [{ id: 'user-2-part', type: 'text', text: 'second change' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+      markMessageStopped: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByRole('textbox'), '/rewind{enter}');
+
+    expect(await screen.findByText('Rewind to turn')).toBeInTheDocument();
+    expect(screen.getAllByText('second change').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('first change').length).toBeGreaterThanOrEqual(2);
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/command',
+      expect.anything(),
+    );
   });
 });
 

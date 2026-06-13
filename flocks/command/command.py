@@ -244,6 +244,15 @@ class Command:
                 channel_safe=True,
             ),
             CommandDef(
+                name="rewind",
+                description="Choose a conversation turn to rewind to and restore file changes",
+                template="Choose a conversation turn to rewind to.",
+                execution_kind="session_control",
+                allow_attachments=False,
+                aliases=("rollback", "undo"),
+                visible_surfaces=("webui", "tui", "acp", "cli"),
+            ),
+            CommandDef(
                 name="clear",
                 description="Clear the current session history",
                 template="Clear all messages in the current session.",

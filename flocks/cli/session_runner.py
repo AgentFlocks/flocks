@@ -355,6 +355,43 @@ class CLISessionRunner:
                 await self._clear_screen()
                 self.console.print("[dim]Conversation history cleared.[/dim]")
 
+            async def _run_session_control(_event, parsed) -> bool:
+                if parsed.canonical_name != "rewind":
+                    return False
+
+                from flocks.session.lifecycle.rewind import SessionRewind
+
+                raw_count = parsed.args.strip()
+                try:
+                    if raw_count:
+                        count = int(raw_count)
+                    else:
+                        candidates = await SessionRewind.candidates(self._session.id)
+                        if not candidates:
+                            self.console.print("[yellow]No user turns are available to rewind.[/yellow]")
+                            return True
+                        self.console.print("[bold]Select a turn to rewind to:[/bold]")
+                        for candidate in candidates[:20]:
+                            self.console.print(f"  {candidate.index}. {candidate.preview}")
+                        choice = Prompt.ask(
+                            "Turn number",
+                            choices=[str(candidate.index) for candidate in candidates[:20]],
+                            default="1",
+                        )
+                        count = int(choice)
+
+                    result = await SessionRewind.rewind(self._session.id, count=count)
+                except (RuntimeError, ValueError) as exc:
+                    self.console.print(f"[red]Rewind failed:[/red] {exc}")
+                    return True
+
+                self._session = result.session
+                Session.set_current(self._session)
+                self.console.print(
+                    f"[dim]Rewound to message {result.target_message.id} and restored tracked file changes.[/dim]"
+                )
+                return True
+
             handled = await dispatch_user_input(
                 event,
                 CliOutputSink(
@@ -372,6 +409,7 @@ class CLISessionRunner:
                     ),
                     clear_screen=self._clear_screen,
                     clear_history=_clear_history,
+                    session_control=_run_session_control,
                 ),
             )
             if handled.handled:
