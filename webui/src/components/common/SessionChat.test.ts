@@ -573,6 +573,19 @@ describe('SessionChat instruction display text', () => {
   });
 });
 
+describe('SessionChat composer controls', () => {
+  it('keeps the disabled send button visible in dark mode', () => {
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const disabledButtons = Array.from(container.querySelectorAll('button:disabled'));
+    const sendButton = disabledButtons.find((button) => button.querySelector('svg'));
+
+    expect(sendButton?.className).toContain('dark:bg-[#46515e]');
+    expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
+    expect(sendButton?.className).toContain('dark:border-[#5a6573]');
+  });
+});
+
 describe('shouldRenderMessage', () => {
   it('keeps active empty assistant messages eligible for the thinking indicator', () => {
     expect(shouldRenderMessage(makeMessage({
