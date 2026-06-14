@@ -1269,9 +1269,22 @@ class SessionLoop:
                             "error": str(exc),
                         })
                         last_response = getattr(last_message, "content", "") or ""
+                    pending_user_input = False
+                    try:
+                        from flocks.server.routes.question import has_pending_questions
+
+                        pending_user_input = has_pending_questions(ctx.session.id)
+                    except Exception as exc:
+                        log.warn("goal.pending_question_check.error", {
+                            "session_id": ctx.session.id,
+                            "error": str(exc),
+                        })
                     goal_decision = await GoalManager.evaluate_after_turn(
                         ctx.session.id,
                         str(last_response or ""),
+                        pending_user_input=pending_user_input,
+                        provider_id=ctx.provider_id,
+                        model_id=ctx.model_id,
                     )
                     if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
                         await cls._publish_runtime_event(callbacks, "session.goal.updated", {
@@ -1281,6 +1294,10 @@ class SessionLoop:
                             "reason": goal_decision.reason,
                         })
                     if goal_decision.should_continue and goal_decision.continuation_prompt:
+                        # Hermes-style goal continuation: append a plain
+                        # user-role prompt to history. Keep metadata for
+                        # observability, but do not mark the part synthetic so
+                        # it remains a normal conversation turn.
                         goal_user = await Message.create(
                             session_id=ctx.session.id,
                             role=MessageRole.USER,
@@ -1291,7 +1308,6 @@ class SessionLoop:
                                 "modelID": ctx.model_id,
                             },
                             provider=last_user.provider if hasattr(last_user, "provider") else ctx.provider_id,
-                            synthetic=True,
                             part_metadata={
                                 "goalContinuation": True,
                                 "goalVerdict": goal_decision.verdict,

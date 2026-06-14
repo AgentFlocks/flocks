@@ -373,14 +373,14 @@ class TestTurnLifecycle:
         )
         user = self._make_msg("msg_001", "user")
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
-        synthetic = self._make_msg("msg_003", "user")
+        goal_user = self._make_msg("msg_003", "user")
         assistant_after_goal = self._make_msg("msg_004", "assistant", finish="stop")
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
                 [user, assistant],
-                [user, assistant, synthetic],
-                [user, assistant, synthetic, assistant_after_goal],
+                [user, assistant, goal_user],
+                [user, assistant, goal_user, assistant_after_goal],
             ])
         )
         event_callback = AsyncMock()
@@ -407,7 +407,7 @@ class TestTurnLifecycle:
             MagicMock(return_value="still working"),
         ), patch(
             "flocks.session.session_loop.Message.create",
-            AsyncMock(return_value=synthetic),
+            AsyncMock(return_value=goal_user),
         ) as create_message, patch(
             "flocks.session.session_loop.GoalManager.evaluate_after_turn",
             AsyncMock(side_effect=goal_decisions),
@@ -420,6 +420,7 @@ class TestTurnLifecycle:
         assert result.action == "stop"
         create_message.assert_awaited_once()
         assert create_message.await_args.kwargs["content"] == "continue toward goal"
+        assert "synthetic" not in create_message.await_args.kwargs
         assert create_message.await_args.kwargs["part_metadata"]["goalContinuation"] is True
         event_names = [call.args[0] for call in event_callback.await_args_list]
         assert event_names == [
@@ -430,7 +431,7 @@ class TestTurnLifecycle:
         ]
         continued_payload = event_callback.await_args_list[1].args[1]
         assert continued_payload["continue_reason"] == "goal"
-        assert continued_payload["goalMessageID"] == synthetic.id
+        assert continued_payload["goalMessageID"] == goal_user.id
 
     @pytest.mark.asyncio
     async def test_run_loop_waits_for_user_input_after_goal_clarification(self):
@@ -485,6 +486,67 @@ class TestTurnLifecycle:
 
         assert result.action == "stop"
         create_message.assert_not_awaited()
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started", "turn.stopped"]
+
+    @pytest.mark.asyncio
+    async def test_run_loop_passes_pending_question_to_goal_judge(self):
+        session = SimpleNamespace(
+            id="turn_goal_pending_question_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        user = self._make_msg("msg_001", "user")
+        assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=[
+                [user],
+                [user, assistant],
+            ])
+        )
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+        evaluate_goal = AsyncMock(return_value=GoalDecision(
+            status="active",
+            verdict="waiting",
+            should_continue=False,
+            reason="session has a pending user question",
+        ))
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.Message.get_text_content",
+            MagicMock(return_value="Please provide the input."),
+        ), patch(
+            "flocks.server.routes.question.has_pending_questions",
+            MagicMock(return_value=True),
+        ), patch(
+            "flocks.session.session_loop.Message.create",
+            AsyncMock(),
+        ) as create_message, patch(
+            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            evaluate_goal,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ):
+            result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        create_message.assert_not_awaited()
+        assert evaluate_goal.await_args.kwargs["pending_user_input"] is True
         event_names = [call.args[0] for call in event_callback.await_args_list]
         assert event_names == ["turn.started", "turn.stopped"]
 

@@ -4,7 +4,53 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from flocks.tool.registry import ToolContext
-from flocks.tool.system.question import question_tool
+from flocks.tool.system import question as question_module
+from flocks.tool.system.question import normalize_question_option, question_tool
+
+
+def test_normalize_question_option_accepts_common_llm_shapes() -> None:
+    assert normalize_question_option({"value": "NVD", "desc": "Public CVE feed"}) == {
+        "label": "NVD",
+        "description": "Public CVE feed",
+    }
+    assert normalize_question_option({"text": "Internal scanner"}) == {
+        "label": "Internal scanner",
+        "description": "",
+    }
+    assert normalize_question_option({"description": "Only descriptive text"}) == {
+        "label": "Only descriptive text",
+        "description": "",
+    }
+    assert normalize_question_option({"label": ""}) is None
+
+
+@pytest.mark.asyncio
+async def test_question_tool_falls_back_to_text_when_choice_has_no_valid_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_questions: list[dict] = []
+
+    async def fake_handler(_session_id: str, questions: list[dict]) -> list[list[str]]:
+        captured_questions.extend(questions)
+        return [["manual answer"]]
+
+    monkeypatch.setattr(question_module, "_question_handler", fake_handler)
+    monkeypatch.setattr(question_module, "_send_channel_question_if_applicable", AsyncMock(return_value=None))
+
+    result = await question_module.question_tool(
+        ToolContext(session_id="ses_question_fallback", message_id="msg_1"),
+        questions=[
+            {
+                "question": "漏洞数据源用什么?",
+                "type": "choice",
+                "options": [{"label": ""}],
+            }
+        ],
+    )
+
+    assert result.success is True
+    assert captured_questions[0]["type"] == "text"
+    assert captured_questions[0]["options"] == []
 
 
 @pytest.mark.asyncio

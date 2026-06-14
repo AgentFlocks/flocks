@@ -4272,10 +4272,10 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   const state: Partial<ToolState> = part.state || {};
   const status = state.status || 'pending';
 
-  // Some tools block on an internal `question` call (for example safety
-  // confirmation inside `ssh_host_cmd`), so render the question UI whenever
-  // this running tool part has a pending question attached to it.
-  const isWaitingForAnswer = status === 'running' && !!pendingQuestion;
+  // Pending question state is the source of truth. Tool status can briefly
+  // arrive as completed after reconnects or transport races, but the user
+  // still needs the answer UI while the question request exists.
+  const isWaitingForAnswer = !!pendingQuestion;
 
   type StatusCfg = {
     icon: React.ReactNode;

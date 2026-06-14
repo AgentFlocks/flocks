@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import re
 import time
+import json
 from dataclasses import dataclass
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from flocks.provider.provider import ChatMessage, Provider
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -17,47 +18,21 @@ log = Log.create(service="session.goal")
 
 DEFAULT_GOAL_MAX_TURNS = 20
 JUDGE_RESPONSE_MAX_CHARS = 4096
+JUDGE_MAX_TOKENS = 200
 GoalStatus = Literal["active", "paused", "completed", "blocked"]
 GoalVerdict = Literal["complete", "blocked", "continue", "waiting", "inactive"]
 
-_BLOCKED_PATTERNS = (
-    re.compile(r"\bgoal\s+blocked\b", re.IGNORECASE),
-    re.compile(r"\bblocked\s+on\s+(?:the\s+)?goal\b", re.IGNORECASE),
-    re.compile(r"\b(?:cannot|can't|unable to)\s+(?:proceed|continue|complete)\b", re.IGNORECASE),
-    re.compile(r"目标(?:已)?阻塞"),
-    re.compile(r"任务(?:已)?阻塞"),
-    re.compile(r"(?:无法|不能)(?:继续|完成|推进)"),
-)
-_WAITING_PATTERNS = (
-    re.compile(r"\bneed(?:s)?\s+(?:user\s+)?(?:input|clarification|approval|confirmation)\b", re.IGNORECASE),
-    re.compile(r"\b(?:please|need to)\s+(?:clarify|confirm|choose|specify)\b", re.IGNORECASE),
-    re.compile(r"\bwaiting\s+(?:for|on)\s+(?:you|user|confirmation|clarification|input)\b", re.IGNORECASE),
-    re.compile(r"\buser\s+(?:hasn't|has not|must|needs? to)\s+(?:answer|confirm|clarify|choose|specify)\b", re.IGNORECASE),
-    re.compile(r"请(?:明确|确认|澄清|选择|说明)"),
-    re.compile(r"需要(?:用户|你)?(?:输入|确认|澄清|批准|明确|选择)"),
-    re.compile(r"等待(?:你|用户)?(?:确认|输入|澄清|回复|回答)"),
-)
-_NEGATED_DONE_PATTERNS = (
-    re.compile(r"\bnot\s+(?:complete|completed|done|finished|resolved|fixed)\b", re.IGNORECASE),
-    re.compile(r"\b(?:incomplete|unfinished|unresolved)\b", re.IGNORECASE),
-    re.compile(r"\b(?:still|not yet)\s+(?:need|needs|pending|remaining|todo|to do)\b", re.IGNORECASE),
-    re.compile(r"(?:尚未|还未|没有|未)(?:完成|解决|修复)"),
-)
-_FUTURE_WORK_PATTERNS = (
-    re.compile(r"\bnext\s+i\s+(?:will|need|should|plan)\b", re.IGNORECASE),
-    re.compile(r"\b(?:remaining|still need|need to|todo|to do|pending)\b", re.IGNORECASE),
-    re.compile(r"(?:下一步|还需要|仍需|待完成|未完成)"),
-)
-_DONE_PATTERNS = (
-    re.compile(r"\bgoal\s+(?:complete|completed|achieved)\b", re.IGNORECASE),
-    re.compile(r"\bstanding\s+goal\s+(?:is\s+)?(?:complete|completed|achieved)\b", re.IGNORECASE),
-    re.compile(r"\b(?:done|completed|finished|resolved|fixed|implemented|delivered)\b", re.IGNORECASE),
-    re.compile(r"\b(?:created|updated|added|removed|changed|verified)\b", re.IGNORECASE),
-    re.compile(r"\b(?:tests?|build|typecheck|lint)\s+(?:pass|passed|succeeded|is green)\b", re.IGNORECASE),
-    re.compile(r"(?:目标|任务)已(?:经)?完成"),
-    re.compile(r"(?:目标|任务)完成"),
-    re.compile(r"(?:已|已经)(?:完成|实现|修复|交付|验证)"),
-)
+_MODEL_JUDGE_SYSTEM_PROMPT = """You are a strict goal completion judge.
+
+Return only valid JSON with exactly this shape:
+{"done": true|false, "reason": "one sentence"}
+
+Judging rules:
+- done=true only if the assistant's latest final response explicitly confirms the goal is complete, the requested deliverable is clearly produced, or the goal is impossible/blocked and the response clearly says why.
+- done=false if work remains, the assistant only made partial progress, the assistant asks the user for more input/clarification/approval, or the latest response is ambiguous.
+- The reason must be concise and grounded only in the provided goal and latest response.
+- Do not include markdown, code fences, or any text outside the JSON object.
+"""
 
 
 class GoalState(BaseModel):
@@ -104,30 +79,59 @@ def _judge_input(last_response: str) -> str:
     return text[-JUDGE_RESPONSE_MAX_CHARS:]
 
 
-def _matches_any(patterns: tuple[re.Pattern[str], ...], text: str) -> bool:
-    return any(pattern.search(text) for pattern in patterns)
+def _extract_json_object(text: str) -> dict:
+    """Parse a strict JSON object."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("empty judge response")
+
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("judge response is not a JSON object")
+    return payload
 
 
-def judge_goal(objective: str, last_response: str) -> tuple[GoalVerdict, str]:
-    """Hermes-style local judge for the latest final response."""
-    text = _judge_input(last_response)
-    reason = _trim_reason(text)
-    if not text.strip():
-        return "continue", "judge received no final response"
+async def judge_goal_with_model(
+    objective: str,
+    last_response: str,
+    *,
+    provider_id: str,
+    model_id: str,
+) -> tuple[GoalVerdict, str]:
+    """Hermes-style model judge using the active session provider/model."""
+    provider = Provider.get(provider_id)
+    if provider is None:
+        raise RuntimeError(f"provider not found: {provider_id}")
 
-    if _matches_any(_WAITING_PATTERNS, text):
-        return "waiting", reason or "judge found the agent is waiting for user input"
+    response = await provider.chat(
+        model_id=model_id,
+        messages=[
+            ChatMessage(role="system", content=_MODEL_JUDGE_SYSTEM_PROMPT),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"Goal:\n{objective}\n\n"
+                    "Latest assistant final response (truncated to the last 4KB):\n"
+                    f"{_judge_input(last_response)}"
+                ),
+            ),
+        ],
+        max_tokens=JUDGE_MAX_TOKENS,
+        temperature=0,
+    )
 
-    if _matches_any(_BLOCKED_PATTERNS, text):
-        return "blocked", reason or "judge found the goal is blocked"
+    payload = _extract_json_object(response.content)
+    done = payload.get("done")
+    reason = _trim_reason(str(payload.get("reason") or ""))
+    if not isinstance(done, bool):
+        raise ValueError("judge JSON field 'done' must be a boolean")
+    if not reason:
+        reason = "model judge returned no reason"
 
-    if _matches_any(_NEGATED_DONE_PATTERNS, text) or _matches_any(_FUTURE_WORK_PATTERNS, text):
-        return "continue", "judge found remaining work toward the goal"
+    if not done:
+        return "continue", reason
 
-    if _matches_any(_DONE_PATTERNS, text):
-        return "complete", reason or f"judge found the goal is done: {objective}"
-
-    return "continue", "judge could not determine the goal is done"
+    return "complete", reason
 
 
 class GoalManager:
@@ -178,6 +182,9 @@ class GoalManager:
         return (
             "[Goal mode]\n"
             f"Active goal: {objective}\n\n"
+            "If the active goal is ambiguous or underspecified, ask the user a "
+            "clarifying question using the question tool and wait for the answer "
+            "instead of continuing autonomously. "
             "Work toward the active goal. Continue taking concrete steps until the goal "
             "is complete or blocked. In your final response, make the current outcome "
             "clear with evidence of completed work or the specific blocker."
@@ -199,6 +206,10 @@ class GoalManager:
         cls,
         session_id: str,
         last_response: str,
+        *,
+        pending_user_input: bool = False,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
     ) -> GoalDecision:
         state = await cls.get(session_id)
         if state is None or state.status != "active":
@@ -209,7 +220,29 @@ class GoalManager:
             )
 
         state.turns_used += 1
-        verdict, reason = judge_goal(state.objective, last_response)
+        if pending_user_input:
+            verdict = "waiting"
+            reason = "session has a pending user question"
+        elif provider_id and model_id:
+            try:
+                verdict, reason = await judge_goal_with_model(
+                    state.objective,
+                    last_response,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                )
+            except Exception as exc:
+                log.warn("goal.model_judge.failed", {
+                    "session_id": session_id,
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+                verdict = "continue"
+                reason = "goal judge failed; continuing"
+        else:
+            verdict = "continue"
+            reason = "goal judge unavailable; continuing"
         state.last_verdict = verdict
         state.last_reason = reason
 
