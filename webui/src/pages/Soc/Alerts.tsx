@@ -26,7 +26,6 @@ import {
 import PageHeader from '@/components/common/PageHeader';
 import { Badge, ConfigWorkshop, ModeSwitch } from './components';
 import {
-  agentInvestigationMessages,
   alertDenoiseDailySummary,
   deepInvestigations,
   incidentClusters,
@@ -36,6 +35,26 @@ type IncidentCluster = typeof incidentClusters[number];
 type DeepInvestigation = typeof deepInvestigations[number];
 type DenoiseCategory = typeof alertDenoiseDailySummary.categories[number];
 type DenoiseCategoryKey = DenoiseCategory['key'];
+type InvestigationSessionMessage = {
+  role: string;
+  sender: string;
+  time: string;
+  content: string;
+  delegate?: {
+    title: string;
+    description: string;
+    status: string;
+    elapsed: string;
+    steps: number;
+  };
+  toolCalls?: Array<{
+    name: string;
+    target: string;
+    status: 'success' | 'failed';
+    result: string;
+  }>;
+  conclusion?: string;
+};
 
 export default function SocAlertsPage() {
   const [params] = useSearchParams();
@@ -155,7 +174,7 @@ function DenoiseAnalysis() {
     { label: '归一化失败', value: summary.normalizeFailedCount, className: 'bg-slate-400 text-slate-900' },
     { label: '扫描告警', value: 3428, className: 'bg-red-500 text-white', categoryKey: 'scan' as const },
     { label: '条件过滤', value: 1124, className: 'bg-rose-500 text-white', categoryKey: 'condition' as const },
-    { label: '规则压制', value: 782, className: 'bg-pink-500 text-white', categoryKey: 'rule' as const },
+    { label: '规则过滤', value: 782, className: 'bg-pink-500 text-white', categoryKey: 'rule' as const },
     { label: '黑白名单', value: 738, className: 'bg-fuchsia-500 text-white', categoryKey: 'allowlist' as const },
     { label: '其他过滤', value: otherFilterRemoved, className: 'bg-slate-500 text-white' },
     { label: '重复告警', value: summary.dedupRemovedCount, className: 'bg-orange-500 text-white', categoryKey: 'duplicate' as const },
@@ -585,7 +604,7 @@ function ConditionDenoiseReport() {
 function RuleDenoiseReport() {
   return (
     <div className="space-y-4">
-      <SectionTitle icon={<FileText className="h-5 w-5" />} title="规则压制分析" subtitle="展示低价值规则、噪声规则和长期误报规则的压制效果。" />
+      <SectionTitle icon={<FileText className="h-5 w-5" />} title="规则过滤分析" subtitle="展示低价值规则、噪声规则和长期误报规则的过滤效果。" />
       <MockTable
         headers={['规则 ID', '规则名称', '减少量', '最近调整', '说明']}
         rows={alertDenoiseDailySummary.ruleReport.map((item) => [
@@ -978,7 +997,7 @@ function InvestigationResult() {
                 ['调查 ID', 'w-[150px]'],
                 ['优先级', 'w-[80px]'],
                 ['调查主题', 'min-w-[340px]'],
-                ['跨设备证据', 'min-w-[280px]'],
+                ['跨设备证据', 'min-w-[260px]'],
                 ['状态', 'w-[90px]'],
                 ['责任组', 'w-[120px]'],
                 ['推荐动作', 'w-[90px]'],
@@ -1002,10 +1021,8 @@ function InvestigationResult() {
                   <div className="whitespace-nowrap text-sm font-medium text-gray-900">{item.title}</div>
                 </td>
                 <td className="px-4 py-3">
-                  <div className="flex flex-nowrap gap-1 overflow-hidden">
-                    {item.entities.map((entity) => (
-                      <Badge key={entity} tone="blue">{entity}</Badge>
-                    ))}
+                  <div className="whitespace-nowrap text-sm text-gray-600">
+                    {item.entities.join(' / ')}
                   </div>
                 </td>
                 <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-600">{item.status}</td>
@@ -1143,13 +1160,72 @@ function InvestigationDrawer({ investigation, onClose }: { investigation: DeepIn
       </aside>
 
       {showAgentSession && (
-        <AgentSessionDrawer onClose={() => setShowAgentSession(false)} />
+        <AgentSessionDrawer investigation={investigation} onClose={() => setShowAgentSession(false)} />
       )}
     </div>
   );
 }
 
-function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
+function getInvestigationSessionMessages(investigation: DeepInvestigation): InvestigationSessionMessage[] {
+  const firstEvidence = investigation.evidence[0];
+  const laterEvidence = investigation.evidence.slice(1);
+  const lastEvidence = laterEvidence.length > 0 ? laterEvidence[laterEvidence.length - 1] : firstEvidence;
+
+  return [
+    {
+      role: 'user',
+      sender: '值班分析员',
+      time: firstEvidence?.time ?? '10:00',
+      content: `请围绕 ${investigation.title} 做深度调查，补齐跨设备证据并给出处置建议。`,
+    },
+    {
+      role: 'assistant',
+      sender: 'Rex',
+      time: firstEvidence?.time ?? '10:01',
+      content: `先从 ${firstEvidence?.source ?? '首个证据源'} 验证告警是否成立，再逐步关联 ${investigation.entities.join('、')} 的上下文。`,
+    },
+    ...investigation.evidence.flatMap((item, index): InvestigationSessionMessage[] => [
+      {
+        role: 'delegate',
+        sender: 'Rex',
+        time: item.time,
+        content: `查询 ${item.source}，确认第 ${index + 1} 个证据点。`,
+        delegate: {
+          title: `${item.source} 调查`,
+          description: `${item.source} 证据检索和上下文补全`,
+          status: 'completed',
+          elapsed: index % 2 === 0 ? '42s' : '1m08s',
+          steps: 3,
+        },
+      },
+      {
+        role: 'tool',
+        sender: `${item.source} 调查`,
+        time: item.time,
+        content: item.detail,
+        toolCalls: [
+          {
+            name: `${item.source}.query_evidence`,
+            target: investigation.id,
+            status: 'success',
+            result: item.detail,
+          },
+        ],
+        conclusion: item.detail,
+      },
+    ]),
+    {
+      role: 'assistant',
+      sender: 'Rex',
+      time: lastEvidence?.time ?? firstEvidence?.time ?? '10:05',
+      content: `多源证据已完成关联：${investigation.summary} 建议：${investigation.recommendation}`,
+    },
+  ];
+}
+
+function AgentSessionDrawer({ investigation, onClose }: { investigation: DeepInvestigation; onClose: () => void }) {
+  const messages = getInvestigationSessionMessages(investigation);
+
   return (
     <div className="fixed inset-0 z-[80]">
       <button
@@ -1166,7 +1242,7 @@ function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
               <h2 className="text-lg font-semibold text-gray-900">Agent 调查过程</h2>
             </div>
             <p className="mt-1 text-sm text-gray-500">
-              场景会话：Rex 调度 NDR、EDR、邮件网关和 OA 上下文 Agent 完成调查。
+              场景会话：围绕 {investigation.title} 关联 {investigation.entities.join('、')} 证据。
             </p>
           </div>
           <button
@@ -1180,7 +1256,7 @@ function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
 
         <div className="flex-1 overflow-y-auto bg-gray-50 px-5 py-4">
           <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-            {agentInvestigationMessages.map((message, index) => (
+            {messages.map((message, index) => (
               <MockSessionMessage key={`${message.time}-${message.sender}-${index}`} message={message} />
             ))}
           </div>
@@ -1189,7 +1265,7 @@ function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
         <div className="border-t border-gray-200 bg-white px-5 py-4">
           <div className="flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-500">
             <Bot className="h-4 w-4 text-red-600" />
-            场景会话已完成：可继续追问“哪些用户还收到同主题邮件？”或“生成处置工单”。
+            场景会话已完成：可继续追问证据细节，或生成处置工单和调查报告。
           </div>
         </div>
       </aside>
@@ -1197,7 +1273,7 @@ function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
   );
 }
 
-function MockSessionMessage({ message }: { message: typeof agentInvestigationMessages[number] }) {
+function MockSessionMessage({ message }: { message: InvestigationSessionMessage }) {
   const isUser = message.role === 'user';
   const isDelegate = message.role === 'delegate';
   const hasToolCalls = Boolean(message.toolCalls?.length);

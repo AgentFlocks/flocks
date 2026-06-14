@@ -55,6 +55,7 @@
     "placeholderStreaming": "AI is processing, please wait...",
     "placeholderNodeRef": "Describe the change intent for node {{nodeId}}...",
     "emptyText": "No execution records",
+    "emptyMessage": "No displayable content",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
     "edit": "Edit",

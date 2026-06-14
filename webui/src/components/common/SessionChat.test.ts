@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { render, screen } from '@testing-library/react';
 
 import type { Message } from '@/types';
 
 import {
+  ChatMessageBubble,
   getMessageBubbleClassName,
   getRegenerateTruncateTarget,
   truncateToolDisplayText,
@@ -83,5 +86,27 @@ describe('getRegenerateTruncateTarget', () => {
     ], 'assistant-1');
 
     expect(target).toEqual({ messageId: 'assistant-1', includeTarget: true });
+  });
+});
+
+describe('ChatMessageBubble rendering fallbacks', () => {
+  it('renders summary message text instead of returning an empty container', () => {
+    render(createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'summary-1',
+        finish: 'summary',
+        parts: [{ id: 'part-summary', type: 'text', text: 'Summary content is visible' }],
+      }),
+    }));
+
+    expect(screen.getByText(/Summary content is visible/)).toBeInTheDocument();
+  });
+
+  it('renders a fallback for persisted messages with no displayable parts', () => {
+    render(createElement(ChatMessageBubble, {
+      message: makeMessage({ id: 'empty-1', parts: [] }),
+    }));
+
+    expect(screen.getByText('No displayable content')).toBeInTheDocument();
   });
 });

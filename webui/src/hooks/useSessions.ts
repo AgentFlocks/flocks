@@ -4,6 +4,55 @@ import client from '@/api/client';
 import type { Session, Message } from '@/types';
 
 const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
+const ABORTED_TOOL_ERROR = 'Tool execution was interrupted';
+
+function finalizeStoppedMessageParts(parts: Message['parts'], stoppedAt = Date.now()): Message['parts'] {
+  return parts.map((part) => {
+    if (
+      (part.type !== 'tool' && part.type !== 'toolCall')
+      || part.state?.status !== 'running'
+    ) {
+      return part;
+    }
+
+    const nextTime = part.state.time
+      ? { ...part.state.time, end: part.state.time.end ?? stoppedAt }
+      : undefined;
+
+    return {
+      ...part,
+      state: {
+        ...part.state,
+        status: 'error',
+        error: part.state.error || ABORTED_TOOL_ERROR,
+        ...(nextTime ? { time: nextTime } : {}),
+      },
+    };
+  });
+}
+
+function mergeFetchedMessages(prev: Message[], fetched: Message[]): Message[] {
+  const previousById = new Map(prev.map((message) => [message.id, message]));
+
+  return fetched.map((message) => {
+    const existing = previousById.get(message.id);
+    if (!existing) return message;
+
+    // Aborted assistant replies may never be fully persisted by the backend.
+    // Keep the richer local snapshot so partial streamed text/tool state doesn't
+    // disappear or regress on a later refetch.
+    if (existing.finish === 'stop' && !message.finish) {
+      return {
+        ...message,
+        parts: existing.parts,
+        finish: existing.finish,
+        compacted: message.compacted ?? existing.compacted,
+      };
+    }
+
+    return message;
+  });
+}
 
 /**
  * Pure reducer for updating a message part in the messages list.
@@ -185,7 +234,7 @@ export function useSessionMessages(sessionId?: string) {
         compacted: msg.info.compacted || null,
       }));
       
-      setMessages(messagesData);
+      setMessages(prev => mergeFetchedMessages(prev, messagesData));
     } catch (err: any) {
       setError(err.message || 'Failed to fetch messages');
     } finally {
@@ -322,6 +371,18 @@ export function useSessionMessages(sessionId?: string) {
         return {
           ...message,
           parts,
+        };
+      }));
+    },
+    markMessageStopped: (messageId: string) => {
+      setMessages(prev => prev.map((message) => {
+        if (message.id !== messageId) return message;
+        if (message.finish === 'stop') return message;
+
+        return {
+          ...message,
+          finish: 'stop',
+          parts: finalizeStoppedMessageParts(message.parts),
         };
       }));
     },

@@ -55,23 +55,23 @@ export function ModeSwitch({ configureHref }: { configureHref: string }) {
   const [params] = useSearchParams();
   const isConfigure = params.get('mode') === 'configure';
   return (
-    <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1 shadow-sm">
+    <div className="inline-flex shrink-0 rounded-lg border border-gray-200 bg-white p-1 shadow-sm">
       <Link
         to="?"
-        className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+        className={`inline-flex items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition-colors ${
           isConfigure ? 'text-gray-500 hover:text-gray-900' : 'bg-slate-900 text-white'
         }`}
       >
-        <PlayCircle className="h-4 w-4" />
+        <PlayCircle className="h-4 w-4 shrink-0" />
         运营视图
       </Link>
       <Link
         to={configureHref}
-        className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+        className={`inline-flex items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition-colors ${
           isConfigure ? 'bg-slate-900 text-white' : 'text-gray-500 hover:text-gray-900'
         }`}
       >
-        <Settings2 className="h-4 w-4" />
+        <Settings2 className="h-4 w-4 shrink-0" />
         配置车间
       </Link>
     </div>

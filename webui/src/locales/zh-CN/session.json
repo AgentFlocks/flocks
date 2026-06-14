@@ -55,6 +55,7 @@
     "placeholderStreaming": "AI 正在处理中，请稍候...",
     "placeholderNodeRef": "描述对节点 {{nodeId}} 的修改意图...",
     "emptyText": "暂无执行记录",
+    "emptyMessage": "此消息暂无可展示内容",
     "suggestions": "示例问题",
     "stopTitle": "停止执行",
     "edit": "编辑",

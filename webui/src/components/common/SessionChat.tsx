@@ -314,6 +314,16 @@ export function getRegenerateTruncateTarget(
   return { messageId, includeTarget: true };
 }
 
+export function shouldRefetchFinishedMessage({
+  finishedMessageId,
+  abortedMessageId,
+}: {
+  finishedMessageId?: string | null;
+  abortedMessageId?: string | null;
+}): boolean {
+  return !finishedMessageId || !abortedMessageId || finishedMessageId !== abortedMessageId;
+}
+
 // ============================================================================
 // Main component
 // ============================================================================
@@ -511,6 +521,7 @@ export default function SessionChat({
     updateMessage,
     updateMessagePart,
     replaceMessageText,
+    markMessageStopped,
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
@@ -533,20 +544,35 @@ export default function SessionChat({
 
       if (!properties || !sessionId) return;
 
-      if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
+      if (type === 'session.cleared' && properties.sessionID === sessionId) {
+        abortingRef.current = false;
+        abortedMessageIdRef.current = null;
+        setIsStreaming(false);
+        refetch();
+      } else if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
+        setIsStreaming(false);
+        const lastAsstMsg = [...messagesRef.current].reverse().find(
+          (message) => message.role === 'assistant' && !message.finish,
+        );
+        if (lastAsstMsg?.parts?.length) {
+          markMessageStopped(lastAsstMsg.id);
+        }
+      } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
         if (properties.info.finish || properties.info.time?.completed) {
-          refetch();
-          // If this is the message we aborted, don't stop streaming — the user may have
-          // already sent a new message whose response is now arriving.
-          if (abortedMessageIdRef.current && abortedMessageIdRef.current === properties.info.id) {
-            abortedMessageIdRef.current = null;
-            abortingRef.current = false;
-          } else {
+          const shouldRefetch = shouldRefetchFinishedMessage({
+            finishedMessageId: properties.info.id,
+            abortedMessageId: abortedMessageIdRef.current,
+          });
+          // Preserve locally streamed partial text when the user aborts. The
+          // backend never persists in-flight text chunks, so refetching here
+          // would replace the visible partial response with an empty message.
+          if (shouldRefetch) {
+            refetch();
             setIsStreaming(false);
-            abortingRef.current = false;
-            abortedMessageIdRef.current = null;
           }
+          abortingRef.current = false;
+          abortedMessageIdRef.current = null;
         } else if (
           properties.info.role === 'assistant' &&
           !properties.info.finish &&
@@ -620,6 +646,7 @@ export default function SessionChat({
       sessionId,
       updateMessage,
       updateMessagePart,
+      markMessageStopped,
       refetch,
       handleQuestionAsked,
       removeByRequestId,
@@ -1916,39 +1943,11 @@ function ChatMessageBubbleInner({
   // ``window.open`` would land on a blank page. We open an in-app overlay
   // instead — same UX, no popup blocker / data-URL restriction headaches.
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
-  if (message.finish === 'summary') {
-    const hasArchived = compactedMessages && compactedMessages.length > 0;
-    return (
-      <div className="my-3 px-1">
-        {/* Archived messages shown inline without collapse */}
-        {hasArchived && (
-          <div className="mb-3 space-y-3">
-            {compactedMessages!.map((cMsg) => (
-              <ChatMessageBubble
-                key={cMsg.id}
-                message={cMsg}
-                showTimestamp={showTimestamp}
-                compact={compact}
-                onCopy={onCopy}
-                editingMessageId={editingMessageId}
-                editingText={editingText}
-                actionsDisabled={actionsDisabled}
-                actionMessageId={actionMessageId}
-                onEditStart={onEditStart}
-                onEditChange={onEditChange}
-                onEditCancel={onEditCancel}
-                onEditSave={onEditSave}
-                onEditSend={onEditSend}
-                onRegenerate={onRegenerate}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
+  const isSummaryMessage = message.finish === 'summary';
+  const hasArchived = compactedMessages && compactedMessages.length > 0;
   const rawAgentName = message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
+  const isTemporaryUserMessage = isUser && String(message.id).startsWith('temp-');
 
   const getTextContent = () =>
     parts
@@ -1978,7 +1977,31 @@ function ChatMessageBubbleInner({
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
 
   return (
-    <div className={`group relative flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'w-full' : ''}`}>
+    <>
+      {isSummaryMessage && hasArchived && (
+        <div className="my-3 px-1 space-y-3">
+          {compactedMessages!.map((cMsg) => (
+            <ChatMessageBubble
+              key={cMsg.id}
+              message={cMsg}
+              showTimestamp={showTimestamp}
+              compact={compact}
+              onCopy={onCopy}
+              editingMessageId={editingMessageId}
+              editingText={editingText}
+              actionsDisabled={actionsDisabled}
+              actionMessageId={actionMessageId}
+              onEditStart={onEditStart}
+              onEditChange={onEditChange}
+              onEditCancel={onEditCancel}
+              onEditSave={onEditSave}
+              onEditSend={onEditSend}
+              onRegenerate={onRegenerate}
+            />
+          ))}
+        </div>
+      )}
+      <div className={`group relative flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'w-full' : ''}`}>
       <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
         {/* Role badge */}
         <div className={`text-xs font-medium mb-2 flex items-center ${compact ? 'gap-1.5' : 'gap-2'}`}>
@@ -2006,8 +2029,12 @@ function ChatMessageBubbleInner({
         {/* Empty / loading state */}
         {parts.length === 0 && (
           <div className="flex items-center gap-2 opacity-60">
-            <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-            {isUser ? t('chat.sending') : t('chat.thinking')}
+            {(isActive || isTemporaryUserMessage) && (
+              <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+            )}
+            {isActive || isTemporaryUserMessage
+              ? (isUser ? t('chat.sending') : t('chat.thinking'))
+              : t('chat.emptyMessage', { defaultValue: 'No displayable content' })}
           </div>
         )}
 
@@ -2251,7 +2278,8 @@ function ChatMessageBubbleInner({
           onClose={() => setPreviewImage(null)}
         />
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
