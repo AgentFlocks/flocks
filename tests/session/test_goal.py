@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from flocks.command.direct import run_direct_command
-from flocks.session.goal import GoalManager
+from flocks.session.goal import JUDGE_MAX_TOKENS, GoalManager
 
 
 @pytest.mark.asyncio
@@ -190,6 +190,36 @@ async def test_goal_evaluation_uses_model_judge_when_provider_model_are_availabl
 
 
 @pytest.mark.asyncio
+async def test_goal_model_judge_uses_provider_options_without_main_token_budget():
+    session_id = "goal_model_judge_provider_options_session"
+    await GoalManager.set_goal(session_id, "finish implementation")
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=SimpleNamespace(
+            content='{"done": true, "reason": "The final response says the goal is complete."}'
+        ))
+    )
+
+    with patch("flocks.session.goal.Provider.get", return_value=provider), patch(
+        "flocks.session.goal.build_provider_options",
+        return_value={"extra_body": {"reasoning_split": True}, "max_tokens": 128000},
+    ) as build_options:
+        decision = await GoalManager.evaluate_after_turn(
+            session_id,
+            "Goal is complete.",
+            provider_id="test-provider",
+            model_id="test-model",
+        )
+
+    build_options.assert_called_once_with("test-provider", "test-model")
+    provider.chat.assert_awaited_once()
+    kwargs = provider.chat.await_args.kwargs
+    assert kwargs["extra_body"] == {"reasoning_split": True}
+    assert kwargs["max_tokens"] == JUDGE_MAX_TOKENS
+    assert kwargs["temperature"] == 0
+    assert decision.verdict == "complete"
+
+
+@pytest.mark.asyncio
 async def test_goal_evaluation_continues_when_model_judge_says_not_done():
     session_id = "goal_model_judge_continue_session"
     await GoalManager.set_goal(session_id, "finish implementation")
@@ -214,7 +244,7 @@ async def test_goal_evaluation_continues_when_model_judge_says_not_done():
 
 
 @pytest.mark.asyncio
-async def test_goal_evaluation_continues_when_model_judge_fails():
+async def test_goal_evaluation_waits_when_model_judge_fails():
     session_id = "goal_model_judge_failure_session"
     await GoalManager.set_goal(session_id, "finish implementation")
     provider = SimpleNamespace(chat=AsyncMock(side_effect=RuntimeError("judge unavailable")))
@@ -228,9 +258,9 @@ async def test_goal_evaluation_continues_when_model_judge_fails():
         )
 
     provider.chat.assert_awaited_once()
-    assert decision.verdict == "continue"
-    assert decision.should_continue is True
-    assert decision.reason == "goal judge failed; continuing"
+    assert decision.verdict == "waiting"
+    assert decision.should_continue is False
+    assert decision.reason == "goal judge failed; waiting instead of continuing autonomously"
 
 
 @pytest.mark.asyncio

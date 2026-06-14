@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import time
 import json
+import time
 from dataclasses import dataclass
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from flocks.provider.options import build_provider_options
 from flocks.provider.provider import ChatMessage, Provider
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -18,7 +19,7 @@ log = Log.create(service="session.goal")
 
 DEFAULT_GOAL_MAX_TURNS = 20
 JUDGE_RESPONSE_MAX_CHARS = 4096
-JUDGE_MAX_TOKENS = 200
+JUDGE_MAX_TOKENS = 4096
 GoalStatus = Literal["active", "paused", "completed", "blocked"]
 GoalVerdict = Literal["complete", "blocked", "continue", "waiting", "inactive"]
 
@@ -31,6 +32,7 @@ Judging rules:
 - done=true only if the assistant's latest final response explicitly confirms the goal is complete, the requested deliverable is clearly produced, or the goal is impossible/blocked and the response clearly says why.
 - done=false if work remains, the assistant only made partial progress, the assistant asks the user for more input/clarification/approval, or the latest response is ambiguous.
 - The reason must be concise and grounded only in the provided goal and latest response.
+- Keep the entire JSON response under 200 characters.
 - Do not include markdown, code fences, or any text outside the JSON object.
 """
 
@@ -85,7 +87,10 @@ def _extract_json_object(text: str) -> dict:
     if not raw:
         raise ValueError("empty judge response")
 
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"judge response was not strict JSON: {_trim_reason(raw)!r}") from exc
     if not isinstance(payload, dict):
         raise ValueError("judge response is not a JSON object")
     return payload
@@ -103,6 +108,9 @@ async def judge_goal_with_model(
     if provider is None:
         raise RuntimeError(f"provider not found: {provider_id}")
 
+    provider_options = build_provider_options(provider_id, model_id)
+    provider_options.pop("max_tokens", None)
+
     response = await provider.chat(
         model_id=model_id,
         messages=[
@@ -116,6 +124,7 @@ async def judge_goal_with_model(
                 ),
             ),
         ],
+        **provider_options,
         max_tokens=JUDGE_MAX_TOKENS,
         temperature=0,
     )
@@ -238,11 +247,11 @@ class GoalManager:
                     "model_id": model_id,
                     "error": str(exc),
                 })
-                verdict = "continue"
-                reason = "goal judge failed; continuing"
+                verdict = "waiting"
+                reason = "goal judge failed; waiting instead of continuing autonomously"
         else:
-            verdict = "continue"
-            reason = "goal judge unavailable; continuing"
+            verdict = "waiting"
+            reason = "goal judge unavailable; waiting instead of continuing autonomously"
         state.last_verdict = verdict
         state.last_reason = reason
 
