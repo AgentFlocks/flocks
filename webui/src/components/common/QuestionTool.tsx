@@ -21,8 +21,9 @@ import { useTranslation } from 'react-i18next';
 export type QuestionType = 'choice' | 'text' | 'number' | 'file' | 'confirm' | 'password';
 
 export interface QuestionOption {
-  label: string;
+  label?: string;
   description?: string;
+  [key: string]: unknown;
 }
 
 export interface QuestionItem {
@@ -61,17 +62,35 @@ export interface QuestionToolProps {
 // ============================================================================
 
 function resolveType(q: QuestionItem): QuestionType {
+  const hasOptions = (q.options ?? []).some(opt => optionLabel(opt));
+  if (q.type === 'choice' && !hasOptions) return 'text';
   if (q.type) return q.type;
-  if (q.options && q.options.length > 0) return 'choice';
+  if (hasOptions) return 'choice';
   return 'text';
 }
 
 function optionLabel(opt: QuestionOption | string): string {
-  return typeof opt === 'string' ? opt : opt.label;
+  if (typeof opt === 'string') return opt;
+  for (const key of ['label', 'text', 'title', 'name', 'value', 'id', 'key']) {
+    const value = opt[key];
+    if (value !== undefined && value !== null) {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+  }
+  return '';
 }
 
 function optionDescription(opt: QuestionOption | string): string {
-  return typeof opt === 'string' ? '' : (opt.description ?? '');
+  if (typeof opt === 'string') return '';
+  for (const key of ['description', 'desc', 'subtitle', 'detail', 'details']) {
+    const value = opt[key];
+    if (value !== undefined && value !== null) {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+  }
+  return '';
 }
 
 function isQuestionAnswered(q: QuestionItem, answer: string[], allowBlankAsNone = false): boolean {
@@ -142,6 +161,7 @@ function ChoiceInput({
       <div className="space-y-1.5">
         {(q.options ?? []).map(opt => {
           const label = optionLabel(opt);
+          if (!label) return null;
           const desc = optionDescription(opt);
           const selected = answer.includes(label);
           return (

@@ -92,6 +92,40 @@ Question format:
 The user's answers will be returned for you to continue with."""
 
 
+_OPTION_LABEL_KEYS = ("label", "text", "title", "name", "value", "id", "key")
+_OPTION_DESCRIPTION_KEYS = ("description", "desc", "subtitle", "detail", "details")
+
+
+def _first_non_empty_string(data: Dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def normalize_question_option(opt: Any) -> Optional[Dict[str, str]]:
+    """Normalize LLM-produced choice options into the UI's label/description shape."""
+    if isinstance(opt, str):
+        label = opt.strip()
+        return {"label": label, "description": ""} if label else None
+
+    if not isinstance(opt, dict):
+        label = str(opt).strip() if opt is not None else ""
+        return {"label": label, "description": ""} if label else None
+
+    label = _first_non_empty_string(opt, _OPTION_LABEL_KEYS)
+    description = _first_non_empty_string(opt, _OPTION_DESCRIPTION_KEYS)
+    if not label and description:
+        label, description = description, ""
+    if not label:
+        return None
+    return {"label": label, "description": description}
+
+
 def _format_channel_question_text(questions: List[Dict[str, Any]]) -> str:
     """Render normalized questions as plain text for IM channels."""
     blocks: list[str] = []
@@ -352,16 +386,12 @@ async def question_tool(
 
         options = q.get("options", [])
         for opt in options:
-            if isinstance(opt, dict):
-                normalized["options"].append({
-                    "label": str(opt.get("label", "")),
-                    "description": opt.get("description", "")
-                })
-            elif isinstance(opt, str):
-                normalized["options"].append({
-                    "label": opt,
-                    "description": ""
-                })
+            option = normalize_question_option(opt)
+            if option is not None:
+                normalized["options"].append(option)
+
+        if normalized["type"] == "choice" and not normalized["options"]:
+            normalized["type"] = "text"
         
         normalized_questions.append(normalized)
     

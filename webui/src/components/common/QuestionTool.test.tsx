@@ -87,4 +87,55 @@ describe('QuestionTool', () => {
 
     expect(onAnswer).toHaveBeenCalledWith([['Syslog 实时流'], ['none']]);
   });
+
+  it('renders choice options that use common non-label fields', async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <QuestionTool
+        questions={[{
+          header: '数据源',
+          question: '漏洞数据源用什么?',
+          type: 'choice',
+          options: [
+            { value: 'NVD', desc: 'Public CVE feed' },
+            { text: '内部扫描器' },
+            { label: '' },
+          ],
+        }]}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /NVD/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /内部扫描器/ })).toBeInTheDocument();
+    expect(screen.queryAllByRole('button')).toHaveLength(3);
+
+    await user.click(screen.getByRole('button', { name: /NVD/ }));
+    await user.click(screen.getByRole('button', { name: /确认/ }));
+
+    expect(onAnswer).toHaveBeenCalledWith([['NVD']]);
+  });
+
+  it('falls back to text input when a choice question has no visible options', async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <QuestionTool
+        questions={[{
+          question: '漏洞数据源用什么?',
+          type: 'choice',
+          options: [{ label: '' }],
+        }]}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await user.type(screen.getByRole('textbox'), 'NVD');
+    await user.click(screen.getByRole('button', { name: /确认/ }));
+
+    expect(onAnswer).toHaveBeenCalledWith([['NVD']]);
+  });
 });
