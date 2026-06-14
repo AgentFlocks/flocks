@@ -37,9 +37,6 @@ const SocIntelPage = lazy(() => import('@/pages/Soc/Intel'));
 const SocVulnerabilitiesPage = lazy(() => import('@/pages/Soc/Vulnerabilities'));
 const SocDrillsPage = lazy(() => import('@/pages/Soc/Drills'));
 const SocAttackSurfacePage = lazy(() => import('@/pages/Soc/AttackSurface'));
-const SocCasesPage = lazy(() => import('@/pages/Soc/Cases'));
-const SocCaseDetailPage = lazy(() => import('@/pages/Soc/CaseDetail'));
-const SocReportsPage = lazy(() => import('@/pages/Soc/Reports'));
 const KnowledgePage = lazy(() => import('@/pages/Knowledge'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
@@ -137,9 +134,9 @@ export function Routes() {
         <Route path="soc/vulnerabilities" element={<LazyRoute><SocVulnerabilitiesPage /></LazyRoute>} />
         <Route path="soc/drills" element={<LazyRoute><SocDrillsPage /></LazyRoute>} />
         <Route path="soc/attack-surface" element={<LazyRoute><SocAttackSurfacePage /></LazyRoute>} />
-        <Route path="soc/cases" element={<LazyRoute><SocCasesPage /></LazyRoute>} />
-        <Route path="soc/cases/:caseId" element={<LazyRoute><SocCaseDetailPage /></LazyRoute>} />
-        <Route path="soc/reports" element={<LazyRoute><SocReportsPage /></LazyRoute>} />
+        <Route path="soc/cases" element={<Navigate to="/soc/alerts" replace />} />
+        <Route path="soc/cases/:caseId" element={<Navigate to="/soc/alerts" replace />} />
+        <Route path="soc/reports" element={<Navigate to="/soc/alerts" replace />} />
         
         {/* Agent Smith */}
         <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />

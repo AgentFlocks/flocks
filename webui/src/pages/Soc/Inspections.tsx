@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ClipboardList, ArrowRight } from 'lucide-react';
+import { ClipboardList } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import { Badge, Card } from './components';
 
@@ -40,15 +40,6 @@ export default function SocInspectionsPage() {
         title="设备巡检"
         description="在 SOC 工作区消费已发布的设备 Skill，按策略执行巡检并产出异常与告警。"
         icon={<ClipboardList className="h-8 w-8" />}
-        action={(
-          <Link
-            to="/soc/cases"
-            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700"
-          >
-            查看关联调查案件
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-        )}
       />
 
       <div className="space-y-5">
