@@ -339,8 +339,8 @@ async def test_device_list_auto_creates_user_device_plugin_instance(monkeypatch,
     app.include_router(device_routes.router, prefix="/api/devices")
     client = TestClient(app)
 
-    response = client.get("/api/devices?refresh=true")
-    repeated = client.get("/api/devices?refresh=true")
+    response = client.post("/api/devices/sync?refresh=true")
+    repeated = client.post("/api/devices/sync?refresh=true")
     devices = await list_devices()
 
     assert response.status_code == 200
@@ -352,10 +352,12 @@ async def test_device_list_auto_creates_user_device_plugin_instance(monkeypatch,
     assert devices[0].enabled is True
 
     delete_response = client.delete(f"/api/devices/{devices[0].id}")
-    after_delete = client.get("/api/devices?refresh=true")
+    sync_after_delete = client.post("/api/devices/sync?refresh=true")
+    after_delete = client.get("/api/devices")
     devices_after_delete = await list_devices()
 
     assert delete_response.status_code == 204
+    assert sync_after_delete.status_code == 200
     assert after_delete.status_code == 200
     assert after_delete.json() == []
     assert devices_after_delete == []
@@ -369,7 +371,7 @@ async def test_device_list_auto_creates_user_device_plugin_instance(monkeypatch,
             "fields": {},
         },
     )
-    after_manual_create = client.get("/api/devices?refresh=true")
+    after_manual_create = client.get("/api/devices")
 
     assert manual_create.status_code == 201
     assert len(after_manual_create.json()) == 1

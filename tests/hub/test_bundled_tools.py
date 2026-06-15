@@ -22,7 +22,12 @@ import pytest
 import yaml
 
 from flocks.hub import catalog, local
-from flocks.hub.installer import _resolve_install_destination, install_plugin, uninstall_plugin
+from flocks.hub.installer import (
+    _refresh_runtime,
+    _resolve_install_destination,
+    install_plugin,
+    uninstall_plugin,
+)
 from flocks.hub.models import HubPluginManifest
 from flocks.hub.security import SKIP_NAMES, validate_package
 
@@ -128,6 +133,33 @@ def _write_bundled_tool(
 # ---------------------------------------------------------------------------
 # _bundled_tool_roots
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
+    from flocks.config import api_versioning
+    from flocks.tool.device import plugin_index
+    from flocks.tool.registry import ToolRegistry
+
+    calls: list[str] = []
+    monkeypatch.setattr(ToolRegistry, "init", classmethod(lambda cls: calls.append("init")))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "refresh_plugin_tools",
+        classmethod(lambda cls: calls.append("refresh")),
+    )
+    monkeypatch.setattr(
+        api_versioning,
+        "discover_api_service_descriptors",
+        lambda *, refresh=False: calls.append(f"discover:{refresh}") or [],
+    )
+    plugin_index._template_cache = []
+
+    await _refresh_runtime("device")
+
+    assert plugin_index._template_cache is None
+    assert calls == ["init", "refresh", "discover:True"]
+
 
 class TestBundledToolRoots:
     def test_discovers_api_subdir_plugins(self, isolated_hub):

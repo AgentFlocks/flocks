@@ -29,14 +29,26 @@ log = Log.create(service="device.plugin-index")
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _SAFE_SERVICE_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_template_cache: Optional[list[DeviceTemplate]] = None
+
+
+def clear_device_template_cache() -> None:
+    """Clear the in-process device template cache after plugin changes."""
+    global _template_cache
+    _template_cache = None
 
 
 def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
     """Return device templates from Hub catalog plus local descriptor discovery."""
+    global _template_cache
+    if _template_cache is not None and not refresh:
+        return list(_template_cache)
+
     if refresh:
         _refresh_device_plugin_runtime()
 
     by_key: dict[str, DeviceTemplate] = {}
+    tool_counts = _device_tool_counts()
     for entry in hub_catalog.list_catalog(plugin_type="device"):
         root = _catalog_entry_root(entry)
         if root is None:
@@ -66,6 +78,7 @@ def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
             fallback_description=entry.description,
             fallback_description_cn=entry.descriptionCn,
             fallback_version=entry.installedVersion or entry.version,
+            tool_counts=tool_counts,
         )
         if template is not None:
             by_key[template.storage_key] = template
@@ -89,9 +102,12 @@ def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
             state="localOnly",
             installed=True,
             source=source,
+            tool_counts=tool_counts,
         )
 
-    return sorted(by_key.values(), key=_sort_key)
+    templates = sorted(by_key.values(), key=_sort_key)
+    _template_cache = templates
+    return list(templates)
 
 
 def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTemplate:
@@ -145,6 +161,7 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
 
 def _refresh_device_plugin_runtime() -> None:
     """Refresh both device descriptors and runtime tool registrations."""
+    clear_device_template_cache()
     discover_api_service_descriptors(refresh=True)
     try:
         ToolRegistry.refresh_plugin_tools()
@@ -163,6 +180,7 @@ def _template_from_plugin_root(
     fallback_description: Optional[str] = None,
     fallback_description_cn: Optional[str] = None,
     fallback_version: Optional[str] = None,
+    tool_counts: Optional[dict[str, int]] = None,
 ) -> Optional[DeviceTemplate]:
     provider = _read_provider_yaml(root)
     if _integration_type(provider) != "device":
@@ -187,6 +205,7 @@ def _template_from_plugin_root(
         fallback_name=fallback_name,
         fallback_description=fallback_description,
         fallback_description_cn=fallback_description_cn,
+        tool_counts=tool_counts,
     )
 
 
@@ -201,6 +220,7 @@ def _template_from_descriptor(
     fallback_name: Optional[str] = None,
     fallback_description: Optional[str] = None,
     fallback_description_cn: Optional[str] = None,
+    tool_counts: Optional[dict[str, int]] = None,
 ) -> DeviceTemplate:
     name = _template_name(provider, descriptor, fallback_name, plugin_id)
     description = _optional_str(provider.get("description")) or fallback_description
@@ -218,7 +238,7 @@ def _template_from_descriptor(
             field.model_dump(mode="json")
             for field in _build_api_service_credential_schema(descriptor.storage_key, provider)
         ],
-        tool_count=_tool_count(descriptor.storage_key, descriptor.provider_yaml.parent),
+        tool_count=_tool_count(descriptor.storage_key, descriptor.provider_yaml.parent, tool_counts),
         installed=installed,
         state=state,  # type: ignore[arg-type]
         source=source,  # type: ignore[arg-type]
@@ -303,17 +323,29 @@ def _source_from_path(path: Optional[Path]) -> str:
     return "bundled"
 
 
-def _tool_count(storage_key: str, root: Path) -> int:
+def _device_tool_counts() -> Optional[dict[str, int]]:
     try:
         ToolRegistry.init()
-        count = len([
-            tool for tool in ToolRegistry.list_tools()
-            if tool.source == "device" and tool.provider == storage_key
-        ])
-        if count:
-            return count
     except Exception as exc:
         log.debug("device.templates.tool_registry_unavailable", {"error": str(exc)})
+        return None
+
+    counts: dict[str, int] = {}
+    for tool in ToolRegistry.list_tools():
+        if tool.source != "device" or not tool.provider:
+            continue
+        counts[tool.provider] = counts.get(tool.provider, 0) + 1
+    return counts
+
+
+def _tool_count(
+    storage_key: str,
+    root: Path,
+    tool_counts: Optional[dict[str, int]] = None,
+) -> int:
+    count = tool_counts.get(storage_key, 0) if tool_counts is not None else 0
+    if count:
+        return count
 
     return len([
         path for path in _tool_yaml_files(root)

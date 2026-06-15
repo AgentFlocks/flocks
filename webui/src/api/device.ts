@@ -91,6 +91,8 @@ export interface DeviceTestResult {
 }
 
 export interface DeviceTestRequest {
+  /** Unsaved form fields used only for this probe. */
+  fields?: Record<string, string>;
   /** Override the persisted base_url for this probe only (typically the
    *  current value in the form, before it has been saved). */
   base_url?: string;

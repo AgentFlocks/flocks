@@ -131,10 +131,12 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
         # the Device Access wizard (the latter consumes
         # ``api_services[storage_key]`` shaped by ``discover_api_service_descriptors``).
         from flocks.config.api_versioning import discover_api_service_descriptors
+        from flocks.tool.device.plugin_index import clear_device_template_cache
         from flocks.tool.registry import ToolRegistry
 
         ToolRegistry.init()
         ToolRegistry.refresh_plugin_tools()
+        clear_device_template_cache()
         # Drop the descriptor cache so freshly installed/uninstalled
         # API plugins surface in ``_load_provider_yaml_metadata`` (and
         # therefore in the Tool API summary metadata) without waiting

@@ -451,7 +451,7 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 
 function DeviceConfigPanel({
   device, template, vendorKey, initialGroupId, groups, groupLocked,
-  onSave, onDelete, onClose, onTest, onToggleVerifySsl, onToggleEnabled, onBack,
+  onSave, onDelete, onClose, onTest, onBack,
 }: {
   device?: DeviceIntegration;
   template?: DeviceTemplate;
@@ -469,9 +469,7 @@ function DeviceConfigPanel({
   }) => Promise<void>;
   onDelete?: () => Promise<void>;
   onClose: () => void;
-  onTest?: (overrides: { verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
-  onToggleVerifySsl?: (next: boolean) => Promise<void>;
-  onToggleEnabled?: (next: boolean) => Promise<void>;
+  onTest?: (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
   onBack?: () => void;
 }) {
   const toast = useToast();
@@ -495,6 +493,7 @@ function DeviceConfigPanel({
   const [metadata, setMetadata] = useState<{ name?: string; version?: string; description?: string; description_cn?: string; docs_url?: string } | null>(null);
   const [toolEnabled, setToolEnabled] = useState<Record<string, boolean>>({});
   const originalMasked = useRef<Record<string, string>>({});
+  const dirtyRef = useRef(false);
 
   const serviceId = device?.service_id ?? template?.service_id ?? '';
   const storageKey = device?.storage_key ?? template?.storage_key ?? '';
@@ -530,7 +529,9 @@ function DeviceConfigPanel({
             }
           });
           originalMasked.current = masked;
-          setFields({ ...device.fields });
+          if (!dirtyRef.current) {
+            setFields({ ...device.fields });
+          }
         } else {
           const defaults: Record<string, string> = {};
           schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
@@ -570,6 +571,7 @@ function DeviceConfigPanel({
         if (payload[k] === masked) payload[k] = '';
       });
       await onSave({ name: name.trim(), fields: payload, enabled, verify_ssl: verifySsl, group_id: groupId });
+      dirtyRef.current = false;
       toast.success(device ? t('toast.saveDone') : t('toast.addDone'));
     } catch {
       toast.error(t('toast.saveFailed'));
@@ -594,6 +596,7 @@ function DeviceConfigPanel({
         }
       }
       setTestResult(await onTest({
+        fields,
         verify_ssl: verifySsl,
         base_url: candidateBaseUrl || undefined,
       }));
@@ -602,30 +605,16 @@ function DeviceConfigPanel({
     }
   };
 
-  const handleToggleSsl = async () => {
+  const handleToggleSsl = () => {
     const next = !verifySsl;
+    dirtyRef.current = true;
     setVerifySsl(next);
-    if (!device || !onToggleVerifySsl) return;
-    try {
-      await onToggleVerifySsl(next);
-      toast.success(next ? t('toast.sslOn') : t('toast.sslOff'));
-    } catch {
-      setVerifySsl(!next);
-      toast.error(t('toast.rollback'));
-    }
   };
 
-  const handleToggleEnabled = async () => {
+  const handleToggleEnabled = () => {
     const next = !enabled;
+    dirtyRef.current = true;
     setEnabled(next);
-    if (!device || !onToggleEnabled) return;
-    try {
-      await onToggleEnabled(next);
-      toast.success(next ? t('toast.enabledOn') : t('toast.enabledOff'));
-    } catch {
-      setEnabled(!next);
-      toast.error(t('toast.rollback'));
-    }
   };
 
   const handleToggleFieldVisibility = async (field: APIServiceCredentialField, hasExisting: boolean) => {
@@ -759,7 +748,10 @@ function DeviceConfigPanel({
                   <input
                     type="text"
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
+                    onChange={(e) => {
+                      dirtyRef.current = true;
+                      setName(e.target.value);
+                    }}
                     placeholder={t('config.namePlaceholder')}
                     className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
                   />
@@ -779,7 +771,10 @@ function DeviceConfigPanel({
                   ) : (
                     <select
                       value={groupId}
-                      onChange={(e) => setGroupId(e.target.value)}
+                      onChange={(e) => {
+                        dirtyRef.current = true;
+                        setGroupId(e.target.value);
+                      }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
                     >
                       {groups.map((g) => (
@@ -807,7 +802,10 @@ function DeviceConfigPanel({
                             <input
                               type={isSecret && !show ? 'password' : 'text'}
                               value={fields[f.key] ?? ''}
-                              onChange={(e) => setFields((p) => ({ ...p, [f.key]: e.target.value }))}
+                              onChange={(e) => {
+                                dirtyRef.current = true;
+                                setFields((p) => ({ ...p, [f.key]: e.target.value }));
+                              }}
                               placeholder={f.default_value ?? ''}
                               className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 pr-10"
                             />
@@ -1338,7 +1336,7 @@ export default function DeviceIntegrationPage() {
       }
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        deviceAPI.listTemplates(refreshTemplates ? { refresh: true } : undefined),
+        deviceAPI.listTemplates(),
         deviceAPI.listGroups(),
       ]);
       const nextTemplates = tplRes.data || [];
@@ -1361,7 +1359,7 @@ export default function DeviceIntegrationPage() {
     const now = Date.now();
     if (now - lastRefreshRef.current < 1000) return;
     lastRefreshRef.current = now;
-    void fetchData(true, true);
+    void fetchData(true);
   }, [fetchData]);
 
   useEffect(() => {
@@ -1497,31 +1495,21 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
   };
 
-  const handleTest = async (overrides: { verify_ssl: boolean; base_url?: string }) => {
+  const handleTest = async (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => {
     if (panel?.kind !== 'edit') return { success: false, message: '' };
     const res = await deviceAPI.test(panel.device.id, overrides);
-    await fetchData(true);
-    if (panel?.kind === 'edit') {
-      const updated = await deviceAPI.get(panel.device.id);
-      setPanel({ kind: 'edit', device: updated.data });
-    }
+    setDevices((current) => current.map((device) => (
+      device.id === panel.device.id
+        ? {
+            ...device,
+            status: res.data.success ? 'ok' : 'error',
+            message: res.data.message,
+            latency_ms: res.data.latency_ms ?? null,
+            checked_at: Date.now(),
+          }
+        : device
+    )));
     return res.data;
-  };
-
-  const handleToggleVerifySsl = async (next: boolean) => {
-    if (panel?.kind !== 'edit') return;
-    await deviceAPI.update(panel.device.id, { verify_ssl: next });
-    const updated = await deviceAPI.get(panel.device.id);
-    setPanel({ kind: 'edit', device: updated.data });
-    await fetchData(true);
-  };
-
-  const handleToggleEnabled = async (next: boolean) => {
-    if (panel?.kind !== 'edit') return;
-    await deviceAPI.update(panel.device.id, { enabled: next });
-    const updated = await deviceAPI.get(panel.device.id);
-    setPanel({ kind: 'edit', device: updated.data });
-    await fetchData(true);
   };
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -1847,8 +1835,6 @@ export default function DeviceIntegrationPage() {
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={() => setPanel(null)}
             onTest={panel.kind === 'edit' ? handleTest : undefined}
-            onToggleVerifySsl={panel.kind === 'edit' ? handleToggleVerifySsl : undefined}
-            onToggleEnabled={panel.kind === 'edit' ? handleToggleEnabled : undefined}
             onBack={panel.kind === 'add'
               ? () => setPanel({
                   kind: 'wizard',
