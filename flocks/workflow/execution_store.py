@@ -6,7 +6,7 @@ import asyncio
 import re
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from flocks.session.recorder import Recorder
 from flocks.storage.storage import Storage
@@ -311,6 +311,63 @@ async def record_execution_step(
     step_payload = compact_step_for_storage(step)
     await Storage.write(workflow_execution_step_key(exec_id, step_index), step_payload)
     return step_payload
+
+
+class ExecutionStepRecorder:
+    """Bridge synchronous workflow step callbacks to append-only step rows."""
+
+    def __init__(
+        self,
+        *,
+        exec_id: str,
+        loop: asyncio.AbstractEventLoop,
+        logger: Any = None,
+        log_event: str = "workflow.execution_step.write_failed",
+        step_compactor: Callable[[Any], Dict[str, Any]] = compact_step_for_storage,
+        write_timeout_s: float = 5.0,
+    ) -> None:
+        self.exec_id = exec_id
+        self.loop = loop
+        self.logger = logger or log
+        self.log_event = log_event
+        self.step_compactor = step_compactor
+        self.write_timeout_s = write_timeout_s
+        self.step_count = 0
+        self.summary: Dict[str, Any] = {}
+
+    def on_step_complete(self, step_result: Any) -> None:
+        raw_step = step_result.model_dump(mode="json") if hasattr(step_result, "model_dump") else step_result
+        step_dict = self.step_compactor(raw_step)
+        if not isinstance(step_dict, dict):
+            return
+
+        self.step_count += 1
+        loop_progress = derive_loop_progress(
+            node_id=step_dict.get("node_id"),
+            global_step_index=self.step_count,
+            inputs=step_dict.get("inputs"),
+            outputs=step_dict.get("outputs"),
+        )
+        self.summary.update({
+            "stepCount": self.step_count,
+            "currentNodeId": step_dict.get("node_id"),
+            "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+            "currentPhase": "running",
+            "currentStepIndex": self.step_count,
+            "loopProgress": loop_progress,
+            "updatedAt": int(time.time() * 1000),
+        })
+        try:
+            asyncio.run_coroutine_threadsafe(
+                record_execution_step(self.exec_id, self.step_count, step_dict),
+                self.loop,
+            ).result(timeout=self.write_timeout_s)
+        except Exception as exc:
+            self.logger.warning(self.log_event, {
+                "exec_id": self.exec_id,
+                "step_index": self.step_count,
+                "error": str(exc),
+            })
 
 
 async def _backfill_execution_steps(

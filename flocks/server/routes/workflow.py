@@ -1854,8 +1854,9 @@ async def get_execution_details(
             raise HTTPException(status_code=404, detail="Execution not found for this workflow")
         
         if step_limit == 0:
-            legacy_steps = compact_history_for_storage(exec_data.get("executionLog"))
-            steps, total_steps = [], exec_data.get("stepCount") or len(legacy_steps)
+            inline_log = exec_data.get("executionLog")
+            inline_count = len(inline_log) if isinstance(inline_log, list) else 0
+            steps, total_steps = [], exec_data.get("stepCount") or inline_count
         else:
             steps, total_steps = await load_execution_steps(
                 exec_id,

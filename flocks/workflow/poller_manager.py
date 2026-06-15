@@ -18,9 +18,9 @@ from croniter import croniter
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
-    compact_history_for_storage,
     compact_outputs_for_storage,
     create_execution_record,
+    ExecutionStepRecorder,
     record_execution_result,
     resolve_execution_outcome,
 )
@@ -415,6 +415,13 @@ class WorkflowPollerManager:
         inputs = self._build_inputs(config)
         exec_data = await create_execution_record(workflow_id, input_params=inputs)
         exec_id = str(exec_data["id"])
+        loop = asyncio.get_running_loop()
+        step_recorder = ExecutionStepRecorder(
+            exec_id=exec_id,
+            loop=loop,
+            logger=log,
+            log_event="poller.execution_step.write_failed",
+        )
         current = self._status.get(workflow_id) or self._base_status(workflow_id)
         current["lastRunAt"] = started_at_ms
         current["activeRuns"] = self._cleanup_done_runs(workflow_id)
@@ -428,6 +435,7 @@ class WorkflowPollerManager:
                 timeout_s=config["timeoutSeconds"],
                 trace=False,
                 cancel=cancel_event.is_set,
+                on_step_complete=step_recorder.on_step_complete,
             )
             if not isinstance(result, RunWorkflowResult):
                 result = RunWorkflowResult(status="failed", error="invalid_run_result")
@@ -438,16 +446,19 @@ class WorkflowPollerManager:
             duration_ms = _now_ms() - started_at_ms
             duration_s = max(0.0, time.time() - started_at_s)
             summary = self._summarize_outputs(result.outputs)
+            step_count = step_recorder.step_count or result.steps
+            exec_data.update(step_recorder.summary)
             exec_data.update({
                 "outputResults": compact_outputs_for_storage(result.outputs),
                 "status": status_value,
                 "finishedAt": _now_ms(),
                 "duration": duration_s,
-                "executionLog": compact_history_for_storage(result.history),
+                "executionLog": [],
                 "errorMessage": error_message,
+                "stepCount": step_count,
                 "currentNodeId": result.last_node_id,
                 "currentPhase": status_value,
-                "currentStepIndex": result.steps,
+                "currentStepIndex": step_count,
                 "triggerId": "schedule-default",
                 "triggerType": "schedule",
                 "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
@@ -471,12 +482,13 @@ class WorkflowPollerManager:
             duration_s = max(0.0, time.time() - started_at_s)
             status_value = "cancelled" if cancel_event.is_set() else "error"
             finished_at_ms = _now_ms()
+            exec_data.update(step_recorder.summary)
             exec_data.update({
                 "status": status_value,
                 "finishedAt": finished_at_ms,
                 "duration": duration_s,
                 "errorMessage": str(exc),
-                "executionLog": compact_history_for_storage(exec_data.get("executionLog")),
+                "executionLog": [],
                 "currentPhase": status_value,
                 "triggerId": "schedule-default",
                 "triggerType": "schedule",
