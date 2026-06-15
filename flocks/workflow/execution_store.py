@@ -82,6 +82,8 @@ def compact_step_for_storage(
     size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
 ) -> Any:
     """Return a copy of one history step with large ``inputs``/``outputs`` compacted."""
+    if not isinstance(step, dict) and hasattr(step, "model_dump"):
+        step = step.model_dump(mode="json")
     if not isinstance(step, dict):
         return step
     step_copy = dict(step)
@@ -311,6 +313,31 @@ async def record_execution_step(
     return step_payload
 
 
+async def _backfill_execution_steps(
+    exec_id: str,
+    execution_log: Any,
+) -> int:
+    """Persist legacy inline executionLog entries as append-only step rows."""
+    if not isinstance(execution_log, list):
+        return 0
+
+    written = 0
+    for step_index, step in enumerate(execution_log, start=1):
+        step_payload = compact_step_for_storage(step)
+        if not isinstance(step_payload, dict):
+            continue
+        try:
+            await Storage.write(workflow_execution_step_key(exec_id, step_index), step_payload)
+            written += 1
+        except Exception as exc:
+            log.warning("workflow.execution_step.backfill_failed", {
+                "exec_id": exec_id,
+                "step_index": step_index,
+                "error": str(exc),
+            })
+    return written
+
+
 async def load_execution_steps(
     exec_id: str,
     *,
@@ -421,16 +448,22 @@ async def record_execution_result(
     exec_data: Dict[str, Any],
 ) -> None:
     """Persist the final execution record, audit trail, and workflow stats."""
-    await Storage.write(workflow_execution_key(exec_id), compact_execution_summary(exec_data))
+    summary_data = dict(exec_data)
+    backfilled_steps = await _backfill_execution_steps(exec_id, summary_data.get("executionLog"))
+    existing_step_count = _as_positive_int(summary_data.get("stepCount"))
+    if backfilled_steps and (existing_step_count is None or existing_step_count < backfilled_steps):
+        summary_data["stepCount"] = backfilled_steps
+
+    await Storage.write(workflow_execution_key(exec_id), compact_execution_summary(summary_data))
 
     # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
     # are reflected in the UI stats panel.
-    status = exec_data.get("status", "error")
+    status = summary_data.get("status", "error")
     success = status == "success"
-    duration = exec_data.get("duration")
+    duration = summary_data.get("duration")
     if not isinstance(duration, (int, float)):
-        started_at = exec_data.get("startedAt", 0)
-        finished_at = exec_data.get("finishedAt", int(time.time() * 1000))
+        started_at = summary_data.get("startedAt", 0)
+        finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
     await _update_workflow_stats(workflow_id, success, float(duration))
 

@@ -30,6 +30,7 @@ from flocks.workflow.execution_store import (
     compact_execution_summary,
     compact_outputs_for_storage,
     compact_step_for_storage,
+    record_execution_result,
     workflow_execution_step_key,
 )
 from flocks.storage.storage import Storage
@@ -235,6 +236,21 @@ def test_compact_history_skips_step_with_non_dict_outputs() -> None:
     assert compacted[0]["outputs"] == "string-output"
 
 
+def test_compact_step_accepts_pydantic_like_model_dump() -> None:
+    class StepLike:
+        def model_dump(self, mode: str = "python") -> Dict[str, Any]:
+            assert mode == "json"
+            return {
+                "node_id": "step-1",
+                "outputs": {"raw_alerts": _make_alerts(150)},
+            }
+
+    compacted = compact_step_for_storage(StepLike())
+
+    assert compacted["node_id"] == "step-1"
+    assert compacted["outputs"] == {"_raw_alerts_count": 150}
+
+
 def test_compact_execution_summary_drops_execution_log() -> None:
     exec_data = {
         "id": "exec-1",
@@ -255,6 +271,42 @@ def test_workflow_execution_step_key_is_append_only_namespaced() -> None:
         workflow_execution_step_key("exec-1", 12)
         == "workflow_execution_step/exec-1/00000012"
     )
+
+
+@pytest.mark.asyncio
+async def test_record_execution_result_backfills_execution_log_steps() -> None:
+    storage_write = AsyncMock(return_value=None)
+    update_stats = AsyncMock(return_value=None)
+    exec_data = {
+        "id": "exec-1",
+        "workflowId": "wf",
+        "status": "success",
+        "duration": 1.0,
+        "executionLog": [
+            {"node_id": "step-1", "outputs": {"raw_alerts": _make_alerts(150)}},
+            {"node_id": "step-2", "inputs": {"filtered_alerts": _make_alerts(150)}},
+        ],
+    }
+
+    def raise_create_task(coro, *args, **kwargs):  # noqa: ANN001, ARG001
+        coro.close()
+        raise RuntimeError
+
+    with patch.object(Storage, "write", storage_write), \
+         patch("flocks.workflow.execution_store._update_workflow_stats", update_stats), \
+         patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)), \
+         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task), \
+         patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)):
+        await record_execution_result("wf", "exec-1", exec_data)
+
+    write_calls = storage_write.await_args_list
+    assert write_calls[0].args[0] == "workflow_execution_step/exec-1/00000001"
+    assert write_calls[0].args[1]["outputs"] == {"_raw_alerts_count": 150}
+    assert write_calls[1].args[0] == "workflow_execution_step/exec-1/00000002"
+    assert write_calls[1].args[1]["inputs"] == {"_filtered_alerts_count": 150}
+    assert write_calls[2].args[0] == "workflow_execution/exec-1"
+    assert write_calls[2].args[1]["executionLog"] == []
+    assert write_calls[2].args[1]["stepCount"] == 2
 
 
 def test_compact_history_compacts_each_step_inputs() -> None:

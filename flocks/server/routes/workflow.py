@@ -1023,9 +1023,10 @@ async def _run_workflow_execution_task(
     """Execute a workflow in the background and keep the execution record updated."""
     exec_key = _workflow_execution_key(exec_id)
     start_time = time.time()
-    step_history: list[dict[str, Any]] = []
     step_count = 0
     loop = asyncio.get_running_loop()
+    pending_step_index: Optional[int] = None
+    pending_step: Optional[Dict[str, Any]] = None
     execution_summary: Dict[str, Any] = {
         "id": exec_id,
         "workflowId": workflow_id,
@@ -1051,15 +1052,26 @@ async def _run_workflow_execution_task(
             })
 
     def _on_step_start(_run_id, step_index, node, _inputs):
+        nonlocal pending_step_index, pending_step
+        node_id = getattr(node, "id", None)
+        node_type = getattr(node, "type", None)
         loop_progress = derive_loop_progress(
-            node_id=getattr(node, "id", None),
+            node_id=node_id,
             global_step_index=step_index,
             inputs=_inputs,
             outputs=None,
         )
+        pending_step_index = step_index
+        pending_step = {
+            "node_id": node_id,
+            "node_type": node_type,
+            "inputs": _inputs if isinstance(_inputs, dict) else {},
+            "outputs": {},
+            "error": "Run cancelled before node completed",
+        }
         execution_summary.update({
-            "currentNodeId": getattr(node, "id", None),
-            "currentNodeType": getattr(node, "type", None),
+            "currentNodeId": node_id,
+            "currentNodeType": node_type,
             "currentPhase": "running",
             "currentStepIndex": step_index,
             "loopProgress": loop_progress,
@@ -1068,16 +1080,17 @@ async def _run_workflow_execution_task(
         return step_index
 
     def _on_step_complete(step_result) -> None:
-        nonlocal step_count
+        nonlocal step_count, pending_step_index, pending_step
         step_dict = compact_step_for_storage(step_result.model_dump(mode="json"))
         step_count += 1
+        pending_step_index = None
+        pending_step = None
         loop_progress = derive_loop_progress(
             node_id=step_dict.get("node_id"),
             global_step_index=step_count,
             inputs=step_dict.get("inputs"),
             outputs=step_dict.get("outputs"),
         )
-        step_history.append(step_dict)
         execution_summary.update({
             "stepCount": step_count,
             "currentNodeId": step_dict.get("node_id"),
@@ -1109,6 +1122,18 @@ async def _run_workflow_execution_task(
                 "updatedAt": int(time.time() * 1000),
             })
 
+    async def _flush_pending_step() -> None:
+        if pending_step_index is None or pending_step is None:
+            return
+        try:
+            await record_execution_step(exec_id, pending_step_index, pending_step)
+        except Exception as exc:
+            log.warning("workflow.pending_step.write_failed", {
+                "exec_id": exec_id,
+                "step_index": pending_step_index,
+                "error": str(exc),
+            })
+
     try:
         result: RunWorkflowResult = await asyncio.to_thread(
             run_workflow,
@@ -1128,23 +1153,26 @@ async def _run_workflow_execution_task(
         if cancel_event.is_set() and status_value == "success":
             status_value = "cancelled"
             error_message = error_message or f"Run cancelled: run_id={result.run_id or exec_id}"
-        # ``result.history`` is the engine-side authoritative history (not
-        # yet compacted), while ``step_history`` was already compacted in
-        # ``_on_step_complete``.  Prefer the former when available, then
-        # run it through ``compact_history_for_storage`` so the persisted
-        # row stays small in either branch.
+        # ``record_execution_result`` backfills this compacted history into
+        # append-only step rows, then stores only the summary row.
+        final_history = compact_history_for_storage(result.history)
+        if status_value == "cancelled" and not final_history:
+            await _flush_pending_step()
+        final_steps = result.steps
+        if pending_step_index is not None:
+            final_steps = max(final_steps, pending_step_index)
         current_data.update({
             "outputResults": compact_outputs_for_storage(result.outputs),
             "status": status_value,
             "finishedAt": int(time.time() * 1000),
             "duration": duration,
-            "executionLog": [],
-            "stepCount": result.steps,
+            "executionLog": final_history,
+            "stepCount": final_steps,
             "errorMessage": error_message,
             "currentNodeId": result.last_node_id,
             "currentNodeType": current_data.get("currentNodeType"),
             "currentPhase": status_value,
-            "currentStepIndex": result.steps,
+            "currentStepIndex": final_steps,
             "updatedAt": int(time.time() * 1000),
         })
 
