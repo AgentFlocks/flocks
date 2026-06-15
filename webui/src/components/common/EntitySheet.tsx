@@ -34,6 +34,11 @@ import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import ChatGuideDock, { type ChatGuideAction } from './ChatGuideDock';
 import GuidedCreatePanel, { type GuidedCreateGroup } from './GuidedCreatePanel';
 import type { Agent } from '@/api/agent';
+import {
+  SIDE_PANEL_MIN_WIDTH,
+  getInitialSidePanelWidth,
+  getMaxSidePanelWidth,
+} from './sidePanelSizing';
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 interface EntitySheetCtx {
@@ -99,7 +104,7 @@ export interface EntitySheetProps {
   hideRex?: boolean;
   /** Hide Test tab */
   hideTest?: boolean;
-  /** Hide form tab (rex-only sheet, e.g. API 创建只能从 AI 编辑开始) */
+  /** Hide form tab (rex-only sheet, e.g. API 创建只能从工作台开始) */
   hideForm?: boolean;
   /** Initial tab when open (e.g. "form" to show 详情 first when creating) */
   initialTab?: 'form' | 'rex';
@@ -140,8 +145,8 @@ export default function EntitySheet({
   submitLoading,
   submitLabel,
   width: initialWidth,
-  minWidth = 400,
-  maxWidth = 800,
+  minWidth = SIDE_PANEL_MIN_WIDTH,
+  maxWidth,
   onClose,
   onSubmit,
   onExtractFromRex,
@@ -171,6 +176,8 @@ export default function EntitySheet({
 }: EntitySheetProps) {
   const { t } = useTranslation('common');
   const supportsVision = useDefaultModelVision();
+  const resolvedInitialWidth = () => initialWidth ?? getInitialSidePanelWidth();
+  const resolvedMaxWidth = maxWidth ?? getMaxSidePanelWidth();
   const showTabs = !(hideRex && hideTest);
   const hasFormTab = !hideForm;
   const title =
@@ -194,10 +201,10 @@ export default function EntitySheet({
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [rexInitialMessage, setRexInitialMessage] = useState<string | null>(null);
-  const [drawerWidth, setDrawerWidth] = useState(initialWidth ?? 560);
+  const [drawerWidth, setDrawerWidth] = useState(resolvedInitialWidth);
   const [isDragging, setIsDragging] = useState(false);
   const dragStartX = useRef(0);
-  const dragStartWidth = useRef(560);
+  const dragStartWidth = useRef(resolvedInitialWidth());
 
   // ── Rex session via unified hook ──────────────────────────────────────────
   const {
@@ -265,7 +272,7 @@ export default function EntitySheet({
       setTestLoading(false);
       setTestError(null);
       setTestPrompt(effectiveDefaultTestPrompt);
-      setDrawerWidth(initialWidth ?? 560);
+      setDrawerWidth(resolvedInitialWidth());
     }
   }, [open, mode, defaultTestPrompt, resetRexSession, initialWidth, showTabs, hideRex, hideForm, initialTab]);
 
@@ -292,7 +299,7 @@ export default function EntitySheet({
 
       const handleMouseMove = (ev: MouseEvent) => {
         const delta = dragStartX.current - ev.clientX;
-        setDrawerWidth(Math.min(maxWidth, Math.max(minWidth, dragStartWidth.current + delta)));
+        setDrawerWidth(Math.min(resolvedMaxWidth, Math.max(minWidth, dragStartWidth.current + delta)));
       };
 
       const handleMouseUp = () => {
@@ -304,7 +311,7 @@ export default function EntitySheet({
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     },
-    [minWidth, maxWidth],
+    [minWidth, resolvedMaxWidth],
   );
 
   // ── openRex (exposed via context) ─────────────────────────────────────────
@@ -418,7 +425,7 @@ export default function EntitySheet({
 
           {/* Tabs */}
           {showTabs && (
-            <div className="flex px-6">
+            <div className="flex w-full px-6">
               {hasFormTab && (
                 <SheetTab
                   active={activeTab === 'form'}
@@ -751,14 +758,14 @@ function SheetTab({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+      className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium border-b-2 transition-colors ${
         active
           ? 'border-red-600 text-red-600'
           : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
       }`}
     >
-      {icon}
-      {children}
+      <span className="shrink-0">{icon}</span>
+      <span className="truncate">{children}</span>
     </button>
   );
 }

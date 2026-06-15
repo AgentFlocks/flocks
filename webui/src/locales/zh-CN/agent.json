@@ -124,6 +124,57 @@
       }
     ]
   },
+  "edit": {
+    "emptyStateTitle": "暂无编辑对话",
+    "guidePanelTitle": "Rex 辅助修改",
+    "guidePanelDesc": "选择一个编辑入口，Rex 会基于当前 Agent 配置，引导你调整 Prompt、职责边界、工具权限和参数。",
+    "guideSectionTitle": "编辑引导",
+    "caseSectionTitle": "编辑案例",
+    "guideActions": [
+      {
+        "label": "优化当前 Agent",
+        "description": "先审视当前配置，再确认要解决的问题和修改边界。",
+        "prompt": "请帮我编辑当前 Agent「{{name}}」。请先基于当前配置做一个简短诊断，不要直接改文件；再用 question 工具一次只问一个最关键问题，帮我确认要优化的职责、Prompt、工具权限、输出格式和验收方式。确认后输出可提取到表单的 JSON 配置摘要。"
+      },
+      {
+        "label": "调整职责边界",
+        "description": "明确它应该做什么、何时被委派、哪些事情不该做。",
+        "prompt": "请帮我重新梳理当前 Agent「{{name}}」的职责边界。请对照现有描述和 System Prompt，先指出可能过宽、过窄或不清晰的地方，再逐步确认：适用场景、触发条件、不可做事项、必要工具和输出结构。"
+      },
+      {
+        "label": "收敛工具权限",
+        "description": "检查 Tools / Skills 是否过多，按最小权限重新选择。",
+        "prompt": "请帮我检查当前 Agent「{{name}}」的 Tools 和 Skills 配置。目标是最小权限：先说明每个能力是否与职责相关，再建议保留、移除或新增哪些工具/Skill，并给出理由。确认前不要输出最终配置。"
+      },
+      {
+        "label": "改写 Prompt",
+        "description": "优化角色、约束、步骤、输出格式和失败处理。",
+        "prompt": "请帮我改写当前 Agent「{{name}}」的 System Prompt。请先指出现有 Prompt 中角色、任务步骤、边界、输出格式、错误处理和示例调用是否清晰，再给出修改方案；我确认后再输出完整 Prompt 和 JSON 配置摘要。"
+      },
+      {
+        "label": "验证效果",
+        "description": "设计测试输入、预期输出和失败判据，指导保存后验证。",
+        "prompt": "请帮我验证当前 Agent「{{name}}」的配置效果。请先基于它的职责设计 2-3 个测试输入，分别说明预期输出、通过标准和失败判据；如果发现 Prompt 或工具权限可能影响测试结果，请给出需要调整的字段。确认后把建议整理成可提取到表单的配置修改。"
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "变得更保守",
+        "description": "降低幻觉和越权风险，适合安全分析、审计等场景。",
+        "prompt": "我想让当前 Agent「{{name}}」更保守可靠。请帮我调整 Prompt、温度建议和权限边界，让它在信息不足时先追问或说明不确定性，不要猜测；同时保持输出清晰可验证。"
+      },
+      {
+        "label": "更适合委派",
+        "description": "让主 Agent 更容易判断何时调用它、如何消费结果。",
+        "prompt": "我想让当前 Agent「{{name}}」更适合作为子 Agent 被主 Agent 委派。请优化英文描述、职责触发条件、输入要求和输出格式，并检查工具白名单是否匹配。"
+      },
+      {
+        "label": "补充输出格式",
+        "description": "把结果格式固定下来，便于主 Agent 或工作流继续处理。",
+        "prompt": "请帮我为当前 Agent「{{name}}」补充稳定的输出格式。请先确认主要使用场景，然后设计字段、层级、简短示例和异常情况下的返回方式；我确认后再整理成 Prompt 修改。"
+      }
+    ]
+  },
   "chat": {
     "createTitle": "创建子 Agent",
     "subtitle": "通过对话描述需求，AI 自动生成配置",

@@ -53,7 +53,7 @@ const entityTranslations: Record<string, string> = {
   'entity.defaultCreate': '创建',
   'entity.defaultSave': '保存',
   'entity.tabDetails': '详情',
-  'entity.tabAIEdit': 'AI 编辑',
+  'entity.tabAIEdit': '工作台',
   'entity.tabTest': '测试',
   'entity.cancelButton': '取消',
   'entity.testButton': '测试',
@@ -115,7 +115,7 @@ describe('SkillSheet', () => {
 
     it('should default to Rex tab in create mode', () => {
       render(<SkillSheet {...defaultProps} />);
-      expect(screen.getByText('AI 编辑')).toBeInTheDocument();
+      expect(screen.getByText('工作台')).toBeInTheDocument();
     });
   });
 

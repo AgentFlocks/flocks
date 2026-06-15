@@ -113,7 +113,7 @@
     "defaultCreate": "Create",
     "defaultSave": "Save",
     "tabDetails": "Details",
-    "tabAIEdit": "AI Edit",
+    "tabAIEdit": "Workbench",
     "tabTest": "Test",
     "rexThinking": "Agent is thinking...",
     "editAndSend": "Edit the content below and send to the Agent to see the result",

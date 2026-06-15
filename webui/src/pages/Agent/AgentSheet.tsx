@@ -5,7 +5,7 @@
  * 合并为单一的 EntitySheet 封装，支持：
  * - 表单模式（直接填写字段：名称、描述、System Prompt、模型、温度、Tools、Skills）
  * - Rex 对话模式（自然语言描述 → 一键提取配置到表单）
- * - 测试模式（在编辑时直接向 Agent 发消息验证效果）
+ * - 工作台模式（通过引导卡片让 Rex 协助创建、编辑和验证配置）
  */
 
 import { useState, useEffect, useMemo } from 'react';
@@ -84,6 +84,23 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     { title: t('create.guideSectionTitle'), actions: t('create.guideActions', { returnObjects: true }) },
     { title: t('create.caseSectionTitle'), actions: t('create.caseActions', { returnObjects: true }) },
   ]), [t]);
+  const editGuideGroups = useMemo(() => buildGuidedCreateGroups([
+    {
+      title: t('edit.guideSectionTitle'),
+      actions: t('edit.guideActions', {
+        returnObjects: true,
+        name: formData.name || agent?.name || 'Agent',
+      }),
+    },
+    {
+      title: t('edit.caseSectionTitle'),
+      actions: t('edit.caseActions', {
+        returnObjects: true,
+        name: formData.name || agent?.name || 'Agent',
+      }),
+    },
+  ]), [agent?.name, formData.name, t]);
+  const guideGroups = isEdit ? editGuideGroups : createGuideGroups;
   const rexComposerControls = useRexComposerControls();
 
   // isPrimary derives from formData.mode so it reacts to mode changes in create mode
@@ -191,13 +208,6 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     }
   };
 
-  // ── Test: run agent with a prompt ─────────────────────────────────────────
-
-  const handleRunTest = async (prompt: string): Promise<string> => {
-    const res = await agentAPI.test(agent!.name, prompt);
-    return res.data.sessionId;
-  };
-
   // ── Rex: extract config from conversation ─────────────────────────────────
 
   const handleExtractFromRex = async (sessionId: string) => {
@@ -205,11 +215,14 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
 \`\`\`json
 {
   "name": "agent-名称（小写字母、数字和连字符）",
+  "name_cn": "中文名称（可选）",
   "description": "简短英文描述（用于委派）",
   "description_cn": "中文界面展示（可选）",
   "prompt": "完整的 System Prompt 内容",
   "temperature": 0.7,
-  "mode": "primary 或 subagent"
+  "mode": "primary 或 subagent",
+  "tools": ["工具名称（可选）"],
+  "skills": ["Skill 名称（可选）"]
 }
 \`\`\``;
 
@@ -260,6 +273,12 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
                 config.mode === 'primary' || config.mode === 'subagent'
                   ? config.mode
                   : prev.mode,
+              tools: Array.isArray(config.tools)
+                ? config.tools.filter((tool: unknown): tool is string => typeof tool === 'string')
+                : prev.tools,
+              skills: Array.isArray(config.skills)
+                ? config.skills.filter((skill: unknown): skill is string => typeof skill === 'string')
+                : prev.skills,
             }));
             return;
           }
@@ -277,14 +296,15 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       entityType="Agent"
       entityName={agent?.name}
       icon={<Bot className="w-5 h-5" />}
-      rexSystemContext={buildRexContext(formData, isEdit)}
-      rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name)}
-      rexGuideGroups={!isEdit ? createGuideGroups : undefined}
-      rexGuidePanelTitle={!isEdit ? t('create.guidePanelTitle') : undefined}
-      rexGuidePanelDesc={!isEdit ? t('create.guidePanelDesc') : undefined}
-      rexGuideEmptyTitle={!isEdit ? t('create.emptyStateTitle') : undefined}
-      rexGuideIcon={!isEdit ? <Bot className="h-5 w-5" /> : undefined}
-      {...(!isEdit ? rexComposerControls : {})}
+      rexSystemContext={buildRexContext(formData, isEdit, isNative)}
+      rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name, isNative)}
+      rexGuideGroups={guideGroups}
+      rexGuidePanelTitle={isEdit ? t('edit.guidePanelTitle') : t('create.guidePanelTitle')}
+      rexGuidePanelDesc={isEdit ? t('edit.guidePanelDesc', { name: agent?.name ?? formData.name }) : t('create.guidePanelDesc')}
+      rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
+      rexGuideIcon={<Bot className="h-5 w-5" />}
+      initialTab={isEdit ? 'rex' : undefined}
+      {...rexComposerControls}
       submitDisabled={submitDisabled}
       submitLoading={loading}
       submitLabel={isEdit ? undefined : t('sheet.done')}
@@ -292,8 +312,6 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={isEdit ? handleExtractFromRex : undefined}
-      onRunTest={isEdit ? handleRunTest : undefined}
-      defaultTestPrompt="你好，请介绍一下你自己以及你的主要功能。"
     >
       <AgentFormContent
         formData={formData}
@@ -710,7 +728,7 @@ function AgentFormContent({
 
 // ─── Rex context builders ─────────────────────────────────────────────────────
 
-function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
+function buildRexContext(formData: AgentFormData, isEdit: boolean, isNative = false): string {
   if (!isEdit) {
     return `你是 Agent 创建助手。用户希望通过对话来创建一个新的子 Agent。
 
@@ -737,9 +755,13 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
     formData.prompt.length > 200
       ? formData.prompt.slice(0, 200) + '...'
       : formData.prompt;
+  const toolsSummary = formData.tools.length > 0 ? formData.tools.join(', ') : '（未配置）';
+  const skillsSummary = formData.skills.length > 0 ? formData.skills.join(', ') : '（未配置）';
 
   return [
-    `你是一个 Agent 配置专家，正在帮助用户修改一个 AI Agent。`,
+    `你是一个 Agent 编辑引导助手，正在帮助用户修改一个已有 AI Agent。`,
+    `你的目标不是直接大改配置，而是先理解当前配置、追问修改意图，再给出可应用到表单的修改方案。`,
+    `如果用户希望改动 Agent 文件或重新生成 prompt.md/agent.yaml，请先加载并遵守项目内 .flocks/plugins/skills/agent-builder（agent-builder skill）。`,
     ``,
     `**当前配置状态：**`,
     `- 名称：${formData.name || '（未填写）'}`,
@@ -748,30 +770,39 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
     `- System Prompt：${promptPreview || '（未填写）'}`,
     `- 温度：${formData.temperature}`,
     `- 模式：${formData.mode === 'primary' ? 'Primary（主 Agent）' : 'Subagent（子 Agent）'}`,
+    `- Tools：${toolsSummary}`,
+    `- Skills：${skillsSummary}`,
+    `- 是否内置 Agent：${isNative ? '是。内置 Agent 仅支持修改模型和温度，其他配置由系统维护。' : '否，可修改描述、Prompt、温度、Tools 和 Skills。'}`,
     ``,
-    `**Agent 字段说明：**`,
-    `- **名称**：小写字母、数字和连字符，是 Agent 的唯一标识符`,
-    `- **描述**：简短说明 Agent 的用途（30字以内）`,
-    `- **System Prompt**：Agent 的核心指令，决定其行为、能力和风格`,
+    `**编辑流程：**`,
+    `1. 先确认用户想解决的问题：职责变更、行为风格、工具权限、输出格式或模型参数。`,
+    `2. 对照当前配置说明建议修改哪些字段，并指出不建议修改的边界。`,
+    `3. 必要时一次只问一个关键问题，避免一开始就输出大段配置。`,
+    `4. 用户确认后，输出可被「从 Rex 提取配置」解析的 JSON 配置摘要。`,
+    ``,
+    `**可编辑字段说明：**`,
+    `- **描述**：简短说明 Agent 的用途，英文描述用于委派和模型上下文。`,
+    `- **System Prompt**：Agent 的核心指令，决定其行为、能力边界、输出格式和风格。`,
     `- **温度**：0-2，值越低越精准保守（安全分析推荐 0.2-0.5），越高越有创意`,
-    `- **模式**：primary 直接与用户交互；subagent 由主 Agent 调用`,
+    `- **Tools / Skills**：只保留任务确实需要的能力，优先使用最小权限。`,
+    `- **模式**：仅展示当前类型；编辑时不要建议修改 primary/subagent 模式。`,
     ``,
-    `请根据用户的描述帮助他们修改 Agent 配置。`,
-    `配置完成后，用户可以点击「从 Rex 提取配置」按钮，将配置自动填入表单。`,
-    `届时你会被要求以 JSON 格式输出配置摘要，请确保 JSON 格式正确。`,
+    `配置完成后，用户会点击「从 Rex 提取配置」按钮，将配置自动填入表单。届时你会被要求只输出 JSON，请确保 JSON 格式正确。`,
   ].join('\n');
 }
 
-function buildRexWelcome(isEdit: boolean, agentName?: string): string {
+function buildRexWelcome(isEdit: boolean, agentName?: string, isNative = false): string {
   if (isEdit) {
     return `你好！我来帮你修改 Agent **${agentName}** 的配置。
 
-你可以告诉我：
-- 想调整 System Prompt 的哪些部分？
-- 需要改变 Agent 的行为风格？
-- 温度或其他参数需要调整？
+你可以从下方选择一个编辑入口，也可以直接描述你想改的地方，比如：
 
-描述你的需求，我来帮你完善配置。配置好后，点击底部「从 Rex 提取配置」即可自动填入表单。`;
+- 调整职责边界或委派触发条件
+- 优化 System Prompt 和输出格式
+- 收敛工具 / Skill 权限
+- 调整温度并验证效果
+
+${isNative ? '注意：这是内置 Agent，当前只支持修改模型和温度。' : '配置好后，点击底部「从 Rex 提取配置」即可自动填入表单。'}`;
   }
   return `你好！我来帮你创建一个新的子 Agent。
 

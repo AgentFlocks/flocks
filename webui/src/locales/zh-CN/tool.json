@@ -620,9 +620,9 @@
     "toolCountLabel": "工具数",
     "resourceCountLabel": "资源数",
     "generateIntro": "通过 AI 对话生成工具",
-    "generateDesc": "切换到「AI 编辑」标签页，描述你需要的工具，Rex 将自动生成 Python 工具代码并完成接入。",
+    "generateDesc": "切换到「工作台」标签页，描述你需要的工具，Rex 将自动生成 Python 工具代码并完成接入。",
     "doneLabel": "完成",
-    "mcpHintDesc": "不确定怎么填？切换到「AI 编辑」标签页，告诉 Rex 你想接入什么 MCP 服务，它会帮你自动完成配置。",
+    "mcpHintDesc": "不确定怎么填？切换到「工作台」标签页，告诉 Rex 你想接入什么 MCP 服务，它会帮你自动完成配置。",
     "connSuccess": "连接成功",
     "connFailed": "连接失败",
     "addFailedTitle": "添加失败"

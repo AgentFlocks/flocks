@@ -124,6 +124,57 @@
       }
     ]
   },
+  "edit": {
+    "emptyStateTitle": "No editing conversation yet",
+    "guidePanelTitle": "Rex Assisted Editing",
+    "guidePanelDesc": "Choose an editing entry. Rex will use the current Agent configuration to guide prompt, responsibility, permission, and parameter changes.",
+    "guideSectionTitle": "Editing Guides",
+    "caseSectionTitle": "Editing Cases",
+    "guideActions": [
+      {
+        "label": "Improve Current Agent",
+        "description": "Review the current configuration, then clarify the change goal and boundaries.",
+        "prompt": "Please help me edit the current Agent \"{{name}}\". Start with a short diagnosis based on the current configuration and do not write files directly. Then use the question tool to ask one most important question at a time to clarify responsibility, prompt, tool permissions, output format, and acceptance checks. After confirmation, output a JSON configuration summary that can be extracted into the form."
+      },
+      {
+        "label": "Adjust Boundaries",
+        "description": "Clarify what it should do, when it should be delegated to, and what it must not do.",
+        "prompt": "Please help me refine the responsibility boundaries of the current Agent \"{{name}}\". Compare its existing description and System Prompt, point out anything too broad, too narrow, or unclear, then gradually confirm applicable scenarios, delegation triggers, avoid cases, required tools, and output structure."
+      },
+      {
+        "label": "Tighten Permissions",
+        "description": "Check whether Tools / Skills are excessive and reselect with least privilege.",
+        "prompt": "Please review the Tools and Skills configuration of the current Agent \"{{name}}\". The goal is least privilege: explain whether each capability is relevant to the responsibility, then recommend what to keep, remove, or add with reasons. Do not output the final configuration until I confirm."
+      },
+      {
+        "label": "Rewrite Prompt",
+        "description": "Improve role, constraints, steps, output format, and failure handling.",
+        "prompt": "Please help me rewrite the System Prompt of the current Agent \"{{name}}\". First point out whether its role, task steps, boundaries, output format, error handling, and example invocation are clear, then propose edits. After I confirm, output the complete Prompt and JSON configuration summary."
+      },
+      {
+        "label": "Validate Behavior",
+        "description": "Design test inputs, expected outputs, and failure criteria for post-save validation.",
+        "prompt": "Please help me validate the behavior of the current Agent \"{{name}}\". Based on its responsibility, design 2-3 test inputs and describe the expected output, pass criteria, and failure criteria for each. If the Prompt or tool permissions may affect the result, point out which fields should be adjusted. After confirmation, summarize the suggested configuration changes so they can be extracted into the form."
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "Make It Safer",
+        "description": "Reduce hallucination and over-permission risk for security analysis or review.",
+        "prompt": "I want the current Agent \"{{name}}\" to be more conservative and reliable. Please adjust its Prompt, temperature recommendation, and permission boundaries so it asks clarifying questions or states uncertainty when information is insufficient, without guessing, while keeping output clear and verifiable."
+      },
+      {
+        "label": "Better Delegation",
+        "description": "Help the primary Agent decide when to call it and how to consume its result.",
+        "prompt": "I want the current Agent \"{{name}}\" to work better as a delegated sub-agent. Please improve its English description, responsibility triggers, input requirements, and output format, and check whether the tool allowlist matches."
+      },
+      {
+        "label": "Add Output Format",
+        "description": "Stabilize the result shape so the primary Agent or workflow can continue processing.",
+        "prompt": "Please help me add a stable output format for the current Agent \"{{name}}\". First confirm the main usage scenario, then design fields, nesting, a short example, and behavior for abnormal cases. After I confirm, turn it into Prompt edits."
+      }
+    ]
+  },
   "chat": {
     "createTitle": "Create Sub-Agent",
     "subtitle": "Describe your needs through conversation, AI generates configuration automatically",

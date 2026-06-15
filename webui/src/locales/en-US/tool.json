@@ -620,9 +620,9 @@
     "toolCountLabel": "Tools",
     "resourceCountLabel": "Resources",
     "generateIntro": "Generate tools via AI conversation",
-    "generateDesc": "Switch to the \"AI Edit\" tab, describe the tool you need, Rex will auto-generate Python tool code and complete integration.",
+    "generateDesc": "Switch to the \"Workbench\" tab, describe the tool you need, Rex will auto-generate Python tool code and complete integration.",
     "doneLabel": "Done",
-    "mcpHintDesc": "Switch to the \"AI Edit\" tab, tell Rex what MCP service you want to connect, and it will automatically complete the configuration.",
+    "mcpHintDesc": "Switch to the \"Workbench\" tab, tell Rex what MCP service you want to connect, and it will automatically complete the configuration.",
     "connSuccess": "Connected",
     "connFailed": "Connection Failed",
     "addFailedTitle": "Add Failed"

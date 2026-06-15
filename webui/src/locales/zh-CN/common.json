@@ -113,7 +113,7 @@
     "defaultCreate": "创建",
     "defaultSave": "保存",
     "tabDetails": "详情",
-    "tabAIEdit": "AI 编辑",
+    "tabAIEdit": "工作台",
     "tabTest": "测试",
     "rexThinking": "Agent 正在思考中...",
     "editAndSend": "编辑下方内容，发送给 Agent 查看效果",
