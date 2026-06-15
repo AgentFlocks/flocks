@@ -853,6 +853,60 @@ describe('SessionChat intermediate process collapse', () => {
     expect(processGroup.closest('.w-full.max-w-full')).not.toBeNull();
   });
 
+  it('can default grouped process details open without locking user toggles', async () => {
+    const user = userEvent.setup();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process-open',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-open',
+              messageID: 'assistant-process-open',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '先分析当前会话',
+            } as any,
+            {
+              id: 'tool-open',
+              messageID: 'assistant-process-open',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-open',
+              state: {
+                status: 'completed',
+                input: { filePath: 'session.json' },
+                output: 'ok',
+              },
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true, processGroupsDefaultOpen: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(processGroup.open).toBe(true);
+
+    await user.click(screen.getByText('过程（2 项）'));
+
+    expect(processGroup.open).toBe(false);
+  });
+
   it('does not split collapsed process groups on invisible step markers', () => {
     useSessionMessagesMock.mockReturnValue({
       messages: [

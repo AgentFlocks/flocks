@@ -288,7 +288,7 @@ export default function CreateChatTab({
       live={!!sessionId}
       placeholder={t('create.chat.inputPlaceholder')}
       className="h-full"
-      display={{ collapseIntermediateSteps: true }}
+      display={{ collapseIntermediateSteps: true, processGroupsDefaultOpen: false }}
       agentName={WORKFLOW_CHAT_AGENT_NAME}
       mentionAgents={workflowChatAgents}
       supportsVision={supportsVision}

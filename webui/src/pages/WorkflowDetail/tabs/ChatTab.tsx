@@ -441,7 +441,7 @@ export default function ChatTab({
           live={!!sessionId}
           placeholder={t('detail.chat.inputPlaceholder')}
           className="h-full"
-          display={{ collapseIntermediateSteps: true }}
+          display={{ collapseIntermediateSteps: true, processGroupsDefaultOpen: false }}
           agentName={WORKFLOW_CHAT_AGENT_NAME}
           mentionAgents={workflowChatAgents}
           nodeRef={nodeRef}

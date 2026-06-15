@@ -16,7 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
@@ -115,6 +115,8 @@ export interface SessionChatDisplay {
   showTimestamp?: boolean;
   /** Default-collapse intermediate reasoning and tool-process details in embedded panels. */
   collapseIntermediateSteps?: boolean;
+  /** Initial open state for grouped reasoning/tool-process details. */
+  processGroupsDefaultOpen?: boolean;
 }
 
 export interface SessionChatProps {
@@ -1287,6 +1289,7 @@ export default function SessionChat({
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
   const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
+  const processGroupsDefaultOpen = display?.processGroupsDefaultOpen ?? false;
   const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
   const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
@@ -2859,6 +2862,7 @@ export default function SessionChat({
                   showActions={showActions}
                   showTimestamp={showTimestamp}
                   collapseIntermediateSteps={collapseIntermediateSteps}
+                  processGroupsDefaultOpen={processGroupsDefaultOpen}
                   compact={compact}
                   onCopy={handleCopy}
                   editingMessageId={editingMessageId}
@@ -3395,6 +3399,7 @@ export interface ChatMessageBubbleProps {
   showActions?: boolean;
   showTimestamp?: boolean;
   collapseIntermediateSteps?: boolean;
+  processGroupsDefaultOpen?: boolean;
   compact?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
@@ -3409,6 +3414,32 @@ export interface ChatMessageBubbleProps {
   onRegenerate?: (messageId: string) => Promise<void>;
 }
 
+function ProcessGroupDetails({
+  defaultOpen,
+  children,
+}: {
+  defaultOpen: boolean;
+  children: React.ReactNode;
+}) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  useLayoutEffect(() => {
+    if (detailsRef.current) {
+      detailsRef.current.open = defaultOpen;
+    }
+  }, [defaultOpen]);
+
+  return (
+    <details
+      ref={detailsRef}
+      data-testid="chat-process-group"
+      className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+    >
+      {children}
+    </details>
+  );
+}
+
 function ChatMessageBubbleInner({
   message,
   isActive = false,
@@ -3418,6 +3449,7 @@ function ChatMessageBubbleInner({
   showActions = false,
   showTimestamp = false,
   collapseIntermediateSteps = false,
+  processGroupsDefaultOpen = false,
   compact = true,
   onCopy,
   editingMessageId,
@@ -3672,10 +3704,9 @@ function ChatMessageBubbleInner({
             ].filter(Boolean).join(' · ');
             const groupKey = group.map(({ part, index }) => part.id || index).join('-');
             return (
-              <details
+              <ProcessGroupDetails
                 key={`process-${groupIndex}-${groupKey}`}
-                data-testid="chat-process-group"
-                className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+                defaultOpen={processGroupsDefaultOpen}
               >
                 <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50">
                   <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
@@ -3692,7 +3723,7 @@ function ChatMessageBubbleInner({
                 <div className="border-t border-zinc-200/70 px-2.5 py-2">
                   {group.map(({ part, index }) => renderPart(part, index))}
                 </div>
-              </details>
+              </ProcessGroupDetails>
             );
           };
           const renderDisplayParts = () => {
@@ -4345,6 +4376,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
   if (prev.showActions !== next.showActions) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
+  if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
   if (prev.editingMessageId !== next.editingMessageId) return false;
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;
