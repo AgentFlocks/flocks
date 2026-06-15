@@ -174,6 +174,39 @@ def _require_session_write_access(session: SessionModel, user) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
 
 
+async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
+    """Validate an explicitly requested chat agent.
+
+    The Agent page "enabled" toggle is stored as ``delegatable`` for backward
+    compatibility, but product semantics treat disabled subagents as unusable
+    from both delegation and direct chat selection.
+    """
+    if not agent_name:
+        return
+
+    from flocks.agent.registry import Agent
+
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available',
+        )
+
+    tags = getattr(agent, "tags", None) or []
+    if getattr(agent, "hidden", False) or "system" in tags:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available for chat',
+        )
+
+    if getattr(agent, "mode", None) != "primary" and getattr(agent, "delegatable", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is disabled',
+        )
+
+
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
@@ -2382,6 +2415,7 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
+    await _require_agent_usable_for_chat(request.agent)
     agent_name = request.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
@@ -3350,6 +3384,7 @@ async def _enqueue_prompt_request(
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
+    await _require_agent_usable_for_chat(request.agent)
     model = request.model.model_dump(by_alias=True) if request.model else None
     parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
     return await InteractionQueue.enqueue(
@@ -3400,6 +3435,7 @@ async def enqueue_prompt(sessionID: str, request: PromptRequest) -> Dict[str, An
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    await _require_agent_usable_for_chat(request.agent)
     try:
         item = await _enqueue_prompt_request(sessionID, request)
     except QueueFullError as exc:
@@ -3511,6 +3547,7 @@ async def send_session_message_async(
         _require_session_write_access(session, current_user)
     
     working_directory = session.directory or os.getcwd()
+    await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
         "sessionID": sessionID,
@@ -3607,6 +3644,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         _require_session_write_access(session, current_user)
 
     working_directory = session.directory or os.getcwd()
+    await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:
         raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)

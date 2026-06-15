@@ -6,7 +6,7 @@ import type { Agent } from '@/api/agent';
 import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
-import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
+import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import type { ModelDefinitionV2 } from '@/types';
 
 export type AgentSourceFilter = 'all' | 'builtin' | 'custom';
@@ -47,11 +47,11 @@ export function useChatAgentOptions(options: { allowedAgentNames?: string[] } = 
   ), [options.allowedAgentNames]);
 
   const primaryAgents = useMemo(
-    () => agents.filter((agent) => agent.mode === 'primary'),
+    () => agents.filter((agent) => agent.mode === 'primary' && isAgentUsableInChat(agent)),
     [agents],
   );
   const subAgents = useMemo(
-    () => agents.filter((agent) => agent.mode !== 'primary' && !(agent.tags ?? []).includes('system')),
+    () => agents.filter((agent) => agent.mode !== 'primary' && isAgentUsableInChat(agent)),
     [agents],
   );
   const chatAgents = useMemo(
