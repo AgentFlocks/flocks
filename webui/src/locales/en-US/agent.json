@@ -78,6 +78,52 @@
   "sheet": {
     "done": "Done"
   },
+  "create": {
+    "emptyStateTitle": "No creation conversation yet",
+    "guidePanelTitle": "Rex Assisted Creation",
+    "guidePanelDesc": "Choose a guide or case. Rex will load the agent-builder skill first, confirm name, role, boundaries, and strategy, then generate files.",
+    "guideSectionTitle": "Creation Guides",
+    "caseSectionTitle": "Creation Cases",
+    "guideActions": [
+      {
+        "label": "How to Create",
+        "description": "Start from name, role, boundaries, strategy, and tool allowlist.",
+        "prompt": "Please follow the .flocks/plugins/skills/agent-builder skill to guide me through creating a Flocks sub-agent. Do not write files yet. Use the question tool to ask one most important question at a time and help me clarify agent name, role description, capability boundaries, execution strategy, tool allowlist, output format, and avoid cases. After I confirm, generate ~/.flocks/plugins/agents/<name>/agent.yaml and prompt.md, and show a plan before writing."
+      },
+      {
+        "label": "Clarify Boundaries",
+        "description": "Turn a fuzzy need into delegatable agent description and triggers.",
+        "prompt": "Please help me clarify the sub-agent's responsibility boundaries so the agent-builder skill can create it. Ask one question at a time to confirm: what task it solves, when Rex should delegate to it, what it must not do, required tools, whether it is read-only, output format, and acceptance checks."
+      },
+      {
+        "label": "Choose Strategy",
+        "description": "Choose among read_only, react, plan_and_execute, and explore.",
+        "prompt": "Please use the agent-builder skill to help me choose an execution strategy for this sub-agent. First confirm task risk, whether it needs file writes, command execution, codebase exploration, or web lookup, then recommend read_only, react, plan_and_execute, or explore with an appropriate tool allowlist."
+      },
+      {
+        "label": "Design Prompt",
+        "description": "Create a reusable system prompt with output format and constraints.",
+        "prompt": "Please help me design the sub-agent prompt.md. First confirm role, mission, capability list, output format, constraints, and example invocation scenarios. Do not write files until I confirm. After confirmation, draft prompt.md using the agent-builder skill template."
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "Threat Intel Agent",
+        "description": "Look up IOC reputation, correlate context, and produce an assessment report.",
+        "prompt": "I want to create a threat intelligence sub-agent for IP, domain, URL, and hash analysis. It should call existing intelligence tools in this project and output a structured assessment report. Please follow the agent-builder skill to guide me through name, tool allowlist, read-only boundaries, output format, and applicable scenarios."
+      },
+      {
+        "label": "Code Review Agent",
+        "description": "Read-only review of code risks, regressions, and missing tests.",
+        "prompt": "I want to create a code review sub-agent for read-only review of bugs, regression risks, security risks, and test gaps in code changes. Please follow the agent-builder skill to guide me through responsibility, read_only strategy, tool allowlist, and output format."
+      },
+      {
+        "label": "Log Analysis Agent",
+        "description": "Analyze security logs, extract key events, anomalies, and response suggestions.",
+        "prompt": "I want to create a log analysis sub-agent that reads security logs, identifies anomalous patterns, summarizes key events, and provides response recommendations. Please follow the agent-builder skill to guide me through input format, tool permissions, analysis steps, and final output structure."
+      }
+    ]
+  },
   "chat": {
     "createTitle": "Create Sub-Agent",
     "subtitle": "Describe your needs through conversation, AI generates configuration automatically",

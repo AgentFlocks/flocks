@@ -128,6 +128,8 @@
     "extracting": "Extracting...",
     "extractFromRex": "Extract from Rex",
     "switchToForm": "Switch to Form",
+    "guideCollapse": "Collapse creation guides",
+    "guideExpand": "Expand creation guides",
     "testStartFailed": "Test start failed",
     "extractFailed": "Extraction failed, please retry",
     "rexAssist": "Rex Assist",

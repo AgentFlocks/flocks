@@ -28,9 +28,12 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
-import SessionChat from './SessionChat';
+import SessionChat, { buildInstructionDisplayText } from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
+import ChatGuideDock, { type ChatGuideAction } from './ChatGuideDock';
+import GuidedCreatePanel, { type GuidedCreateGroup } from './GuidedCreatePanel';
+import type { Agent } from '@/api/agent';
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 interface EntitySheetCtx {
@@ -100,6 +103,24 @@ export interface EntitySheetProps {
   hideForm?: boolean;
   /** Initial tab when open (e.g. "form" to show 详情 first when creating) */
   initialTab?: 'form' | 'rex';
+  /** Guided actions shown in the Rex tab before and after the conversation starts. */
+  rexGuideGroups?: GuidedCreateGroup[];
+  rexGuidePanelTitle?: string;
+  rexGuidePanelDesc?: string;
+  rexGuideEmptyTitle?: string;
+  rexGuideCollapseTitle?: string;
+  rexGuideExpandTitle?: string;
+  rexGuideIcon?: React.ReactNode;
+  /** SessionChat composer options for Rex-assisted pages. */
+  rexAgentName?: string;
+  rexMentionAgents?: Agent[];
+  rexModel?: { providerID: string; modelID: string } | null;
+  rexSupportsVision?: boolean | null;
+  rexContextWindowTokens?: number | null;
+  rexToolbarSlot?: React.ReactNode;
+  rexCenterToolbarSlot?: React.ReactNode;
+  rexComposerTextareaMinHeight?: number;
+  rexComposerTextareaMaxHeight?: number;
   /** Optional element rendered on the left side of the form-tab footer (e.g. delete button) */
   footerLeft?: React.ReactNode;
 }
@@ -130,6 +151,22 @@ export default function EntitySheet({
   hideTest = false,
   hideForm = false,
   initialTab,
+  rexGuideGroups,
+  rexGuidePanelTitle,
+  rexGuidePanelDesc,
+  rexGuideEmptyTitle,
+  rexGuideCollapseTitle,
+  rexGuideExpandTitle,
+  rexGuideIcon,
+  rexAgentName,
+  rexMentionAgents,
+  rexModel,
+  rexSupportsVision,
+  rexContextWindowTokens,
+  rexToolbarSlot,
+  rexCenterToolbarSlot,
+  rexComposerTextareaMinHeight,
+  rexComposerTextareaMaxHeight,
   footerLeft,
 }: EntitySheetProps) {
   const { t } = useTranslation('common');
@@ -185,6 +222,25 @@ export default function EntitySheet({
   const [testError, setTestError] = useState<string | null>(null);
   const testTextareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+  const effectiveRexGuideGroups = (rexGuideGroups ?? [])
+    .map((group) => ({
+      ...group,
+      actions: group.actions.filter((action) => action.label && action.prompt),
+    }))
+    .filter((group) => group.actions.length > 0);
+  const rexGuideActions: ChatGuideAction[] = effectiveRexGuideGroups.flatMap((group) => (
+    group.actions.map((action) => ({
+      ...action,
+      group: action.group ?? group.title,
+    }))
+  ));
+  const hasRexGuideActions = rexGuideActions.length > 0;
+  const showRexFooter =
+    activeTab === 'rex' &&
+    (Boolean(extractError) ||
+      Boolean(onExtractFromRex && sessionId) ||
+      Boolean(sessionId && hasFormTab) ||
+      (mode === 'create' && !hasRexGuideActions));
 
   // ── Auto-resize test textarea ─────────────────────────────────────────────
 
@@ -257,14 +313,17 @@ export default function EntitySheet({
     (msg?: string) => {
       setActiveTab('rex');
       if (sessionId && msg) {
-        client.post(`/api/session/${sessionId}/prompt_async`, {
+        const payload: Record<string, unknown> = {
           parts: [{ type: 'text', text: msg }],
-        });
+        };
+        if (rexAgentName) payload.agent = rexAgentName;
+        if (rexModel) payload.model = rexModel;
+        client.post(`/api/session/${sessionId}/prompt_async`, payload);
       } else if (msg) {
-        createAndSendRex({ text: msg }).catch(() => {});
+        createAndSendRex({ text: msg, agent: rexAgentName, model: rexModel }).catch(() => {});
       }
     },
-    [sessionId, createAndSendRex],
+    [sessionId, createAndSendRex, rexAgentName, rexModel],
   );
 
   // ── openTest (exposed via context) ────────────────────────────────────────
@@ -272,6 +331,15 @@ export default function EntitySheet({
   const openTest = useCallback(() => {
     setActiveTab('test');
   }, []);
+
+  const startRexGuidePrompt = useCallback((prompt: string, label: string) => {
+    createAndSendRex({
+      text: prompt,
+      agent: rexAgentName,
+      model: rexModel,
+      displayText: buildInstructionDisplayText(label),
+    }).catch(() => {});
+  }, [createAndSendRex, rexAgentName, rexModel]);
 
   // ── Test session ──────────────────────────────────────────────────────────
 
@@ -489,18 +557,56 @@ export default function EntitySheet({
                   sessionId={sessionId}
                   live={!!sessionId}
                   placeholder={t('entity.rexInputPlaceholder')}
-                  className="flex-1"
+                  className="h-full"
                   emptyText={t('entity.rexReady')}
                   initialMessage={rexInitialMessage}
-                  supportsVision={supportsVision}
-                  onCreateAndSend={!sessionId ? (text, imageParts) => createAndSendRex({ text, imageParts }) : undefined}
+                  agentName={rexAgentName}
+                  mentionAgents={rexMentionAgents}
+                  model={rexModel}
+                  supportsVision={rexSupportsVision ?? supportsVision}
+                  contextWindowTokens={rexContextWindowTokens}
+                  toolbarSlot={rexToolbarSlot}
+                  centerToolbarSlot={rexCenterToolbarSlot}
+                  composerTextareaMinHeight={rexComposerTextareaMinHeight}
+                  composerTextareaMaxHeight={rexComposerTextareaMaxHeight}
+                  onCreateAndSend={!sessionId ? (text, imageParts, agentOverride, modelOverride, options) => createAndSendRex({
+                    text,
+                    imageParts,
+                    agent: agentOverride || rexAgentName,
+                    model: modelOverride === undefined ? rexModel : modelOverride,
+                    displayText: options?.displayText,
+                  }) : undefined}
                   welcomeContent={!sessionId ? (
-                    <div className="text-center max-w-md">
-                      <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />
-                      <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
-                      <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
-                    </div>
+                    hasRexGuideActions ? (
+                      <GuidedCreatePanel
+                        emptyTitle={rexGuideEmptyTitle ?? t('entity.rexReady')}
+                        icon={rexGuideIcon ?? <MessageSquare className="h-5 w-5" />}
+                        title={rexGuidePanelTitle ?? t('entity.rexAssist')}
+                        description={rexGuidePanelDesc ?? t('entity.rexReady')}
+                        groups={effectiveRexGuideGroups}
+                        onStartPrompt={startRexGuidePrompt}
+                      />
+                    ) : (
+                      <div className="text-center max-w-md">
+                        <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />
+                        <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
+                        <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
+                      </div>
+                    )
                   ) : undefined}
+                  conversationBottomSlot={({ sendPrompt, sending, streaming }) => (
+                    hasRexGuideActions && (sessionId || sending || streaming) ? (
+                      <ChatGuideDock
+                        actions={rexGuideActions}
+                        disabled={sending || streaming}
+                        collapseTitle={rexGuideCollapseTitle ?? t('entity.guideCollapse')}
+                        expandTitle={rexGuideExpandTitle ?? t('entity.guideExpand')}
+                        onStartPrompt={(prompt, label) => sendPrompt(prompt, {
+                          displayText: buildInstructionDisplayText(label),
+                        })}
+                      />
+                    ) : null
+                  )}
                 />
               )}
             </div>
@@ -538,7 +644,7 @@ export default function EntitySheet({
         )}
 
         {/* ── Rex tab footer: extract / switch actions only ── */}
-        {activeTab === 'rex' && (
+        {showRexFooter && (
           <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-3">
             {extractError && (
               <p className="text-xs text-red-500 mb-2 flex items-center gap-1">
@@ -573,9 +679,7 @@ export default function EntitySheet({
                 ) : null}
               </div>
 
-              {/* In create mode, show Done button directly in the Rex tab so the user
-                  doesn't have to switch to the form tab after the agent is created. */}
-              {mode === 'create' && (
+              {mode === 'create' && !hasRexGuideActions && (
                 <SubmitButtons
                   onClose={onClose}
                   onSubmit={onSubmit}

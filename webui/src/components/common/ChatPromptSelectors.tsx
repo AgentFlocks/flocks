@@ -75,9 +75,9 @@ export function useChatModelOptions() {
   useEffect(() => {
     let cancelled = false;
     setLoadingEnabledModels(true);
-    modelV2API.listDefinitions({ enabled_only: true })
+    Promise.resolve(modelV2API.listDefinitions({ enabled_only: true }))
       .then((response) => {
-        if (!cancelled) setEnabledModelDefinitions(response.data.models ?? []);
+        if (!cancelled) setEnabledModelDefinitions(response?.data?.models ?? []);
       })
       .catch(() => {
         if (!cancelled) setEnabledModelDefinitions([]);
@@ -165,10 +165,10 @@ export function useChatModelOptions() {
   useEffect(() => {
     if (selectedModelKey || options.length === 0) return;
     let cancelled = false;
-    defaultModelAPI.getResolved()
+    Promise.resolve(defaultModelAPI.getResolved())
       .then((response) => {
         if (cancelled) return;
-        const { provider_id: providerID, model_id: modelID } = response.data;
+        const { provider_id: providerID, model_id: modelID } = response?.data ?? {};
         const defaultKey = `${providerID}::${modelID}`;
         const fallbackKey = options[0]?.key ?? null;
         setSelectedModelKey(options.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);

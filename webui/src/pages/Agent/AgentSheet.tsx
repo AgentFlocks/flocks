@@ -8,13 +8,15 @@
  * - 测试模式（在编辑时直接向 Agent 发消息验证效果）
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Bot, Sparkles, Lock } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import EntitySheet, { useEntitySheet } from '@/components/common/EntitySheet';
+import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
+import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import PillGroup from '@/components/common/PillGroup';
 import { providerAPI, defaultModelAPI, modelV2API } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
@@ -78,6 +80,11 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [toolsLoading, setToolsLoading] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(true);
+  const createGuideGroups = useMemo(() => buildGuidedCreateGroups([
+    { title: t('create.guideSectionTitle'), actions: t('create.guideActions', { returnObjects: true }) },
+    { title: t('create.caseSectionTitle'), actions: t('create.caseActions', { returnObjects: true }) },
+  ]), [t]);
+  const rexComposerControls = useRexComposerControls();
 
   // isPrimary derives from formData.mode so it reacts to mode changes in create mode
   const isPrimary = formData.mode === 'primary';
@@ -272,6 +279,12 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       icon={<Bot className="w-5 h-5" />}
       rexSystemContext={buildRexContext(formData, isEdit)}
       rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name)}
+      rexGuideGroups={!isEdit ? createGuideGroups : undefined}
+      rexGuidePanelTitle={!isEdit ? t('create.guidePanelTitle') : undefined}
+      rexGuidePanelDesc={!isEdit ? t('create.guidePanelDesc') : undefined}
+      rexGuideEmptyTitle={!isEdit ? t('create.emptyStateTitle') : undefined}
+      rexGuideIcon={!isEdit ? <Bot className="h-5 w-5" /> : undefined}
+      {...(!isEdit ? rexComposerControls : {})}
       submitDisabled={submitDisabled}
       submitLoading={loading}
       submitLabel={isEdit ? undefined : t('sheet.done')}
@@ -701,18 +714,20 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
   if (!isEdit) {
     return `你是 Agent 创建助手。用户希望通过对话来创建一个新的子 Agent。
 
-请使用 agent-builder skill 根据用户的需求生成子 Agent 配置文件（YAML + prompt 文件），保存到 ~/.flocks/plugins/agents/ 目录。
+请先加载并遵守项目内 .flocks/plugins/skills/agent-builder（agent-builder skill），再根据用户需求生成子 Agent 配置文件（agent.yaml + prompt.md），保存到 ~/.flocks/plugins/agents/<name>/ 目录。
 
 **创建流程：**
 1. 先确认用户需求：Agent 名称、职责、能力边界、执行模式
-2. 生成 prompt 文件（.prompt.md）和配置文件（.yaml）
-3. 验证文件正确性
+2. 生成 prompt.md 和 agent.yaml，目录名必须与 Agent name 一致
+3. 验证 YAML、目录结构、名称唯一性和工具名
 
 **重要约束：**
+- 必须先加载 .flocks/plugins/skills/agent-builder
 - Agent 名称必须是 kebab-case 格式
 - 如果用户提供中文名称，请写入 name_cn 字段
 - mode 固定为 subagent
-- 文件必须写入 ~/.flocks/plugins/agents/
+- 文件必须写入 ~/.flocks/plugins/agents/<name>/，禁止创建 agents/<name>.yaml 这类扁平文件
+- 新 Agent 优先使用 tools: allowlist，不要随意使用 permission 通配规则
 - 不要与内置 Agent 名称冲突
 
 请先引导用户描述需求，如果信息不够清晰可适当追问，然后一次性生成所有文件。`;

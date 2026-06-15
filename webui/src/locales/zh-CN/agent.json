@@ -78,6 +78,52 @@
   "sheet": {
     "done": "完成"
   },
+  "create": {
+    "emptyStateTitle": "暂无创建对话",
+    "guidePanelTitle": "Rex 辅助创建",
+    "guidePanelDesc": "选择一个引导或案例，Rex 会先加载 agent-builder skill，确认名称、职责、能力边界和执行模式后再生成文件。",
+    "guideSectionTitle": "创建引导",
+    "caseSectionTitle": "创建案例",
+    "guideActions": [
+      {
+        "label": "如何创建子 Agent",
+        "description": "从名称、职责、边界、策略和工具白名单开始梳理。",
+        "prompt": "请按 .flocks/plugins/skills/agent-builder skill 引导我创建一个 Flocks 子 Agent。先不要写文件，先用 question 工具一次只问一个最关键问题，帮我明确 Agent 名称、职责描述、能力边界、执行策略、工具白名单、输出格式和不适用场景；我确认后再生成 ~/.flocks/plugins/agents/<name>/agent.yaml 和 prompt.md，并在写入前展示计划。"
+      },
+      {
+        "label": "梳理职责边界",
+        "description": "把模糊需求整理成可委派的 Agent 描述和触发条件。",
+        "prompt": "请帮我把子 Agent 的职责边界梳理清楚。目标是形成 agent-builder skill 可使用的创建说明。请一次只问一个问题，依次确认：它解决什么任务、何时由 Rex 委派、不能做什么、需要哪些工具、是否只读、输出格式和验收方式。"
+      },
+      {
+        "label": "选择执行策略",
+        "description": "在 read_only、react、plan_and_execute、explore 之间做选择。",
+        "prompt": "请根据 agent-builder skill 帮我选择子 Agent 的执行策略。请先确认任务风险、是否需要写文件、是否需要执行命令、是否需要探索代码库或联网查询，然后推荐 read_only、react、plan_and_execute 或 explore，并说明对应工具白名单。"
+      },
+      {
+        "label": "设计 Prompt",
+        "description": "生成可复用的 system prompt 结构、输出格式和约束。",
+        "prompt": "请帮我设计子 Agent 的 prompt.md。先确认角色、任务目标、能力清单、输出格式、约束和示例调用场景；在我确认前不要写文件。确认后按 agent-builder skill 的模板生成 prompt.md 草稿。"
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "威胁情报分析 Agent",
+        "description": "查询 IOC 信誉、关联上下文并输出研判报告。",
+        "prompt": "我想创建一个威胁情报分析子 Agent，用于分析 IP、域名、URL、哈希等 IOC，能调用项目里已有的情报工具并输出结构化研判报告。请按 agent-builder skill 引导我确认名称、工具白名单、只读边界、输出格式和适用场景。"
+      },
+      {
+        "label": "代码审计 Agent",
+        "description": "只读检查代码风险、回归风险和缺失测试。",
+        "prompt": "我想创建一个代码审计子 Agent，用于只读检查代码变更中的 bug、回归风险、安全风险和测试缺口。请按 agent-builder skill 引导我确认职责、read_only 策略、工具白名单和输出格式。"
+      },
+      {
+        "label": "日志分析 Agent",
+        "description": "分析安全日志，提取关键事件、异常模式和处置建议。",
+        "prompt": "我想创建一个日志分析子 Agent，用于读取安全日志、识别异常模式、汇总关键事件并给出处置建议。请按 agent-builder skill 引导我确认输入格式、工具权限、分析步骤和最终输出结构。"
+      }
+    ]
+  },
   "chat": {
     "createTitle": "创建子 Agent",
     "subtitle": "通过对话描述需求，AI 自动生成配置",

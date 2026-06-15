@@ -128,6 +128,8 @@
     "extracting": "提取中...",
     "extractFromRex": "从 Rex 提取配置",
     "switchToForm": "切换到表单",
+    "guideCollapse": "收起创建引导",
+    "guideExpand": "展开创建引导",
     "testStartFailed": "测试启动失败",
     "extractFailed": "提取失败，请重试",
     "rexAssist": "Rex 协助",

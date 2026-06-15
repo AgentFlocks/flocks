@@ -13,7 +13,7 @@ import {
   useChatModelOptions,
 } from '@/components/common/ChatPromptSelectors';
 import ChatGuideDock, { type ChatGuideAction } from '@/components/common/ChatGuideDock';
-import GuideInfoIcon from '@/components/common/GuideInfoIcon';
+import GuidedCreatePanel from '@/components/common/GuidedCreatePanel';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { workflowAPI, Workflow } from '@/api/workflow';
@@ -298,9 +298,16 @@ export default function CreateChatTab({
       onSSEEvent={handleSSEEvent}
       onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
       welcomeContent={!sessionId ? (
-        <CreateWorkflowGuidePanel
-          guideActions={guideActions}
-          caseActions={exampleActions}
+        <GuidedCreatePanel
+          emptyTitle={t('create.chat.emptyStateTitle')}
+          icon={<Bot className="h-5 w-5" />}
+          title={t('create.chat.guidePanelTitle')}
+          description={t('create.chat.guidePanelDesc')}
+          groups={[
+            { title: t('create.chat.guideSectionTitle'), actions: guideActions },
+            { title: t('create.chat.caseSectionTitle'), actions: exampleActions },
+          ]}
+          scrollTestId="create-workflow-guide-scroll"
           onStartPrompt={handleWelcomeGuidePrompt}
         />
       ) : undefined}
@@ -365,91 +372,4 @@ function CreateWorkflowLaunchRequestRunner({
   }, [launchRequest, onLaunchRequestHandled, onStartPrompt]);
 
   return null;
-}
-
-function CreateWorkflowGuidePanel({
-  guideActions,
-  caseActions,
-  onStartPrompt,
-}: {
-  guideActions: ChatGuideAction[];
-  caseActions: ChatGuideAction[];
-  onStartPrompt: (prompt: string, label: string) => void;
-}) {
-  const { t } = useTranslation('workflow');
-
-  return (
-    <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
-      <p className="mb-8 text-center text-sm font-medium text-gray-400">
-        {t('create.chat.emptyStateTitle')}
-      </p>
-      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
-        <div className="flex-shrink-0">
-          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
-            <Bot className="h-5 w-5" />
-          </div>
-          <h3 className="mt-4 text-sm font-semibold text-gray-900">
-            {t('create.chat.guidePanelTitle')}
-          </h3>
-          <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
-            {t('create.chat.guidePanelDesc')}
-          </p>
-        </div>
-        <div
-          data-testid="create-workflow-guide-scroll"
-          className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]"
-        >
-          <CreateGuideSection
-            title={t('create.chat.guideSectionTitle')}
-            actions={guideActions}
-            onStartPrompt={onStartPrompt}
-          />
-          <CreateGuideSection
-            title={t('create.chat.caseSectionTitle')}
-            actions={caseActions}
-            onStartPrompt={onStartPrompt}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CreateGuideSection({
-  title,
-  actions,
-  onStartPrompt,
-}: {
-  title: string;
-  actions: ChatGuideAction[];
-  onStartPrompt: (prompt: string, label: string) => void;
-}) {
-  if (actions.length === 0) return null;
-
-  return (
-    <section>
-      <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
-      <div className="flex flex-col gap-1.5">
-        {actions.map((action) => (
-          <div
-            key={action.label}
-            className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
-          >
-            <button
-              type="button"
-              onClick={() => onStartPrompt(action.prompt, action.label)}
-              className="min-w-0 flex-1 truncate text-left"
-            >
-              {action.label}
-            </button>
-            <GuideInfoIcon
-              label={action.label}
-              description={action.description}
-              className="group-hover:text-rose-400"
-            />
-          </div>
-        ))}
-      </div>
-    </section>
-  );
 }
