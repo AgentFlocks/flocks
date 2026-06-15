@@ -3,12 +3,13 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import IntegrationTab from './IntegrationTab';
 
-const { workflowAPI } = vi.hoisted(() => ({
+const { workflowAPI, workflowAPIEndpoints } = vi.hoisted(() => ({
   workflowAPI: {
     get: vi.fn(),
     getConfig: vi.fn(),
     updateConfig: vi.fn(),
     getService: vi.fn(),
+    deleteService: vi.fn(),
     publish: vi.fn(),
     unpublish: vi.fn(),
     syncConfig: vi.fn(),
@@ -25,10 +26,49 @@ const { workflowAPI } = vi.hoisted(() => ({
     savePollerConfig: vi.fn(),
     getPollerStatus: vi.fn(),
   },
+  workflowAPIEndpoints: (id: string, triggerId = '{triggerId}') => {
+    const workflowBase = `/api/workflow/${id}`;
+    const triggerBase = `${workflowBase}/triggers`;
+    const triggerRecord = `${triggerBase}/${triggerId}`;
+    return {
+      config: {
+        read: `GET ${workflowBase}/config`,
+        write: `PUT ${workflowBase}/config`,
+        syncFallback: `POST ${workflowBase}/config/sync`,
+      },
+      apiService: {
+        read: `GET ${workflowBase}/service`,
+        publish: `POST ${workflowBase}/publish`,
+        unpublish: `POST ${workflowBase}/unpublish`,
+        delete: `DELETE ${workflowBase}/service`,
+      },
+      triggers: {
+        list: `GET ${triggerBase}`,
+        create: `POST ${triggerBase}`,
+        update: `PUT ${triggerRecord}`,
+        delete: `DELETE ${triggerRecord}`,
+        status: `GET ${triggerRecord}/status`,
+        previewMapping: `POST ${triggerRecord}/preview-mapping`,
+        test: `POST ${triggerRecord}/test`,
+        invokeWebhook: `/webhook/workflows/${id}/${triggerId}`,
+        plugins: 'GET /api/workflow-trigger-plugins',
+      },
+      legacyAdapters: {
+        kafkaConfig: `GET/POST ${workflowBase}/kafka-config`,
+        kafkaStatus: `GET ${workflowBase}/kafka-status`,
+        pollerConfig: `GET/POST ${workflowBase}/poller-config`,
+        pollerStatus: `GET ${workflowBase}/poller-status`,
+        pollerRunOnce: `POST ${workflowBase}/poller-run-once`,
+        syslogConfig: `GET/POST ${workflowBase}/syslog-config`,
+        syslogStatus: `GET ${workflowBase}/syslog-status`,
+      },
+    };
+  },
 }));
 
 vi.mock('@/api/workflow', () => ({
   workflowAPI,
+  workflowAPIEndpoints,
 }));
 
 vi.mock('@/components/common/CopyButton', () => ({
@@ -55,6 +95,11 @@ vi.mock('react-i18next', () => ({
         'detail.run.stopFailed': '停止失败',
         'detail.run.stopping': '停止中...',
         'detail.run.stopService': '停止服务',
+        'detail.run.deleteService': '删除 API 发布配置',
+        'detail.run.deleteServiceShort': '删除配置',
+        'detail.run.deletingService': '删除中...',
+        'detail.run.deleteServiceConfirm': '确认删除 API 发布配置？',
+        'detail.run.deleteServiceFailed': '删除 API 发布配置失败',
         'detail.run.driverLocal': '本地进程',
         'detail.run.driverDocker': 'Docker 容器',
         'detail.run.driverLocalDesc': 'local desc',
@@ -63,22 +108,28 @@ vi.mock('react-i18next', () => ({
         'detail.run.apiKeyShow': '显示',
         'detail.run.guidePanelTitle': 'Rex 辅助发布',
         'detail.run.guidePanelDesc': '选择一种发布方式',
+        'detail.run.cardGuideTitle': 'Flocks辅助配置',
+        'detail.run.cardGuideAction': '辅助配置',
+        'detail.run.cardGuideApiFocus': 'API 发布配置',
+        'detail.run.cardGuideApiDesc': '结合当前 API 服务状态、运行方式和工作流功能，引导确认发布、鉴权、调用样例和是否启动。',
+        'detail.run.cardGuideTriggerDesc': '结合当前 {{trigger}} 卡片配置和工作流功能，引导确认接入参数、字段映射、样例和生效方式。',
+        'detail.run.cardGuideDisplayLabel': 'Flocks辅助配置：{{focus}}',
         'detail.run.guideApiShort': '发布为 API',
         'detail.run.guideApiDesc': '配置 API 发布',
-        'detail.run.guideApiInstruction': '围绕 API 发布读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideApiInstruction': '围绕 API 发布读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 和 workflow.json 不是直接写入目标；后端接口不可用时必须停止配置流程',
         'detail.run.guideSyslogShort': 'Syslog 接入',
         'detail.run.guideSyslogDesc': '配置 Syslog 接入',
-        'detail.run.guideSyslogInstruction': '围绕 Syslog 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideSyslogInstruction': '围绕 Syslog 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 和 workflow.json 不是直接写入目标；后端接口不可用时必须停止配置流程',
         'detail.run.guideKafkaShort': 'Kafka 接入',
         'detail.run.guideKafkaDesc': '配置 Kafka 接入',
-        'detail.run.guideKafkaInstruction': '围绕 Kafka 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideKafkaInstruction': '围绕 Kafka 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 和 workflow.json 不是直接写入目标；后端接口不可用时必须停止配置流程',
         'detail.run.guideWebhookShort': 'Webhook 接入',
         'detail.run.guideWebhookDesc': '配置 Webhook 接入',
-        'detail.run.guideWebhookInstruction': '围绕 Webhook 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
+        'detail.run.guideWebhookInstruction': '围绕 Webhook 接入读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 和 workflow.json 不是直接写入目标；后端接口不可用时必须停止配置流程',
         'detail.run.guideScheduleShort': '定时触发',
         'detail.run.guideScheduleDesc': '配置定时触发',
-        'detail.run.guideScheduleInstruction': '围绕定时触发读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 不是直接写入目标',
-        'detail.chat.welcome.guideQuestionPrompt': '用户点击了「{{focus}}」按钮。这个按钮的意图是：{{instruction}} 工作流 ID 是 {{id}}，工作流目录是 {{dir}}，工作流配置引导文件是 {{guidePath}}。配置模板接口是 {{configEndpoint}}。第一步必须读取 {{guidePath}}，必须调用 question 工具。',
+        'detail.run.guideScheduleInstruction': '围绕定时触发读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 和 workflow.json 不是直接写入目标；后端接口不可用时必须停止配置流程',
+        'detail.chat.welcome.guideQuestionPrompt': '用户点击了「{{focus}}」按钮。这个按钮的意图是：{{instruction}} 工作流 ID 是 {{id}}，工作流目录是 {{dir}}，工作流配置引导文件是 {{guidePath}}。配置模板接口是 {{configEndpoint}}。前端当前 API 清单：{{apiEndpoints}}。第一步必须读取 {{guidePath}}，必须调用 question 工具。',
       };
       return (translations[key] ?? key).replace(/{{(\w+)}}/g, (_match, name: string) => (
         params?.[name] === undefined ? '' : String(params[name])
@@ -127,6 +178,7 @@ describe('IntegrationTab trigger workspace', () => {
       },
     }));
     workflowAPI.getService.mockResolvedValue({ data: null });
+    workflowAPI.deleteService.mockResolvedValue({ data: { ok: true, workflowId: 'wf-1' } });
     workflowAPI.publish.mockResolvedValue({
       data: {
         workflowId: 'wf-1',
@@ -157,25 +209,54 @@ describe('IntegrationTab trigger workspace', () => {
     workflowAPI.getPollerStatus.mockResolvedValue({ data: { state: 'stopped' } });
   });
 
-  it('shows guided empty state when no publish capability is returned', async () => {
-    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+  it('renders guide with persistent API and trigger workspaces when no runtime records exist', async () => {
+    const onGuidePrompt = vi.fn();
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={onGuidePrompt} />);
 
-    expect(await screen.findByText('当前工作流还没有发布或配置接入方式。')).toBeInTheDocument();
+    const apiCard = await screen.findByTestId('api-publish-card');
+    const guideActions = screen.getByTestId('publish-guide-actions-inline');
     expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /发布为 API/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Syslog 接入/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Kafka 接入/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /发布为 API/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /Syslog 接入/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /Kafka 接入/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
     expect(workflowAPI.getConfig).toHaveBeenCalledWith('wf-1');
     expect(workflowAPI.syncConfig).not.toHaveBeenCalled();
+    expect(within(apiCard).getByRole('button', { name: '发布' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '发布为 API 服务' })).not.toBeInTheDocument();
-    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
+    expect(screen.getByText('触发能力')).toBeInTheDocument();
+    expect(screen.getByText('还没有配置任何 Trigger。可以从上面的快捷按钮开始。')).toBeInTheDocument();
     expect(screen.queryByText('Kafka 配置')).not.toBeInTheDocument();
     expect(screen.queryByText('Workflow Poller')).not.toBeInTheDocument();
   });
 
-  it('renders generated publish config capabilities even without a stored template', async () => {
+  it('renders runtime publish and trigger records with delete actions below the Rex guide', async () => {
+    const user = userEvent.setup();
+    const service = {
+      workflowId: 'wf-1',
+      workflowName: 'Demo Workflow',
+      serviceUrl: 'http://127.0.0.1:8080',
+      invokeUrl: 'http://127.0.0.1:8080/invoke',
+      apiKey: 'secret',
+      status: 'stopped' as const,
+      publishedAt: Date.now(),
+      driver: 'local' as const,
+    };
+    const triggerRecord = {
+      trigger: {
+        id: 'syslog-default',
+        type: 'syslog' as const,
+        name: 'Syslog Listener',
+        enabled: false,
+        source: { protocol: 'udp', host: '0.0.0.0', port: 5140, format: 'auto' },
+        auth: { type: 'api_key', headerName: 'X-Api-Key', apiKey: 'super-secret-api-key' },
+        mapping: { syslog_message: '$.body' },
+      },
+      status: { state: 'stopped' },
+    };
+    workflowAPI.getService.mockResolvedValue({ data: service });
+    workflowAPI.getTriggers.mockResolvedValue({ data: [triggerRecord] });
     workflowAPI.getConfig.mockResolvedValue({
       data: {
         exists: false,
@@ -197,19 +278,100 @@ describe('IntegrationTab trigger workspace', () => {
             },
           ],
         },
+        runtime: {
+          publish: {
+            type: 'api_service',
+            enabled: false,
+            status: 'stopped',
+            driver: 'local',
+            invokeUrl: 'http://127.0.0.1:8080/invoke',
+            apiKeyConfigured: true,
+            publishedAt: service.publishedAt,
+          },
+          triggers: [triggerRecord],
+        },
       },
     });
 
-    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+    const onGuidePrompt = vi.fn();
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={onGuidePrompt} />);
 
-    expect((await screen.findAllByText('发布为 API')).length).toBeGreaterThan(0);
-    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '发布为 API 服务' })).toBeInTheDocument();
+    const guideActions = await screen.findByTestId('publish-guide-actions-inline');
+    const apiCard = await screen.findByTestId('api-publish-card');
+    expect(Boolean(guideActions.compareDocumentPosition(apiCard) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(within(apiCard).getByRole('button', { name: '启用' })).toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: '删除 API 发布配置' })).toBeInTheDocument();
+    expect(within(apiCard).queryByTestId('api-publish-config')).not.toBeInTheDocument();
+    await user.click(within(apiCard).getByRole('button', { name: '配置' }));
+    expect(within(apiCard).getByTestId('api-publish-config')).toBeInTheDocument();
+    expect(within(apiCard).getByText('Flocks辅助配置')).toBeInTheDocument();
+    await user.click(within(apiCard).getByRole('button', { name: '辅助配置' }));
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('当前发布卡片上下文'),
+      'Flocks辅助配置：API 发布配置',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('"selectedDriver": "local"'),
+      'Flocks辅助配置：API 发布配置',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('"delete": "DELETE /api/workflow/wf-1/service"'),
+      'Flocks辅助配置：API 发布配置',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('不要继续询问用户要对 workflow.json 模板触发器做什么'),
+      'Flocks辅助配置：API 发布配置',
+    );
     expect(screen.getByText('触发能力')).toBeInTheDocument();
-    expect(screen.getByText('Syslog Listener')).toBeInTheDocument();
+    const triggerCard = screen.getByTestId('trigger-card-syslog-default');
+    expect(within(triggerCard).getByText('Syslog Listener')).toBeInTheDocument();
+    expect(within(triggerCard).queryByText('Inputs（JSON）')).not.toBeInTheDocument();
+    await user.click(within(triggerCard).getByRole('button', { name: '配置' }));
+    expect(within(triggerCard).getByText('Inputs（JSON）')).toBeInTheDocument();
+    expect(within(triggerCard).getByText('Flocks辅助配置')).toBeInTheDocument();
+    await user.click(within(triggerCard).getByRole('button', { name: '辅助配置' }));
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('"id": "syslog-default"'),
+      'Flocks辅助配置：Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('"triggerType": "syslog"'),
+      'Flocks辅助配置：Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('"update": "PUT /api/workflow/wf-1/triggers/syslog-default"'),
+      'Flocks辅助配置：Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('后端配置库或运行态接口不可达，请停止配置流程'),
+      'Flocks辅助配置：Syslog 接入',
+    );
+    const triggerPrompt = onGuidePrompt.mock.calls.find(
+      ([, label]) => label === 'Flocks辅助配置：Syslog 接入',
+    )?.[0] as string | undefined;
+    expect(triggerPrompt).toContain('"apiKeyConfigured": true');
+    expect(triggerPrompt).toContain('"headerName": "X-Api-Key"');
+    expect(triggerPrompt).not.toContain('super-secret-api-key');
+    expect(triggerPrompt).not.toContain('"apiKey":');
+    expect(within(triggerCard).getByRole('button', { name: '删除 Syslog Listener' })).toBeInTheDocument();
     expect(screen.queryByText('当前工作流还没有发布或配置接入方式。')).not.toBeInTheDocument();
+
+    await user.click(within(triggerCard).getByRole('button', { name: '删除 Syslog Listener' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.deleteTrigger).toHaveBeenCalledWith('wf-1', 'syslog-default');
+    });
+
+    await user.click(within(apiCard).getByRole('button', { name: '删除 API 发布配置' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.deleteService).toHaveBeenCalledWith('wf-1');
+    });
+    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '发布' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('api-publish-card')).queryByRole('button', { name: '删除 API 发布配置' })).not.toBeInTheDocument();
   });
 
-  it('uses publish config template to render only API publishing', async () => {
+  it('keeps template-only triggers out of runtime cards while preserving publish controls', async () => {
     workflowAPI.getConfig.mockResolvedValue({
       data: {
         exists: true,
@@ -220,187 +382,36 @@ describe('IntegrationTab trigger workspace', () => {
           workflow: { id: 'wf-1' },
           updatedAt: Date.now(),
           publish: { type: 'api_service', driver: 'local' },
+          triggers: [
+            {
+              id: 'syslog-template',
+              type: 'syslog',
+              name: 'Syslog Template',
+              source: { protocol: 'udp', host: '0.0.0.0', port: 5514 },
+            },
+          ],
+        },
+        runtime: {
+          publish: { type: 'api_service', enabled: false, status: 'stopped' },
           triggers: [],
         },
       },
     });
 
-    render(<IntegrationTab workflow={workflow} />);
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
 
-    expect(await screen.findByText('发布为 API')).toBeInTheDocument();
-    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '发布为 API 服务' })).toBeInTheDocument();
-    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Webhook' })).not.toBeInTheDocument();
+    const apiCard = await screen.findByTestId('api-publish-card');
+    const guideActions = screen.getByTestId('publish-guide-actions-inline');
+    expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /^发布为 API$/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /Syslog 接入/ })).toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: '发布' })).toBeInTheDocument();
+    expect(screen.getByText('触发能力')).toBeInTheDocument();
+    expect(screen.getByText('还没有配置任何 Trigger。可以从上面的快捷按钮开始。')).toBeInTheDocument();
+    expect(screen.queryByText('Syslog Template')).not.toBeInTheDocument();
   });
 
-  it('treats api trigger entries as publish templates instead of runtime triggers', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getService.mockResolvedValue({
-      data: {
-        workflowId: 'wf-1',
-        workflowName: 'Demo Workflow',
-        serviceUrl: 'http://127.0.0.1:8080',
-        invokeUrl: 'http://127.0.0.1:8080/invoke',
-        apiKey: 'secret',
-        status: 'running',
-        publishedAt: Date.now(),
-        driver: 'local',
-      },
-    });
-    workflowAPI.getConfig.mockResolvedValue({
-      data: {
-        exists: true,
-        path: '/tmp/config.json',
-        config: {
-          version: 1,
-          kind: 'workflow.integration-config',
-          workflow: { id: 'wf-1' },
-          updatedAt: Date.now(),
-          triggers: [
-            {
-              id: 'api-default',
-              type: 'api',
-              name: 'Demo API',
-              enabled: true,
-              source: { method: 'POST', path: '/api/workflow/wf-1/run' },
-            },
-          ],
-        },
-      },
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    expect(await screen.findByText('发布为 API')).toBeInTheDocument();
-    expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '停止服务' })).toBeInTheDocument();
-    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
-    expect(screen.queryByText('Demo API')).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '停止服务' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.unpublish).toHaveBeenCalledWith('wf-1');
-    });
-    expect(workflowAPI.createTrigger).not.toHaveBeenCalled();
-    expect(workflowAPI.updateTrigger).not.toHaveBeenCalled();
-  });
-
-  it('uses syslog template with editable config and runtime start/stop', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getConfig.mockResolvedValue({
-      data: {
-        exists: true,
-        path: '/tmp/config.json',
-        config: {
-          version: 1,
-          kind: 'workflow.integration-config',
-          workflow: { id: 'wf-1' },
-          updatedAt: Date.now(),
-          triggers: [
-            {
-              id: 'syslog-default',
-              type: 'syslog',
-              name: 'Syslog Listener',
-              source: { protocol: 'udp', host: '0.0.0.0', port: 5514, format: 'auto' },
-              mapping: { syslog_message: '$.body' },
-            },
-          ],
-        },
-      },
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    expect(await screen.findByText('触发能力')).toBeInTheDocument();
-    expect(screen.queryByText('发布为 API')).not.toBeInTheDocument();
-    expect(screen.getByText('模板来自配置库')).toBeInTheDocument();
-    expect(screen.getByText('协议')).toBeInTheDocument();
-    expect(screen.getByText('Inputs（JSON）')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '保存配置' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.updateConfig).toHaveBeenCalledWith(
-        'wf-1',
-        expect.objectContaining({
-          triggers: expect.arrayContaining([
-            expect.objectContaining({
-              id: 'syslog-default',
-              type: 'syslog',
-              source: expect.objectContaining({
-                port: 5514,
-              }),
-            }),
-          ]),
-        }),
-      );
-    });
-
-    await user.click(await screen.findByRole('button', { name: '启动监听' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.saveSyslogConfig).toHaveBeenCalledWith(
-        'wf-1',
-        {
-          enabled: true,
-          protocol: 'udp',
-          host: '0.0.0.0',
-          port: 5514,
-          format: 'auto',
-          inputKey: 'syslog_message',
-        },
-      );
-    });
-  });
-
-  it('starts cron schedule templates with a cron poller config', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getConfig.mockResolvedValue({
-      data: {
-        exists: true,
-        path: '/tmp/config.json',
-        config: {
-          version: 1,
-          kind: 'workflow.integration-config',
-          workflow: { id: 'wf-1' },
-          updatedAt: Date.now(),
-          triggers: [
-            {
-              id: 'schedule-default',
-              type: 'schedule',
-              name: 'Cron Schedule',
-              source: { mode: 'cron', cron: '*/10 * * * *', intervalSeconds: 300 },
-              runtime: { timeoutSeconds: 1800, noOverlap: false },
-              inputs: { source: 'cron' },
-            },
-          ],
-        },
-      },
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    expect(await screen.findByText('触发能力')).toBeInTheDocument();
-    expect(screen.getByText('Cron: */10 * * * *')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: '启动定时' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.savePollerConfig).toHaveBeenCalledWith(
-        'wf-1',
-        {
-          enabled: true,
-          intervalSeconds: 300,
-          cronExpression: '*/10 * * * *',
-          timeoutSeconds: 1800,
-          noOverlap: false,
-          inputs: { source: 'cron' },
-        },
-      );
-    });
-  });
-
-  it('shows template empty state when config declares no publish capability', async () => {
+  it('shows default publish controls when config declares no publish capability', async () => {
     workflowAPI.getConfig.mockResolvedValue({
       data: {
         exists: true,
@@ -417,17 +428,51 @@ describe('IntegrationTab trigger workspace', () => {
 
     render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
 
-    expect(await screen.findByText('发布配置中没有声明可发布的 API 或触发能力。')).toBeInTheDocument();
+    const apiCard = await screen.findByTestId('api-publish-card');
+    const guideActions = screen.getByTestId('publish-guide-actions-inline');
     expect(screen.getByText('Rex 辅助发布')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /发布为 API/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
-    expect(screen.queryByText('触发能力')).not.toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /发布为 API/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /Webhook 接入/ })).toBeInTheDocument();
+    expect(within(guideActions).getByRole('button', { name: /定时触发/ })).toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: '发布' })).toBeInTheDocument();
+    expect(screen.getByText('触发能力')).toBeInTheDocument();
   });
 
   it('offers publish guide actions and routes the selected guide prompt', async () => {
     const user = userEvent.setup();
     const onGuidePrompt = vi.fn();
+    const service = {
+      workflowId: 'wf-1',
+      workflowName: 'Demo Workflow',
+      serviceUrl: 'http://127.0.0.1:8080',
+      invokeUrl: 'http://127.0.0.1:8080/invoke',
+      apiKey: 'secret',
+      status: 'running' as const,
+      publishedAt: Date.now(),
+      driver: 'local' as const,
+    };
+    const triggerRecords = [
+      {
+        trigger: {
+          id: 'syslog-default',
+          type: 'syslog' as const,
+          name: 'Syslog Listener',
+          source: { protocol: 'udp', host: '0.0.0.0', port: 5514 },
+        },
+        status: { state: 'stopped' },
+      },
+      {
+        trigger: {
+          id: 'kafka-default',
+          type: 'kafka' as const,
+          name: 'Kafka Consumer',
+          source: { inputBroker: 'localhost:9092', inputTopic: 'alerts' },
+        },
+        status: { state: 'stopped' },
+      },
+    ];
+    workflowAPI.getService.mockResolvedValue({ data: service });
+    workflowAPI.getTriggers.mockResolvedValue({ data: triggerRecords });
     workflowAPI.getConfig.mockResolvedValue({
       data: {
         exists: true,
@@ -452,6 +497,18 @@ describe('IntegrationTab trigger workspace', () => {
               source: { inputBroker: 'localhost:9092', inputTopic: 'alerts' },
             },
           ],
+        },
+        runtime: {
+          publish: {
+            type: 'api_service',
+            enabled: true,
+            status: 'running',
+            driver: 'local',
+            invokeUrl: 'http://127.0.0.1:8080/invoke',
+            apiKeyConfigured: true,
+            publishedAt: service.publishedAt,
+          },
+          triggers: triggerRecords,
         },
       },
     });
@@ -489,7 +546,15 @@ describe('IntegrationTab trigger workspace', () => {
       'Syslog 接入',
     );
     expect(onGuidePrompt).toHaveBeenCalledWith(
-      expect.stringContaining('config.json 不是直接写入目标'),
+      expect.stringContaining('DELETE /api/workflow/wf-1/triggers/{triggerId}'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('config.json 和 workflow.json 不是直接写入目标'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('后端接口不可用时必须停止配置流程'),
       'Syslog 接入',
     );
   });
