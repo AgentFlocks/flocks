@@ -1,0 +1,58 @@
+name: 360_fw_auth_security
+description: >
+  360 FW v5.5 认证源、管理员、用户组、syslog、联动和安全扩展对象工具。
+  写操作需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 认证和安全对象操作名称。
+      enum:
+        - fw_user_list
+        - fw_user_create
+        - fw_user_delete
+        - fw_user_group_list
+        - fw_user_group_create
+        - fw_user_group_update
+        - fw_user_group_delete
+        - fw_user_obj_list
+        - fw_radius_list
+        - fw_radius_create
+        - fw_radius_update
+        - fw_radius_delete
+        - fw_ldap_list
+        - fw_ldap_create
+        - fw_ldap_delete
+        - fw_syslog_server_get
+        - fw_v0_0_1_syslog_server_get
+        - fw_v0_0_1_syslog_server_create
+        - fw_v0_0_1_syslog_server_delete
+        - fw_multiple_ids_create
+        - fw_multiple_ids_delete
+        - fw_multiple_domains_create
+        - fw_multiple_domains_delete
+        - fw_auth_security_call
+        - test
+    name:
+      type: string
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE]
+    path:
+      type: string
+    query:
+      type: object
+    body:
+      type: string
+      description: 完整 JSON payload 字符串。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: auth_security
