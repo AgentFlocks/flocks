@@ -21,7 +21,7 @@ import client from '@/api/client';
 import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
-import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
+import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2 } from '@/types';
 
@@ -122,9 +122,9 @@ export default function SessionPage() {
   const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
-  const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary'), [agents]);
+  const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
   const subAgents = useMemo(
-    () => agents.filter((a) => a.mode !== 'primary' && !(a.tags ?? []).includes('system')),
+    () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
     [agents],
   );
   const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
@@ -497,14 +497,13 @@ export default function SessionPage() {
       const newSessionId = response.data.id;
 
       addSession(response.data);
-      setSelectedAgent('rex');
       setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };
-      const effectiveAgent = agentOverride || 'rex';
+      const effectiveAgent = agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (modelOverride) payload.model = modelOverride;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
@@ -513,7 +512,7 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, toast, t]);
+  }, [addSession, selectedAgent, toast, t]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();

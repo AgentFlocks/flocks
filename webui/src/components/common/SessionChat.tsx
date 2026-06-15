@@ -2409,8 +2409,9 @@ export default function SessionChat({
       if (onCreateAndSend) {
         setSending(true);
         try {
-          setPendingAgentName(mentionedAgent || 'rex');
-          await onCreateAndSend(text, imageParts, mentionedAgent || undefined, model);
+          const effectiveAgent = mentionedAgent || agentName;
+          setPendingAgentName(effectiveAgent || 'rex');
+          await onCreateAndSend(text, imageParts, effectiveAgent || undefined, model);
           setAttachments([]);
         } catch {
           // Restore both the text and the attachment list so the user can

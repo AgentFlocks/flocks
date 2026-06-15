@@ -1110,6 +1110,28 @@ describe('SessionChat agent mentions', () => {
     });
   });
 
+  it('uses the selected agent when creating a session from the first message', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    render(React.createElement(SessionChat, {
+      sessionId: null,
+      agentName: 'explore',
+      mentionAgents,
+      onCreateAndSend,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'summarize this file{enter}');
+
+    await waitFor(() => {
+      expect(onCreateAndSend).toHaveBeenCalledWith(
+        'summarize this file',
+        [],
+        'explore',
+        undefined,
+      );
+    });
+  });
+
   it('queues streaming messages to the mentioned agent', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {

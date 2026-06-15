@@ -93,10 +93,12 @@ vi.mock('@/components/common/SessionChat', () => ({
     toolbarSlot,
     centerToolbarSlot,
     onCreateAndSend,
+    agentName,
     model,
     display,
   }: {
     sessionId?: string | null;
+    agentName?: string;
     mentionAgents?: Array<{ name: string }>;
     toolbarSlot?: React.ReactNode;
     centerToolbarSlot?: React.ReactNode;
@@ -112,6 +114,7 @@ vi.mock('@/components/common/SessionChat', () => ({
   }) => (
     <div
       data-testid="session-chat"
+      data-agent-name={agentName ?? ''}
       data-mention-agents={(mentionAgents ?? []).map((a) => a.name).join(',')}
       data-model={model ? `${model.providerID}/${model.modelID}` : ''}
       data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
@@ -120,7 +123,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       {sessionId ?? 'no-session'}
       {toolbarSlot}
       {centerToolbarSlot}
-      <button type="button" onClick={() => void onCreateAndSend?.('hello from empty session')}>
+      <button type="button" onClick={() => void onCreateAndSend?.('hello from empty session', [], agentName)}>
         mock-create-and-send
       </button>
     </div>
@@ -130,6 +133,12 @@ vi.mock('@/components/common/SessionChat', () => ({
 vi.mock('@/utils/agentDisplay', () => ({
   getAgentDisplayDescription: () => 'agent-description',
   getAgentDisplayName: (agent: { name: string }) => agent.name.charAt(0).toUpperCase() + agent.name.slice(1),
+  isAgentUsableInChat: (agent: { mode?: string; hidden?: boolean; delegatable?: boolean; tags?: string[] }) => (
+    Boolean(agent)
+    && !agent.hidden
+    && !(agent.tags ?? []).includes('system')
+    && (agent.mode === 'primary' || agent.delegatable !== false)
+  ),
 }));
 
 vi.mock('@/utils/time', () => ({
@@ -464,6 +473,17 @@ describe('SessionPage session actions menu', () => {
           skills: [],
           tools: [],
         },
+        {
+          name: 'oracle',
+          description: 'Oracle',
+          mode: 'subagent',
+          native: true,
+          delegatable: false,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
       ],
       loading: false,
       error: null,
@@ -478,6 +498,7 @@ describe('SessionPage session actions menu', () => {
 
     expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /hidden-system/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Oracle/i })).not.toBeInTheDocument();
   });
 
   it('resets the chat agent to Rex when creating a new session', async () => {
@@ -648,7 +669,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('uses Rex for the first message when an empty session is created by sending', async () => {
+  it('uses the selected agent for the first message when an empty session is created by sending', async () => {
     const user = userEvent.setup();
     useAgents.mockReturnValue({
       agents: [
@@ -687,9 +708,9 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(client.post).toHaveBeenCalledWith(
         '/api/session/session-2/prompt_async',
-        expect.objectContaining({ agent: 'rex' }),
+        expect.objectContaining({ agent: 'explore' }),
       );
     });
-    expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
   });
 });
