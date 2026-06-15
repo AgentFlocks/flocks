@@ -83,9 +83,17 @@ async def test_save_source_triggers_build_and_event(client: AsyncClient, user_de
 @pytest.mark.asyncio
 async def test_bundle_endpoint_available_after_create(client: AsyncClient, user_defined_pages_env: UserDefinedPagesStore):
     await client.post("/api/user-defined-pages", json={"id": "empty-page", "title": "空页面"})
+    bundle_path = user_defined_pages_env.bundle_path("empty-page")
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text("export default function Page(){return null;}", encoding="utf-8")
+    user_defined_pages_env.write_build_meta(
+        "empty-page",
+        UserDefinedPageBuildMeta(status="ready", hash="test-hash", builtAt=1),
+    )
     bundle_resp = await client.get("/api/user-defined-pages/empty-page/bundle.js")
     assert bundle_resp.status_code == 200
     assert "application/javascript" in bundle_resp.headers.get("content-type", "")
+    assert "content-disposition" not in bundle_resp.headers
     assert bundle_resp.text.strip()
 
 

@@ -129,7 +129,7 @@
       "deleting": "Deleting..."
     },
     "overview": {
-      "configInfo": "Configuration",
+      "configInfo": "Info",
       "workflowInfo": "Basics",
       "nodeCount": "Nodes",
       "nodesAndEdges": "{{nodes}} nodes / {{edges}} edges",
@@ -138,8 +138,10 @@
       "createdBy": "Created By",
       "createdAt": "Created At",
       "updatedAt": "Updated At",
+      "workflowFiles": "Workflow Files",
       "fileDir": "Directory",
       "notGenerated": "(Not yet generated)",
+      "run": "Run",
       "runStats": "Run Statistics",
       "totalCalls": "Total Calls",
       "successRate": "Success Rate",

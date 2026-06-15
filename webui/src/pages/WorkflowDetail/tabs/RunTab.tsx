@@ -19,7 +19,13 @@ interface RunTabProps {
   latestExecution: WorkflowExecution | null;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
+  sections?: RunTabSection[];
+  embedded?: boolean;
+  embeddedTabs?: boolean;
+  hideSectionHeaders?: boolean;
 }
+
+export type RunTabSection = 'test' | 'history';
 
 function getExecutionDisplayStatus(execution?: WorkflowExecution | null): string {
   if (!execution) return 'unknown';
@@ -49,18 +55,24 @@ function SectionHeader({
   expanded,
   onToggle,
   badge,
+  embedded = false,
 }: {
   title: string;
   expanded: boolean;
   onToggle: () => void;
   badge?: React.ReactNode;
+  embedded?: boolean;
 }) {
   return (
     <button
       onClick={onToggle}
-      className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100 transition-colors text-left"
+      className={`w-full flex items-center justify-between transition-colors text-left ${
+        embedded
+          ? 'px-3 py-2.5 bg-white border-b border-gray-100 hover:bg-gray-50'
+          : 'px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100'
+      }`}
     >
-      <span className="text-xs font-semibold text-gray-700 flex items-center gap-2">
+      <span className={`${embedded ? 'text-sm text-gray-900' : 'text-xs text-gray-700'} font-semibold flex items-center gap-2`}>
         {title}
         {badge}
       </span>
@@ -196,11 +208,15 @@ function TestSection({
   execution,
   onExecutionChange,
   onExecutionSettled,
+  embedded = false,
+  hideSectionHeader = false,
 }: {
   workflow: Workflow;
   execution: WorkflowExecution | null;
   onExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
+  embedded?: boolean;
+  hideSectionHeader?: boolean;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -400,12 +416,20 @@ function TestSection({
   };
 
   const showSampleSaveHint = sampleSaveState === 'saving' || sampleSaveState === 'saved';
+  const bodyExpanded = hideSectionHeader || expanded;
 
   return (
-    <div className="border-b border-gray-100">
-      <SectionHeader title={t('detail.run.testSection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
-      {expanded && (
-        <div className="p-4 space-y-3">
+    <div className={embedded ? 'bg-white' : 'border-b border-gray-100'}>
+      {!hideSectionHeader && (
+        <SectionHeader
+          title={t('detail.run.testSection')}
+          expanded={expanded}
+          onToggle={() => setExpanded(v => !v)}
+          embedded={embedded}
+        />
+      )}
+      {bodyExpanded && (
+        <div className={`${embedded ? 'p-3' : 'p-4'} space-y-3`}>
           <div>
             <div className="flex items-center justify-between gap-2 mb-1">
               <label className="block text-xs text-gray-500">{t('detail.run.inputParams')}</label>
@@ -701,10 +725,14 @@ function HistorySection({
   workflowId,
   latestExecutionId,
   onLatestExecutionChange,
+  embedded = false,
+  hideSectionHeader = false,
 }: {
   workflowId: string;
   latestExecutionId?: string;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  embedded?: boolean;
+  hideSectionHeader?: boolean;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -761,11 +789,19 @@ function HistorySection({
     if (status === 'error' || status === 'FAILED') return <XCircle className="w-3.5 h-3.5 text-red-500" />;
     return <AlertCircle className="w-3.5 h-3.5 text-orange-500" />;
   };
+  const bodyExpanded = hideSectionHeader || expanded;
 
   return (
-    <div>
-      <SectionHeader title={t('detail.run.historySection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
-      {expanded && (
+    <div className={embedded ? 'bg-white' : undefined}>
+      {!hideSectionHeader && (
+        <SectionHeader
+          title={t('detail.run.historySection')}
+          expanded={expanded}
+          onToggle={() => setExpanded(v => !v)}
+          embedded={embedded}
+        />
+      )}
+      {bodyExpanded && (
         <div>
           {loading ? (
             <div className="flex items-center justify-center py-6">
@@ -778,31 +814,32 @@ function HistorySection({
             </div>
           ) : (
             <div>
-              <div className="divide-y divide-gray-100">
+              <div>
                 {history.map((exec) => (
-                  <button
-                    key={exec.id}
-                    onClick={() => setSelectedExec(selectedExec?.id === exec.id ? null : exec)}
-                    className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
-                  >
-                    {statusIcon(getExecutionDisplayStatus(exec))}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
-                    </div>
-                    {exec.duration != null && (
-                      <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
+                  <div key={exec.id} className="border-b border-gray-100 last:border-b-0">
+                    <button
+                      onClick={() => setSelectedExec(selectedExec?.id === exec.id ? null : exec)}
+                      className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
+                    >
+                      {statusIcon(getExecutionDisplayStatus(exec))}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
+                      </div>
+                      {exec.duration != null && (
+                        <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
+                      )}
+                      {selectedExec?.id === exec.id ? (
+                        <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                      )}
+                    </button>
+                    {selectedExec?.id === exec.id && (
+                      <HistoryExecDetail exec={selectedExec} />
                     )}
-                    {selectedExec?.id === exec.id ? (
-                      <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" />
-                    ) : (
-                      <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
-                    )}
-                  </button>
+                  </div>
                 ))}
               </div>
-              {selectedExec && (
-                <HistoryExecDetail exec={selectedExec} />
-              )}
             </div>
           )}
         </div>
@@ -819,20 +856,97 @@ export default function RunTab({
   latestExecution,
   onLatestExecutionChange,
   onExecutionSettled,
+  sections = ['test', 'history'],
+  embedded = false,
+  embeddedTabs = false,
+  hideSectionHeaders = false,
 }: RunTabProps) {
+  const { t } = useTranslation('workflow');
+  const [activeEmbeddedSection, setActiveEmbeddedSection] = useState<RunTabSection>('test');
+  const showTest = sections.includes('test');
+  const showHistory = sections.includes('history');
+  const activeSection =
+    activeEmbeddedSection === 'test' && showTest
+      ? 'test'
+      : activeEmbeddedSection === 'history' && showHistory
+        ? 'history'
+        : showTest
+          ? 'test'
+          : 'history';
+  const embeddedTabItems = [
+    showTest ? { id: 'test' as const, label: t('detail.run.testSection') } : null,
+    showHistory ? { id: 'history' as const, label: t('detail.run.historySection') } : null,
+  ].filter((item): item is { id: RunTabSection; label: string } => Boolean(item));
+
+  if (embeddedTabs) {
+    return (
+      <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto space-y-3'}>
+        <div className="flex rounded-md bg-gray-100 p-1">
+          {embeddedTabItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setActiveEmbeddedSection(item.id)}
+              className={`flex-1 rounded px-2 py-1.5 text-xs font-medium transition-colors ${
+                activeSection === item.id
+                  ? 'bg-white text-red-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="overflow-hidden rounded-md border border-gray-200 bg-white">
+          {showTest && (
+            <div className={activeSection === 'test' ? 'block' : 'hidden'}>
+              <TestSection
+                workflow={workflow}
+                execution={latestExecution}
+                onExecutionChange={onLatestExecutionChange}
+                onExecutionSettled={onExecutionSettled}
+                embedded={embedded}
+                hideSectionHeader={hideSectionHeaders}
+              />
+            </div>
+          )}
+          {showHistory && (
+            <div className={activeSection === 'history' ? 'block' : 'hidden'}>
+              <HistorySection
+                workflowId={workflow.id}
+                latestExecutionId={latestExecution?.id}
+                onLatestExecutionChange={onLatestExecutionChange}
+                embedded={embedded}
+                hideSectionHeader={hideSectionHeaders}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
-      <TestSection
-        workflow={workflow}
-        execution={latestExecution}
-        onExecutionChange={onLatestExecutionChange}
-        onExecutionSettled={onExecutionSettled}
-      />
-      <HistorySection
-        workflowId={workflow.id}
-        latestExecutionId={latestExecution?.id}
-        onLatestExecutionChange={onLatestExecutionChange}
-      />
+    <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100'}>
+      {showTest && (
+        <TestSection
+          workflow={workflow}
+          execution={latestExecution}
+          onExecutionChange={onLatestExecutionChange}
+          onExecutionSettled={onExecutionSettled}
+          embedded={embedded}
+          hideSectionHeader={hideSectionHeaders}
+        />
+      )}
+      {showHistory && (
+        <HistorySection
+          workflowId={workflow.id}
+          latestExecutionId={latestExecution?.id}
+          onLatestExecutionChange={onLatestExecutionChange}
+          embedded={embedded}
+          hideSectionHeader={hideSectionHeaders}
+        />
+      )}
     </div>
   );
 }

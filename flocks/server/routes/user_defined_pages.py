@@ -270,7 +270,6 @@ async def get_user_defined_page_bundle(page_id: str, v: Optional[str] = Query(No
         return FileResponse(
             path=bundle_path,
             media_type="application/javascript",
-            filename="page.js",
             headers=headers,
         )
     except ValueError as exc:
