@@ -16,6 +16,10 @@ vi.mock('@/api/userDefinedPages', () => ({
   },
 }));
 
+vi.mock('@/api/client', () => ({
+  getApiBase: () => 'https://api.example.test',
+}));
+
 vi.mock('./runtime', () => ({
   installUserDefinedPageRuntime: installMock,
   loadUserDefinedPageBundle: loadBundleMock,
@@ -84,7 +88,7 @@ describe('UserDefinedPageHost', () => {
     });
     expect(installMock).toHaveBeenCalledWith('dash-1');
     expect(loadBundleMock).toHaveBeenCalledWith(
-      '/api/user-defined-pages/dash-1/bundle.js?v=abc123',
+      'https://api.example.test/api/user-defined-pages/dash-1/bundle.js?v=abc123',
       'host.bundleMissingExport',
     );
   });

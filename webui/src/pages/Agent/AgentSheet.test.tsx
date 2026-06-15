@@ -111,6 +111,26 @@ vi.mock('react-i18next', () => ({
         ],
         'edit.guidePanelTitle': 'Rex 辅助修改',
         'edit.guidePanelDesc': '编辑描述',
+        'edit.nativeGuidePanelDesc': '内置编辑描述',
+        'edit.nativeGuideActions': [
+          {
+            label: '检查模型策略',
+            description: '检查模型',
+            prompt: `模型 ${String(params?.name ?? '')}`,
+          },
+          {
+            label: '调整温度',
+            description: '调整温度',
+            prompt: `温度 ${String(params?.name ?? '')}`,
+          },
+        ],
+        'edit.nativeCaseActions': [
+          {
+            label: '提升响应效率',
+            description: '提升效率',
+            prompt: `效率 ${String(params?.name ?? '')}`,
+          },
+        ],
         'edit.emptyStateTitle': '暂无编辑对话',
         'sheet.done': '完成',
       };
@@ -206,5 +226,59 @@ describe('AgentSheet', () => {
     expect(props.rexSystemContext).toContain('Agent 编辑引导助手');
     expect(props.rexSystemContext).toContain('Tools：query_ioc');
     expect(props.rexSystemContext).toContain('Skills：agent-builder');
+  });
+
+  it('uses a model and temperature guide when editing a native agent', () => {
+    render(
+      <AgentSheet
+        agent={makeAgent({
+          name: 'device-inspector',
+          native: true,
+          model: { providerID: 'minimax', modelID: 'minimax-m3' },
+          tools: ['device_query'],
+          skills: ['agent-builder'],
+        })}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    const props = capturedEntitySheetProps.at(-1);
+    expect(props.mode).toBe('edit');
+    expect(props.initialTab).toBe('rex');
+    expect(props.rexGuidePanelDesc).toBe('内置编辑描述');
+    expect(props.rexGuideGroups).toEqual([
+      {
+        title: '编辑引导',
+        actions: [
+          {
+            label: '检查模型策略',
+            description: '检查模型',
+            prompt: '模型 device-inspector',
+            group: '编辑引导',
+          },
+          {
+            label: '调整温度',
+            description: '调整温度',
+            prompt: '温度 device-inspector',
+            group: '编辑引导',
+          },
+        ],
+      },
+      {
+        title: '编辑案例',
+        actions: [
+          {
+            label: '提升响应效率',
+            description: '提升效率',
+            prompt: '效率 device-inspector',
+            group: '编辑案例',
+          },
+        ],
+      },
+    ]);
+    expect(props.rexSystemContext).toContain('只能保存模型和温度');
+    expect(props.rexSystemContext).toContain('不要建议提取或覆盖这些字段');
+    expect(props.rexWelcomeMessage).toContain('当前只支持保存模型和温度');
   });
 });

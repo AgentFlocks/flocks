@@ -128,6 +128,7 @@
     "emptyStateTitle": "No editing conversation yet",
     "guidePanelTitle": "Rex Assisted Editing",
     "guidePanelDesc": "Choose an editing entry. Rex will use the current Agent configuration to guide prompt, responsibility, permission, and parameter changes.",
+    "nativeGuidePanelDesc": "This is a built-in Agent. Only model and temperature can be saved, so Rex will guide model choice, temperature strategy, and validation.",
     "guideSectionTitle": "Editing Guides",
     "caseSectionTitle": "Editing Cases",
     "guideActions": [
@@ -157,6 +158,23 @@
         "prompt": "Please help me validate the behavior of the current Agent \"{{name}}\". Based on its responsibility, design 2-3 test inputs and describe the expected output, pass criteria, and failure criteria for each. If the Prompt or tool permissions may affect the result, point out which fields should be adjusted. After confirmation, summarize the suggested configuration changes so they can be extracted into the form."
       }
     ],
+    "nativeGuideActions": [
+      {
+        "label": "Check Model Strategy",
+        "description": "Decide whether the current model fits this built-in Agent's task profile.",
+        "prompt": "Please review the model configuration of the built-in Agent \"{{name}}\". This is a built-in Agent: only model and temperature can be saved, so do not suggest changing Prompt, Tools, or Skills. First describe the model capabilities this task needs, then recommend whether to switch models and include the providerID and modelID if applicable."
+      },
+      {
+        "label": "Tune Temperature",
+        "description": "Choose temperature based on stability, creativity, and safety.",
+        "prompt": "Please help me tune the temperature of the built-in Agent \"{{name}}\". This is a built-in Agent: only model and temperature can be saved. Explain how lower or higher temperature affects this responsibility, then recommend a temperature value with reasoning and summarize it as extractable JSON."
+      },
+      {
+        "label": "Validate Behavior",
+        "description": "Design test inputs, expected outputs, and failure criteria for post-save validation.",
+        "prompt": "Please help me validate the model and temperature behavior of the built-in Agent \"{{name}}\". Design 2-3 test inputs with expected output, pass criteria, and failure criteria. If anything should change, only recommend model or temperature changes and summarize them as extractable JSON."
+      }
+    ],
     "caseActions": [
       {
         "label": "Make It Safer",
@@ -172,6 +190,18 @@
         "label": "Add Output Format",
         "description": "Stabilize the result shape so the primary Agent or workflow can continue processing.",
         "prompt": "Please help me add a stable output format for the current Agent \"{{name}}\". First confirm the main usage scenario, then design fields, nesting, a short example, and behavior for abnormal cases. After I confirm, turn it into Prompt edits."
+      }
+    ],
+    "nativeCaseActions": [
+      {
+        "label": "Make It Safer",
+        "description": "Reduce randomness for security analysis, audit, or review tasks.",
+        "prompt": "I want the built-in Agent \"{{name}}\" to be more conservative and reliable. Only suggest model and temperature changes; do not modify Prompt, Tools, or Skills. Focus on the recommended temperature, required model capabilities, and how to validate after saving."
+      },
+      {
+        "label": "Improve Responsiveness",
+        "description": "Choose a more suitable model and temperature without changing built-in configuration.",
+        "prompt": "I want the built-in Agent \"{{name}}\" to respond faster and more consistently. Only evaluate model and temperature, explain whether a lighter model is suitable, recommend a temperature, and propose test inputs to validate the result."
       }
     ]
   },

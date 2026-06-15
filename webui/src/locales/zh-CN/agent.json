@@ -128,6 +128,7 @@
     "emptyStateTitle": "暂无编辑对话",
     "guidePanelTitle": "Rex 辅助修改",
     "guidePanelDesc": "选择一个编辑入口，Rex 会基于当前 Agent 配置，引导你调整 Prompt、职责边界、工具权限和参数。",
+    "nativeGuidePanelDesc": "这是内置 Agent，只支持保存模型和温度；Rex 会围绕模型选择、温度策略和验证方式引导修改。",
     "guideSectionTitle": "编辑引导",
     "caseSectionTitle": "编辑案例",
     "guideActions": [
@@ -157,6 +158,23 @@
         "prompt": "请帮我验证当前 Agent「{{name}}」的配置效果。请先基于它的职责设计 2-3 个测试输入，分别说明预期输出、通过标准和失败判据；如果发现 Prompt 或工具权限可能影响测试结果，请给出需要调整的字段。确认后把建议整理成可提取到表单的配置修改。"
       }
     ],
+    "nativeGuideActions": [
+      {
+        "label": "检查模型策略",
+        "description": "判断当前模型是否适合这个内置 Agent 的任务特点。",
+        "prompt": "请帮我检查内置 Agent「{{name}}」的模型配置。注意：这是内置 Agent，只能保存模型和温度，不要建议修改 Prompt、Tools 或 Skills。请先说明当前任务对模型能力的要求，再给出是否建议切换模型，以及需要的 providerID 和 modelID。"
+      },
+      {
+        "label": "调整温度",
+        "description": "根据稳定性、创造性和安全性选择温度。",
+        "prompt": "请帮我调整内置 Agent「{{name}}」的温度。注意：这是内置 Agent，只能保存模型和温度。请先根据它的职责说明温度高低的影响，再给出一个推荐 temperature 数值和理由，并整理成可提取的 JSON。"
+      },
+      {
+        "label": "验证效果",
+        "description": "设计测试输入、预期输出和失败判据，指导保存后验证。",
+        "prompt": "请帮我验证内置 Agent「{{name}}」的模型和温度效果。请设计 2-3 个测试输入，说明预期输出、通过标准和失败判据；如果发现问题，只建议调整模型或温度，并整理成可提取的 JSON。"
+      }
+    ],
     "caseActions": [
       {
         "label": "变得更保守",
@@ -172,6 +190,18 @@
         "label": "补充输出格式",
         "description": "把结果格式固定下来，便于主 Agent 或工作流继续处理。",
         "prompt": "请帮我为当前 Agent「{{name}}」补充稳定的输出格式。请先确认主要使用场景，然后设计字段、层级、简短示例和异常情况下的返回方式；我确认后再整理成 Prompt 修改。"
+      }
+    ],
+    "nativeCaseActions": [
+      {
+        "label": "变得更保守",
+        "description": "降低随机性，让安全分析、审计类任务更稳定。",
+        "prompt": "我想让内置 Agent「{{name}}」更保守可靠。请只围绕模型和温度给出建议，不要修改 Prompt、Tools 或 Skills；重点说明推荐 temperature、适用模型能力和保存后的验证方法。"
+      },
+      {
+        "label": "提升响应效率",
+        "description": "在不改内置配置的前提下选择更合适的模型和温度。",
+        "prompt": "我想让内置 Agent「{{name}}」响应更快、更稳定。请只评估模型和温度配置，说明是否建议切换到更轻量的模型、温度如何设置，以及如何用测试输入验证效果。"
       }
     ]
   },

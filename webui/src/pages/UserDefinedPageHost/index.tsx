@@ -11,6 +11,7 @@ import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
 import { AlertCircle, Loader2 } from 'lucide-react';
+import { getApiBase } from '@/api/client';
 import { userDefinedPagesAPI } from '@/api/userDefinedPages';
 import { useSSE } from '@/hooks/useSSE';
 import { installUserDefinedPageRuntime, loadUserDefinedPageBundle } from './runtime';
@@ -74,7 +75,8 @@ export default function UserDefinedPageHost() {
   const loadBundle = useCallback(async (hash: string) => {
     if (!pageId || !hash) return;
     installUserDefinedPageRuntime(pageId);
-    const url = `/api/user-defined-pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
+    const base = getApiBase();
+    const url = `${base}/api/user-defined-pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
     const component = await loadUserDefinedPageBundle(url, tr('host.bundleMissingExport'));
     setPageComponent(() => component);
     setError(null);
