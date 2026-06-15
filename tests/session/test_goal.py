@@ -45,6 +45,38 @@ async def test_goal_command_rejects_empty_objective():
 
 
 @pytest.mark.asyncio
+async def test_goal_records_only_first_initial_clarification():
+    session_id = "goal_initial_clarification_session"
+    await GoalManager.set_goal(session_id, "make it work")
+
+    first_state = await GoalManager.record_initial_clarification(
+        session_id,
+        [{"question": "What should work?"}],
+        [["The MCP test connection button"]],
+        message_id="msg_question_1",
+        call_id="call_question_1",
+    )
+    second_state = await GoalManager.record_initial_clarification(
+        session_id,
+        [{"question": "Should I run tests?"}],
+        [["Yes"]],
+        message_id="msg_question_2",
+        call_id="call_question_2",
+    )
+
+    assert first_state is not None
+    assert second_state is not None
+    state = await GoalManager.get(session_id)
+    assert state is not None
+    assert state.initial_clarification is not None
+    assert state.initial_clarification.message_id == "msg_question_1"
+    assert state.initial_clarification.call_id == "call_question_1"
+    assert state.initial_clarification.answers[0].question == "What should work?"
+    assert state.initial_clarification.answers[0].answer == "The MCP test connection button"
+    assert "Should I run tests?" not in state.initial_clarification.text
+
+
+@pytest.mark.asyncio
 async def test_goal_evaluation_completes_when_judge_finds_done():
     session_id = "goal_complete_session"
     await GoalManager.set_goal(session_id, "finish implementation")
@@ -187,6 +219,37 @@ async def test_goal_evaluation_uses_model_judge_when_provider_model_are_availabl
     provider.chat.assert_awaited_once()
     assert decision.verdict == "complete"
     assert decision.reason == "The final response says the implementation and tests are complete."
+
+
+@pytest.mark.asyncio
+async def test_goal_model_judge_receives_initial_clarification():
+    session_id = "goal_model_judge_clarification_session"
+    await GoalManager.set_goal(session_id, "make it work")
+    await GoalManager.record_initial_clarification(
+        session_id,
+        [{"question": "What should work?"}],
+        [["The MCP test connection button should submit even with a blank saved name."]],
+    )
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=SimpleNamespace(
+            content='{"done": false, "reason": "The response says more work remains."}'
+        ))
+    )
+
+    with patch("flocks.session.goal.Provider.get", return_value=provider):
+        decision = await GoalManager.evaluate_after_turn(
+            session_id,
+            "I made progress.",
+            provider_id="test-provider",
+            model_id="test-model",
+        )
+
+    provider.chat.assert_awaited_once()
+    judge_prompt = provider.chat.await_args.kwargs["messages"][1].content
+    assert "Original goal:\nmake it work" in judge_prompt
+    assert "Initial user clarification:" in judge_prompt
+    assert "The MCP test connection button should submit" in judge_prompt
+    assert decision.verdict == "continue"
 
 
 @pytest.mark.asyncio

@@ -420,7 +420,7 @@ class TestTurnLifecycle:
         assert result.action == "stop"
         create_message.assert_awaited_once()
         assert create_message.await_args.kwargs["content"] == "continue toward goal"
-        assert "synthetic" not in create_message.await_args.kwargs
+        assert create_message.await_args.kwargs["synthetic"] is True
         assert create_message.await_args.kwargs["part_metadata"]["goalContinuation"] is True
         event_names = [call.args[0] for call in event_callback.await_args_list]
         assert event_names == [

@@ -1294,10 +1294,10 @@ class SessionLoop:
                             "reason": goal_decision.reason,
                         })
                     if goal_decision.should_continue and goal_decision.continuation_prompt:
-                        # Hermes-style goal continuation: append a plain
-                        # user-role prompt to history. Keep metadata for
-                        # observability, but do not mark the part synthetic so
-                        # it remains a normal conversation turn.
+                        # Hermes-style goal continuation: append a user-role
+                        # prompt to history so the model continues, while
+                        # marking the part synthetic so UIs do not treat it as
+                        # user-authored text.
                         goal_user = await Message.create(
                             session_id=ctx.session.id,
                             role=MessageRole.USER,
@@ -1308,6 +1308,7 @@ class SessionLoop:
                                 "modelID": ctx.model_id,
                             },
                             provider=last_user.provider if hasattr(last_user, "provider") else ctx.provider_id,
+                            synthetic=True,
                             part_metadata={
                                 "goalContinuation": True,
                                 "goalVerdict": goal_decision.verdict,

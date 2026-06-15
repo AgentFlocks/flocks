@@ -307,6 +307,13 @@ async def default_question_handler(
                             "type": "boolean",
                             "description": "For 'choice' type: allow selecting multiple options",
                         },
+                        "custom": {
+                            "type": "boolean",
+                            "description": (
+                                "For 'choice' type: allow a custom Other answer option. "
+                                "Defaults to true."
+                            ),
+                        },
                         "placeholder": {
                             "type": "string",
                             "description": "Placeholder/hint text for text, number, password, file inputs",
@@ -371,6 +378,7 @@ async def question_tool(
             "type": q.get("type", "choice"),
             "options": [],
             "multiple": q.get("multiple", False),
+            "custom": q.get("custom", True),
             "placeholder": q.get("placeholder", ""),
             "multiline": q.get("multiline", False),
         }
@@ -428,6 +436,21 @@ async def question_tool(
         ])
         
         output = f"User has answered your questions: {formatted}. You can now continue with the user's answers in mind."
+        try:
+            from flocks.session.goal import GoalManager
+
+            await GoalManager.record_initial_clarification(
+                ctx.session_id,
+                normalized_questions,
+                answers,
+                message_id=ctx.message_id,
+                call_id=ctx.call_id,
+            )
+        except Exception as e:
+            log.warn("question.goal_clarification_record_failed", {
+                "session_id": ctx.session_id,
+                "error": str(e),
+            })
         
         return ToolResult(
             success=True,

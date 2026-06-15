@@ -20,6 +20,7 @@ log = Log.create(service="session.goal")
 DEFAULT_GOAL_MAX_TURNS = 20
 JUDGE_RESPONSE_MAX_CHARS = 4096
 JUDGE_MAX_TOKENS = 4096
+GOAL_CLARIFICATION_MAX_CHARS = 2000
 GoalStatus = Literal["active", "paused", "completed", "blocked"]
 GoalVerdict = Literal["complete", "blocked", "continue", "waiting", "inactive"]
 
@@ -31,10 +32,23 @@ Return only valid JSON with exactly this shape:
 Judging rules:
 - done=true only if the assistant's latest final response explicitly confirms the goal is complete, the requested deliverable is clearly produced, or the goal is impossible/blocked and the response clearly says why.
 - done=false if work remains, the assistant only made partial progress, the assistant asks the user for more input/clarification/approval, or the latest response is ambiguous.
-- The reason must be concise and grounded only in the provided goal and latest response.
+- The reason must be concise and grounded only in the provided goal, user clarification, and latest response.
 - Keep the entire JSON response under 200 characters.
 - Do not include markdown, code fences, or any text outside the JSON object.
 """
+
+
+class GoalClarificationAnswer(BaseModel):
+    question: str
+    answer: str
+
+
+class GoalClarification(BaseModel):
+    answers: list[GoalClarificationAnswer]
+    text: str
+    created_at: float = Field(default_factory=time.time)
+    message_id: Optional[str] = None
+    call_id: Optional[str] = None
 
 
 class GoalState(BaseModel):
@@ -47,6 +61,7 @@ class GoalState(BaseModel):
     last_verdict: Optional[GoalVerdict] = None
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None
+    initial_clarification: Optional[GoalClarification] = None
 
 
 @dataclass
@@ -81,6 +96,61 @@ def _judge_input(last_response: str) -> str:
     return text[-JUDGE_RESPONSE_MAX_CHARS:]
 
 
+def _truncate_text(text: str, max_chars: int) -> str:
+    normalized = " ".join((text or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
+
+
+def _format_goal_context(objective: str, clarification: Optional[GoalClarification]) -> str:
+    if clarification is None or not clarification.text.strip():
+        return objective
+    return (
+        f"Original goal:\n{objective}\n\n"
+        "Initial user clarification:\n"
+        f"{clarification.text}"
+    )
+
+
+def _format_answer(answer: object) -> str:
+    if isinstance(answer, list):
+        return ", ".join(str(item).strip() for item in answer if str(item).strip())
+    return str(answer or "").strip()
+
+
+def _build_clarification(
+    questions: list[dict],
+    answers: list[list[str]],
+    *,
+    message_id: Optional[str] = None,
+    call_id: Optional[str] = None,
+) -> Optional[GoalClarification]:
+    items: list[GoalClarificationAnswer] = []
+    lines: list[str] = []
+    for index, question in enumerate(questions):
+        question_text = str(question.get("question") or "").strip()
+        answer_text = _format_answer(answers[index] if index < len(answers) else [])
+        if not question_text and not answer_text:
+            continue
+        if not question_text:
+            question_text = f"Question {index + 1}"
+        if not answer_text:
+            answer_text = "Unanswered"
+        items.append(GoalClarificationAnswer(question=question_text, answer=answer_text))
+        lines.append(f'Q: {question_text}\nA: {answer_text}')
+
+    if not items:
+        return None
+
+    return GoalClarification(
+        answers=items,
+        text=_truncate_text("\n\n".join(lines), GOAL_CLARIFICATION_MAX_CHARS),
+        message_id=message_id,
+        call_id=call_id,
+    )
+
+
 def _extract_json_object(text: str) -> dict:
     """Parse a strict JSON object."""
     raw = (text or "").strip()
@@ -102,6 +172,7 @@ async def judge_goal_with_model(
     *,
     provider_id: str,
     model_id: str,
+    initial_clarification: Optional[GoalClarification] = None,
 ) -> tuple[GoalVerdict, str]:
     """Hermes-style model judge using the active session provider/model."""
     provider = Provider.get(provider_id)
@@ -118,7 +189,7 @@ async def judge_goal_with_model(
             ChatMessage(
                 role="user",
                 content=(
-                    f"Goal:\n{objective}\n\n"
+                    f"Goal:\n{_format_goal_context(objective, initial_clarification)}\n\n"
                     "Latest assistant final response (truncated to the last 4KB):\n"
                     f"{_judge_input(last_response)}"
                 ),
@@ -187,6 +258,33 @@ class GoalManager:
         return await cls.save(session_id, state)
 
     @classmethod
+    async def record_initial_clarification(
+        cls,
+        session_id: str,
+        questions: list[dict],
+        answers: list[list[str]],
+        *,
+        message_id: Optional[str] = None,
+        call_id: Optional[str] = None,
+    ) -> Optional[GoalState]:
+        """Persist the first successful user clarification for an active goal."""
+        state = await cls.get(session_id)
+        if state is None or state.status != "active" or state.initial_clarification is not None:
+            return state
+
+        clarification = _build_clarification(
+            questions,
+            answers,
+            message_id=message_id,
+            call_id=call_id,
+        )
+        if clarification is None:
+            return state
+
+        state.initial_clarification = clarification
+        return await cls.save(session_id, state)
+
+    @classmethod
     def goal_prompt(cls, objective: str) -> str:
         return (
             "[Goal mode]\n"
@@ -202,9 +300,16 @@ class GoalManager:
     @classmethod
     def continuation_prompt(cls, state: GoalState, reason: str) -> str:
         reason = reason or "goal is still active"
+        clarification = (
+            "\nInitial user clarification:\n"
+            f"{state.initial_clarification.text}\n"
+            if state.initial_clarification is not None and state.initial_clarification.text.strip()
+            else ""
+        )
         return (
             "[Continuing toward active goal]\n"
             f"Goal: {state.objective}\n"
+            f"{clarification}"
             f"Reason to continue: {reason}\n\n"
             "Take the next concrete step. If the goal is complete or blocked, make "
             "that outcome clear with evidence or the specific blocker."
@@ -239,6 +344,7 @@ class GoalManager:
                     last_response,
                     provider_id=provider_id,
                     model_id=model_id,
+                    initial_clarification=state.initial_clarification,
                 )
             except Exception as exc:
                 log.warn("goal.model_judge.failed", {

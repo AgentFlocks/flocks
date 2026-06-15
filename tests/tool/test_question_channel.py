@@ -37,20 +37,65 @@ async def test_question_tool_falls_back_to_text_when_choice_has_no_valid_options
     monkeypatch.setattr(question_module, "_question_handler", fake_handler)
     monkeypatch.setattr(question_module, "_send_channel_question_if_applicable", AsyncMock(return_value=None))
 
-    result = await question_module.question_tool(
-        ToolContext(session_id="ses_question_fallback", message_id="msg_1"),
-        questions=[
-            {
-                "question": "漏洞数据源用什么?",
-                "type": "choice",
-                "options": [{"label": ""}],
-            }
-        ],
-    )
+    with patch(
+        "flocks.session.goal.GoalManager.record_initial_clarification",
+        AsyncMock(),
+    ) as record_clarification:
+        result = await question_module.question_tool(
+            ToolContext(session_id="ses_question_fallback", message_id="msg_1", call_id="call_1"),
+            questions=[
+                {
+                    "question": "漏洞数据源用什么?",
+                    "type": "choice",
+                    "options": [{"label": ""}],
+                }
+            ],
+        )
 
     assert result.success is True
     assert captured_questions[0]["type"] == "text"
     assert captured_questions[0]["options"] == []
+    record_clarification.assert_awaited_once_with(
+        "ses_question_fallback",
+        captured_questions,
+        [["manual answer"]],
+        message_id="msg_1",
+        call_id="call_1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_question_tool_preserves_custom_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_questions: list[dict] = []
+
+    async def fake_handler(_session_id: str, questions: list[dict]) -> list[list[str]]:
+        captured_questions.extend(questions)
+        return [["NVD"]]
+
+    monkeypatch.setattr(question_module, "_question_handler", fake_handler)
+    monkeypatch.setattr(question_module, "_send_channel_question_if_applicable", AsyncMock(return_value=None))
+
+    with patch(
+        "flocks.session.goal.GoalManager.record_initial_clarification",
+        AsyncMock(),
+    ):
+        result = await question_module.question_tool(
+            ToolContext(session_id="ses_question_custom", message_id="msg_1", call_id="call_1"),
+            questions=[
+                {
+                    "question": "漏洞数据源用什么?",
+                    "type": "choice",
+                    "custom": False,
+                    "options": [{"label": "NVD"}],
+                }
+            ],
+        )
+
+    assert result.success is True
+    assert captured_questions[0]["type"] == "choice"
+    assert captured_questions[0]["custom"] is False
 
 
 @pytest.mark.asyncio
