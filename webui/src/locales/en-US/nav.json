@@ -23,6 +23,8 @@
   "expandNav": "Expand navigation",
   "collapseNav": "Collapse navigation",
   "switchLanguage": "Switch Language",
+  "switchToDarkTheme": "Switch to dark mode",
+  "switchToLightTheme": "Switch to light mode",
   "newVersion": "New Version",
   "hasNewVersion": "New version {{version}}",
   "versionInfo": "Flocks version info",

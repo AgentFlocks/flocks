@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { AlertCircle, Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import SessionChat, {
   buildInstructionDisplayText,
   type PromptDisplayOptions,
@@ -69,7 +68,6 @@ export default function CreateChatTab({
   onLaunchRequestHandled,
 }: CreateChatTabProps) {
   const { t } = useTranslation('workflow');
-  const navigate = useNavigate();
   const defaultSupportsVision = useDefaultModelVision();
   const guideSectionTitle = t('create.chat.guideSectionTitle');
   const caseSectionTitle = t('create.chat.caseSectionTitle');
@@ -290,7 +288,7 @@ export default function CreateChatTab({
       live={!!sessionId}
       placeholder={t('create.chat.inputPlaceholder')}
       className="h-full"
-      display={{ collapseIntermediateSteps: true }}
+      display={{ collapseIntermediateSteps: true, processGroupsDefaultOpen: false }}
       agentName={WORKFLOW_CHAT_AGENT_NAME}
       mentionAgents={workflowChatAgents}
       supportsVision={supportsVision}
@@ -320,7 +318,6 @@ export default function CreateChatTab({
           loading={loadingChatModels}
           selectedModelOption={selectedModelOption}
           onSelectModel={(option) => setSelectedModelKey(option.key)}
-          onAddModel={() => navigate('/models')}
         />
       }
       conversationBottomSlot={({ sendPrompt, sending, streaming }) => (

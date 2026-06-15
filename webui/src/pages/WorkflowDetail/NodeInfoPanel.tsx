@@ -169,11 +169,11 @@ function ExpandedCodeEditor({
   }, [lineNumbers.length]);
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-[#30363d] bg-[#0d1117]">
+    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-[#4a5563] bg-[#252c35]">
       <div
         aria-hidden="true"
         data-testid="expanded-code-line-numbers"
-        className="flex-shrink-0 overflow-hidden select-none border-r border-[#30363d] bg-[#0b0f14] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#6e7681]"
+        className="flex-shrink-0 overflow-hidden select-none border-r border-[#4a5563] bg-[#20262d] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#9aa7b4]"
       >
         <div ref={lineNumberTrackRef}>
           {lineNumbers.map((lineNumber) => (
@@ -190,7 +190,7 @@ function ExpandedCodeEditor({
         onScroll={syncLineNumberOffset}
         rows={24}
         wrap="off"
-        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-[#0d1117] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#e6edf3] focus:outline-none focus:ring-2 focus:ring-red-400"
+        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-[#252c35] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#d7dee8] focus:outline-none focus:ring-2 focus:ring-[#539bf5]"
         placeholder={placeholder}
         spellCheck={false}
       />
@@ -699,7 +699,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 onChange={(e) => set('code', e.target.value)}
                 rows={12}
                 className="w-full px-2.5 py-2.5 rounded-lg text-[11px] font-mono resize-y focus:outline-none focus:ring-2 focus:ring-red-400
-                           bg-[#0d1117] text-[#e6edf3] border border-[#30363d] leading-relaxed"
+                           bg-[#252c35] text-[#d7dee8] border border-[#4a5563] leading-relaxed"
                 placeholder={t('detail.nodeInfo.codePlaceholder')}
                 spellCheck={false}
               />
@@ -847,7 +847,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 {t('detail.nodeInfo.closeExpandedEditor')}
               </button>
             </div>
-            <div className="flex-1 min-h-0 min-w-0 bg-[#0d1117] p-4">
+            <div className="flex-1 min-h-0 min-w-0 bg-[#252c35] p-4">
               <ExpandedCodeEditor
                 value={form.code ?? ''}
                 onChange={(value) => set('code', value)}

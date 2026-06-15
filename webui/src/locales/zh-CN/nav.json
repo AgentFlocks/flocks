@@ -23,6 +23,8 @@
   "expandNav": "展开导航",
   "collapseNav": "收起导航",
   "switchLanguage": "切换语言",
+  "switchToDarkTheme": "切换到深色模式",
+  "switchToLightTheme": "切换到浅色模式",
   "newVersion": "新版本",
   "hasNewVersion": "有新版本 {{version}}",
   "versionInfo": "Flocks 版本信息",

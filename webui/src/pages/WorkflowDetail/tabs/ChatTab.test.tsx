@@ -412,6 +412,10 @@ describe('WorkflowDetail ChatTab', () => {
 
     expect(capturedSessionChatProps[0].agentName).toBe('rex');
     expect(capturedSessionChatProps[0].mentionAgents.map((agent: any) => agent.name)).toEqual(['rex']);
+    expect(capturedSessionChatProps[0].display).toEqual({
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: false,
+    });
     expect(screen.getAllByText(/Rex/i).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: /Rex/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Explore/i })).not.toBeInTheDocument();

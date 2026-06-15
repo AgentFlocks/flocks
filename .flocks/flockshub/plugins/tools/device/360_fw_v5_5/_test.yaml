@@ -1,0 +1,121 @@
+schema_version: 1
+provider: 360_fw
+
+connectivity:
+  tool: 360_fw_system
+  params:
+    action: fw_check_login
+
+fixtures:
+  360_fw_system:
+    - label: "Check login"
+      tags: [smoke, auth]
+      params:
+        action: fw_check_login
+      assert:
+        success: true
+    - label: "Get system info"
+      tags: [smoke, system]
+      params:
+        action: fw_system_info_get
+      assert:
+        success: true
+
+  360_fw_objects:
+    - label: "List address objects"
+      tags: [smoke, objects]
+      params:
+        action: fw_addressobj_list
+      assert:
+        success: true
+    - label: "Create temporary address object"
+      tags: [objects, mutation]
+      params:
+        action: fw_addressobj_create
+        name: flocks_tmp_addr
+        addr: 198.18.0.10
+
+  360_fw_policy:
+    - label: "List firewall policies"
+      tags: [smoke, policy]
+      params:
+        action: fw_fwpolicy_list
+      assert:
+        success: true
+    - label: "List policy groups"
+      tags: [policy]
+      params:
+        action: fw_policy_group_list
+
+  360_fw_network:
+    - label: "List interfaces"
+      tags: [smoke, network]
+      params:
+        action: fw_interface_list
+      assert:
+        success: true
+    - label: "List static routes"
+      tags: [network]
+      params:
+        action: fw_static_route_list
+
+  360_fw_vpn_bgp:
+    - label: "List IKE phase1"
+      tags: [smoke, vpn]
+      params:
+        action: fw_autoike_list
+      assert:
+        success: true
+    - label: "Get BGP default node"
+      tags: [bgp]
+      params:
+        action: fw_bgp_info_get
+
+  360_fw_auth_security:
+    - label: "List user groups"
+      tags: [smoke, auth]
+      params:
+        action: fw_user_group_list
+      assert:
+        success: true
+    - label: "List RADIUS servers"
+      tags: [auth]
+      params:
+        action: fw_radius_list
+
+  360_fw_observability:
+    - label: "Get CPU trend"
+      tags: [smoke, observability]
+      params:
+        action: fw_cpu_state
+        type: 1
+        period: 1
+      assert:
+        success: true
+    - label: "Get interface monitor"
+      tags: [observability]
+      params:
+        action: fw_interface_monitor
+
+  360_fw_api_readonly:
+    - label: "Show API catalog"
+      tags: [smoke, api]
+      params:
+        action: fw_api_catalog
+      assert:
+        success: true
+    - label: "Raw GET sys_info"
+      tags: [api]
+      params:
+        action: fw_call_raw_readonly
+        path: /sys_info
+
+  360_fw_api_mutation:
+    - label: "Unified GET sys_info"
+      tags: [api]
+      params:
+        action: fw_call_api
+        method: GET
+        path: /sys_info
+      assert:
+        success: true

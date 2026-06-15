@@ -99,7 +99,7 @@ export default function ChatGuideDock({
           data-testid="chat-guide-expanded-panel"
           className="absolute bottom-full left-0 right-0 z-30 mb-2 h-56 max-h-[calc(100vh-12rem)] overflow-hidden rounded-xl border border-zinc-200 bg-white/95 p-2 shadow-lg backdrop-blur"
         >
-          <div className="flex h-full flex-col gap-3 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:#d4d4d8_transparent]">
+          <div className="flex h-full flex-col gap-3 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:#d4d4d8_transparent] dark:[scrollbar-color:#545d68_transparent]">
             {actionGroups.map((group, groupIndex) => (
               <section key={group.title || `group-${groupIndex}`} className="min-w-0">
                 {shouldShowGroupTitle && group.title && (
