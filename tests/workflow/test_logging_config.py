@@ -46,5 +46,7 @@ def test_run_workflow_default_logging_suppresses_routine_execution_noise() -> No
         logs = stream.getvalue()
         assert "开始执行 workflow" not in logs
         assert "workflow 信息" not in logs
+        assert "outputs=" not in logs
+        assert "outputs_keys=['ok']" in logs
     finally:
         logger.handlers.clear()

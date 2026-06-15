@@ -535,17 +535,29 @@ class WorkflowEngine:
                                 **({"timeout_s": self.node_timeout_s} if _eo.is_timeout else {"traceback": (_eo.traceback or "")[:500]}),
                             },
                         )
+                        outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
-                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs=%s error=%s",
-                            _sn, _nid, _nd.type, _status, _eo.duration_ms,
-                            _outputs_for_log(_eo.outputs), _eo.error,
+                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
+                            _sn, _nid, _nd.type, _status, _eo.duration_ms, outputs_keys,
                             extra={
                                 "run_id": rid, "step": _sn, "node_id": _nid,
                                 "node_type": _nd.type, "status": _status,
-                                "duration_ms": _eo.duration_ms, "outputs_keys": list(_eo.outputs.keys()),
-                                "outputs": _outputs_for_log(_eo.outputs), "error": _eo.error,
+                                "duration_ms": _eo.duration_ms, "outputs_keys": outputs_keys,
+                                "error": _eo.error,
                             },
                         )
+                        if _logger.isEnabledFor(logging.DEBUG):
+                            outputs_for_debug = _outputs_for_log(_eo.outputs)
+                            _logger.debug(
+                                "wf.step.outputs step=%s node=%s status=%s outputs=%s",
+                                _sn, _nid, _status, outputs_for_debug,
+                                extra={
+                                    "run_id": rid, "step": _sn, "node_id": _nid,
+                                    "node_type": _nd.type, "status": _status,
+                                    "outputs": outputs_for_debug,
+                                    "error": _eo.error,
+                                },
+                            )
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
@@ -581,16 +593,29 @@ class WorkflowEngine:
                             error=None,
                         )
                         history.append(step_res)
+                        outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
-                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs=%s",
-                            _sn, _nid, _nd.type, "ok", _eo.duration_ms, _outputs_for_log(_eo.outputs),
+                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
+                            _sn, _nid, _nd.type, "ok", _eo.duration_ms, outputs_keys,
                             extra={
                                 "run_id": rid, "step": _sn, "node_id": _nid,
                                 "node_type": _nd.type, "status": "ok",
-                                "duration_ms": _eo.duration_ms, "outputs_keys": list(_eo.outputs.keys()),
-                                "outputs": _outputs_for_log(_eo.outputs), "error": None,
+                                "duration_ms": _eo.duration_ms, "outputs_keys": outputs_keys,
+                                "error": None,
                             },
                         )
+                        if _logger.isEnabledFor(logging.DEBUG):
+                            outputs_for_debug = _outputs_for_log(_eo.outputs)
+                            _logger.debug(
+                                "wf.step.outputs step=%s node=%s status=%s outputs=%s",
+                                _sn, _nid, "ok", outputs_for_debug,
+                                extra={
+                                    "run_id": rid, "step": _sn, "node_id": _nid,
+                                    "node_type": _nd.type, "status": "ok",
+                                    "outputs": outputs_for_debug,
+                                    "error": None,
+                                },
+                            )
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
