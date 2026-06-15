@@ -94,18 +94,28 @@ vi.mock('@/components/common/SessionChat', () => ({
     centerToolbarSlot,
     onCreateAndSend,
     model,
+    display,
   }: {
     sessionId?: string | null;
     mentionAgents?: Array<{ name: string }>;
     toolbarSlot?: React.ReactNode;
     centerToolbarSlot?: React.ReactNode;
     model?: { providerID: string; modelID: string } | null;
+    display?: {
+      compact?: boolean;
+      showActions?: boolean;
+      showTimestamp?: boolean;
+      collapseIntermediateSteps?: boolean;
+      processGroupsDefaultOpen?: boolean;
+    };
     onCreateAndSend?: (text: string, imageParts?: unknown[], agentOverride?: string) => Promise<unknown> | unknown;
   }) => (
     <div
       data-testid="session-chat"
       data-mention-agents={(mentionAgents ?? []).map((a) => a.name).join(',')}
       data-model={model ? `${model.providerID}/${model.modelID}` : ''}
+      data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
+      data-process-groups-default-open={String(Boolean(display?.processGroupsDefaultOpen))}
     >
       {sessionId ?? 'no-session'}
       {toolbarSlot}
@@ -371,6 +381,15 @@ describe('SessionPage session actions menu', () => {
     renderSessionPage();
 
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+  });
+
+  it('defaults session process groups open on the session management page', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-collapse-intermediate', 'true');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-process-groups-default-open', 'true');
   });
 
   it('syncs selected session when query param changes after mount', async () => {

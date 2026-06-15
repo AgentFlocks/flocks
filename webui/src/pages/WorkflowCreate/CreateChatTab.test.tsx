@@ -203,6 +203,10 @@ describe('WorkflowCreate CreateChatTab', () => {
     expect(capturedSessionChatProps[0].model).toEqual(selectedPromptModel);
     expect(capturedSessionChatProps[0].supportsVision).toBe(true);
     expect(capturedSessionChatProps[0].contextWindowTokens).toBe(128000);
+    expect(capturedSessionChatProps[0].display).toEqual({
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: false,
+    });
     expect(capturedSessionChatProps[0].composerTextareaMinHeight).toBe(48);
     expect(capturedSessionChatProps[0].composerTextareaMaxHeight).toBe(120);
 

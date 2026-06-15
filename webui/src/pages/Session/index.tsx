@@ -939,7 +939,13 @@ export default function SessionPage() {
           sessionId={selectedSessionId}
           live={Boolean(selectedSessionId)}
           hideInput={selectedSession?.canWrite === false}
-          display={{ compact: false, showActions: true, showTimestamp: true }}
+          display={{
+            compact: false,
+            showActions: true,
+            showTimestamp: true,
+            collapseIntermediateSteps: true,
+            processGroupsDefaultOpen: true,
+          }}
           agentName={selectedAgent}
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"

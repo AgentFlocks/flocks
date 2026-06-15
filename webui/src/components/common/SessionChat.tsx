@@ -16,7 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
@@ -115,6 +115,8 @@ export interface SessionChatDisplay {
   showTimestamp?: boolean;
   /** Default-collapse intermediate reasoning and tool-process details in embedded panels. */
   collapseIntermediateSteps?: boolean;
+  /** Initial open state for grouped reasoning/tool-process details. */
+  processGroupsDefaultOpen?: boolean;
 }
 
 export interface SessionChatProps {
@@ -818,7 +820,11 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (compact) {
-    return `max-w-[90%] px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
+    const widthClass = isUser
+      ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
+      : 'w-full max-w-full';
+
+    return `${widthClass} px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
         ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
         : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
@@ -850,7 +856,7 @@ export function getMessageGroupClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    return compact ? 'max-w-[90%]' : 'w-full';
+    return compact ? 'w-full max-w-full' : 'w-full';
   }
 
   if (compact) {
@@ -1283,6 +1289,7 @@ export default function SessionChat({
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
   const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
+  const processGroupsDefaultOpen = display?.processGroupsDefaultOpen ?? false;
   const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
   const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
@@ -2855,6 +2862,7 @@ export default function SessionChat({
                   showActions={showActions}
                   showTimestamp={showTimestamp}
                   collapseIntermediateSteps={collapseIntermediateSteps}
+                  processGroupsDefaultOpen={processGroupsDefaultOpen}
                   compact={compact}
                   onCopy={handleCopy}
                   editingMessageId={editingMessageId}
@@ -2887,7 +2895,7 @@ export default function SessionChat({
                       <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
-                      <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
+                      <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
                         <div className="flex items-center gap-2 text-sm text-amber-700">
                           <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                           <span>{compactingMessage || t('chat.compacting')}</span>
@@ -3391,6 +3399,7 @@ export interface ChatMessageBubbleProps {
   showActions?: boolean;
   showTimestamp?: boolean;
   collapseIntermediateSteps?: boolean;
+  processGroupsDefaultOpen?: boolean;
   compact?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
@@ -3405,6 +3414,32 @@ export interface ChatMessageBubbleProps {
   onRegenerate?: (messageId: string) => Promise<void>;
 }
 
+function ProcessGroupDetails({
+  defaultOpen,
+  children,
+}: {
+  defaultOpen: boolean;
+  children: React.ReactNode;
+}) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  useLayoutEffect(() => {
+    if (detailsRef.current) {
+      detailsRef.current.open = defaultOpen;
+    }
+  }, [defaultOpen]);
+
+  return (
+    <details
+      ref={detailsRef}
+      data-testid="chat-process-group"
+      className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+    >
+      {children}
+    </details>
+  );
+}
+
 function ChatMessageBubbleInner({
   message,
   isActive = false,
@@ -3414,6 +3449,7 @@ function ChatMessageBubbleInner({
   showActions = false,
   showTimestamp = false,
   collapseIntermediateSteps = false,
+  processGroupsDefaultOpen = false,
   compact = true,
   onCopy,
   editingMessageId,
@@ -3547,6 +3583,13 @@ function ChatMessageBubbleInner({
             }
             return part.type === 'tool' && !isBlockingQuestionToolPart(part);
           };
+          const isRenderableDisplayPart = (part: MessagePart): boolean => {
+            if (isIntermediateProcessPart(part)) return true;
+            if (part.type === 'text') return !!getMessagePartDisplayText(part).trim();
+            if (part.type === 'tool') return true;
+            if (part.type === 'file') return !!part.url;
+            return false;
+          };
           const renderPart = (part: MessagePart, i: number) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -3556,12 +3599,13 @@ function ChatMessageBubbleInner({
             // block, making them look glued together.
             <div key={part.id || i} className="mt-2 first:mt-0">
               {/* Text */}
-              {part.type === 'text' && part.text && (() => {
+              {part.type === 'text' && (() => {
                 const rawText = part.text || '';
                 const nodeRefMatch = isUser
                   ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
                   : null;
                 const partDisplayText = getMessagePartDisplayText(part);
+                if (!partDisplayText.trim()) return null;
                 const displayText = nodeRefMatch && partDisplayText === rawText ? nodeRefMatch[3] : partDisplayText;
                 const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
                 if (instructionLabel) {
@@ -3660,10 +3704,9 @@ function ChatMessageBubbleInner({
             ].filter(Boolean).join(' · ');
             const groupKey = group.map(({ part, index }) => part.id || index).join('-');
             return (
-              <details
+              <ProcessGroupDetails
                 key={`process-${groupIndex}-${groupKey}`}
-                data-testid="chat-process-group"
-                className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+                defaultOpen={processGroupsDefaultOpen}
               >
                 <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50">
                   <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
@@ -3680,7 +3723,7 @@ function ChatMessageBubbleInner({
                 <div className="border-t border-zinc-200/70 px-2.5 py-2">
                   {group.map(({ part, index }) => renderPart(part, index))}
                 </div>
-              </details>
+              </ProcessGroupDetails>
             );
           };
           const renderDisplayParts = () => {
@@ -3701,6 +3744,7 @@ function ChatMessageBubbleInner({
                 processGroup.push({ part, index });
                 return;
               }
+              if (!isRenderableDisplayPart(part)) return;
               flushProcessGroup();
               nodes.push(renderPart(part, index));
             });
@@ -4332,6 +4376,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
   if (prev.showActions !== next.showActions) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
+  if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
   if (prev.editingMessageId !== next.editingMessageId) return false;
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;
