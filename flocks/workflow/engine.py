@@ -193,6 +193,7 @@ class WorkflowEngine:
         cancel: Optional[Callable[[], bool]] = None,
         on_step_start: Optional[StepStartHook[Any]] = None,
         on_step_end: Optional[StepEndHook[Any]] = None,
+        retain_history: bool = False,
     ) -> ExecutionResult:
         assert self.runtime is not None
         nodes = self.workflow.nodes_by_id()
@@ -224,6 +225,10 @@ class WorkflowEngine:
             previous_cancel_checker = self.runtime.cancel_checker
             self.runtime.cancel_checker = cancel
         try:
+            def _retain_step(step: StepResult) -> None:
+                if retain_history:
+                    history.append(step)
+
             def _build_execution_context() -> Dict[str, Any]:
                 return {
                     "run_id": rid,
@@ -499,7 +504,7 @@ class WorkflowEngine:
                             error=_eo.error or "Run cancelled",
                             traceback_text=_eo.traceback,
                         )
-                        history.append(step_res)
+                        _retain_step(step_res)
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
@@ -525,7 +530,7 @@ class WorkflowEngine:
                             error=_eo.error,
                             traceback_text=_eo.traceback,
                         )
-                        history.append(step_res)
+                        _retain_step(step_res)
                         _status = "timeout" if _eo.is_timeout else "error"
                         (_logger.warning if _eo.is_timeout else _logger.error)(
                             f"wf.step.{_status}",
@@ -574,6 +579,7 @@ class WorkflowEngine:
                                     "run_id": rid,
                                     "steps": step_count + len(exec_results),
                                     "last_node_id": _nid,
+                                    "outputs": last_outputs,
                                     "history": history,
                                 },
                             )
@@ -592,7 +598,7 @@ class WorkflowEngine:
                             stdout=_eo.stdout,
                             error=None,
                         )
-                        history.append(step_res)
+                        _retain_step(step_res)
                         outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
                             "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
@@ -902,7 +908,7 @@ class WorkflowEngine:
             workflow_loader=self.workflow_loader,
         )
         result = sub_engine.run(initial_inputs=sub_inputs)
-        last_outputs = result.history[-1].outputs if result.history else {}
+        last_outputs = result.outputs or (result.history[-1].outputs if result.history else {})
         output_k = node.output_key or "output"
         return {output_k: last_outputs}, ""
 

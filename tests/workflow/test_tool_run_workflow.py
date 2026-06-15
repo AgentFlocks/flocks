@@ -377,14 +377,7 @@ class TestRunWorkflowToolExecution:
                 steps=1,
                 last_node_id="node-1",
                 outputs={"enriched_alerts": large_alerts, "message": "done"},
-                history=[
-                    {
-                        "node_id": "node-1",
-                        "node_type": "python",
-                        "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
-                        "outputs": {"raw_alerts": large_alerts, "message": "ok"},
-                    }
-                ],
+                history=[],
                 error=None,
             )
 
@@ -439,21 +432,14 @@ class TestRunWorkflowToolExecution:
             "message": "done",
         }
         assert result.metadata["history"] == []
-        assert result.metadata["history_count"] == 1
+        assert result.metadata["history_count"] == 0
 
         final_exec_data = record_result.await_args.args[2]
         assert final_exec_data["outputResults"] == {
             "_enriched_alerts_count": 150,
             "message": "done",
         }
-        assert final_exec_data["executionLog"][0]["inputs"] == {
-            "_raw_alerts_count": 150,
-            "source": "syslog",
-        }
-        assert final_exec_data["executionLog"][0]["outputs"] == {
-            "_raw_alerts_count": 150,
-            "message": "ok",
-        }
+        assert final_exec_data["executionLog"] == []
         assert final_exec_data["stepCount"] == 1
         assert any(update.get("workflow_execution_id") == "exec-compacted" for update in metadata_updates)
 

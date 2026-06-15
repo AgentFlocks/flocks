@@ -34,7 +34,7 @@ def test_node_timeout_skips_node_and_records_error():
         node_timeout_s=1.0,
         stop_on_error=False,
     )
-    result = engine.run(initial_inputs={})
+    result = engine.run(initial_inputs={}, retain_history=True)
 
     assert result.steps == 2
     assert len(result.history) == 2
@@ -67,7 +67,7 @@ def test_node_timeout_none_disabled():
         runtime=PythonExecRuntime(),
         node_timeout_s=None,
     )
-    result = engine.run(initial_inputs={})
+    result = engine.run(initial_inputs={}, retain_history=True)
     assert result.steps == 1
     assert result.history[0].outputs["x"] == 1
 
@@ -92,6 +92,7 @@ def test_run_workflow_node_timeout_param():
         inputs={},
         node_timeout_s=0.2,
         ensure_requirements=False,
+        retain_history=True,
     )
     assert result.status == "SUCCEEDED"
     assert len(result.history) == 1
@@ -119,6 +120,7 @@ def test_run_workflow_uses_metadata_node_timeout_default():
         workflow=workflow,
         inputs={},
         ensure_requirements=False,
+        retain_history=True,
     )
     assert result.status == "SUCCEEDED"
     assert len(result.history) == 1
@@ -146,6 +148,7 @@ def test_run_workflow_explicit_node_timeout_overrides_metadata():
         inputs={},
         node_timeout_s=1.0,
         ensure_requirements=False,
+        retain_history=True,
     )
     assert result.status == "SUCCEEDED"
     assert len(result.history) == 1

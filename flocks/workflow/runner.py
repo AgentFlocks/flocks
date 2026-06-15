@@ -298,6 +298,7 @@ def run_workflow(
     max_parallel_workers: int = 4,
     history_mode: Literal["full", "summary"] = "summary",
     cancel: Optional[Callable[[], bool]] = None,
+    retain_history: bool = False,
 ) -> RunWorkflowResult:
     # 确保日志已配置
     _ensure_logging_configured()
@@ -465,6 +466,7 @@ def run_workflow(
             cancel=cancel,
             on_step_start=_on_step_start,
             on_step_end=_on_step_end,
+            retain_history=retain_history,
         )
     except FlocksWorkflowError as e:
         # Extract execution context from error if available
@@ -495,8 +497,8 @@ def run_workflow(
             history=history_from_error,
         )
 
-    history = [s.model_dump(mode="json") for s in result.history]
-    last_outputs = result.outputs if result.outputs else (result.history[-1].outputs if result.history else {})
+    history = [s.model_dump(mode="json") for s in result.history] if result.history else []
+    last_outputs = result.outputs if result.outputs else {}
 
     if cancel is not None and cancel():
         return RunWorkflowResult(

@@ -1,4 +1,4 @@
-"""Test run_workflow tool keeps execution history in metadata."""
+"""Test run_workflow tool keeps final metadata lightweight."""
 
 import json
 import pytest
@@ -17,7 +17,7 @@ class MockToolContext(ToolContext):
 
 @pytest.mark.asyncio
 async def test_workflow_history_in_output():
-    """History stays in metadata while the default output stays concise."""
+    """Final tool metadata omits retained history while output stays concise."""
     
     # Create a simple test workflow
     workflow = {
@@ -65,35 +65,10 @@ async def test_workflow_history_in_output():
     assert result.success is True
     assert result.output is not None
     
-    # Verify metadata contains history
+    # Final tool metadata should not retain full per-step history in memory.
     assert "history" in result.metadata
     history = result.metadata["history"]
-    
-    # Should have 3 steps
-    assert len(history) == 3
-    
-    # Verify step 1
-    step1 = history[0]
-    assert step1["node_id"] == "step1"
-    assert "inputs" in step1
-    assert step1["inputs"]["x"] == 5
-    assert "outputs" in step1
-    assert step1["outputs"]["result1"] == 15
-    assert step1.get("error") is None
-    
-    # Verify step 2
-    step2 = history[1]
-    assert step2["node_id"] == "step2"
-    assert step2["inputs"]["result1"] == 15
-    assert step2["outputs"]["result2"] == 30
-    assert step2.get("error") is None
-    
-    # Verify step 3
-    step3 = history[2]
-    assert step3["node_id"] == "step3"
-    assert step3["inputs"]["result2"] == 30
-    assert step3["outputs"]["final"] == 35
-    assert step3.get("error") is None
+    assert history == []
     
     # Verify final outputs in metadata
     assert "outputs" in result.metadata
@@ -109,7 +84,7 @@ async def test_workflow_history_in_output():
 
 @pytest.mark.asyncio
 async def test_workflow_history_with_error():
-    """History is preserved in metadata even when execution fails."""
+    """Failure metadata remains lightweight even when execution fails."""
     
     workflow = {
         "name": "test_error_workflow",
@@ -146,25 +121,11 @@ async def test_workflow_history_with_error():
     assert result.success is False
     assert result.error is not None
     
-    # But history should still be available
+    # Per-step details are written through execution step rows, not retained
+    # in the final ToolResult metadata.
     assert "history" in result.metadata
     history = result.metadata["history"]
-    
-    # Should have 2 steps (both executed, second one failed)
-    assert len(history) == 2
-    
-    # First step should succeed
-    step1 = history[0]
-    assert step1["node_id"] == "step1"
-    assert step1["outputs"]["value"] == 100
-    assert step1.get("error") is None
-    
-    # Second step should have error
-    step2 = history[1]
-    assert step2["node_id"] == "step2"
-    assert step2.get("error") is not None
-    assert "Intentional error" in step2["error"]
-    assert "traceback" in step2
+    assert history == []
     
     # Output should contain only the top-level failure summary
     assert "Error:" in result.output
@@ -175,7 +136,7 @@ async def test_workflow_history_with_error():
 
 @pytest.mark.asyncio
 async def test_workflow_history_with_stdout():
-    """Stdout remains in metadata history even if hidden from tool output."""
+    """Stdout is not retained in final metadata history or tool output."""
     
     workflow = {
         "name": "test_stdout_workflow",
@@ -202,13 +163,8 @@ async def test_workflow_history_with_stdout():
     
     assert result.success is True
     
-    # Check history contains stdout
     history = result.metadata["history"]
-    assert len(history) == 1
-    
-    step1 = history[0]
-    assert "stdout" in step1
-    assert "Hello from step1" in step1["stdout"]
+    assert history == []
     
     # Output should stay concise and omit per-step stdout details
     assert "Stdout:" not in result.output
