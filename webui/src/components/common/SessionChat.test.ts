@@ -762,6 +762,102 @@ describe('SessionChat intermediate process collapse', () => {
     expect(processGroup.open).toBe(true);
     expect(screen.getByText('read')).toBeInTheDocument();
   });
+
+  it('does not split collapsed process groups on invisible step markers', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-1',
+              messageID: 'assistant-process-1',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '先读取 workflow.md',
+            } as any,
+            {
+              id: 'tool-1',
+              messageID: 'assistant-process-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-1',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.md' },
+                output: 'workflow content',
+              },
+            } as any,
+            {
+              id: 'empty-text-1',
+              messageID: 'assistant-process-1',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '',
+            } as any,
+          ],
+        }),
+        makeMessage({
+          id: 'assistant-process-2',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'step-start-1',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'step-start',
+            } as any,
+            {
+              id: 'reason-2',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'thinking',
+              text: '再生成 workflow.json',
+            } as any,
+            {
+              id: 'tool-2',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'write',
+              callID: 'call-2',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.json' },
+                output: 'ok',
+              },
+            } as any,
+            {
+              id: 'step-finish-1',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'step-finish',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
+    expect(screen.getByText('过程（4 项）')).toBeInTheDocument();
+    expect(screen.getByText('2 段思考 · 2 次工具调用')).toBeInTheDocument();
+  });
 });
 
 describe('SessionChat agent mentions', () => {

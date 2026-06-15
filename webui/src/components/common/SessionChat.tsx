@@ -3547,6 +3547,13 @@ function ChatMessageBubbleInner({
             }
             return part.type === 'tool' && !isBlockingQuestionToolPart(part);
           };
+          const isRenderableDisplayPart = (part: MessagePart): boolean => {
+            if (isIntermediateProcessPart(part)) return true;
+            if (part.type === 'text') return !!getMessagePartDisplayText(part).trim();
+            if (part.type === 'tool') return true;
+            if (part.type === 'file') return !!part.url;
+            return false;
+          };
           const renderPart = (part: MessagePart, i: number) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -3556,12 +3563,13 @@ function ChatMessageBubbleInner({
             // block, making them look glued together.
             <div key={part.id || i} className="mt-2 first:mt-0">
               {/* Text */}
-              {part.type === 'text' && part.text && (() => {
+              {part.type === 'text' && (() => {
                 const rawText = part.text || '';
                 const nodeRefMatch = isUser
                   ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
                   : null;
                 const partDisplayText = getMessagePartDisplayText(part);
+                if (!partDisplayText.trim()) return null;
                 const displayText = nodeRefMatch && partDisplayText === rawText ? nodeRefMatch[3] : partDisplayText;
                 const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
                 if (instructionLabel) {
@@ -3701,6 +3709,7 @@ function ChatMessageBubbleInner({
                 processGroup.push({ part, index });
                 return;
               }
+              if (!isRenderableDisplayPart(part)) return;
               flushProcessGroup();
               nodes.push(renderPart(part, index));
             });
