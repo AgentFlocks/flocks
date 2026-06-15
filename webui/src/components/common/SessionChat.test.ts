@@ -346,12 +346,9 @@ describe('buildContextUsageBreakdown', () => {
 });
 
 describe('getMessageBubbleClassName', () => {
-  // The bubble's max width is owned by its outer container (`max-w-[80%]` for
-  // user, `w-full` for assistant; see SessionChat.tsx), so the inner bubble
-  // only controls its own intrinsic sizing (`w-auto` vs `w-full`).  Previously
-  // the inner bubble also pinned `max-w-2xl`, but the unified chat redesign
-  // moved that responsibility outward.  Tests here therefore assert width
-  // semantics, not the legacy `max-w-2xl` literal.
+  // The message column owns the available width, so the inner bubble only
+  // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
+  // assert width semantics, not legacy max-width literals.
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -408,26 +405,26 @@ describe('getMessageBubbleClassName', () => {
 });
 
 describe('getMessageGroupClassName', () => {
-  it('caps full-layout user messages at 80% width', () => {
+  it('caps full-layout user messages at 88% width', () => {
     const className = getMessageGroupClassName({
       compact: false,
       isUser: true,
       isEditing: false,
     });
 
-    expect(className).toContain('max-w-[80%]');
+    expect(className).toContain('max-w-[88%]');
     expect(className).toContain('w-fit');
   });
 
-  it('expands editing user messages to the 80% container width', () => {
+  it('expands editing user messages to the full content width', () => {
     const className = getMessageGroupClassName({
       compact: false,
       isUser: true,
       isEditing: true,
     });
 
-    expect(className).toContain('w-[80%]');
-    expect(className).toContain('max-w-[80%]');
+    expect(className).toContain('w-full');
+    expect(className).toContain('max-w-full');
   });
 
   it('keeps assistant messages full width in full layout', () => {
@@ -605,6 +602,19 @@ describe('SessionChat instruction display text', () => {
 
     expect(screen.getByText('智能配置')).toBeInTheDocument();
     expect(screen.queryByText(/Please read guide\.md/)).not.toBeInTheDocument();
+  });
+});
+
+describe('SessionChat composer controls', () => {
+  it('keeps the disabled send button visible in dark mode', () => {
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const disabledButtons = Array.from(container.querySelectorAll('button:disabled'));
+    const sendButton = disabledButtons.find((button) => button.querySelector('svg'));
+
+    expect(sendButton?.className).toContain('dark:bg-[#46515e]');
+    expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
+    expect(sendButton?.className).toContain('dark:border-[#5a6573]');
   });
 });
 

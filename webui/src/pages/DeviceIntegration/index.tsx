@@ -1215,8 +1215,8 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 
                   {/* Hover action buttons */}
                   <div
-                    className="absolute right-1 inset-y-0 hidden group-hover/room:flex items-center gap-0.5 pl-4"
-                    style={{ background: `linear-gradient(to right, transparent, ${isSelected ? '#eff6ff' : '#f4f4f5'} 35%)` }}
+                    className="device-room-actions-fade absolute right-1 inset-y-0 hidden group-hover/room:flex items-center gap-0.5 pl-4"
+                    data-selected={isSelected ? 'true' : 'false'}
                   >
                     <button
                       onClick={(e) => startEdit(group, e)}

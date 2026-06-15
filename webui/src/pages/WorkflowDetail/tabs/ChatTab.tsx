@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import { AlertCircle, Bot, Clock, Plus } from 'lucide-react';
 import SessionChat, {
   NodeRef,
@@ -80,7 +79,6 @@ export default function ChatTab({
   onNodeRefDismiss,
 }: ChatTabProps) {
   const { t, i18n } = useTranslation('workflow');
-  const navigate = useNavigate();
   const workflowDisplayName = getWorkflowDisplayName(workflow, i18n?.language);
   const defaultSupportsVision = useDefaultModelVision();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -469,7 +467,6 @@ export default function ChatTab({
               loading={loadingChatModels}
               selectedModelOption={selectedModelOption}
               onSelectModel={(option) => setSelectedModelKey(option.key)}
-              onAddModel={() => navigate('/models')}
             />
           }
           conversationBottomSlot={({ sendPrompt, sending, streaming }) => (
