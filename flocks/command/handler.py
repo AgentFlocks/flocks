@@ -24,6 +24,7 @@ async def handle_slash_command(
     clear_screen: Optional[ClearScreen] = None,
     clear_history: Optional[ClearHistory] = None,
     surface: Optional[CommandSurface] = None,
+    session_id: Optional[str] = None,
 ) -> bool:
     """
     Handle supported slash commands.
@@ -56,11 +57,14 @@ async def handle_slash_command(
         args=parsed.args,
         args_json=parsed.args_json,
         surface=surface,
+        session_id=session_id,
     )
     if not result.handled:
         return False
 
     if result.prompt is not None:
+        if result.text:
+            await send_text(result.text)
         await send_prompt(result.prompt)
         return True
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -34,6 +34,15 @@ class TestParseSlashCommand:
         assert parsed is not None
         assert parsed.command_name == "restart"
         assert parsed.command_def is None
+
+    def test_goal_command_resolves(self):
+        parsed = parse_slash_command("/goal fix tests")
+        assert parsed is not None
+        assert parsed.command_name == "goal"
+        assert parsed.canonical_name == "goal"
+        assert parsed.args == "fix tests"
+        assert parsed.command_def is not None
+        assert parsed.command_def.execution_kind == "direct"
 
 
 class TestDispatchUserInput:
@@ -195,6 +204,55 @@ class TestDispatchUserInput:
 
         assert result.action == "rejected"
         assert "不支持附件" in direct[0]
+
+    @pytest.mark.asyncio
+    async def test_goal_requires_existing_session(self):
+        direct = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            text="/goal fix tests",
+            parts=[{"type": "text", "text": "/goal fix tests"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "rejected"
+        assert "需要先有一个会话" in direct[0]
+
+    @pytest.mark.asyncio
+    async def test_goal_set_runs_llm_without_direct_ack(self, monkeypatch):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        monkeypatch.setattr(
+            "flocks.command.direct.GoalManager.set_goal",
+            AsyncMock(return_value=SimpleNamespace(objective="fix tests", max_turns=20)),
+        )
+        monkeypatch.setattr(
+            "flocks.command.direct.GoalManager.goal_prompt",
+            MagicMock(return_value="goal prompt"),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_goal_dispatch",
+            text="/goal fix tests",
+            parts=[{"type": "text", "text": "/goal fix tests"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "llm"
+        assert direct == []
+        assert llm == [("goal prompt", "/goal fix tests")]
 
     @pytest.mark.asyncio
     async def test_channel_unsafe_command_is_rejected(self):

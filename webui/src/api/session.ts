@@ -56,6 +56,18 @@ export interface ContextUsageSnapshot {
   excludedSegments: ContextUsageSegment[];
 }
 
+export interface SessionGoalState {
+  status: 'active' | 'completed' | 'blocked' | 'paused';
+  objective: string;
+  reason?: string | null;
+}
+
+export interface SessionResponse {
+  id: string;
+  goal?: SessionGoalState | null;
+  [key: string]: unknown;
+}
+
 export interface SessionListParams {
   limit?: number;
   offset?: number;
@@ -86,7 +98,7 @@ export const sessionApi = {
   /**
    * 获取单个会话
    */
-  get: async (sessionId: string) => {
+  get: async (sessionId: string): Promise<SessionResponse> => {
     const response = await client.get(`/api/session/${sessionId}`);
     return response.data;
   },
