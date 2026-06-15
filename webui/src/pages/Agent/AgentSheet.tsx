@@ -57,7 +57,7 @@ interface AgentSheetProps {
 }
 
 export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps) {
-  const { t } = useTranslation('agent');
+  const { t } = useTranslation(['agent', 'common']);
   const isEdit = !!agent;
   const isNative = !!agent?.native;
 
@@ -323,6 +323,15 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     throw new Error(t('error.extractTimeout'));
   };
 
+  const handleRunTest = async (prompt: string) => {
+    if (!agent?.name) {
+      throw new Error(t('error.testUnavailable', { defaultValue: 'Agent is not ready for testing.' }));
+    }
+
+    const res = await agentAPI.test(agent.name, prompt);
+    return res.data.sessionId;
+  };
+
   return (
     <EntitySheet
       open
@@ -348,6 +357,12 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={isEdit ? handleExtractFromRex : undefined}
+      onRunTest={isEdit ? handleRunTest : undefined}
+      defaultTestPrompt={isEdit
+        ? t('common:entity.defaultTestPrompt', {
+            defaultValue: 'Hello, please introduce yourself and your main capabilities.',
+          })
+        : undefined}
     >
       <AgentFormContent
         formData={formData}

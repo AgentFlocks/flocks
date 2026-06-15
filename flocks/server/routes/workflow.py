@@ -2096,16 +2096,19 @@ async def publish_workflow_as_api(
         }
         await Storage.write(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
 
+        # Preserve existing API key across re-publishes so callers don't break.
+        # The runtime must receive the same key before it starts so /invoke can
+        # enforce the key returned to callers.
+        existing_service = await Storage.read(_api_service_key(workflow_id)) or {}
+        api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
+
         # Use center.py to publish the selected runtime.
         active_record = await publish_workflow(
             workflow_id,
             image=req.image if req else None,
             driver=req.driver if req else None,
+            api_key=api_key,
         )
-
-        # Preserve existing API key across re-publishes so callers don't break
-        existing_service = await Storage.read(_api_service_key(workflow_id)) or {}
-        api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
 
         service_url = active_record.get("serviceUrl", "")
         invoke_url = f"{service_url}/invoke"

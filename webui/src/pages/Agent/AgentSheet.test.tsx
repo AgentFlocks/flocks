@@ -12,6 +12,7 @@ const {
   mockModelListDefinitions,
   mockToolList,
   mockSkillList,
+  mockAgentTest,
 } = vi.hoisted(() => ({
   capturedEntitySheetProps: [] as any[],
   mockUseRexComposerControls: vi.fn(),
@@ -20,6 +21,7 @@ const {
   mockModelListDefinitions: vi.fn(),
   mockToolList: vi.fn(),
   mockSkillList: vi.fn(),
+  mockAgentTest: vi.fn(),
 }));
 
 vi.mock('@/components/common/EntitySheet', () => ({
@@ -55,7 +57,7 @@ vi.mock('@/api/agent', () => ({
   agentAPI: {
     update: vi.fn(),
     updateModel: vi.fn(),
-    test: vi.fn(),
+    test: mockAgentTest,
   },
 }));
 
@@ -132,9 +134,11 @@ vi.mock('react-i18next', () => ({
           },
         ],
         'edit.emptyStateTitle': '暂无编辑对话',
+        'common:entity.defaultTestPrompt': '你好，请介绍一下你自己以及你的主要功能。',
         'sheet.done': '完成',
       };
-      return translations[key] ?? key;
+      const fallback = params?.defaultValue;
+      return translations[key] ?? (typeof fallback === 'string' ? fallback : key);
     },
   }),
 }));
@@ -172,9 +176,10 @@ describe('AgentSheet', () => {
     mockModelListDefinitions.mockResolvedValue({ data: { models: [] } });
     mockToolList.mockResolvedValue({ data: [] });
     mockSkillList.mockResolvedValue({ data: [] });
+    mockAgentTest.mockResolvedValue({ data: { sessionId: 'test-session-1', status: 'created' } });
   });
 
-  it('uses an edit guide experience when editing an agent', () => {
+  it('uses an edit guide experience and keeps real test execution when editing an agent', async () => {
     render(
       <AgentSheet
         agent={makeAgent()}
@@ -222,10 +227,14 @@ describe('AgentSheet', () => {
     ]);
     expect(props.rexAgentName).toBe('rex');
     expect(props.onExtractFromRex).toEqual(expect.any(Function));
-    expect(props.onRunTest).toBeUndefined();
+    expect(props.onRunTest).toEqual(expect.any(Function));
+    expect(props.defaultTestPrompt).toBe('你好，请介绍一下你自己以及你的主要功能。');
     expect(props.rexSystemContext).toContain('Agent 编辑引导助手');
     expect(props.rexSystemContext).toContain('Tools：query_ioc');
     expect(props.rexSystemContext).toContain('Skills：agent-builder');
+
+    await expect(props.onRunTest('请用边界输入验证这个 Agent')).resolves.toBe('test-session-1');
+    expect(mockAgentTest).toHaveBeenCalledWith('audit-agent', '请用边界输入验证这个 Agent');
   });
 
   it('uses a model and temperature guide when editing a native agent', () => {
