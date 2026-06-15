@@ -30,3 +30,12 @@ export function getAgentDisplayName(
   const cn = (agent.nameCn ?? '').trim();
   return isChineseLocale(language) ? (cn || en) : en;
 }
+
+export function isAgentUsableInChat(
+  agent: { mode?: string; hidden?: boolean; delegatable?: boolean; tags?: string[] } | null | undefined,
+): boolean {
+  if (!agent || agent.hidden) return false;
+  if ((agent.tags ?? []).includes('system')) return false;
+  if (agent.mode === 'primary') return true;
+  return agent.delegatable !== false;
+}

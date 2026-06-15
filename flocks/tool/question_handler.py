@@ -15,7 +15,12 @@ from flocks.server.routes.question import (
     is_request_rejected,
     clear_request_state,
 )
-from flocks.tool.system.question import QuestionRejectedError, get_current_message_id, get_current_call_id
+from flocks.tool.system.question import (
+    QuestionRejectedError,
+    get_current_call_id,
+    get_current_message_id,
+    normalize_question_option,
+)
 
 
 log = Log.create(service="question-handler")
@@ -68,22 +73,18 @@ async def api_question_handler(
         # Convert options format for QuestionInfo
         options = []
         for opt in q.get("options", []):
-            if isinstance(opt, dict):
-                options.append({
-                    "label": str(opt.get("label", "")),
-                    "description": str(opt.get("description", "")),
-                })
-            elif isinstance(opt, str):
-                options.append({
-                    "label": opt,
-                    "description": "",
-                })
+            option = normalize_question_option(opt)
+            if option is not None:
+                options.append(option)
         
         # Build QuestionInfo
+        question_type = q.get("type", "choice")
+        if question_type == "choice" and not options:
+            question_type = "text"
         question_info = {
             "question": str(q.get("question", "")),
             "header": str(q.get("header", "")),
-            "type": q.get("type", "choice"),
+            "type": question_type,
             "options": options,
             "multiple": q.get("multiple", False),
             "placeholder": q.get("placeholder", ""),

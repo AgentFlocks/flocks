@@ -27,7 +27,7 @@ const entityTranslations: Record<string, string> = {
   'entity.defaultCreate': '创建',
   'entity.defaultSave': '保存',
   'entity.tabDetails': '详情',
-  'entity.tabAIEdit': 'AI 编辑',
+  'entity.tabAIEdit': '工作台',
   'entity.tabTest': '测试',
   'entity.rexThinking': 'Agent 正在思考中...',
   'entity.editAndSend': '编辑下方内容，发送给 Agent 查看效果',
@@ -105,7 +105,9 @@ describe('EntitySheet', () => {
         </EntitySheet>,
       );
 
-      expect(screen.getByText('AI 编辑')).toBeInTheDocument();
+      expect(screen.getByText('工作台')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '详情' })).toHaveClass('flex-1');
+      expect(screen.getByRole('button', { name: '工作台' })).toHaveClass('flex-1');
     });
 
     it('should default to Form tab in edit mode', () => {

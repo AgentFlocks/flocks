@@ -96,6 +96,15 @@ class SessionTime(BaseModel):
     archived: Optional[int] = Field(None, description="Archive timestamp (ms)")
 
 
+class SessionGoalResponse(BaseModel):
+    """Persisted goal state shown by the WebUI composer banner."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: Literal["active", "paused", "completed", "blocked"] = Field(..., description="Goal status")
+    objective: str = Field(..., description="Goal objective")
+    reason: Optional[str] = Field(None, description="Last goal judge reason")
+
+
 class SessionResponse(BaseModel):
     """
     Session response - Flocks compatible
@@ -124,6 +133,7 @@ class SessionResponse(BaseModel):
     canWrite: bool = Field(False, description="Whether current user can continue this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
     isShared: bool = Field(False, description="Whether this session is locally shared")
+    goal: Optional[SessionGoalResponse] = Field(None, description="Persisted session goal state")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -164,6 +174,26 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     )
 
 
+async def _session_to_response_with_goal(session: SessionModel) -> SessionResponse:
+    """Convert SessionModel to SessionResponse and attach persisted goal state."""
+    response = _session_to_response(session)
+    try:
+        from flocks.session.goal import GoalManager
+
+        goal_state = await GoalManager.get(session.id)
+    except Exception as exc:
+        log.warn("session.goal.response_error", {"sessionID": session.id, "error": str(exc)})
+        goal_state = None
+
+    if goal_state is not None:
+        response.goal = SessionGoalResponse(
+            status=goal_state.status,
+            objective=goal_state.objective,
+            reason=goal_state.last_reason or goal_state.paused_reason,
+        )
+    return response
+
+
 def _require_session_read_access(session: SessionModel, user) -> None:
     if not SessionPolicy.can_read(session, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者或受邀只读用户可访问会话")
@@ -172,6 +202,39 @@ def _require_session_read_access(session: SessionModel, user) -> None:
 def _require_session_write_access(session: SessionModel, user) -> None:
     if not SessionPolicy.can_write(session, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
+
+
+async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
+    """Validate an explicitly requested chat agent.
+
+    The Agent page "enabled" toggle is stored as ``delegatable`` for backward
+    compatibility, but product semantics treat disabled subagents as unusable
+    from both delegation and direct chat selection.
+    """
+    if not agent_name:
+        return
+
+    from flocks.agent.registry import Agent
+
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available',
+        )
+
+    tags = getattr(agent, "tags", None) or []
+    if getattr(agent, "hidden", False) or "system" in tags:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available for chat',
+        )
+
+    if getattr(agent, "mode", None) != "primary" and getattr(agent, "delegatable", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is disabled',
+        )
 
 
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
@@ -313,7 +376,7 @@ async def list_sessions(
         if limit is not None and len(filtered) >= limit:
             break
     
-    response = [_session_to_response(s) for s in filtered]
+    response = [await _session_to_response_with_goal(s) for s in filtered]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
@@ -418,7 +481,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         )
     except Exception:
         pass
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 
@@ -440,7 +503,7 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     _require_session_read_access(session, _current_user)
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 @router.get(
@@ -479,7 +542,7 @@ async def get_session_children(sessionID: str, request: Request) -> List[Session
         )
     _require_session_read_access(session, current_user)
     children = await Session.children(session.project_id, sessionID)
-    return [_session_to_response(s) for s in children if SessionPolicy.can_read(s, current_user)]
+    return [await _session_to_response_with_goal(s) for s in children if SessionPolicy.can_read(s, current_user)]
 
 
 class TodoInfo(BaseModel):
@@ -670,7 +733,7 @@ async def update_session(
         )
     
     log.info("session.updated", {"session_id": sessionID})
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 @router.post(
@@ -703,7 +766,7 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 @router.post(
@@ -736,7 +799,7 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 # =============================================================================
@@ -886,7 +949,7 @@ async def fork_session(sessionID: str, http_request: Request, request: Optional[
     forked = await Session.fork(session.project_id, sessionID, message_id)
     
     log.info("session.forked", {"from": sessionID, "to": forked.id})
-    return _session_to_response(forked)
+    return await _session_to_response_with_goal(forked)
 
 
 @router.get(
@@ -1024,7 +1087,7 @@ async def revert_session(sessionID: str, request: RevertRequest, http_request: R
     )
     
     log.info("session.reverted", {"session_id": sessionID, "message_id": request.messageID})
-    return _session_to_response(updated)
+    return await _session_to_response_with_goal(updated)
 
 
 @router.post(
@@ -1049,7 +1112,7 @@ async def unrevert_session(sessionID: str, http_request: Request) -> SessionResp
     updated = await SessionRevert.unrevert(session_id=sessionID)
     
     log.info("session.unreverted", {"session_id": sessionID})
-    return _session_to_response(updated)
+    return await _session_to_response_with_goal(updated)
 
 
 # =============================================================================
@@ -2382,6 +2445,7 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
+    await _require_agent_usable_for_chat(request.agent)
     agent_name = request.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
@@ -3337,7 +3401,18 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         session_control=_run_session_control,
         clear_history=_clear_history,
     )
-    await dispatch_user_input(event, sink)
+    result = await dispatch_user_input(event, sink)
+    if result.command_name == "goal" and result.action == "llm":
+        from flocks.session.goal import GoalManager
+
+        state = await GoalManager.get(sessionID)
+        if state is not None:
+            await publish_event("session.goal.updated", {
+                "sessionID": sessionID,
+                "status": state.status,
+                "objective": state.objective,
+                "reason": state.last_reason,
+            })
 
 
 class PromptQueueUpdateRequest(BaseModel):
@@ -3350,6 +3425,7 @@ async def _enqueue_prompt_request(
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
+    await _require_agent_usable_for_chat(request.agent)
     model = request.model.model_dump(by_alias=True) if request.model else None
     parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
     return await InteractionQueue.enqueue(
@@ -3400,6 +3476,7 @@ async def enqueue_prompt(sessionID: str, request: PromptRequest) -> Dict[str, An
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    await _require_agent_usable_for_chat(request.agent)
     try:
         item = await _enqueue_prompt_request(sessionID, request)
     except QueueFullError as exc:
@@ -3511,6 +3588,7 @@ async def send_session_message_async(
         _require_session_write_access(session, current_user)
     
     working_directory = session.directory or os.getcwd()
+    await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
         "sessionID": sessionID,
@@ -3607,6 +3685,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         _require_session_write_access(session, current_user)
 
     working_directory = session.directory or os.getcwd()
+    await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:
         raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)
@@ -3938,11 +4017,13 @@ async def _clear_session_history(sessionID: str) -> int:
         )
 
     from flocks.server.routes.event import publish_event
+    from flocks.session.goal import GoalManager
     from flocks.session.interaction_queue import InteractionQueue
     from flocks.session.message import Message
 
     await abort_session(sessionID)
     await InteractionQueue.clear(sessionID)
+    await GoalManager.clear(sessionID)
     try:
         await _publish_prompt_queue(sessionID)
     except Exception as exc:

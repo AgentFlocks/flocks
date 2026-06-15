@@ -11,6 +11,7 @@ class TestHelpFormatting:
         names = {command.name for command in commands}
 
         assert "help" in names
+        assert "goal" in names
         assert "mcp" in names
         assert "model" not in names
         assert "status" not in names
@@ -49,6 +50,7 @@ class TestHelpFormatting:
         assert "/agents" in output
         assert "/workflows" in output
         assert "/mcp" in output
+        assert "/goal" not in output
         assert "/clear" not in output
         assert "/plan" not in output
         assert "/compact" not in output

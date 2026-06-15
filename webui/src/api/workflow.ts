@@ -453,6 +453,9 @@ export const workflowAPI = {
   getService: (id: string) =>
     client.get<WorkflowService | null>(`/api/workflow/${id}/service`),
 
+  deleteService: (id: string) =>
+    client.delete<{ ok: boolean; workflowId: string }>(`/api/workflow/${id}/service`),
+
   getConfig: (id: string) =>
     client.get<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`),
 
@@ -568,3 +571,43 @@ export const workflowAPI = {
   saveSampleInputs: (id: string, sampleInputs: Record<string, any>) =>
     client.post<{ ok: boolean }>(`/api/workflow/${id}/sample-inputs`, { sampleInputs }),
 };
+
+export function workflowAPIEndpoints(id: string, triggerId = '{triggerId}') {
+  const workflowBase = `/api/workflow/${id}`;
+  const triggerBase = `${workflowBase}/triggers`;
+  const triggerRecord = `${triggerBase}/${triggerId}`;
+
+  return {
+    config: {
+      read: `GET ${workflowBase}/config`,
+      write: `PUT ${workflowBase}/config`,
+      syncFallback: `POST ${workflowBase}/config/sync`,
+    },
+    apiService: {
+      read: `GET ${workflowBase}/service`,
+      publish: `POST ${workflowBase}/publish`,
+      unpublish: `POST ${workflowBase}/unpublish`,
+      delete: `DELETE ${workflowBase}/service`,
+    },
+    triggers: {
+      list: `GET ${triggerBase}`,
+      create: `POST ${triggerBase}`,
+      update: `PUT ${triggerRecord}`,
+      delete: `DELETE ${triggerRecord}`,
+      status: `GET ${triggerRecord}/status`,
+      previewMapping: `POST ${triggerRecord}/preview-mapping`,
+      test: `POST ${triggerRecord}/test`,
+      invokeWebhook: `/webhook/workflows/${id}/${triggerId}`,
+      plugins: 'GET /api/workflow-trigger-plugins',
+    },
+    legacyAdapters: {
+      kafkaConfig: `GET/POST ${workflowBase}/kafka-config`,
+      kafkaStatus: `GET ${workflowBase}/kafka-status`,
+      pollerConfig: `GET/POST ${workflowBase}/poller-config`,
+      pollerStatus: `GET ${workflowBase}/poller-status`,
+      pollerRunOnce: `POST ${workflowBase}/poller-run-once`,
+      syslogConfig: `GET/POST ${workflowBase}/syslog-config`,
+      syslogStatus: `GET ${workflowBase}/syslog-status`,
+    },
+  };
+}

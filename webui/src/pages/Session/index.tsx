@@ -21,7 +21,7 @@ import client from '@/api/client';
 import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
-import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
+import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2 } from '@/types';
 
@@ -122,9 +122,9 @@ export default function SessionPage() {
   const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
-  const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary'), [agents]);
+  const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
   const subAgents = useMemo(
-    () => agents.filter((a) => a.mode !== 'primary' && !(a.tags ?? []).includes('system')),
+    () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
     [agents],
   );
   const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
@@ -497,14 +497,13 @@ export default function SessionPage() {
       const newSessionId = response.data.id;
 
       addSession(response.data);
-      setSelectedAgent('rex');
       setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };
-      const effectiveAgent = agentOverride || 'rex';
+      const effectiveAgent = agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (modelOverride) payload.model = modelOverride;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
@@ -513,7 +512,7 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, toast, t]);
+  }, [addSession, selectedAgent, toast, t]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();
@@ -1089,7 +1088,7 @@ export default function SessionPage() {
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                <div className="absolute right-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
                   <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
                     <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
                     <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>

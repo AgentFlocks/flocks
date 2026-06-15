@@ -45,6 +45,7 @@ _DEFAULT_HEALTH_INTERVAL_S = 2.0
 _DEFAULT_RUNTIME_INSTALL_HEALTH_RETRIES = 450  # 450 × 2s = 15 minutes
 _DEFAULT_STOP_TIMEOUT_S = 15.0
 _DEFAULT_LOCAL_STOP_GRACE_S = 5.0
+_SERVICE_API_KEY_ENV = "FLOCKS_WORKFLOW_SERVICE_API_KEY"
 
 # Service driver: "local" runs as a subprocess; "docker" runs in a container.
 _DEFAULT_SERVICE_DRIVER = "local"
@@ -99,6 +100,17 @@ def _fingerprint(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 128), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _generate_api_key() -> str:
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def _workflow_service_auth_headers(runtime: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    api_key = runtime.get("apiKey")
+    if not api_key:
+        return None
+    return {"x-api-key": str(api_key)}
 
 
 GLOBAL_WORKFLOW_ROOT: Path = Path.home() / ".flocks" / "workflow"
@@ -351,11 +363,19 @@ def _host_service_url(port: int) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _json_post(url: str, payload: Dict[str, Any], timeout_s: float = 10.0) -> Dict[str, Any]:
+def _json_post(
+    url: str,
+    payload: Dict[str, Any],
+    timeout_s: float = 10.0,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = url_request.Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     with url_request.urlopen(request, timeout=timeout_s) as response:
@@ -562,7 +582,7 @@ async def _stop_existing_runtime_for_publish(workflow_id: str) -> None:
         await _stop_local_service(workflow_id)
 
 
-async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
+async def publish_workflow_local(workflow_id: str, *, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Publish a workflow as a local subprocess using the current Python env.
 
     This is the default driver for development: no Docker, instant startup,
@@ -589,8 +609,10 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
     host_port = await _allocate_port()
     service_url = _host_service_url(host_port)
     service_key = workflow_id
+    runtime_api_key = api_key or _generate_api_key()
 
     env = os.environ.copy()
+    env[_SERVICE_API_KEY_ENV] = runtime_api_key
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m", "flocks.workflow.service_runtime",
@@ -638,6 +660,7 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
         "status": "active",
         "updatedAt": _now_ms(),
         "driver": "local",
+        "apiKey": runtime_api_key,
     }
     await Storage.write(_active_release_key(workflow_id), active_record)
     await Storage.write(_runtime_key(workflow_id), active_record)
@@ -678,14 +701,15 @@ async def publish_workflow(
     workflow_id: str,
     image: Optional[str] = None,
     driver: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Publish a workflow using the configured service driver (local or docker)."""
     resolved_driver = (driver or _service_driver()).strip().lower()
     if resolved_driver == "docker":
-        return await _publish_workflow_docker(workflow_id, image=image)
+        return await _publish_workflow_docker(workflow_id, image=image, api_key=api_key)
     if resolved_driver != "local":
         raise WorkflowCenterError(f"Unsupported workflow service driver: {resolved_driver}")
-    return await publish_workflow_local(workflow_id)
+    return await publish_workflow_local(workflow_id, api_key=api_key)
 
 
 async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
@@ -701,7 +725,12 @@ async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
     return await stop_local_service(workflow_id)
 
 
-async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None) -> Dict[str, Any]:
+async def _publish_workflow_docker(
+    workflow_id: str,
+    image: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Publish a registered workflow as a Docker service container."""
     registry = await _read_registry(workflow_id)
     workflow_path = Path(str(registry["workflowPath"]))
@@ -758,6 +787,7 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
     project_root = Path.cwd().resolve()
     user_config_dir = Config.get_config_path().resolve()
     service_key = workflow_id
+    runtime_api_key = api_key or _generate_api_key()
 
     cmd = [
         "run",
@@ -778,6 +808,8 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
         "FLOCKS_CONFIG_DIR=/runtime/.flocks-config",
         "-e",
         "FLOCKS_CONFIG=/runtime/.flocks-config/flocks.json",
+        "-e",
+        f"{_SERVICE_API_KEY_ENV}={runtime_api_key}",
         image_name,
     ]
     if user_config_dir.exists():
@@ -870,6 +902,7 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
             "status": "active",
             "updatedAt": _now_ms(),
             "driver": "docker",
+            "apiKey": runtime_api_key,
         }
         await Storage.write(_active_release_key(workflow_id), active_record)
         await Storage.write(_runtime_key(workflow_id), active_record)
@@ -1024,7 +1057,13 @@ async def invoke_published_workflow(
         payload["timeout_s"] = timeout_s
 
     try:
-        result = await asyncio.to_thread(_json_post, f"{service_url}/invoke", payload, timeout_s or 30.0)
+        result = await asyncio.to_thread(
+            _json_post,
+            f"{service_url}/invoke",
+            payload,
+            timeout_s or 30.0,
+            _workflow_service_auth_headers(runtime),
+        )
         result.setdefault("workflowId", workflow_id)
         result.setdefault("releaseId", runtime.get("releaseId"))
         return result

@@ -66,6 +66,24 @@ class TestSessionCRUD:
         assert resp.json()["category"] == "workflow"
 
     @pytest.mark.asyncio
+    async def test_get_session_includes_persisted_goal(self, client: AsyncClient):
+        """GET /api/session/{id} hydrates persisted goal state for the WebUI."""
+        from flocks.session.goal import GoalManager
+
+        create_resp = await client.post("/api/session", json={"title": "Goal Session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        await GoalManager.set_goal(session_id, "List built-in tools")
+
+        resp = await client.get(f"/api/session/{session_id}")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["goal"] == {
+            "status": "active",
+            "objective": "List built-in tools",
+            "reason": None,
+        }
+
+    @pytest.mark.asyncio
     async def test_list_sessions_empty(self, client: AsyncClient):
         """GET /api/session returns an empty list when no sessions exist."""
         resp = await client.get("/api/session")
@@ -367,6 +385,42 @@ class TestSessionLocalSharing:
 
 
 class TestSessionMessagesRemaining:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path_suffix", "payload"),
+        [
+            ("/message", {"parts": [{"type": "text", "text": "blocked"}], "agent": "disabled-agent"}),
+            ("/prompt_async", {"parts": [{"type": "text", "text": "blocked"}], "agent": "disabled-agent"}),
+            ("/prompt_queue", {"parts": [{"type": "text", "text": "blocked"}], "agent": "disabled-agent"}),
+            ("/command", {"command": "help", "agent": "disabled-agent"}),
+        ],
+    )
+    async def test_input_routes_reject_disabled_agents(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+        path_suffix: str,
+        payload: dict,
+    ):
+        """Disabled subagents cannot be used through direct session input APIs."""
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(
+                name="disabled-agent",
+                mode="subagent",
+                delegatable=False,
+                hidden=False,
+                tags=[],
+                model=None,
+            )),
+        )
+
+        resp = await client.post(f"/api/session/{session_id}{path_suffix}", json=payload)
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json()["message"] == 'Agent "disabled-agent" is disabled'
+
     @pytest.mark.asyncio
     async def test_send_message_empty_parts_returns_success(
         self, client: AsyncClient, session_id: str
@@ -943,17 +997,25 @@ class TestSessionUtilities:
     @pytest.mark.asyncio
     async def test_clear_session(self, client: AsyncClient, session_id: str):
         """POST /api/session/{id}/clear removes messages."""
+        from flocks.session.goal import GoalManager
+
         # Add a message first
         await client.post(
             f"/api/session/{session_id}/message",
             json={"parts": [{"type": "text", "text": "msg"}], "noReply": True},
         )
+        await GoalManager.set_goal(session_id, "List built-in tools")
         clear_resp = await client.post(f"/api/session/{session_id}/clear")
         assert clear_resp.status_code == status.HTTP_200_OK
 
         # Messages should be gone
         list_resp = await client.get(f"/api/session/{session_id}/message")
         assert list_resp.json() == []
+        assert await GoalManager.get(session_id) is None
+
+        session_resp = await client.get(f"/api/session/{session_id}")
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json()["goal"] is None
 
     @pytest.mark.asyncio
     async def test_clear_session_clears_prompt_queue(self, client: AsyncClient, session_id: str):

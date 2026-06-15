@@ -42,6 +42,7 @@ const sessionApiUpdateMessagePartMock = vi.fn();
 const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const sessionApiGetContextUsageMock = vi.fn();
+const sessionApiGetMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string, options?: Record<string, unknown>) => {
@@ -71,6 +72,11 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.contextUsage.breakdown.reasoning': 'Reasoning',
   'chat.contextUsage.breakdown.draft': 'Current draft',
   'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
+  'chat.goal.dismiss': 'Dismiss goal notice',
+  'chat.goal.status.active': 'Goal',
+  'chat.goal.status.completed': 'Completed',
+  'chat.goal.status.blocked': 'Blocked',
+  'chat.goal.status.paused': 'Paused',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
@@ -153,6 +159,7 @@ vi.mock('@/api/client', () => ({
 
 vi.mock('@/api/session', () => ({
   sessionApi: {
+    get: (...args: unknown[]) => sessionApiGetMock(...args),
     listPromptQueue: (...args: unknown[]) => sessionApiListPromptQueueMock(...args),
     enqueuePrompt: (...args: unknown[]) => sessionApiEnqueuePromptMock(...args),
     updateQueuedPrompt: (...args: unknown[]) => sessionApiUpdateQueuedPromptMock(...args),
@@ -167,17 +174,20 @@ vi.mock('@/api/session', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  if (typeof window.localStorage?.clear !== 'function') {
-    Object.defineProperty(window, 'localStorage', {
-      configurable: true,
-      value: {
-        clear: vi.fn(),
-        getItem: vi.fn(),
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
-    });
-  }
+  const localStorageData = new Map<string, string>();
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+      clear: vi.fn(() => localStorageData.clear()),
+      getItem: vi.fn((key: string) => localStorageData.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        localStorageData.set(key, String(value));
+      }),
+      removeItem: vi.fn((key: string) => {
+        localStorageData.delete(key);
+      }),
+    },
+  });
   window.localStorage.clear();
   Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
     configurable: true,
@@ -193,6 +203,7 @@ beforeEach(() => {
   sessionApiUpdateMessagePartMock.mockResolvedValue({});
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
+  sessionApiGetMock.mockResolvedValue({});
   sessionApiGetContextUsageMock.mockResolvedValue({
     sessionID: 'sess-1',
     usedTokens: 0,
@@ -1110,6 +1121,28 @@ describe('SessionChat agent mentions', () => {
     });
   });
 
+  it('uses the selected agent when creating a session from the first message', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    render(React.createElement(SessionChat, {
+      sessionId: null,
+      agentName: 'explore',
+      mentionAgents,
+      onCreateAndSend,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'summarize this file{enter}');
+
+    await waitFor(() => {
+      expect(onCreateAndSend).toHaveBeenCalledWith(
+        'summarize this file',
+        [],
+        'explore',
+        undefined,
+      );
+    });
+  });
+
   it('queues streaming messages to the mentioned agent', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {
@@ -1489,6 +1522,125 @@ describe('SessionChat context usage popover', () => {
     });
 
     expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat goal banner', () => {
+  it('hydrates a persisted goal banner when the session loads', async () => {
+    sessionApiGetMock.mockResolvedValue({
+      id: 'sess-1',
+      goal: {
+        status: 'active',
+        objective: 'List built-in tools',
+      },
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+    expect(sessionApiGetMock).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('shows goal status updates and lets the user dismiss the current notice', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'completed',
+          objective: 'List built-in tools',
+          reason: 'Goal complete: tools listed',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
+  });
+
+  it('keeps a dismissed persisted goal hidden after remount', async () => {
+    const user = userEvent.setup();
+    sessionApiGetMock.mockResolvedValue({
+      id: 'sess-1',
+      goal: {
+        status: 'completed',
+        objective: 'List built-in tools',
+        reason: 'Goal complete: tools listed',
+      },
+    });
+
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('flocks:session:sess-1:dismissedGoal')).toBe(
+      'completed:List built-in tools',
+    );
+
+    view.unmount();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(sessionApiGetMock).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
+  });
+
+  it('shows a new goal even when a previous goal was dismissed', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'completed',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'Calculate 4+87',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('Calculate 4+87')).toBeInTheDocument();
   });
 });
 

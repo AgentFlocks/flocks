@@ -104,6 +104,15 @@
         "compactedHistory": "Compacted history"
       }
     },
+    "goal": {
+      "dismiss": "Dismiss goal notice",
+      "status": {
+        "active": "Goal",
+        "completed": "Completed",
+        "blocked": "Blocked",
+        "paused": "Paused"
+      }
+    },
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",

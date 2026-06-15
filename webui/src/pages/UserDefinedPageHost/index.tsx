@@ -76,7 +76,7 @@ export default function UserDefinedPageHost() {
     if (!pageId || !hash) return;
     installUserDefinedPageRuntime(pageId);
     const base = getApiBase();
-    const url = `${base}/api/user-defined-pages/${pageId}/bundle.js?v=${encodeURIComponent(hash)}`;
+    const url = `${base}/api/user-defined-pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
     const component = await loadUserDefinedPageBundle(url, tr('host.bundleMissingExport'));
     setPageComponent(() => component);
     setError(null);

@@ -176,7 +176,12 @@ export default function RightPanel({
         )}
         {currentActiveTab === 'overview' && (
           <TabErrorBoundary>
-            <OverviewTab workflow={workflow} />
+            <OverviewTab
+              workflow={workflow}
+              latestExecution={latestExecution ?? null}
+              onLatestExecutionChange={onLatestExecutionChange}
+              onExecutionSettled={onExecutionSettled}
+            />
           </TabErrorBoundary>
         )}
         {currentActiveTab === 'integration' && (

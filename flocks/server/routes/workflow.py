@@ -2203,16 +2203,19 @@ async def publish_workflow_as_api(
         }
         await Storage.write(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
 
+        # Preserve existing API key across re-publishes so callers don't break.
+        # The runtime must receive the same key before it starts so /invoke can
+        # enforce the key returned to callers.
+        existing_service = await Storage.read(_api_service_key(workflow_id)) or {}
+        api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
+
         # Use center.py to publish the selected runtime.
         active_record = await publish_workflow(
             workflow_id,
             image=req.image if req else None,
             driver=req.driver if req else None,
+            api_key=api_key,
         )
-
-        # Preserve existing API key across re-publishes so callers don't break
-        existing_service = await Storage.read(_api_service_key(workflow_id)) or {}
-        api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
 
         service_url = active_record.get("serviceUrl", "")
         invoke_url = f"{service_url}/invoke"
@@ -2293,6 +2296,33 @@ async def get_workflow_service(workflow_id: str):
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
+
+
+@router.delete("/workflow/{workflow_id}/service")
+async def delete_workflow_service(workflow_id: str):
+    """Delete the stored API service configuration for a workflow."""
+    try:
+        existing = await Storage.read(_api_service_key(workflow_id))
+        if not existing:
+            raise HTTPException(status_code=404, detail="No published service found for this workflow")
+
+        try:
+            await stop_workflow_service(workflow_id)
+        except (WorkflowNotFoundError, WorkflowNotPublishedError):
+            pass
+
+        try:
+            await Storage.remove(_api_service_key(workflow_id))
+        except Storage.NotFoundError:
+            pass
+
+        log.info("workflow.api.service_deleted", {"id": workflow_id})
+        return {"ok": True, "workflowId": workflow_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.service.delete.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to delete workflow service: {str(e)}")
 
 
 @router.get("/workflow/{workflow_id}/config")
