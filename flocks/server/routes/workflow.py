@@ -2188,6 +2188,33 @@ async def get_workflow_service(workflow_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
 
 
+@router.delete("/workflow/{workflow_id}/service")
+async def delete_workflow_service(workflow_id: str):
+    """Delete the stored API service configuration for a workflow."""
+    try:
+        existing = await Storage.read(_api_service_key(workflow_id))
+        if not existing:
+            raise HTTPException(status_code=404, detail="No published service found for this workflow")
+
+        try:
+            await stop_workflow_service(workflow_id)
+        except (WorkflowNotFoundError, WorkflowNotPublishedError):
+            pass
+
+        try:
+            await Storage.remove(_api_service_key(workflow_id))
+        except Storage.NotFoundError:
+            pass
+
+        log.info("workflow.api.service_deleted", {"id": workflow_id})
+        return {"ok": True, "workflowId": workflow_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.service.delete.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to delete workflow service: {str(e)}")
+
+
 @router.get("/workflow/{workflow_id}/config")
 async def get_workflow_config(workflow_id: str):
     """Read workflow publish template from Storage, migrating config.json if needed."""

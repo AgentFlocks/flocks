@@ -417,6 +417,41 @@ async def test_update_workflow_config_writes_template_without_mutating_runtime(
 
 
 @pytest.mark.asyncio
+async def test_delete_workflow_service_removes_runtime_service_record(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "wf-service-delete"
+    await workflow_routes.Storage.write(
+        workflow_routes._api_service_key(workflow_id),
+        {
+            "workflowId": workflow_id,
+            "workflowName": "Demo Workflow",
+            "serviceUrl": "http://127.0.0.1:19000",
+            "invokeUrl": "http://127.0.0.1:19000/invoke",
+            "apiKey": "runtime-secret",
+            "status": "running",
+            "driver": "local",
+            "publishedAt": 123,
+        },
+    )
+    stopped: list[str] = []
+
+    async def _fake_stop_service(wid: str) -> dict[str, Any]:
+        stopped.append(wid)
+        return {"workflowId": wid, "status": "stopped"}
+
+    monkeypatch.setattr(workflow_routes, "stop_workflow_service", _fake_stop_service)
+
+    response = await client.delete(f"/api/workflow/{workflow_id}/service")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "workflowId": workflow_id}
+    assert stopped == [workflow_id]
+    assert await workflow_routes.Storage.read(workflow_routes._api_service_key(workflow_id)) is None
+
+
+@pytest.mark.asyncio
 async def test_update_workflow_config_rejects_mismatched_workflow_id(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

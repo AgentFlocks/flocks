@@ -16,13 +16,17 @@ import {
   Bot,
   Globe,
   Loader2,
+  Play,
+  Rocket,
   Server,
+  Square,
   Trash2,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   workflowAPI,
+  workflowAPIEndpoints,
   Workflow,
   WorkflowIntegrationConfig,
   WorkflowService,
@@ -49,6 +53,10 @@ const DEFAULT_JSON_TEXT = JSON.stringify({}, null, 2);
 const LEGACY_SINGLETON_TYPES: WorkflowTriggerType[] = ['schedule', 'kafka', 'syslog'];
 const TEMPLATE_API_MODES = new Set(['api', 'publish', 'api_service', 'service']);
 const DEFAULT_PUBLISH_GUIDE_KINDS = ['api', 'syslog', 'kafka', 'webhook', 'schedule'] as const;
+const CARD_ACTION_GRID_CLASS = 'grid w-full grid-cols-3 items-center gap-2 sm:w-[276px] sm:justify-self-end';
+const CARD_ACTION_BUTTON_CLASS = 'inline-flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border bg-white px-2 text-xs font-medium disabled:opacity-60';
+const CARD_ACTION_NEUTRAL_BUTTON_CLASS = `${CARD_ACTION_BUTTON_CLASS} border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50`;
+const CARD_ACTION_DANGER_BUTTON_CLASS = `${CARD_ACTION_BUTTON_CLASS} border-red-200 text-red-600 hover:bg-red-50`;
 
 interface TemplateView {
   hasApi: boolean;
@@ -62,10 +70,21 @@ interface PublishGuideAction {
   prompt: string;
 }
 
+interface CardGuideAction {
+  label: string;
+  description: string;
+  prompt: string;
+  displayLabel: string;
+}
+
 const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
 const WORKFLOW_GUIDE_FILE_NAME = 'guide.md';
 
 type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
+
+function formatWorkflowAPIEndpoints(id: string, triggerId?: string): string {
+  return JSON.stringify(workflowAPIEndpoints(id, triggerId), null, 2);
+}
 
 function asObject(value: unknown): JsonObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
@@ -140,17 +159,19 @@ function workflowGuidePromptParams(workflow: Workflow) {
   const dir = workflow.source === 'global'
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
+  const endpoints = workflowAPIEndpoints(workflow.id);
   return {
     id: workflow.id,
     name: workflow.name,
     dir,
     mdPath: `${dir}workflow.md`,
     guidePath: `${dir}${WORKFLOW_GUIDE_FILE_NAME}`,
-    configEndpoint: `/api/workflow/${workflow.id}/config`,
-    configSyncEndpoint: `/api/workflow/${workflow.id}/config/sync`,
-    publishEndpoint: `/api/workflow/${workflow.id}/publish`,
-    unpublishEndpoint: `/api/workflow/${workflow.id}/unpublish`,
-    triggersEndpoint: `/api/workflow/${workflow.id}/triggers`,
+    configEndpoint: endpoints.config.read.replace(/^GET /, ''),
+    configSyncEndpoint: endpoints.config.syncFallback.replace(/^POST /, ''),
+    publishEndpoint: endpoints.apiService.publish.replace(/^POST /, ''),
+    unpublishEndpoint: endpoints.apiService.unpublish.replace(/^POST /, ''),
+    triggersEndpoint: endpoints.triggers.list.replace(/^GET /, ''),
+    apiEndpoints: formatWorkflowAPIEndpoints(workflow.id),
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
 }
@@ -224,6 +245,169 @@ function buildPublishGuideActions(t: TranslateFn, workflow: Workflow, view: Temp
   return actions;
 }
 
+function workflowGuideContext(workflow: Workflow): JsonObject {
+  return {
+    id: workflow.id,
+    name: workflow.name,
+    category: workflow.category,
+    source: workflow.source ?? 'project',
+    start: workflow.workflowJson.start,
+    nodeCount: workflow.workflowJson.nodes?.length ?? 0,
+    edgeCount: workflow.workflowJson.edges?.length ?? 0,
+    triggerCount: workflow.workflowJson.triggers?.length ?? 0,
+    sampleInputs: workflow.workflowJson.metadata?.sampleInputs ?? {},
+    outputSchema: workflow.workflowJson.metadata?.outputSchema ?? {},
+  };
+}
+
+function buildCardGuidePrompt(
+  t: TranslateFn,
+  workflow: Workflow,
+  focus: string,
+  instruction: string,
+  cardContext: JsonObject,
+): string {
+  return [
+    buildGuideQuestionPrompt(t, workflow, focus, instruction),
+    '',
+    '当前发布卡片上下文（来自 WebUI 当前状态，最终应用仍以后端配置库为准）：',
+    stringifyJson({
+      workflow: workflowGuideContext(workflow),
+      apiEndpoints: workflowAPIEndpoints(workflow.id, String(cardContext.trigger?.id ?? '{triggerId}')),
+      card: cardContext,
+    }),
+    '',
+    '请结合当前工作流的功能、guide.md、workflow.md、配置库和上面的卡片上下文进行引导。优先判断当前配置是否与工作流输入/输出契约匹配；如需用户补充信息，请使用 question 工具一次只问一个最关键问题；如需应用配置，先展示相对后端配置库的 diff 并确认。',
+    '重要边界：workflow.json/config.json 里的触发器只可作为模板或兜底迁移来源，不能当作已生效配置，也不能通过修改这些文件来表示配置已生效。已生效的 API/触发器配置必须来自后端配置库或当前卡片对应的运行态记录。',
+    '如果后端配置库或运行态接口不可达，请停止配置流程，明确说明无法读取/写入配置库且本次未应用、未发布、未启动；不要继续询问用户要对 workflow.json 模板触发器做什么，也不要在普通回复里问“你希望做什么操作”。',
+  ].join('\n');
+}
+
+function buildApiCardGuideAction(
+  t: TranslateFn,
+  workflow: Workflow,
+  service: WorkflowService | null,
+  selectedDriver: WorkflowServiceDriver,
+): CardGuideAction {
+  const focus = t('detail.run.cardGuideApiFocus');
+  return {
+    label: t('detail.run.cardGuideAction'),
+    description: t('detail.run.cardGuideApiDesc'),
+    displayLabel: t('detail.run.cardGuideDisplayLabel', { focus }),
+    prompt: buildCardGuidePrompt(t, workflow, focus, t('detail.run.guideApiInstruction'), {
+      capability: 'api_service',
+      selectedDriver,
+      service: service
+        ? {
+            status: service.status,
+            driver: service.driver,
+            serviceUrl: service.serviceUrl,
+            invokeUrl: service.invokeUrl,
+            apiKeyConfigured: Boolean(service.apiKey),
+            publishedAt: service.publishedAt,
+          }
+        : {
+            status: 'not_published',
+          },
+    }),
+  };
+}
+
+function sanitizeTriggerAuthForPrompt(auth?: WorkflowTrigger['auth']): JsonObject {
+  const sanitized: JsonObject = {
+    type: String(auth?.type ?? 'none'),
+  };
+  if (!auth) return sanitized;
+
+  Object.entries(auth).forEach(([key, value]) => {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (key === 'type') return;
+    if (key === 'headerName' || key === 'queryParam') {
+      sanitized[key] = value;
+      return;
+    }
+    const isSecretLike = (
+      normalizedKey.includes('apikey')
+      || normalizedKey.includes('secret')
+      || normalizedKey.includes('token')
+      || normalizedKey.includes('password')
+      || normalizedKey.includes('signature')
+    );
+    if (isSecretLike) {
+      sanitized[`${key}Configured`] = Boolean(value);
+    }
+  });
+
+  return sanitized;
+}
+
+function buildTriggerCardGuideAction(
+  t: TranslateFn,
+  workflow: Workflow,
+  trigger: WorkflowTrigger,
+  status?: JsonObject,
+  inputsText?: string,
+): CardGuideAction {
+  const kind = triggerGuideKind(trigger.type);
+  const focus = t(triggerGuideTranslationKey(kind, 'Short'));
+  return {
+    label: t('detail.run.cardGuideAction'),
+    description: t('detail.run.cardGuideTriggerDesc', { trigger: focus }),
+    displayLabel: t('detail.run.cardGuideDisplayLabel', { focus }),
+    prompt: buildCardGuidePrompt(t, workflow, focus, t(triggerGuideTranslationKey(kind, 'Instruction')), {
+      capability: 'trigger',
+      triggerType: trigger.type,
+      triggerLabel: focus,
+      trigger: {
+        id: trigger.id,
+        name: trigger.name,
+        enabled: Boolean(trigger.enabled),
+        source: trigger.source ?? {},
+        auth: sanitizeTriggerAuthForPrompt(trigger.auth),
+        mapping: trigger.mapping ?? {},
+        runtime: trigger.runtime ?? {},
+        inputs: trigger.inputs ?? {},
+        inputsText,
+      },
+      status: status ?? null,
+    }),
+  };
+}
+
+function CardGuidePanel({
+  action,
+  onGuidePrompt,
+}: {
+  action: CardGuideAction;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
+}) {
+  const { t } = useTranslation('workflow');
+  if (!onGuidePrompt) return null;
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <span className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600">
+            <Bot className="h-3.5 w-3.5" />
+          </span>
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-zinc-800">{t('detail.run.cardGuideTitle')}</div>
+            <div className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">{action.description}</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => onGuidePrompt(action.prompt, action.displayLabel)}
+          className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 hover:border-gray-300 hover:bg-gray-50"
+        >
+          <Bot className="h-3.5 w-3.5" />
+          {action.label}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PublishGuidePanel({
   actions,
   onGuidePrompt,
@@ -290,31 +474,6 @@ function PublishGuidePanel({
   );
 }
 
-function PublishStatusNotice({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex min-h-[88px] w-full items-center justify-center rounded-xl border border-dashed border-zinc-200 bg-zinc-50/70 px-6 py-5 text-center text-xs leading-relaxed text-zinc-500">
-      {children}
-    </div>
-  );
-}
-
-function EmptyPublishGuideState({
-  statusText,
-  actions,
-  onGuidePrompt,
-}: {
-  statusText: string;
-  actions: PublishGuideAction[];
-  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
-}) {
-  return (
-    <div className="flex min-h-[calc(100vh-150px)] w-full flex-col items-center justify-start gap-16 p-4 pt-12">
-      <PublishStatusNotice>{statusText}</PublishStatusNotice>
-      <PublishGuidePanel actions={actions} onGuidePrompt={onGuidePrompt} variant="empty" />
-    </div>
-  );
-}
-
 function SectionHeader({
   title,
   expanded,
@@ -341,6 +500,24 @@ function SectionHeader({
         <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
       )}
     </button>
+  );
+}
+
+function CapabilityTypePill({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex h-5 items-center rounded-full bg-gray-100 px-2 text-[11px] font-medium text-gray-600">
+      {children}
+    </span>
+  );
+}
+
+function EnabledStatusPill({ active }: { active: boolean }) {
+  return (
+    <span className={`inline-flex h-5 items-center rounded-full px-2 text-[11px] font-medium ${
+      active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
+    }`}>
+      {active ? '启用' : '停用'}
+    </span>
   );
 }
 
@@ -619,22 +796,6 @@ function triggerSourceLabel(trigger: WorkflowTrigger): string {
   }
 }
 
-function triggerRuntimeActionLabel(type: WorkflowTriggerType, active: boolean): string {
-  switch (type) {
-    case 'syslog':
-      return active ? '停止监听' : '启动监听';
-    case 'kafka':
-      return active ? '停止消费' : '启动消费';
-    case 'schedule':
-      return active ? '停止定时' : '启动定时';
-    case 'custom_webhook':
-    case 'webhook':
-      return active ? '停用接入' : '启用接入';
-    default:
-      return active ? '停用' : '启用';
-  }
-}
-
 function getTriggerInputKey(trigger: WorkflowTrigger, fallback: string): string {
   return Object.keys(trigger.mapping ?? {})[0] ?? fallback;
 }
@@ -743,9 +904,13 @@ function createTriggerDraft(
 }
 
 function PublishSection({
+  workflow,
   workflowId,
+  onGuidePrompt,
 }: {
+  workflow: Workflow;
   workflowId: string;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -753,9 +918,11 @@ function PublishSection({
   const [loading, setLoading] = useState(true);
   const [publishing, setPublishing] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
   const [driver, setDriver] = useState<WorkflowServiceDriver>('local');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [configExpanded, setConfigExpanded] = useState(false);
 
   const loadService = useCallback(async () => {
     try {
@@ -801,6 +968,79 @@ function PublishSection({
     }
   };
 
+  const handleDeleteService = async () => {
+    if (!window.confirm(t('detail.run.deleteServiceConfirm'))) {
+      return;
+    }
+    setDeleting(true);
+    setError('');
+    try {
+      await workflowAPI.deleteService(workflowId);
+      setService(null);
+    } catch (err: unknown) {
+      setError(extractErrorMessage(err, t('detail.run.deleteServiceFailed')));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const renderDeleteButton = () => (
+    <button
+      type="button"
+      onClick={handleDeleteService}
+      disabled={deleting || stopping || publishing}
+      aria-label={t('detail.run.deleteService')}
+      title={t('detail.run.deleteService')}
+      className={CARD_ACTION_DANGER_BUTTON_CLASS}
+    >
+      <Trash2 className="h-3.5 w-3.5" />
+      <span>{deleting ? '删除中' : '删除'}</span>
+    </button>
+  );
+
+  const renderConfigButton = () => (
+    <button
+      type="button"
+      onClick={() => setConfigExpanded((value) => !value)}
+      aria-expanded={configExpanded}
+      className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
+    >
+      {configExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+      <span>配置</span>
+    </button>
+  );
+
+  const renderDriverSelector = () => (
+    <div>
+      <div className="mb-2 text-xs font-medium text-zinc-500">运行方式</div>
+      <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+        {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => {
+          const selected = driver === item;
+          return (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setDriver(item)}
+              className={`inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs font-medium transition-colors ${
+                selected
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              {selected ? <Check className="h-3.5 w-3.5 text-gray-700" /> : null}
+              <span>{item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+        {driver === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
+      </div>
+    </div>
+  );
+
+  const apiGuideAction = buildApiCardGuideAction(t, workflow, service, driver);
+
   return (
     <div className="border-b border-gray-100">
       <SectionHeader
@@ -816,85 +1056,135 @@ function PublishSection({
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               加载中...
             </div>
-          ) : service && service.status !== 'stopped' ? (
+          ) : service ? (
             <div className="space-y-3">
               <div
                 data-testid="api-publish-card"
-                className="min-h-[190px] rounded-xl border border-gray-200 bg-white px-4 py-4 space-y-3"
+                className={`rounded-xl border bg-white transition-colors ${
+                  configExpanded
+                    ? 'border-gray-300'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
               >
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-500">运行方式</span>
-                  <span className="font-medium text-gray-700">
-                    {service.driver === 'docker' ? t('detail.run.driverDocker') : t('detail.run.driverLocal')}
-                  </span>
-                </div>
-                <div>
-                  <div className="text-xs text-gray-500 mb-1">Invoke URL</div>
-                  <div className="flex items-center gap-2 rounded-lg bg-white border border-gray-200 px-2 py-2">
-                    <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-700">{service.invokeUrl}</span>
-                    <CopyButton text={service.invokeUrl ?? ''} />
+                <div className="grid grid-cols-1 items-center gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_276px]">
+                  <button
+                    type="button"
+                    onClick={() => setConfigExpanded((value) => !value)}
+                    className="flex min-h-[82px] min-w-0 flex-col justify-between text-left"
+                  >
+                    <div>
+                      <div className="truncate text-sm font-semibold text-gray-900">API 服务</div>
+                      <div className="mt-1 truncate text-[11px] text-gray-500">
+                        {service.driver === 'docker' ? t('detail.run.driverDocker') : t('detail.run.driverLocal')}
+                      </div>
+                      <div className="mt-1 truncate text-[11px] text-gray-400">ID: api-service</div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <CapabilityTypePill>API</CapabilityTypePill>
+                      <EnabledStatusPill active={service.status !== 'stopped'} />
+                    </div>
+                  </button>
+                  <div className={CARD_ACTION_GRID_CLASS}>
+                    {renderConfigButton()}
+                    {service.status === 'stopped' ? (
+                      <button
+                        type="button"
+                        onClick={handlePublish}
+                        disabled={publishing || deleting}
+                        className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        {publishing ? t('detail.run.publishing') : '启用'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleUnpublish}
+                        disabled={stopping || deleting}
+                        className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
+                      >
+                        <Square className="h-3.5 w-3.5" />
+                        {stopping ? t('detail.run.stopping') : '停用'}
+                      </button>
+                    )}
+                    {renderDeleteButton()}
                   </div>
                 </div>
-                <div>
-                  <div className="text-xs text-gray-500 mb-1">API Key</div>
-                  <div className="flex items-center gap-2 rounded-lg bg-white border border-gray-200 px-2 py-2">
-                    <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-700">
-                      {maskedValue(service.apiKey, apiKeyVisible)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setApiKeyVisible((v) => !v)}
-                      className="text-xs text-red-500 hover:text-red-700"
-                    >
-                      {apiKeyVisible ? t('detail.run.apiKeyHide') : t('detail.run.apiKeyShow')}
-                    </button>
-                    <CopyButton text={service.apiKey ?? ''} />
+                {configExpanded ? (
+                  <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
+                    <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
+                    <div>
+                      <div className="mb-2 text-xs font-medium text-zinc-500">Invoke URL</div>
+                      <div className="flex min-h-10 items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2">
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-700">{service.invokeUrl}</span>
+                        <CopyButton text={service.invokeUrl ?? ''} />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="mb-2 text-xs font-medium text-zinc-500">API Key</div>
+                      <div className="flex min-h-10 items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2">
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-700">
+                          {maskedValue(service.apiKey, apiKeyVisible)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setApiKeyVisible((v) => !v)}
+                          className="text-xs font-medium text-red-500 hover:text-red-700"
+                        >
+                          {apiKeyVisible ? t('detail.run.apiKeyHide') : t('detail.run.apiKeyShow')}
+                        </button>
+                        <CopyButton text={service.apiKey ?? ''} />
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleUnpublish}
-                  disabled={stopping}
-                  className="w-full rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
-                >
-                  {stopping ? t('detail.run.stopping') : t('detail.run.stopService')}
-                </button>
+                ) : null}
               </div>
             </div>
           ) : (
             <div className="space-y-3">
               <div
                 data-testid="api-publish-card"
-                className="min-h-[190px] rounded-xl border border-gray-200 bg-white px-4 py-4 space-y-3"
+                className={`rounded-xl border bg-white transition-colors ${
+                  configExpanded
+                    ? 'border-gray-300'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
               >
-                <p className="text-xs text-gray-500">{t('detail.run.publishDesc')}</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => (
+                <div className="grid grid-cols-1 items-center gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_276px]">
+                  <button
+                    type="button"
+                    onClick={() => setConfigExpanded((value) => !value)}
+                    className="flex min-h-[82px] min-w-0 flex-col justify-between text-left"
+                  >
+                    <div>
+                      <div className="truncate text-sm font-semibold text-gray-900">API 服务</div>
+                      <div className="mt-1 truncate text-[11px] text-gray-500">{t('detail.run.publishDesc')}</div>
+                      <div className="mt-1 truncate text-[11px] text-gray-400">ID: api-service</div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <CapabilityTypePill>API</CapabilityTypePill>
+                      <EnabledStatusPill active={false} />
+                    </div>
+                  </button>
+                  <div className={CARD_ACTION_GRID_CLASS}>
+                    {renderConfigButton()}
                     <button
-                      key={item}
                       type="button"
-                      onClick={() => setDriver(item)}
-                      className={`rounded-lg border px-3 py-2 text-left text-xs ${
-                        driver === item ? 'border-red-400 bg-red-50 text-red-700' : 'border-gray-200 hover:bg-gray-50 text-gray-600'
-                      }`}
+                      onClick={handlePublish}
+                      disabled={publishing}
+                      className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                     >
-                      <div className="font-semibold">
-                        {item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}
-                      </div>
-                      <div className="mt-1 text-[11px] text-gray-500">
-                        {item === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
-                      </div>
+                      <Rocket className="h-3.5 w-3.5" />
+                      {publishing ? t('detail.run.publishing') : '发布'}
                     </button>
-                  ))}
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={handlePublish}
-                  disabled={publishing}
-                  className="w-full rounded-lg bg-green-600 px-3 py-2 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-60"
-                >
-                  {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
-                </button>
+                {configExpanded ? (
+                  <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
+                    <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
+                    {renderDriverSelector()}
+                  </div>
+                ) : null}
               </div>
             </div>
           )}
@@ -910,511 +1200,15 @@ function PublishSection({
   );
 }
 
-function isRuntimeActive(status?: JsonObject | null): boolean {
-  const state = String(status?.state ?? '').toLowerCase();
-  return ['binding', 'connecting', 'listening', 'ready', 'running'].includes(state);
-}
-
-function templateStatusLabel(status?: JsonObject | null): string {
-  if (!status) return 'unknown';
-  return String(status.state ?? '-');
-}
-
-function TemplateTriggersSection({
-  workflow,
-  triggers,
-  config,
-  onConfigUpdated,
-  onWorkflowUpdated,
-}: {
-  workflow: Workflow;
-  triggers: WorkflowTrigger[];
-  config: WorkflowIntegrationConfig | null;
-  onConfigUpdated: (config: WorkflowIntegrationConfig) => void;
-  onWorkflowUpdated?: (updated: Workflow) => void;
-}) {
-  const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [configSavingId, setConfigSavingId] = useState<string | null>(null);
-  const [statuses, setStatuses] = useState<Record<string, JsonObject>>({});
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-
-  const loadStatuses = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const next: Record<string, JsonObject> = {};
-      const genericRecordsPromise = workflowAPI.getTriggers(workflow.id)
-        .then((res) => res.data ?? [])
-        .catch(() => [] as WorkflowTriggerRecord[]);
-
-      await Promise.all(triggers.map(async (trigger) => {
-        try {
-          if (trigger.type === 'syslog') {
-            const res = await workflowAPI.getSyslogStatus(workflow.id);
-            next[trigger.id] = res.data as JsonObject;
-            return;
-          }
-          if (trigger.type === 'kafka') {
-            const res = await workflowAPI.getKafkaStatus(workflow.id);
-            next[trigger.id] = res.data as JsonObject;
-            return;
-          }
-          if (trigger.type === 'schedule') {
-            const res = await workflowAPI.getPollerStatus(workflow.id);
-            next[trigger.id] = res.data as JsonObject;
-          }
-        } catch (err: unknown) {
-          next[trigger.id] = { state: 'error', error: extractErrorMessage(err) };
-        }
-      }));
-
-      const genericRecords = await genericRecordsPromise;
-      genericRecords.forEach((record) => {
-        if (record.trigger.id && !next[record.trigger.id]) {
-          next[record.trigger.id] = (record.status ?? { state: record.trigger.enabled ? 'ready' : 'stopped' }) as JsonObject;
-        }
-      });
-
-      triggers.forEach((trigger) => {
-        if (!next[trigger.id]) {
-          next[trigger.id] = { state: trigger.enabled ? 'ready' : 'stopped' };
-        }
-      });
-      setStatuses(next);
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, '加载发布状态失败'));
-    } finally {
-      setLoading(false);
-    }
-  }, [triggers, workflow.id]);
-
-  useEffect(() => {
-    void loadStatuses();
-  }, [loadStatuses]);
-
-  const syncWorkflowFromServer = useCallback(async () => {
-    try {
-      const response = await workflowAPI.get(workflow.id);
-      onWorkflowUpdated?.(response.data);
-    } catch {
-      // Status refresh is enough for this page; workflow sync is best-effort.
-    }
-  }, [onWorkflowUpdated, workflow.id]);
-
-  const upsertTemplateTrigger = async (trigger: WorkflowTrigger, enabled: boolean) => {
-    const normalizedTrigger = {
-      ...trigger,
-      enabled,
-    };
-    const records = await workflowAPI.getTriggers(workflow.id)
-      .then((res) => res.data ?? [])
-      .catch(() => [] as WorkflowTriggerRecord[]);
-    const existing = records.find((record) => record.trigger.id === trigger.id);
-    if (existing) {
-      await workflowAPI.updateTrigger(workflow.id, trigger.id, normalizedTrigger);
-      return;
-    }
-    await workflowAPI.createTrigger(workflow.id, normalizedTrigger);
-  };
-
-  const applyTemplateTrigger = async (trigger: WorkflowTrigger, enabled: boolean) => {
-    const source = trigger.source ?? {};
-    if (trigger.type === 'syslog') {
-      await workflowAPI.saveSyslogConfig(workflow.id, {
-        enabled,
-        protocol: String(source.protocol ?? 'udp'),
-        host: String(source.host ?? '0.0.0.0'),
-        port: Math.max(1, Number(source.port ?? 5140)),
-        format: String(source.format ?? 'auto'),
-        inputKey: getTriggerInputKey(trigger, 'syslog_message'),
-      });
-      return;
-    }
-    if (trigger.type === 'kafka') {
-      await workflowAPI.saveKafkaConfig(workflow.id, {
-        enabled,
-        inputBroker: String(source.inputBroker ?? 'localhost:9092'),
-        inputTopic: String(source.inputTopic ?? `${workflow.id}.events`),
-        inputGroupId: String(source.inputGroupId ?? `${workflow.id}-group`),
-        autoOffsetReset: String(source.autoOffsetReset ?? 'latest'),
-        inputKey: getTriggerInputKey(trigger, 'kafka_message'),
-        inputs: asObject(trigger.inputs ?? {}),
-      });
-      return;
-    }
-    if (trigger.type === 'schedule') {
-      const cronExpression = String(source.cron ?? source.cronExpression ?? '').trim();
-      const scheduleMode = source.mode ?? (cronExpression ? 'cron' : 'interval');
-      await workflowAPI.savePollerConfig(workflow.id, {
-        enabled,
-        intervalSeconds: Math.max(1, Number(source.intervalSeconds ?? 300)),
-        cronExpression: scheduleMode === 'cron' ? (cronExpression || '*/5 * * * *') : null,
-        timeoutSeconds: Math.max(1, Number(trigger.runtime?.timeoutSeconds ?? 7200)),
-        noOverlap: Boolean(trigger.runtime?.noOverlap ?? true),
-        inputs: asObject(trigger.inputs ?? {}),
-      });
-      return;
-    }
-    await upsertTemplateTrigger(trigger, enabled);
-  };
-
-  const handleToggle = async (trigger: WorkflowTrigger) => {
-    const currentStatus = statuses[trigger.id];
-    const nextEnabled = !isRuntimeActive(currentStatus);
-    setSavingId(trigger.id);
-    setError('');
-    setSuccess('');
-    try {
-      await applyTemplateTrigger(trigger, nextEnabled);
-      setSuccess(nextEnabled ? `${triggerTypeLabel(trigger.type)} 已启动` : `${triggerTypeLabel(trigger.type)} 已停止`);
-      await Promise.all([loadStatuses(), syncWorkflowFromServer()]);
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, nextEnabled ? '启动失败' : '停止失败'));
-    } finally {
-      setSavingId(null);
-    }
-  };
-
-  const saveTemplateTrigger = async (trigger: WorkflowTrigger): Promise<WorkflowTrigger | null> => {
-    const baseConfig = (config ?? {
-      version: 1,
-      kind: 'workflow.integration-config',
-      workflow: {
-        id: workflow.id,
-        name: workflow.name,
-        category: workflow.category,
-        source: workflow.source,
-      },
-      updatedAt: Date.now(),
-      publish: {},
-      triggers: [],
-    }) as WorkflowIntegrationConfig;
-    const rawTriggers = Array.isArray(baseConfig.triggers) ? baseConfig.triggers : [];
-    const triggerExists = rawTriggers.some((item) => item?.id === trigger.id);
-    const nextTriggers = triggerExists
-      ? rawTriggers.map((item) => (item?.id === trigger.id ? trigger : item))
-      : [...rawTriggers, trigger];
-    const nextConfig = {
-      ...baseConfig,
-      workflow: {
-        ...asObject((baseConfig as JsonObject).workflow),
-        id: workflow.id,
-        name: workflow.name,
-        category: workflow.category,
-        source: workflow.source,
-      },
-      triggers: nextTriggers,
-    } as WorkflowIntegrationConfig;
-
-    setConfigSavingId(trigger.id);
-    setError('');
-    setSuccess('');
-    try {
-      const response = await workflowAPI.updateConfig(workflow.id, nextConfig);
-      const savedConfig = response.data.config;
-      onConfigUpdated(savedConfig);
-      setSuccess(`${triggerTypeLabel(trigger.type)} 配置已保存`);
-      return templateTriggers(savedConfig).find((item) => item.id === trigger.id) ?? trigger;
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, '保存配置失败'));
-      return null;
-    } finally {
-      setConfigSavingId(null);
-    }
-  };
-
-  return (
-    <div className="border-b border-gray-100">
-      <SectionHeader
-        title={t('detail.run.triggerSection')}
-        expanded={expanded}
-        onToggle={() => setExpanded((v) => !v)}
-        badge={<span className="text-xs font-normal text-gray-500">{triggers.length} 个</span>}
-      />
-      {expanded && (
-        <div className="p-4 space-y-3">
-          {loading ? (
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              正在加载发布状态...
-            </div>
-          ) : null}
-
-          {triggers.map((trigger) => {
-            const status = statuses[trigger.id];
-            const active = isRuntimeActive(status);
-            const busy = savingId === trigger.id;
-            return (
-              <TemplateTriggerConfigCard
-                key={trigger.id}
-                trigger={trigger}
-                status={status}
-                active={active}
-                toggling={busy}
-                saving={configSavingId === trigger.id}
-                onToggle={(nextTrigger) => {
-                  void handleToggle(nextTrigger);
-                }}
-                onSave={saveTemplateTrigger}
-              />
-            );
-          })}
-
-          {error ? (
-            <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-              <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-              <span>{error}</span>
-            </div>
-          ) : null}
-          {success ? (
-            <div className="flex items-start gap-1.5 rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">
-              <Check className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-              <span>{success}</span>
-            </div>
-          ) : null}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TemplateTriggerConfigCard({
-  trigger,
-  status,
-  active,
-  toggling,
-  saving,
-  onToggle,
-  onSave,
-}: {
-  trigger: WorkflowTrigger;
-  status?: JsonObject;
-  active: boolean;
-  toggling: boolean;
-  saving: boolean;
-  onToggle: (trigger: WorkflowTrigger) => void;
-  onSave: (trigger: WorkflowTrigger) => Promise<WorkflowTrigger | null>;
-}) {
-  const [draft, setDraft] = useState(() => cloneTrigger(trigger));
-  const [inputsText, setInputsText] = useState(() => stringifyJson(trigger.inputs ?? {}));
-  const [jsonError, setJsonError] = useState('');
-
-  useEffect(() => {
-    setDraft(cloneTrigger(trigger));
-    setInputsText(stringifyJson(trigger.inputs ?? {}));
-    setJsonError('');
-  }, [trigger]);
-
-  const source = draft.source ?? {};
-  const runtime = draft.runtime ?? {};
-  const auth = draft.auth ?? { type: 'none' };
-  const isWebhook = draft.type === 'webhook' || draft.type === 'custom_webhook';
-  const isSchedule = draft.type === 'schedule';
-  const isKafka = draft.type === 'kafka';
-  const isSyslog = draft.type === 'syslog';
-  const inputKey = isKafka
-    ? getTriggerInputKey(draft, 'kafka_message')
-    : isSyslog
-      ? getTriggerInputKey(draft, 'syslog_message')
-      : getTriggerInputKey(draft, 'event');
-
-  const updateDraft = (patch: Partial<WorkflowTrigger>) => {
-    setDraft((current) => ({
-      ...current,
-      ...patch,
-    }));
-  };
-
-  const updateSource = (patch: JsonObject) => {
-    setDraft((current) => ({
-      ...current,
-      source: {
-        ...(current.source ?? {}),
-        ...patch,
-      },
-    }));
-  };
-
-  const updateRuntime = (patch: JsonObject) => {
-    setDraft((current) => ({
-      ...current,
-      runtime: {
-        ...(current.runtime ?? {}),
-        ...patch,
-      },
-    }));
-  };
-
-  const updateAuth = (patch: JsonObject) => {
-    setDraft((current) => ({
-      ...current,
-      auth: {
-        ...(current.auth ?? { type: 'none' }),
-        ...patch,
-      },
-    }));
-  };
-
-  const saveCurrentDraft = async (): Promise<WorkflowTrigger | null> => {
-    const parsedInputs = parseJsonObject(inputsText, 'Inputs');
-    if (!parsedInputs.ok) {
-      setJsonError(parsedInputs.error);
-      return null;
-    }
-    setJsonError('');
-    const nextDraft = {
-      ...draft,
-      inputs: parsedInputs.value,
-    };
-    const saved = await onSave(nextDraft);
-    if (saved) {
-      setDraft(cloneTrigger(saved));
-      setInputsText(stringifyJson(saved.inputs ?? {}));
-    }
-    return saved;
-  };
-
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white px-4 py-4 space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-gray-900">{draft.name || triggerTypeLabel(draft.type)}</span>
-            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
-              {triggerTypeLabel(draft.type)}
-            </span>
-          </div>
-          <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(draft)}</div>
-          <div className="mt-1 text-[11px] text-gray-400">模板来自配置库</div>
-        </div>
-        <WorkflowStatusBadge status={templateStatusLabel(status)} />
-      </div>
-
-      {status?.error ? (
-        <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-          {String(status.error)}
-        </div>
-      ) : null}
-
-      <Field label="名称">
-        <Input value={draft.name ?? ''} onChange={(e) => updateDraft({ name: e.target.value })} />
-      </Field>
-
-      {isSyslog ? (
-        <SyslogTriggerFields
-          source={source}
-          inputKey={inputKey}
-          onSourceChange={updateSource}
-          onInputKeyChange={(key) => setDraft((current) => setTriggerInputKey(current, key))}
-        />
-      ) : null}
-
-      {isKafka ? (
-        <KafkaTriggerFields
-          source={source}
-          inputKey={inputKey}
-          onSourceChange={updateSource}
-          onInputKeyChange={(key) => setDraft((current) => setTriggerInputKey(current, key))}
-        />
-      ) : null}
-
-      {isWebhook ? (
-        <div className="grid grid-cols-1 gap-3">
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="方法">
-              <Select value={String(source.method ?? 'POST')} onChange={(e) => updateSource({ method: e.target.value })}>
-                <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-              </Select>
-            </Field>
-            <Field label="路径">
-              <Input value={String(source.path ?? '/webhook')} onChange={(e) => updateSource({ path: e.target.value })} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="鉴权方式">
-              <Select value={String(auth.type ?? 'none')} onChange={(e) => updateAuth({ type: e.target.value })}>
-                <option value="none">none</option>
-                <option value="api_key">api_key</option>
-                <option value="hmac">hmac</option>
-              </Select>
-            </Field>
-            <Field label="Secret Ref">
-              <Input value={String(auth.secretRef ?? '')} onChange={(e) => updateAuth({ secretRef: e.target.value })} />
-            </Field>
-          </div>
-          <Field label="Input Key">
-            <Input
-              value={inputKey}
-              onChange={(e) => setDraft((current) => setTriggerInputKey(current, e.target.value || 'event'))}
-            />
-          </Field>
-        </div>
-      ) : null}
-
-      {isSchedule ? (
-        <ScheduleTriggerFields
-          source={source}
-          runtime={runtime}
-          onSourceChange={updateSource}
-          onRuntimeChange={updateRuntime}
-        />
-      ) : null}
-
-      <Field label="Inputs（JSON）" hint='直接填写工作流需要的输入，例如：{ "alert_data": { "id": 1 } }'>
-        <TextArea value={inputsText} onChange={(e) => setInputsText(e.target.value)} rows={5} />
-      </Field>
-
-      {jsonError ? (
-        <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-          <span>{jsonError}</span>
-        </div>
-      ) : null}
-
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={async () => {
-            const saved = await saveCurrentDraft();
-            if (saved) {
-              onToggle(saved);
-            }
-          }}
-          disabled={toggling || saving}
-          className={`rounded-lg px-3 py-2 text-xs font-medium disabled:opacity-60 ${
-            active
-              ? 'border border-red-200 text-red-600 hover:bg-red-50'
-              : 'bg-green-600 text-white hover:bg-green-700'
-          }`}
-        >
-          {toggling ? '处理中...' : triggerRuntimeActionLabel(draft.type, active)}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            void saveCurrentDraft();
-          }}
-          disabled={saving}
-          className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-        >
-          {saving ? '保存中...' : '保存配置'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function TriggerEditor({
+  workflow,
   workflowId,
   draft,
   status,
   plugins,
   showIdentityHeader,
+  embedded = false,
+  onGuidePrompt,
   saving,
   deleting,
   error,
@@ -1424,11 +1218,14 @@ function TriggerEditor({
   onSave,
   onRunOnce,
 }: {
+  workflow: Workflow;
   workflowId: string;
   draft: WorkflowTrigger | null;
   status?: JsonObject;
   plugins: WorkflowTriggerPlugin[];
   showIdentityHeader: boolean;
+  embedded?: boolean;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
   saving: boolean;
   deleting: boolean;
   error: string;
@@ -1438,6 +1235,7 @@ function TriggerEditor({
   onSave: (next: WorkflowTrigger) => Promise<WorkflowTrigger | null> | void;
   onRunOnce?: () => Promise<void>;
 }) {
+  const { t } = useTranslation('workflow');
   const [inputsText, setInputsText] = useState(DEFAULT_JSON_TEXT);
   const [jsonError, setJsonError] = useState('');
   const [runningOnce, setRunningOnce] = useState(false);
@@ -1529,8 +1327,10 @@ function TriggerEditor({
     return savedTrigger ?? nextDraft;
   };
 
+  const triggerGuideAction = buildTriggerCardGuideAction(t, workflow, draft, status, inputsText);
+
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-4">
+    <div className={embedded ? 'border-t border-gray-100 px-3 pb-3 pt-4 space-y-4' : 'rounded-xl border border-gray-200 bg-white p-4 space-y-4'}>
       {showIdentityHeader ? (
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1567,6 +1367,8 @@ function TriggerEditor({
           <div className="text-[11px] text-gray-400">{draft.id}</div>
         </div>
       )}
+
+      <CardGuidePanel action={triggerGuideAction} onGuidePrompt={onGuidePrompt} />
 
       <Field label="名称">
         <Input value={draft.name ?? ''} onChange={(e) => updateDraft({ name: e.target.value })} />
@@ -1736,9 +1538,11 @@ function TriggerEditor({
 function TriggersSection({
   workflow,
   onWorkflowUpdated,
+  onGuidePrompt,
 }: {
   workflow: Workflow;
   onWorkflowUpdated?: (updated: Workflow) => void;
+  onGuidePrompt?: (prompt: string, displayLabel: string) => void;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -1783,9 +1587,9 @@ function TriggersSection({
       setRecords(nextRecords);
       setPlugins(pluginRes.data ?? []);
 
-      const nextSelectedId: string | null = nextRecords.some((item) => item.trigger.id === preferredId)
-        ? (preferredId ?? null)
-        : nextRecords[0]?.trigger.id ?? null;
+      const nextSelectedId: string | null = preferredId && nextRecords.some((item) => item.trigger.id === preferredId)
+        ? preferredId
+        : null;
       setSelectedTriggerId(nextSelectedId);
       if (syncDraft) {
         const selected = nextRecords.find((item) => item.trigger.id === nextSelectedId)?.trigger ?? null;
@@ -1822,9 +1626,7 @@ function TriggersSection({
     void refresh({ preferredId: null, syncDraft: true });
   }, [refresh]);
 
-  const selectedRecord = records.find((item) => item.trigger.id === selectedTriggerId) ?? null;
-
-  const selectTrigger = (triggerId: string) => {
+  const openTriggerConfig = (triggerId: string) => {
     if (!confirmDiscardIfDirty('当前 Trigger 有未保存修改，确认切换并放弃这些改动吗？')) {
       return;
     }
@@ -1835,6 +1637,22 @@ function TriggersSection({
     setSuccess('');
     setHint('');
     setDirty(false);
+  };
+
+  const toggleTriggerConfig = (triggerId: string) => {
+    if (selectedTriggerId === triggerId) {
+      if (!confirmDiscardIfDirty('当前 Trigger 有未保存修改，确认收起并放弃这些改动吗？')) {
+        return;
+      }
+      setSelectedTriggerId(null);
+      setDraft(null);
+      setError('');
+      setSuccess('');
+      setHint('');
+      setDirty(false);
+      return;
+    }
+    openTriggerConfig(triggerId);
   };
 
   const createTrigger = async (type: WorkflowTriggerType) => {
@@ -1884,8 +1702,11 @@ function TriggersSection({
         enabled: !trigger.enabled,
       });
       setSuccess(!trigger.enabled ? 'Trigger 已启用' : 'Trigger 已停用');
+      const keepSelectedId = selectedTriggerId && records.some((item) => item.trigger.id === selectedTriggerId)
+        ? selectedTriggerId
+        : null;
       await Promise.all([
-        refresh({ preferredId: trigger.id, syncDraft: selectedTriggerId === trigger.id }),
+        refresh({ preferredId: keepSelectedId, syncDraft: selectedTriggerId === trigger.id }),
         syncWorkflowFromServer(),
       ]);
       if (selectedTriggerId === trigger.id && draft) {
@@ -2054,70 +1875,102 @@ function TriggersSection({
             </div>
           ) : (
             <>
-              {records.length > 1 ? (
+              {records.length > 0 ? (
                 <div className="space-y-2">
-                  {records.map(({ trigger, status }) => (
-                    <button
-                      key={trigger.id}
-                      type="button"
-                      onClick={() => selectTrigger(trigger.id)}
-                      className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${
-                        selectedTriggerId === trigger.id
-                          ? 'border-red-300 bg-red-50/40'
-                          : 'border-gray-200 hover:bg-gray-50'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="truncate text-sm font-semibold text-gray-900">{trigger.name || trigger.id}</span>
-                            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
-                              {triggerTypeLabel(trigger.type)}
-                            </span>
-                          </div>
-                          <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(trigger)}</div>
-                          <div className="mt-1 truncate text-[11px] text-gray-400">ID: {trigger.id}</div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
-                            <span>{String(status?.state || (trigger.enabled ? 'ready' : 'stopped'))}</span>
-                            {status?.error ? <span className="text-red-600">{String(status.error)}</span> : null}
+                  {records.map(({ trigger, status }) => {
+                    const isSelected = selectedTriggerId === trigger.id;
+                    return (
+                      <div
+                        key={trigger.id}
+                        data-testid={`trigger-card-${trigger.id}`}
+                        className={`rounded-xl border bg-white transition-colors ${
+                          isSelected
+                            ? 'border-gray-300'
+                            : 'border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        <div className="grid grid-cols-1 items-center gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_276px]">
+                          <button
+                            type="button"
+                            onClick={() => toggleTriggerConfig(trigger.id)}
+                            className="flex min-h-[82px] min-w-0 flex-col justify-between text-left"
+                          >
+                            <div>
+                              <div className="truncate text-sm font-semibold text-gray-900">{trigger.name || trigger.id}</div>
+                              <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(trigger)}</div>
+                              <div className="mt-1 truncate text-[11px] text-gray-400">ID: {trigger.id}</div>
+                            </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <CapabilityTypePill>{triggerTypeLabel(trigger.type)}</CapabilityTypePill>
+                              <EnabledStatusPill active={!!trigger.enabled} />
+                              {status?.error ? <span className="text-red-600">{String(status.error)}</span> : null}
+                            </div>
+                          </button>
+                          <div className={CARD_ACTION_GRID_CLASS}>
+                            <button
+                              type="button"
+                              onClick={() => toggleTriggerConfig(trigger.id)}
+                              aria-expanded={isSelected}
+                              className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
+                            >
+                              {isSelected ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                              配置
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void toggleTriggerEnabled(trigger);
+                              }}
+                              disabled={saving}
+                              className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
+                            >
+                              {trigger.enabled ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                              {trigger.enabled ? '停用' : '启用'}
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`删除 ${trigger.name || trigger.id}`}
+                              onClick={() => {
+                                void handleDeleteTrigger(trigger.id, trigger.name || trigger.id);
+                              }}
+                              disabled={deleting}
+                              className={CARD_ACTION_DANGER_BUTTON_CLASS}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              删除
+                            </button>
                           </div>
                         </div>
-                        <div className="flex items-start gap-2">
-                          <span className={`mt-0.5 inline-flex h-5 items-center rounded-full px-2 text-[11px] font-medium ${
-                            trigger.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-                          }`}>
-                            {trigger.enabled ? '启用' : '停用'}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                              void toggleTriggerEnabled(trigger);
+                        {isSelected ? (
+                          <TriggerEditor
+                            workflow={workflow}
+                            workflowId={workflow.id}
+                            draft={draft}
+                            status={status as JsonObject | undefined}
+                            plugins={plugins}
+                            showIdentityHeader={false}
+                            embedded
+                            onGuidePrompt={onGuidePrompt}
+                            saving={saving}
+                            deleting={deleting}
+                            error={error}
+                            success={success}
+                            onChange={(next) => {
+                              setDraft(next);
+                              setDirty(true);
+                              setError('');
+                              setSuccess('');
                             }}
-                            disabled={saving}
-                            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-white disabled:opacity-60"
-                          >
-                            {trigger.enabled ? '停用' : '启用'}
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`删除 ${trigger.name || trigger.id}`}
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
+                            onDelete={() => {
                               void handleDeleteTrigger(trigger.id, trigger.name || trigger.id);
                             }}
-                            disabled={deleting}
-                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-[11px] font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                            删除
-                          </button>
-                        </div>
+                            onSave={persistDraft}
+                            onRunOnce={draft?.type === 'schedule' ? runScheduleOnce : undefined}
+                          />
+                        ) : null}
                       </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : records.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
@@ -2125,30 +1978,6 @@ function TriggersSection({
                 </div>
               ) : null}
 
-              {records.length > 0 ? (
-                <TriggerEditor
-                  workflowId={workflow.id}
-                  draft={draft}
-                  status={selectedRecord?.status as JsonObject | undefined}
-                  plugins={plugins}
-                  showIdentityHeader={records.length === 1}
-                  saving={saving}
-                  deleting={deleting}
-                  error={error}
-                  success={success}
-                  onChange={(next) => {
-                    setDraft(next);
-                    setDirty(true);
-                    setError('');
-                    setSuccess('');
-                  }}
-                  onDelete={() => {
-                    void handleDelete();
-                  }}
-                  onSave={persistDraft}
-                  onRunOnce={draft?.type === 'schedule' ? runScheduleOnce : undefined}
-                />
-              ) : null}
             </>
           )}
         </div>
@@ -2160,7 +1989,6 @@ function TriggersSection({
 export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePrompt }: IntegrationTabProps) {
   const { t } = useTranslation('workflow');
   const [config, setConfig] = useState<WorkflowIntegrationConfig | null>(null);
-  const [hasStoredTemplate, setHasStoredTemplate] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [configError, setConfigError] = useState('');
 
@@ -2171,12 +1999,10 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
     void workflowAPI.getConfig(workflow.id)
       .then((response) => {
         if (cancelled) return;
-        setHasStoredTemplate(response.data.exists === true);
         setConfig(response.data.config ?? null);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setHasStoredTemplate(false);
         setConfig(null);
         setConfigError(extractErrorMessage(err, '加载发布配置失败'));
       })
@@ -2203,7 +2029,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
 
   const view = buildTemplateView(config);
   const guideActions = buildPublishGuideActions(t, workflow, view);
-  const hasConfiguredCapabilities = view.hasApi || view.triggers.length > 0;
+  const showGuide = Boolean(onGuidePrompt && guideActions.length > 0);
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
@@ -2213,31 +2039,17 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
           <span>{configError}</span>
         </div>
       ) : null}
-      {view.hasApi ? (
-        <PublishSection workflowId={workflow.id} />
-      ) : null}
-      {view.triggers.length > 0 ? (
-        <TemplateTriggersSection
-          workflow={workflow}
-          triggers={view.triggers}
-          config={config}
-          onConfigUpdated={setConfig}
-          onWorkflowUpdated={onWorkflowUpdated}
-        />
-      ) : null}
-      {hasConfiguredCapabilities ? (
+      {showGuide ? (
         <div className="p-4">
           <PublishGuidePanel actions={guideActions} onGuidePrompt={onGuidePrompt} />
         </div>
-      ) : (
-        <EmptyPublishGuideState
-          statusText={hasStoredTemplate
-            ? '发布配置中没有声明可发布的 API 或触发能力。'
-            : '当前工作流还没有发布或配置接入方式。'}
-          actions={guideActions}
-          onGuidePrompt={onGuidePrompt}
-        />
-      )}
+      ) : null}
+      <PublishSection workflow={workflow} workflowId={workflow.id} onGuidePrompt={onGuidePrompt} />
+      <TriggersSection
+        workflow={workflow}
+        onWorkflowUpdated={onWorkflowUpdated}
+        onGuidePrompt={onGuidePrompt}
+      />
     </div>
   );
 }

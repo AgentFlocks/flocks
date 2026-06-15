@@ -18,7 +18,7 @@ import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import type { ImagePartData } from '@/utils/imageUpload';
-import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
+import { workflowAPI, workflowAPIEndpoints, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import client from '@/api/client';
@@ -34,6 +34,10 @@ const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
 const WORKFLOW_CHAT_AGENT_NAME = 'rex';
 const WORKFLOW_CHAT_AGENT_NAMES = [WORKFLOW_CHAT_AGENT_NAME];
 const WORKFLOW_GUIDE_FILE_NAME = 'guide.md';
+
+function formatWorkflowAPIEndpoints(id: string): string {
+  return JSON.stringify(workflowAPIEndpoints(id), null, 2);
+}
 
 type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
 
@@ -112,7 +116,8 @@ export default function ChatTab({
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowMdPath = `${workflowDir}workflow.md`;
   const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
-  const workflowConfigEndpoint = `/api/workflow/${workflow.id}/config`;
+  const endpoints = workflowAPIEndpoints(workflow.id);
+  const workflowConfigEndpoint = endpoints.config.read.replace(/^GET /, '');
 
   const {
     sessionId: hookSessionId,
@@ -134,10 +139,11 @@ export default function ChatTab({
       guidePath: workflowGuidePath,
       configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
       configEndpoint: workflowConfigEndpoint,
-      configSyncEndpoint: `/api/workflow/${workflow.id}/config/sync`,
-      publishEndpoint: `/api/workflow/${workflow.id}/publish`,
-      unpublishEndpoint: `/api/workflow/${workflow.id}/unpublish`,
-      triggersEndpoint: `/api/workflow/${workflow.id}/triggers`,
+      configSyncEndpoint: endpoints.config.syncFallback.replace(/^POST /, ''),
+      publishEndpoint: endpoints.apiService.publish.replace(/^POST /, ''),
+      unpublishEndpoint: endpoints.apiService.unpublish.replace(/^POST /, ''),
+      triggersEndpoint: endpoints.triggers.list.replace(/^GET /, ''),
+      apiEndpoints: formatWorkflowAPIEndpoints(workflow.id),
     }),
   });
 
@@ -554,6 +560,11 @@ function WorkflowWelcome({
             actions={guideGroups.configActions}
             onStartPrompt={onStartPrompt}
           />
+          <WorkflowGuideSection
+            title={t('detail.chat.welcome.publishSectionTitle')}
+            actions={guideGroups.publishActions}
+            onStartPrompt={onStartPrompt}
+          />
         </div>
       </div>
 
@@ -638,19 +649,37 @@ function buildWorkflowPromptParams(workflow: Workflow) {
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const workflowMdPath = `${workflowDir}workflow.md`;
   const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
+  const endpoints = workflowAPIEndpoints(workflow.id);
   return {
     id: workflow.id,
     name: workflow.name,
     dir: workflowDir,
     mdPath: workflowMdPath,
     guidePath: workflowGuidePath,
-    configEndpoint: `/api/workflow/${workflow.id}/config`,
-    configSyncEndpoint: `/api/workflow/${workflow.id}/config/sync`,
-    publishEndpoint: `/api/workflow/${workflow.id}/publish`,
-    unpublishEndpoint: `/api/workflow/${workflow.id}/unpublish`,
-    triggersEndpoint: `/api/workflow/${workflow.id}/triggers`,
+    configEndpoint: endpoints.config.read.replace(/^GET /, ''),
+    configSyncEndpoint: endpoints.config.syncFallback.replace(/^POST /, ''),
+    publishEndpoint: endpoints.apiService.publish.replace(/^POST /, ''),
+    unpublishEndpoint: endpoints.apiService.unpublish.replace(/^POST /, ''),
+    triggersEndpoint: endpoints.triggers.list.replace(/^GET /, ''),
+    apiEndpoints: formatWorkflowAPIEndpoints(workflow.id),
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
+}
+
+function buildWorkflowGuideQuestionPrompt(
+  t: TranslateFn,
+  workflow: Workflow,
+  focus: string,
+  instruction: string,
+): string {
+  return t(
+    'detail.chat.welcome.guideQuestionPrompt',
+    {
+      ...buildWorkflowPromptParams(workflow),
+      focus,
+      instruction,
+    },
+  );
 }
 
 function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
@@ -693,13 +722,8 @@ function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuide
 function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
   const promptParams = buildWorkflowPromptParams(workflow);
   const group = t('detail.chat.welcome.configSectionTitle');
-  const buildQuestionPrompt = (focus: string, instruction: string) => t(
-    'detail.chat.welcome.guideQuestionPrompt',
-    {
-      ...promptParams,
-      focus,
-      instruction,
-    },
+  const buildQuestionPrompt = (focus: string, instruction: string) => (
+    buildWorkflowGuideQuestionPrompt(t, workflow, focus, instruction)
   );
   return [
     {
@@ -771,13 +795,69 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
   ];
 }
 
+function buildWorkflowPublishActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
+  const group = t('detail.chat.welcome.publishSectionTitle');
+  const buildQuestionPrompt = (focus: string, instruction: string) => (
+    buildWorkflowGuideQuestionPrompt(t, workflow, focus, instruction)
+  );
+  return [
+    {
+      label: t('detail.run.guideApiShort'),
+      description: t('detail.run.guideApiDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.run.guideApiShort'),
+        t('detail.run.guideApiInstruction'),
+      ),
+      group,
+    },
+    {
+      label: t('detail.run.guideSyslogShort'),
+      description: t('detail.run.guideSyslogDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.run.guideSyslogShort'),
+        t('detail.run.guideSyslogInstruction'),
+      ),
+      group,
+    },
+    {
+      label: t('detail.run.guideKafkaShort'),
+      description: t('detail.run.guideKafkaDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.run.guideKafkaShort'),
+        t('detail.run.guideKafkaInstruction'),
+      ),
+      group,
+    },
+    {
+      label: t('detail.run.guideWebhookShort'),
+      description: t('detail.run.guideWebhookDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.run.guideWebhookShort'),
+        t('detail.run.guideWebhookInstruction'),
+      ),
+      group,
+    },
+    {
+      label: t('detail.run.guideScheduleShort'),
+      description: t('detail.run.guideScheduleDesc'),
+      prompt: buildQuestionPrompt(
+        t('detail.run.guideScheduleShort'),
+        t('detail.run.guideScheduleInstruction'),
+      ),
+      group,
+    },
+  ];
+}
+
 function buildWorkflowGuideGroups(t: TranslateFn, workflow: Workflow) {
   const editActions = buildWorkflowEditActions(t, workflow);
   const configActions = buildWorkflowConfigActions(t, workflow);
+  const publishActions = buildWorkflowPublishActions(t, workflow);
   return {
     editActions,
     configActions,
-    allActions: [...editActions, ...configActions],
+    publishActions,
+    allActions: [...editActions, ...configActions, ...publishActions],
   };
 }
 
