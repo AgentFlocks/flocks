@@ -21,6 +21,11 @@ import {
   type TextDiffHunk,
 } from '@/utils/textDiff';
 import { useConfirm } from '@/components/common/ConfirmDialog';
+import {
+  SIDE_PANEL_MIN_WIDTH,
+  getInitialSidePanelWidth,
+  getMaxSidePanelWidth,
+} from '@/components/common/sidePanelSizing';
 
 type CanvasTab = 'flow' | 'md' | 'json';
 
@@ -32,16 +37,6 @@ interface EditDocDiff {
 interface WorkflowChatSessionRef {
   workflowId: string;
   sessionId: string;
-}
-
-const PANEL_MIN = 240;
-const PANEL_RATIO = 0.40; // 初始占可用宽度的 40%
-
-function getInitialPanelWidth() {
-  // 可用宽度 = 视口宽度 - 侧边导航栏（lg 以上为 256px）
-  const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
-  const available = window.innerWidth - sidebarWidth;
-  return Math.max(PANEL_MIN, Math.round(available * PANEL_RATIO));
 }
 
 function hasWorkflowJsonDefinition(workflow: Workflow | null) {
@@ -69,7 +64,7 @@ export default function WorkflowDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
-  const [panelWidth, setPanelWidth] = useState(getInitialPanelWidth);
+  const [panelWidth, setPanelWidth] = useState(getInitialSidePanelWidth);
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
   const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
@@ -95,9 +90,7 @@ export default function WorkflowDetail() {
   // 视口尺寸变化时，若面板比例超出合理范围则自动修正
   useEffect(() => {
     const onResize = () => {
-      const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
-      const maxAllowed = Math.round((window.innerWidth - sidebarWidth) * 0.7);
-      setPanelWidth((w) => Math.min(w, Math.max(PANEL_MIN, maxAllowed)));
+      setPanelWidth((w) => Math.min(w, getMaxSidePanelWidth()));
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
@@ -109,13 +102,12 @@ export default function WorkflowDetail() {
     dragStartX.current = e.clientX;
     dragStartWidth.current = panelWidth;
 
-    const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
-    const panelMax = Math.round((window.innerWidth - sidebarWidth) * 0.7);
+    const panelMax = getMaxSidePanelWidth();
 
     const onMove = (ev: MouseEvent) => {
       if (!dragging.current) return;
       const delta = dragStartX.current - ev.clientX;
-      setPanelWidth(Math.min(panelMax, Math.max(PANEL_MIN, dragStartWidth.current + delta)));
+      setPanelWidth(Math.min(panelMax, Math.max(SIDE_PANEL_MIN_WIDTH, dragStartWidth.current + delta)));
     };
     const onUp = () => {
       dragging.current = false;

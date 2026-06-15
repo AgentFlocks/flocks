@@ -36,9 +36,6 @@ vi.mock('./tabs/ChatTab', () => ({
   default: () => <div>chat tab</div>,
 }));
 
-vi.mock('./tabs/RunTab', () => ({
-  default: () => <div>run tab</div>,
-}));
 vi.mock('./tabs/IntegrationTab', () => ({
   default: () => <div>integration tab</div>,
 }));
@@ -81,7 +78,7 @@ describe('RightPanel', () => {
     expect(screen.queryByRole('button', { name: '前往会话列表查看' })).not.toBeInTheDocument();
   });
 
-  it('不再渲染运行 Tab', () => {
+  it('不在右侧顶栏渲染测试、历史和运行分栏', () => {
     render(
       <RightPanel
         workflow={makeWorkflow()}
@@ -89,6 +86,8 @@ describe('RightPanel', () => {
       />,
     );
 
+    expect(screen.queryByRole('button', { name: '测试' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '历史' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '运行' })).not.toBeInTheDocument();
   });
 

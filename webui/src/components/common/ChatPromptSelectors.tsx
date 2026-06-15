@@ -75,9 +75,9 @@ export function useChatModelOptions() {
   useEffect(() => {
     let cancelled = false;
     setLoadingEnabledModels(true);
-    modelV2API.listDefinitions({ enabled_only: true })
+    Promise.resolve(modelV2API.listDefinitions({ enabled_only: true }))
       .then((response) => {
-        if (!cancelled) setEnabledModelDefinitions(response.data.models ?? []);
+        if (!cancelled) setEnabledModelDefinitions(response?.data?.models ?? []);
       })
       .catch(() => {
         if (!cancelled) setEnabledModelDefinitions([]);
@@ -165,10 +165,10 @@ export function useChatModelOptions() {
   useEffect(() => {
     if (selectedModelKey || options.length === 0) return;
     let cancelled = false;
-    defaultModelAPI.getResolved()
+    Promise.resolve(defaultModelAPI.getResolved())
       .then((response) => {
         if (cancelled) return;
-        const { provider_id: providerID, model_id: modelID } = response.data;
+        const { provider_id: providerID, model_id: modelID } = response?.data ?? {};
         const defaultKey = `${providerID}::${modelID}`;
         const fallbackKey = options[0]?.key ?? null;
         setSelectedModelKey(options.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
@@ -471,7 +471,7 @@ export function ChatModelPicker({
         <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+        <div className="absolute right-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
           <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
             <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
             <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>

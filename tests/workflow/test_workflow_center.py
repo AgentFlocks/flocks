@@ -115,6 +115,7 @@ async def test_publish_invoke_stop_workflow_service(
     workflow_id = scanned[0]["workflowId"]
 
     docker_calls = []
+    json_post_calls = []
 
     async def fake_exec_docker(args, allow_failure=False, **_kwargs):
         docker_calls.append((args, allow_failure))
@@ -126,7 +127,8 @@ async def test_publish_invoke_stop_workflow_service(
     async def fake_wait_service_healthy(*_args, **_kwargs) -> bool:
         return True
 
-    def fake_json_post(*_args, **_kwargs):
+    def fake_json_post(*args, **kwargs):
+        json_post_calls.append((args, kwargs))
         return {"status": "SUCCEEDED", "outputs": {"answer": 42}, "run_id": "run-1"}
 
     monkeypatch.setattr(center, "exec_docker", fake_exec_docker)
@@ -137,6 +139,7 @@ async def test_publish_invoke_stop_workflow_service(
     published = await center.publish_workflow(workflow_id)
     assert published["status"] == "active"
     assert published["hostPort"] == 19123
+    assert len(published["apiKey"]) == 64
 
     invoked = await center.invoke_published_workflow(workflow_id, inputs={"k": "v"})
     assert invoked["status"] == "SUCCEEDED"
@@ -153,4 +156,9 @@ async def test_publish_invoke_stop_workflow_service(
     assert "/runtime" in run_call[0]
     assert "-w" in run_call[0]
     assert "/runtime" in run_call[0][run_call[0].index("-w") + 1]
+    assert "-e" in run_call[0]
+    assert f"FLOCKS_WORKFLOW_SERVICE_API_KEY={published['apiKey']}" in run_call[0]
+    assert json_post_calls
+    assert json_post_calls[0][0][0] == "http://127.0.0.1:19123/invoke"
+    assert json_post_calls[0][0][3] == {"x-api-key": published["apiKey"]}
     assert any(call[0][:2] == ["rm", "-f"] for call in docker_calls)

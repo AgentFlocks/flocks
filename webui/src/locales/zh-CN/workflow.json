@@ -129,7 +129,7 @@
       "deleting": "删除中..."
     },
     "overview": {
-      "configInfo": "配置信息",
+      "configInfo": "信息",
       "workflowInfo": "基本信息",
       "nodeCount": "节点数",
       "nodesAndEdges": "{{nodes}} 个节点 / {{edges}} 条边",
@@ -138,8 +138,10 @@
       "createdBy": "创建人",
       "createdAt": "创建时间",
       "updatedAt": "更新时间",
+      "workflowFiles": "工作流文件",
       "fileDir": "文件目录",
       "notGenerated": "（尚未生成）",
+      "run": "运行",
       "runStats": "运行统计",
       "totalCalls": "总调用次数",
       "successRate": "成功率",

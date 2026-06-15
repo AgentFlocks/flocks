@@ -17,6 +17,11 @@ import { extractErrorMessage } from '@/utils/error';
 import FlowCanvas from '../WorkflowDetail/FlowCanvas';
 import CreateTopBar from './CreateTopBar';
 import CreateRightPanel from './CreateRightPanel';
+import {
+  SIDE_PANEL_MIN_WIDTH,
+  getInitialSidePanelWidth,
+  getMaxSidePanelWidth,
+} from '@/components/common/sidePanelSizing';
 
 type CreateCanvasTab = 'flow' | 'md' | 'json';
 
@@ -25,8 +30,6 @@ interface EditDocDiff {
   after: string;
 }
 
-const PANEL_MIN = 240;
-const PANEL_RATIO = 0.40;
 const WORKFLOW_REFRESH_MS = 3000;
 const CREATE_DRAFT_STORAGE_KEY = 'flocks.workflow.create.draft.v1';
 
@@ -101,12 +104,6 @@ function isValidCanvasTab(value: unknown): value is CreateCanvasTab {
   return value === 'flow' || value === 'md' || value === 'json';
 }
 
-function getInitialPanelWidth() {
-  const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
-  const available = window.innerWidth - sidebarWidth;
-  return Math.max(PANEL_MIN, Math.round(available * PANEL_RATIO));
-}
-
 function getWorkflowMarkdown(workflow: Workflow) {
   return workflow.markdownContent ?? workflow.editMarkdownContent ?? '';
 }
@@ -132,7 +129,7 @@ export default function WorkflowCreate() {
   const initialCreateDraft = initialCreateDraftRef.current;
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [panelOpen, setPanelOpen] = useState(initialCreateDraft?.panelOpen ?? true);
-  const [panelWidth, setPanelWidth] = useState(initialCreateDraft?.panelWidth ?? getInitialPanelWidth);
+  const [panelWidth, setPanelWidth] = useState(initialCreateDraft?.panelWidth ?? getInitialSidePanelWidth);
   const [canvasTab, setCanvasTab] = useState<CreateCanvasTab>(
     isValidCanvasTab(initialCreateDraft?.canvasTab) ? initialCreateDraft.canvasTab : 'md',
   );
@@ -179,9 +176,7 @@ export default function WorkflowCreate() {
 
   useEffect(() => {
     const onResize = () => {
-      const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
-      const maxAllowed = Math.round((window.innerWidth - sidebarWidth) * 0.7);
-      setPanelWidth((w) => Math.min(w, Math.max(PANEL_MIN, maxAllowed)));
+      setPanelWidth((w) => Math.min(w, getMaxSidePanelWidth()));
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
@@ -246,13 +241,12 @@ export default function WorkflowCreate() {
       dragStartX.current = e.clientX;
       dragStartWidth.current = panelWidth;
 
-      const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
-      const panelMax = Math.round((window.innerWidth - sidebarWidth) * 0.7);
+      const panelMax = getMaxSidePanelWidth();
 
       const onMove = (ev: MouseEvent) => {
         if (!dragging.current) return;
         const delta = dragStartX.current - ev.clientX;
-        setPanelWidth(Math.min(panelMax, Math.max(PANEL_MIN, dragStartWidth.current + delta)));
+        setPanelWidth(Math.min(panelMax, Math.max(SIDE_PANEL_MIN_WIDTH, dragStartWidth.current + delta)));
       };
       const onUp = () => {
         dragging.current = false;

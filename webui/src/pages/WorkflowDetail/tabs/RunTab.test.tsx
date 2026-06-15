@@ -246,4 +246,49 @@ describe('RunTab', () => {
     });
   });
 
+  it('expands history execution details directly under the clicked item', async () => {
+    const user = userEvent.setup();
+    const executions = [
+      {
+        id: 'exec-first',
+        workflowId: 'wf-1',
+        inputParams: {},
+        outputResults: { marker: 'first' },
+        status: 'success' as const,
+        startedAt: new Date('2026-01-01T00:00:00Z').getTime(),
+        duration: 1,
+        executionLog: [],
+      },
+      {
+        id: 'exec-second',
+        workflowId: 'wf-1',
+        inputParams: {},
+        outputResults: { marker: 'second' },
+        status: 'success' as const,
+        startedAt: new Date('2026-01-02T00:00:00Z').getTime(),
+        duration: 2,
+        executionLog: [],
+      },
+    ];
+    workflowAPI.getHistory.mockResolvedValue({ data: executions });
+
+    render(
+      <RunTab
+        workflow={baseWorkflow}
+        latestExecution={null}
+        sections={['history']}
+      />,
+    );
+
+    const firstHistoryButton = (await screen.findByText('1.0s')).closest('button');
+    const secondHistoryButton = (await screen.findByText('2.0s')).closest('button');
+    expect(firstHistoryButton).not.toBeNull();
+    expect(secondHistoryButton).not.toBeNull();
+
+    await user.click(firstHistoryButton!);
+
+    const firstDetail = screen.getByText(/"marker": "first"/);
+    expect(firstDetail.compareDocumentPosition(secondHistoryButton!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
 });

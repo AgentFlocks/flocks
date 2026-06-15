@@ -89,10 +89,18 @@ export async function loadUserDefinedPageBundle(
   url: string,
   missingExportMessage = 'Page bundle does not export a default component',
 ): Promise<ComponentType> {
-  const mod = await import(/* @vite-ignore */ url);
-  const component = mod.default as ComponentType | undefined;
-  if (!component) {
-    throw new Error(missingExportMessage);
+  const response = await apiClient.get<string>(url, { responseType: 'text' });
+  const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+  const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+
+  try {
+    const mod = await import(/* @vite-ignore */ moduleUrl);
+    const component = mod.default as ComponentType | undefined;
+    if (!component) {
+      throw new Error(missingExportMessage);
+    }
+    return component;
+  } finally {
+    URL.revokeObjectURL(moduleUrl);
   }
-  return component;
 }

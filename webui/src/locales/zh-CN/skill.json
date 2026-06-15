@@ -78,6 +78,47 @@
     "missingDepsWarning": "技能已安装，但缺少以下依赖：{{missing}}",
     "runInstallDeps": "运行 \"安装依赖\" 以完成配置"
   },
+  "create": {
+    "emptyStateTitle": "暂无创建对话",
+    "guidePanelTitle": "Rex 辅助创建",
+    "guidePanelDesc": "选择一个引导或案例，Rex 会先加载 skill-builder skill，确认技能目标、触发场景、产物结构和验证方式后再生成文件。",
+    "guideSectionTitle": "创建引导",
+    "caseSectionTitle": "创建案例",
+    "guideActions": [
+      {
+        "label": "如何创建技能",
+        "description": "从用途、触发条件、说明结构、依赖和验证方式开始。",
+        "prompt": "请按 .flocks/plugins/skills/skill-builder skill 引导我创建一个 Flocks Skill。先不要写文件，先用 question 工具一次只问一个最关键问题，帮我明确技能名称、用途描述、何时触发、需要哪些 references/scripts、是否需要依赖、输出目录和验证方式；我确认后再生成 ~/.flocks/plugins/skills/<skill-name>/SKILL.md 及必要文件。"
+      },
+      {
+        "label": "梳理技能说明",
+        "description": "把模糊能力整理成可被 Agent 正确使用的 SKILL.md。",
+        "prompt": "请帮我把技能说明梳理成适合 SKILL.md 的结构。请一次只问一个问题，确认：技能解决什么问题、触发关键词、适用和不适用场景、执行步骤、需要读取的参考资料、可复用脚本、质量检查和示例。"
+      },
+      {
+        "label": "补充依赖与验证",
+        "description": "规划 bin/env/install specs、冒烟测试和失败处理。",
+        "prompt": "请按 skill-builder skill 帮我设计这个 Skill 的依赖声明和验证方式。请先确认是否需要命令行工具、Python/Node 包、环境变量或外部服务，然后给出 install specs、检查命令、冒烟测试和失败时给用户的提示。"
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "安全分析技能",
+        "description": "把威胁分析步骤、报告格式和限制条件沉淀成 Skill。",
+        "prompt": "我想创建一个安全分析 Skill，用于指导 Agent 分析告警或 IOC，输出结构化研判报告。请按 skill-builder skill 引导我确认触发条件、分析流程、报告字段、参考资料和验证方式。"
+      },
+      {
+        "label": "代码迁移技能",
+        "description": "沉淀跨文件迁移、测试和回滚注意事项。",
+        "prompt": "我想创建一个代码迁移 Skill，用于指导 Agent 做框架升级或跨文件迁移。请按 skill-builder skill 引导我确认适用场景、迁移步骤、风险检查、测试命令和输出格式。"
+      },
+      {
+        "label": "外部系统使用技能",
+        "description": "记录某个系统的使用流程、禁止事项和工具调用约束。",
+        "prompt": "我想创建一个外部系统使用 Skill，用于指导 Agent 操作某个业务系统。请按 skill-builder skill 引导我确认系统名称、登录/查询流程、可用工具、禁止绕过事项、敏感信息处理和验收方式。"
+      }
+    ]
+  },
   "sheet": {
     "entityType": "技能",
     "path": "路径",

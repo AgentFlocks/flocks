@@ -78,6 +78,133 @@
   "sheet": {
     "done": "完成"
   },
+  "create": {
+    "emptyStateTitle": "暂无创建对话",
+    "guidePanelTitle": "Rex 辅助创建",
+    "guidePanelDesc": "选择一个引导或案例，Rex 会先加载 agent-builder skill，确认名称、职责、能力边界和执行模式后再生成文件。",
+    "guideSectionTitle": "创建引导",
+    "caseSectionTitle": "创建案例",
+    "guideActions": [
+      {
+        "label": "如何创建子 Agent",
+        "description": "从名称、职责、边界、策略和工具白名单开始梳理。",
+        "prompt": "请按 .flocks/plugins/skills/agent-builder skill 引导我创建一个 Flocks 子 Agent。先不要写文件，先用 question 工具一次只问一个最关键问题，帮我明确 Agent 名称、职责描述、能力边界、执行策略、工具白名单、输出格式和不适用场景；我确认后再生成 ~/.flocks/plugins/agents/<name>/agent.yaml 和 prompt.md，并在写入前展示计划。"
+      },
+      {
+        "label": "梳理职责边界",
+        "description": "把模糊需求整理成可委派的 Agent 描述和触发条件。",
+        "prompt": "请帮我把子 Agent 的职责边界梳理清楚。目标是形成 agent-builder skill 可使用的创建说明。请一次只问一个问题，依次确认：它解决什么任务、何时由 Rex 委派、不能做什么、需要哪些工具、是否只读、输出格式和验收方式。"
+      },
+      {
+        "label": "选择执行策略",
+        "description": "在 read_only、react、plan_and_execute、explore 之间做选择。",
+        "prompt": "请根据 agent-builder skill 帮我选择子 Agent 的执行策略。请先确认任务风险、是否需要写文件、是否需要执行命令、是否需要探索代码库或联网查询，然后推荐 read_only、react、plan_and_execute 或 explore，并说明对应工具白名单。"
+      },
+      {
+        "label": "设计 Prompt",
+        "description": "生成可复用的 system prompt 结构、输出格式和约束。",
+        "prompt": "请帮我设计子 Agent 的 prompt.md。先确认角色、任务目标、能力清单、输出格式、约束和示例调用场景；在我确认前不要写文件。确认后按 agent-builder skill 的模板生成 prompt.md 草稿。"
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "威胁情报分析 Agent",
+        "description": "查询 IOC 信誉、关联上下文并输出研判报告。",
+        "prompt": "我想创建一个威胁情报分析子 Agent，用于分析 IP、域名、URL、哈希等 IOC，能调用项目里已有的情报工具并输出结构化研判报告。请按 agent-builder skill 引导我确认名称、工具白名单、只读边界、输出格式和适用场景。"
+      },
+      {
+        "label": "代码审计 Agent",
+        "description": "只读检查代码风险、回归风险和缺失测试。",
+        "prompt": "我想创建一个代码审计子 Agent，用于只读检查代码变更中的 bug、回归风险、安全风险和测试缺口。请按 agent-builder skill 引导我确认职责、read_only 策略、工具白名单和输出格式。"
+      },
+      {
+        "label": "日志分析 Agent",
+        "description": "分析安全日志，提取关键事件、异常模式和处置建议。",
+        "prompt": "我想创建一个日志分析子 Agent，用于读取安全日志、识别异常模式、汇总关键事件并给出处置建议。请按 agent-builder skill 引导我确认输入格式、工具权限、分析步骤和最终输出结构。"
+      }
+    ]
+  },
+  "edit": {
+    "emptyStateTitle": "暂无编辑对话",
+    "guidePanelTitle": "Rex 辅助修改",
+    "guidePanelDesc": "选择一个编辑入口，Rex 会基于当前 Agent 配置，引导你调整 Prompt、职责边界、工具权限和参数。",
+    "nativeGuidePanelDesc": "这是内置 Agent，只支持保存模型和温度；Rex 会围绕模型选择、温度策略和验证方式引导修改。",
+    "guideSectionTitle": "编辑引导",
+    "caseSectionTitle": "编辑案例",
+    "guideActions": [
+      {
+        "label": "优化当前 Agent",
+        "description": "先审视当前配置，再确认要解决的问题和修改边界。",
+        "prompt": "请帮我编辑当前 Agent「{{name}}」。请先基于当前配置做一个简短诊断，不要直接改文件；再用 question 工具一次只问一个最关键问题，帮我确认要优化的职责、Prompt、工具权限、输出格式和验收方式。确认后输出可提取到表单的 JSON 配置摘要。"
+      },
+      {
+        "label": "调整职责边界",
+        "description": "明确它应该做什么、何时被委派、哪些事情不该做。",
+        "prompt": "请帮我重新梳理当前 Agent「{{name}}」的职责边界。请对照现有描述和 System Prompt，先指出可能过宽、过窄或不清晰的地方，再逐步确认：适用场景、触发条件、不可做事项、必要工具和输出结构。"
+      },
+      {
+        "label": "收敛工具权限",
+        "description": "检查 Tools / Skills 是否过多，按最小权限重新选择。",
+        "prompt": "请帮我检查当前 Agent「{{name}}」的 Tools 和 Skills 配置。目标是最小权限：先说明每个能力是否与职责相关，再建议保留、移除或新增哪些工具/Skill，并给出理由。确认前不要输出最终配置。"
+      },
+      {
+        "label": "改写 Prompt",
+        "description": "优化角色、约束、步骤、输出格式和失败处理。",
+        "prompt": "请帮我改写当前 Agent「{{name}}」的 System Prompt。请先指出现有 Prompt 中角色、任务步骤、边界、输出格式、错误处理和示例调用是否清晰，再给出修改方案；我确认后再输出完整 Prompt 和 JSON 配置摘要。"
+      },
+      {
+        "label": "验证效果",
+        "description": "设计测试输入、预期输出和失败判据，指导保存后验证。",
+        "prompt": "请帮我验证当前 Agent「{{name}}」的配置效果。请先基于它的职责设计 2-3 个测试输入，分别说明预期输出、通过标准和失败判据；如果发现 Prompt 或工具权限可能影响测试结果，请给出需要调整的字段。确认后把建议整理成可提取到表单的配置修改。"
+      }
+    ],
+    "nativeGuideActions": [
+      {
+        "label": "检查模型策略",
+        "description": "判断当前模型是否适合这个内置 Agent 的任务特点。",
+        "prompt": "请帮我检查内置 Agent「{{name}}」的模型配置。注意：这是内置 Agent，只能保存模型和温度，不要建议修改 Prompt、Tools 或 Skills。请先说明当前任务对模型能力的要求，再给出是否建议切换模型，以及需要的 providerID 和 modelID。"
+      },
+      {
+        "label": "调整温度",
+        "description": "根据稳定性、创造性和安全性选择温度。",
+        "prompt": "请帮我调整内置 Agent「{{name}}」的温度。注意：这是内置 Agent，只能保存模型和温度。请先根据它的职责说明温度高低的影响，再给出一个推荐 temperature 数值和理由，并整理成可提取的 JSON。"
+      },
+      {
+        "label": "验证效果",
+        "description": "设计测试输入、预期输出和失败判据，指导保存后验证。",
+        "prompt": "请帮我验证内置 Agent「{{name}}」的模型和温度效果。请设计 2-3 个测试输入，说明预期输出、通过标准和失败判据；如果发现问题，只建议调整模型或温度，并整理成可提取的 JSON。"
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "变得更保守",
+        "description": "降低幻觉和越权风险，适合安全分析、审计等场景。",
+        "prompt": "我想让当前 Agent「{{name}}」更保守可靠。请帮我调整 Prompt、温度建议和权限边界，让它在信息不足时先追问或说明不确定性，不要猜测；同时保持输出清晰可验证。"
+      },
+      {
+        "label": "更适合委派",
+        "description": "让主 Agent 更容易判断何时调用它、如何消费结果。",
+        "prompt": "我想让当前 Agent「{{name}}」更适合作为子 Agent 被主 Agent 委派。请优化英文描述、职责触发条件、输入要求和输出格式，并检查工具白名单是否匹配。"
+      },
+      {
+        "label": "补充输出格式",
+        "description": "把结果格式固定下来，便于主 Agent 或工作流继续处理。",
+        "prompt": "请帮我为当前 Agent「{{name}}」补充稳定的输出格式。请先确认主要使用场景，然后设计字段、层级、简短示例和异常情况下的返回方式；我确认后再整理成 Prompt 修改。"
+      }
+    ],
+    "nativeCaseActions": [
+      {
+        "label": "变得更保守",
+        "description": "降低随机性，让安全分析、审计类任务更稳定。",
+        "prompt": "我想让内置 Agent「{{name}}」更保守可靠。请只围绕模型和温度给出建议，不要修改 Prompt、Tools 或 Skills；重点说明推荐 temperature、适用模型能力和保存后的验证方法。"
+      },
+      {
+        "label": "提升响应效率",
+        "description": "在不改内置配置的前提下选择更合适的模型和温度。",
+        "prompt": "我想让内置 Agent「{{name}}」响应更快、更稳定。请只评估模型和温度配置，说明是否建议切换到更轻量的模型、温度如何设置，以及如何用测试输入验证效果。"
+      }
+    ]
+  },
   "chat": {
     "createTitle": "创建子 Agent",
     "subtitle": "通过对话描述需求，AI 自动生成配置",
