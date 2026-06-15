@@ -818,7 +818,11 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (compact) {
-    return `max-w-[90%] px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
+    const widthClass = isUser
+      ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
+      : 'w-full max-w-full';
+
+    return `${widthClass} px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
         ? 'bg-sky-50 border border-sky-100 text-zinc-900'
         : 'bg-white border border-zinc-200/90'
@@ -850,7 +854,7 @@ export function getMessageGroupClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    return compact ? 'max-w-[90%]' : 'w-full';
+    return compact ? 'w-full max-w-full' : 'w-full';
   }
 
   if (compact) {
@@ -2887,7 +2891,7 @@ export default function SessionChat({
                       <span className="text-xs font-semibold text-zinc-700">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
-                      <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200`}>
+                      <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200`}>
                         <div className="flex items-center gap-2 text-sm text-amber-700">
                           <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                           <span>{compactingMessage || t('chat.compacting')}</span>

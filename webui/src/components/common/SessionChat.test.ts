@@ -383,6 +383,28 @@ describe('getMessageBubbleClassName', () => {
 
     expect(className).toContain('w-full');
   });
+
+  it('fills the fixed compact assistant message column', () => {
+    const className = getMessageBubbleClassName({
+      compact: true,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toContain('w-full');
+    expect(className).toContain('max-w-full');
+  });
+
+  it('keeps compact user bubbles content-sized when not editing', () => {
+    const className = getMessageBubbleClassName({
+      compact: true,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('max-w-full');
+    expect(className.split(/\s+/)).not.toContain('w-full');
+  });
 });
 
 describe('getMessageGroupClassName', () => {
@@ -416,6 +438,16 @@ describe('getMessageGroupClassName', () => {
     });
 
     expect(className).toBe('w-full');
+  });
+
+  it('uses the full compact message-list width for assistant messages', () => {
+    const className = getMessageGroupClassName({
+      compact: true,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toBe('w-full max-w-full');
   });
 });
 
@@ -763,6 +795,54 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByText('read')).toBeInTheDocument();
   });
 
+  it('renders collapsed process groups inside the full compact assistant column', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process-width',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-width',
+              messageID: 'assistant-process-width',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '需要先读取当前工作流',
+            } as any,
+            {
+              id: 'tool-width',
+              messageID: 'assistant-process-width',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-width',
+              state: {
+                status: 'running',
+                input: { filePath: 'workflow.md' },
+              },
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group');
+    expect(processGroup.closest('.w-full.max-w-full')).not.toBeNull();
+  });
+
   it('does not split collapsed process groups on invisible step markers', () => {
     useSessionMessagesMock.mockReturnValue({
       messages: [
@@ -857,6 +937,53 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
     expect(screen.getByText('过程（4 项）')).toBeInTheDocument();
     expect(screen.getByText('2 段思考 · 2 次工具调用')).toBeInTheDocument();
+  });
+
+  it('keeps the compact compaction bubble at the full assistant column width', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-before-compaction',
+          role: 'user',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'user-text',
+              messageID: 'user-before-compaction',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '继续优化工作流',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'compacting', message: '正在压缩上下文...' },
+        },
+      });
+    });
+
+    const compactionText = await screen.findByText('正在压缩上下文...');
+    expect(compactionText.closest('.w-full.max-w-full')).not.toBeNull();
   });
 });
 
