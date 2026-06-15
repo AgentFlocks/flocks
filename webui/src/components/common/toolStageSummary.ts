@@ -66,6 +66,7 @@ export function buildRunWorkflowHeaderSummary(
   const currentNodeRaw = metadata.current_node_id;
   const stepIndexRaw = metadata.step_index;
   const totalNodesRaw = metadata.total_nodes;
+  const loopProgress = metadata.loop_progress as Record<string, unknown> | undefined;
 
   const phase = typeof phaseRaw === 'string' && phaseRaw.trim() ? phaseRaw.trim() : 'running';
   const currentNode =
@@ -87,16 +88,44 @@ export function buildRunWorkflowHeaderSummary(
     : resolvePhaseLabel(phase);
 
   let summary = `${workflowName} ${phaseLabel}`;
-  if (stepIndex !== null && stepIndex > 0) {
+  const loopIteration =
+    typeof loopProgress?.iteration === 'number' && Number.isFinite(loopProgress.iteration)
+      ? loopProgress.iteration
+      : null;
+  const loopTotal =
+    typeof loopProgress?.total_iterations === 'number' && Number.isFinite(loopProgress.total_iterations)
+      ? loopProgress.total_iterations
+      : null;
+  const loopItem =
+    typeof loopProgress?.current_item === 'string' && loopProgress.current_item.trim()
+      ? loopProgress.current_item.trim()
+      : '';
+  const loopInnerNode =
+    typeof loopProgress?.current_inner_node_id === 'string' && loopProgress.current_inner_node_id.trim()
+      ? loopProgress.current_inner_node_id.trim()
+      : '';
+
+  if (loopIteration !== null && loopIteration > 0) {
+    const loopLabel = translateOrFallback('chat.tool.workflowLoopIteration', 'Loop', t);
+    const progressLabel = loopTotal !== null && loopTotal > 0
+      ? `${loopIteration}/${loopTotal}`
+      : `${loopIteration}`;
+    summary += ` · ${loopLabel} ${progressLabel}`;
+    if (loopItem) {
+      const currentLabel = translateOrFallback('chat.tool.workflowLoopCurrent', 'Current', t);
+      summary += ` · ${currentLabel}: ${loopItem}`;
+    }
+  } else if (stepIndex !== null && stepIndex > 0) {
     const stepLabel = totalNodes !== null ? `${stepIndex}/${totalNodes}` : `${stepIndex}`;
     summary += ` · ${stepLabel}`;
   }
-  if (currentNode) {
+  const nodeForDisplay = loopInnerNode || currentNode;
+  if (nodeForDisplay) {
     summary += ` · ${translateOrFallback(
       'chat.tool.workflowNode',
-      `node:${currentNode}`,
+      `node:${nodeForDisplay}`,
       t,
-      { node: currentNode },
+      { node: nodeForDisplay },
     )}`;
   }
   return summary;

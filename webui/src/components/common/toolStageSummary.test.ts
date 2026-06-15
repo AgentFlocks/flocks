@@ -13,6 +13,10 @@ describe('buildRunWorkflowHeaderSummary', () => {
         return `步骤：${String(options?.step ?? '')}`;
       case 'chat.tool.workflowNode':
         return `节点：${String(options?.node ?? '')}`;
+      case 'chat.tool.workflowLoopIteration':
+        return '循环';
+      case 'chat.tool.workflowLoopCurrent':
+        return '当前';
       default:
         return key;
     }
@@ -55,6 +59,31 @@ describe('buildRunWorkflowHeaderSummary', () => {
         zhT,
       ),
     ).toBe('keyword-search-summary 排队中');
+  });
+
+  it('prefers generic loop progress over static node count', () => {
+    expect(
+      buildRunWorkflowHeaderSummary(
+        'run_workflow',
+        {
+          status: 'running',
+          metadata: {
+            workflow_name: 'batch-process',
+            phase: 'running',
+            current_node_id: 'inspect_item',
+            step_index: 30,
+            total_nodes: 5,
+            loop_progress: {
+              iteration: 30,
+              total_iterations: 500,
+              current_item: 'item-30',
+              current_inner_node_id: 'inspect_item',
+            },
+          },
+        },
+        zhT,
+      ),
+    ).toBe('batch-process 执行中 · 循环 30/500 · 当前: item-30 · 节点：inspect_item');
   });
 
   it('falls back to concise english labels when no translator is provided', () => {

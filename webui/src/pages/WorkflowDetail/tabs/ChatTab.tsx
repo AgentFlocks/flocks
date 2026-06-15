@@ -343,6 +343,8 @@ export default function ChatTab({
             currentNodeType: metadata.current_node_type,
             currentPhase: metadata.phase,
             currentStepIndex: metadata.step_index,
+            stepCount: metadata.step_count,
+            loopProgress: metadata.loop_progress,
           });
         }
       }

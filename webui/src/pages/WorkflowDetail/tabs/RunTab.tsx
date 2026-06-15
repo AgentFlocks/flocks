@@ -269,7 +269,7 @@ function TestSection({
 
     const pollExecution = async () => {
       try {
-        const response = await workflowAPI.getExecution(workflow.id, execution.id);
+        const response = await workflowAPI.getExecution(workflow.id, execution.id, { stepLimit: 0 });
         if (cancelled) return;
         onExecutionChange?.(response.data);
         if (response.data.status === 'running') {
@@ -731,7 +731,14 @@ function HistorySection({
       setSelectedExec(prev => {
         if (!prev) return null;
         const updated = res.data.find((e: WorkflowExecution) => e.id === prev.id);
-        return updated ?? prev;
+        if (!updated) return prev;
+        return {
+          ...updated,
+          executionLog: prev.executionLog?.length ? prev.executionLog : updated.executionLog,
+          stepLogOffset: prev.stepLogOffset ?? updated.stepLogOffset,
+          stepLogLimit: prev.stepLogLimit ?? updated.stepLogLimit,
+          stepLogTotal: prev.stepLogTotal ?? updated.stepLogTotal,
+        };
       });
     } catch {
       setHistory([]);
@@ -762,6 +769,20 @@ function HistorySection({
     return <AlertCircle className="w-3.5 h-3.5 text-orange-500" />;
   };
 
+  const toggleExecutionDetail = async (exec: WorkflowExecution) => {
+    if (selectedExec?.id === exec.id) {
+      setSelectedExec(null);
+      return;
+    }
+    setSelectedExec(exec);
+    try {
+      const res = await workflowAPI.getExecution(workflowId, exec.id);
+      setSelectedExec(res.data);
+    } catch {
+      setSelectedExec(exec);
+    }
+  };
+
   return (
     <div>
       <SectionHeader title={t('detail.run.historySection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
@@ -782,7 +803,7 @@ function HistorySection({
                 {history.map((exec) => (
                   <button
                     key={exec.id}
-                    onClick={() => setSelectedExec(selectedExec?.id === exec.id ? null : exec)}
+                    onClick={() => void toggleExecutionDetail(exec)}
                     className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
                   >
                     {statusIcon(getExecutionDisplayStatus(exec))}

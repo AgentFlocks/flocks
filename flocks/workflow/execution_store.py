@@ -6,7 +6,7 @@ import asyncio
 import re
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from flocks.session.recorder import Recorder
 from flocks.storage.storage import Storage
@@ -113,6 +113,90 @@ def compact_history_for_storage(
         for step in history
     ]
 
+
+def _first_value(data: Dict[str, Any], keys: Iterable[str]) -> Any:
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _as_positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, float) and value > 0 and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def derive_loop_progress(
+    *,
+    node_id: Optional[str],
+    global_step_index: int,
+    inputs: Optional[Dict[str, Any]] = None,
+    outputs: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Infer loop progress metadata from common workflow counter fields.
+
+    Workflows often carry their global loop state in normal inputs/outputs
+    (for example ``iteration``/``total_iterations``/``current_item``).  The
+    engine currently exposes only node-level callbacks, so this helper derives
+    a best-effort loop snapshot without changing the runtime data flow.
+    """
+    merged: Dict[str, Any] = {}
+    if isinstance(inputs, dict):
+        merged.update(inputs)
+    if isinstance(outputs, dict):
+        merged.update(outputs)
+
+    iteration = _as_positive_int(_first_value(
+        merged,
+        ("iteration", "loop_index", "current_index", "item_idx", "item_index", "host_idx"),
+    ))
+    total = _as_positive_int(_first_value(
+        merged,
+        (
+            "total_iterations",
+            "total_items",
+            "item_count",
+            "items_count",
+            "total_hosts",
+            "host_count",
+            "hosts_count",
+            "hosts_total",
+        ),
+    ))
+    if total is None:
+        hosts = merged.get("hosts")
+        if isinstance(hosts, list):
+            total = len(hosts)
+
+    current_item = _first_value(
+        merged,
+        ("current_item", "item", "current_host", "last_host", "host", "ssh_target", "last_ssh_target"),
+    )
+
+    if iteration is None and total is None and current_item is None:
+        return None
+
+    return {
+        "loop_node_id": merged.get("loop_node_id") or merged.get("loop_id"),
+        "iteration": iteration,
+        "total_iterations": total,
+        "current_item": current_item,
+        "current_inner_node_id": node_id,
+        "global_step_index": global_step_index,
+    }
+
 # Maximum number of execution history records retained per workflow.
 # Keep this intentionally small so high-frequency workflows do not keep
 # inflating the SQLite row set and matching JSONL audit files indefinitely.
@@ -192,6 +276,57 @@ async def _update_workflow_stats(workflow_id: str, success: bool, duration: floa
 def workflow_execution_key(exec_id: str) -> str:
     """Return the storage key for one workflow execution."""
     return f"workflow_execution/{exec_id}"
+
+
+def workflow_execution_step_key(exec_id: str, step_index: int) -> str:
+    """Return the storage key for one workflow execution step."""
+    return f"workflow_execution_step/{exec_id}/{step_index:08d}"
+
+
+def workflow_execution_step_prefix(exec_id: str) -> str:
+    """Return the storage key prefix for all steps of one execution."""
+    return f"workflow_execution_step/{exec_id}/"
+
+
+def compact_execution_summary(exec_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an execution record safe to keep in the hot summary row.
+
+    Step details are stored separately under ``workflow_execution_step`` keys.
+    Keeping ``executionLog`` out of the summary row avoids rewriting an
+    ever-growing JSON blob on every progress update.
+    """
+    summary = dict(exec_data)
+    summary["executionLog"] = []
+    return summary
+
+
+async def record_execution_step(
+    exec_id: str,
+    step_index: int,
+    step: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist one compacted execution step and return the stored payload."""
+    step_payload = compact_step_for_storage(step)
+    await Storage.write(workflow_execution_step_key(exec_id, step_index), step_payload)
+    return step_payload
+
+
+async def load_execution_steps(
+    exec_id: str,
+    *,
+    offset: int = 0,
+    limit: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Load persisted step logs for an execution, sorted by step key."""
+    page_limit = 500 if limit is None else max(limit, 0)
+    selected, total = await Storage.list_entries_page(
+        workflow_execution_step_prefix(exec_id),
+        offset=max(offset, 0),
+        limit=page_limit,
+    )
+    return [
+        value for _key, value in selected if isinstance(value, dict)
+    ], total
 
 
 def normalize_execution_status(status: str) -> str:
@@ -276,7 +411,7 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    await Storage.write(workflow_execution_key(exec_data["id"]), exec_data)
+    await Storage.write(workflow_execution_key(exec_data["id"]), compact_execution_summary(exec_data))
     return exec_data
 
 
@@ -286,7 +421,7 @@ async def record_execution_result(
     exec_data: Dict[str, Any],
 ) -> None:
     """Persist the final execution record, audit trail, and workflow stats."""
-    await Storage.write(workflow_execution_key(exec_id), exec_data)
+    await Storage.write(workflow_execution_key(exec_id), compact_execution_summary(exec_data))
 
     # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
     # are reflected in the UI stats panel.
@@ -395,6 +530,9 @@ async def _trim_execution_history(workflow_id: str) -> None:
             try:
                 exec_id = key.rsplit("/", 1)[-1]
                 await Storage.remove(key)
+                step_rows = await Storage.list_raw(workflow_execution_step_prefix(exec_id))
+                for step_key, _value in step_rows:
+                    await Storage.remove(step_key)
                 record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
                 await asyncio.to_thread(record_path.unlink, missing_ok=True)
             except Exception:

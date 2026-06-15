@@ -228,6 +228,18 @@ export interface WorkflowExecution {
   currentNodeType?: string;
   currentPhase?: string;
   currentStepIndex?: number;
+  stepCount?: number;
+  stepLogOffset?: number;
+  stepLogLimit?: number;
+  stepLogTotal?: number;
+  loopProgress?: {
+    loop_node_id?: string;
+    iteration?: number;
+    total_iterations?: number;
+    current_item?: string;
+    current_inner_node_id?: string;
+    global_step_index?: number;
+  };
 }
 
 export interface WorkflowNodeExecution {
@@ -408,8 +420,12 @@ export const workflowAPI = {
   getHistory: (id: string, params?: { limit?: number; triggerId?: string; triggerType?: string }) =>
     client.get<WorkflowExecution[]>(`/api/workflow/${id}/history`, { params }),
   
-  getExecution: (workflowId: string, execId: string) =>
-    client.get<WorkflowExecution>(`/api/workflow/${workflowId}/history/${execId}`),
+  getExecution: (
+    workflowId: string,
+    execId: string,
+    params?: { stepOffset?: number; stepLimit?: number },
+  ) =>
+    client.get<WorkflowExecution>(`/api/workflow/${workflowId}/history/${execId}`, { params }),
 
   cancelExecution: (workflowId: string, execId: string) =>
     client.post<{ status: string; message: string; executionId: string }>(

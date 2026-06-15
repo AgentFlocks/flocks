@@ -200,6 +200,8 @@
       "elapsed": "Elapsed",
       "workflowStage": "Current stage: {{phase}}",
       "workflowNode": "Node: {{node}}",
+      "workflowLoopIteration": "Loop",
+      "workflowLoopCurrent": "Current",
       "workflowStep": "Step: {{step}}",
       "workflowPhase": {
         "queued": "Queued",
