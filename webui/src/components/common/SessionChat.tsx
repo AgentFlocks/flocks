@@ -558,7 +558,7 @@ function ContextUsageRing({
         onClick={() => setOpen((value) => !value)}
       >
         <svg className="absolute inset-0 h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200" />
+          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200 dark:stroke-zinc-800" />
           <circle
             cx="12"
             cy="12"
@@ -577,24 +577,24 @@ function ContextUsageRing({
         <div
           role="menu"
           aria-label={t('chat.contextUsage.title')}
-          className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm"
+          className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:shadow-xl dark:shadow-black/30"
         >
-          <div className="border-b border-zinc-100 px-2.5 py-1.5">
+          <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-xs font-semibold text-zinc-700">{t('chat.contextUsage.title')}</div>
-                <div className="truncate text-[10px] text-zinc-400">
+                <div className="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('chat.contextUsage.title')}</div>
+                <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
                   {t('chat.contextUsage.tokens', {
                     used: formatTokenCount(usedTokens),
                     total: formatTokenCount(totalTokens),
                   })}
                 </div>
               </div>
-              <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
+              <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300">
                 {t('chat.contextUsage.full', { percent: clamped })}
               </span>
             </div>
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-zinc-100">
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
               <div
                 className="flex h-full overflow-hidden rounded-full"
                 style={{ width: `${clamped}%` }}
@@ -618,15 +618,15 @@ function ContextUsageRing({
               <div
                 key={segment.key}
                 role="menuitem"
-                className="flex min-w-0 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700"
+                className="flex min-w-0 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700 dark:text-zinc-300"
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <span className={`h-3 w-3 shrink-0 rounded-[3px] ${segment.colorClass}`} />
-                  <span className="truncate font-medium text-zinc-800">
+                  <span className="truncate font-medium text-zinc-800 dark:text-zinc-100">
                     {getContextUsageLabel(t, segment.key)}
                   </span>
                 </div>
-                <span className={segment.included ? 'shrink-0 text-zinc-600' : 'shrink-0 text-zinc-400'}>
+                <span className={segment.included ? 'shrink-0 text-zinc-600 dark:text-zinc-300' : 'shrink-0 text-zinc-400 dark:text-zinc-500'}>
                   {segment.included
                     ? formatTokenCount(segment.tokens)
                     : t('chat.contextUsage.excludedTokens', { tokens: formatTokenCount(segment.tokens) })}
@@ -820,8 +820,8 @@ export function getMessageBubbleClassName({
   if (compact) {
     return `max-w-[90%] px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
-        ? 'bg-sky-50 border border-sky-100 text-zinc-900'
-        : 'bg-white border border-zinc-200/90'
+        ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
+        : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
     }`;
   }
 
@@ -831,13 +831,13 @@ export function getMessageBubbleClassName({
 
   return `${widthClass} px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
     isUser
-      ? 'bg-sky-50 border border-sky-100 text-zinc-900'
-      : 'bg-white border border-zinc-200/90'
+      ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
+      : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
   }`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
-  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-rose-100 bg-rose-50/80 text-sm text-rose-700 shadow-none`;
+  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-rose-100 bg-rose-50/80 text-sm text-rose-700 shadow-none dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200`;
 }
 
 export function getMessageGroupClassName({
@@ -857,7 +857,7 @@ export function getMessageGroupClassName({
     return isEditing ? 'w-full max-w-[90%]' : 'w-fit max-w-[90%]';
   }
 
-  return isEditing ? 'w-[80%] max-w-[80%]' : 'w-fit max-w-[80%]';
+  return isEditing ? 'w-full max-w-full' : 'w-fit max-w-[88%]';
 }
 
 export function getCompactionDividerClassName(compact: boolean): string {
@@ -1116,40 +1116,40 @@ function QueuedPromptPanel({
   if (items.length === 0) return null;
 
   return (
-    <div className="mb-2 rounded-xl border border-zinc-200 bg-zinc-950/[0.02] overflow-hidden">
+    <div className="mb-2 overflow-hidden rounded-xl border border-zinc-200 bg-zinc-950/[0.02] dark:border-zinc-800 dark:bg-zinc-900/60">
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 hover:bg-zinc-100/70 transition-colors"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100/70 dark:text-zinc-300 dark:hover:bg-zinc-800"
       >
         <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
         <span>{t('chat.queue.count', { count: items.length })}</span>
       </button>
       {expanded && (
-        <div className="max-h-40 overflow-y-auto border-t border-zinc-200">
+        <div className="max-h-40 overflow-y-auto border-t border-zinc-200 dark:border-zinc-800">
           {items.map((item) => {
             const isEditing = editingId === item.id;
             const isBusy = actionId === item.id || item.status === 'executing';
             const text = getQueuedPromptText(item);
             const instructionLabel = parseInstructionDisplayText(text);
             return (
-              <div key={item.id} className="flex items-start gap-2 px-3 py-2 border-b border-zinc-100 last:border-b-0">
-                <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 flex-shrink-0" />
+              <div key={item.id} className="flex items-start gap-2 border-b border-zinc-100 px-3 py-2 last:border-b-0 dark:border-zinc-800">
+                <div className="mt-1 h-2 w-2 flex-shrink-0 rounded-full border border-zinc-400 dark:border-zinc-500" />
                 <div className="min-w-0 flex-1">
                   {isEditing ? (
                     <textarea
                       value={editingText}
                       onChange={(event) => onEditChange(event.target.value)}
-                      className="w-full resize-none rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-800 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100"
+                      className="w-full resize-none rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-800 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-700 dark:focus:ring-zinc-800/70"
                       rows={2}
                     />
                   ) : (
                     instructionLabel ? (
-                      <span className="inline-flex max-w-full items-center truncate rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700">
+                      <span className="inline-flex max-w-full items-center truncate rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700 dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200">
                         {instructionLabel}
                       </span>
                     ) : (
-                      <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                      <div className="line-clamp-2 text-xs text-zinc-700 dark:text-zinc-300">{text || t('chat.queue.attachmentOnly')}</div>
                     )
                   )}
                 </div>
@@ -1160,7 +1160,7 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={() => onEditSave(item)}
                         disabled={isBusy || !editingText.trim()}
-                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.save')}
                       >
                         <Save className="h-3.5 w-3.5" />
@@ -1169,7 +1169,7 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={onEditCancel}
                         disabled={isBusy}
-                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.cancel')}
                       >
                         <X className="h-3.5 w-3.5" />
@@ -1181,7 +1181,7 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={() => onEditStart(item)}
                         disabled={isBusy}
-                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.edit')}
                       >
                         <Pencil className="h-3.5 w-3.5" />
@@ -1190,7 +1190,7 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={() => onRunNow(item)}
                         disabled={isBusy}
-                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.runNow')}
                       >
                         <ArrowUp className="h-3.5 w-3.5" />
@@ -1199,7 +1199,7 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={() => onRemove(item)}
                         disabled={isBusy}
-                        className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+                        className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                         title={t('chat.queue.remove')}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -2801,12 +2801,12 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4'
-    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
+    ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
+    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
 
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
-    : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
+    : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -2874,20 +2874,20 @@ export default function SessionChat({
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
-                <div className={`flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}`}>
+                <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${
+                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
-                    }`}
+                    } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
                     {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
-                      <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200`}>
+                      <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
                         <div className="flex items-center gap-2 text-sm text-amber-700">
                           <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                           <span>{compactingMessage || t('chat.compacting')}</span>
@@ -2932,17 +2932,17 @@ export default function SessionChat({
             {/* Standalone thinking indicator when no incomplete message exists */}
             {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
-                <div className={`flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}`}>
+                <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${
+                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
-                    }`}
+                    } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
                     {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
@@ -2966,7 +2966,7 @@ export default function SessionChat({
 
       {/* Suggestions — shown before user sends any message */}
       {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (
-        <div className="flex-shrink-0 px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white">
+        <div className="flex-shrink-0 px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white dark:border-zinc-800 dark:bg-zinc-950">
           <div className="flex items-center gap-1.5 mb-2">
             <span className="text-xs font-medium text-gray-400">{t('chat.suggestions')}</span>
           </div>
@@ -2987,8 +2987,8 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
-          <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]') : ''}`}>
+        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'} dark:bg-zinc-950`}>
+          <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}`}>
             {conversationBottomSlot && (
               <div className="mb-2 min-w-0">
                 {typeof conversationBottomSlot === 'function'
@@ -3056,20 +3056,20 @@ export default function SessionChat({
               onDrop={handleComposerDrop}
               className={`rounded-2xl border transition-all ${
                 isCompacting
-                  ? 'border-amber-200 bg-amber-50/30'
+                  ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
-                    ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100'
+                    ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
-                      ? 'border-zinc-200 bg-zinc-50'
-                      : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100'
+                      ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
+                      : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
                 {/* Node reference chip */}
                 {nodeRef && (
                   <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
-                    <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1">{nodeRef.id}</code>
-                    <span className="text-[10px] text-slate-400 flex-shrink-0">{nodeRef.type}</span>
+                    <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1 dark:text-slate-200">{nodeRef.id}</code>
+                    <span className="text-[10px] text-slate-400 flex-shrink-0 dark:text-slate-500">{nodeRef.type}</span>
                     {onNodeRefDismiss && (
                       <button
                         onClick={onNodeRefDismiss}
@@ -3096,7 +3096,7 @@ export default function SessionChat({
                           <div
                             key={attachment.id}
                             className={`relative flex-shrink-0 rounded-lg border overflow-hidden ${
-                              isUploading ? 'border-sky-200 bg-sky-50' : 'border-gray-200 bg-gray-50'
+                              isUploading ? 'border-sky-200 bg-sky-50 dark:border-sky-500/35 dark:bg-sky-950/30' : 'border-gray-200 bg-gray-50 dark:border-zinc-800 dark:bg-zinc-900'
                             }`}
                           >
                             {isUploading ? (
@@ -3134,7 +3134,7 @@ export default function SessionChat({
                               ? 'border-red-200 bg-red-50 text-red-700'
                               : isUploading
                                 ? 'border-sky-200 bg-sky-50 text-sky-700'
-                                : 'border-gray-200 bg-gray-50 text-gray-700'
+                                : 'border-gray-200 bg-gray-50 text-gray-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200'
                           }`}
                         >
                           {isUploading ? (
@@ -3224,8 +3224,8 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 ${
-                      sending ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
+                    className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 ${
+                      sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
                     }`}
                     style={{
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
@@ -3248,7 +3248,7 @@ export default function SessionChat({
                     <Paperclip className="h-4 w-4" />
                   </button>
 
-                  <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200" />
+                  <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200 dark:bg-zinc-800" />
 
                   {toolbarSlot}
 
@@ -3297,7 +3297,7 @@ export default function SessionChat({
                       className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
                         canSend
                           ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                          : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
+                          : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
                       }`}
                     >
                       {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
@@ -3344,10 +3344,10 @@ function AgentMentionDropdown({
 
   return (
     <div
-      className="absolute bottom-full left-0 right-0 mb-1 z-50 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+      className="absolute bottom-full left-0 right-0 z-50 mb-1 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
       onMouseDown={(e) => e.preventDefault()}
     >
-      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
         {t('chat.mention.title')}
       </div>
       <div ref={listRef} className="max-h-64 overflow-y-auto p-1">
@@ -3360,17 +3360,17 @@ function AgentMentionDropdown({
               onClick={() => onSelect(agent)}
               onMouseDown={(e) => e.preventDefault()}
               className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-                idx === selectedIndex ? 'bg-sky-50 text-sky-800' : 'text-gray-800 hover:bg-gray-50'
+                idx === selectedIndex ? 'bg-sky-50 text-sky-800 dark:bg-sky-950/45 dark:text-sky-100' : 'text-gray-800 hover:bg-gray-50 dark:text-zinc-200 dark:hover:bg-zinc-800'
               }`}
             >
-              <Bot className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+              <Bot className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-zinc-500" />
               <span className="shrink-0 font-mono text-sm font-semibold">@{agent.name}</span>
-              <span className="min-w-0 truncate text-xs text-gray-500">{desc}</span>
+              <span className="min-w-0 truncate text-xs text-gray-500 dark:text-zinc-400">{desc}</span>
             </button>
           );
         })}
       </div>
-      <div className="flex gap-3 border-t border-gray-100 bg-gray-50 px-3 py-1 text-[10px] text-gray-400">
+      <div className="flex gap-3 border-t border-gray-100 bg-gray-50 px-3 py-1 text-[10px] text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
         <span><kbd className="font-mono">↑↓</kbd> {t('chat.mention.navigate')}</span>
         <span><kbd className="font-mono">Enter</kbd>/<kbd className="font-mono">Tab</kbd> {t('chat.mention.select')}</span>
       </div>
@@ -3475,18 +3475,18 @@ function ChatMessageBubbleInner({
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed';
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
 
   const avatar = isUser ? (
-    <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white flex-shrink-0 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -3857,6 +3857,27 @@ function ChatMessageBubbleInner({
   ) : null;
 
   if (isUser) {
+    if (!compact) {
+      return (
+        <div className="group relative flex w-full min-w-0 justify-end">
+          <div className={`flex min-w-0 flex-col items-end ${isEditing ? 'w-full' : 'max-w-[88%]'}`}>
+            {bubble}
+            {footer}
+          </div>
+          <div className="absolute -right-10 top-1">
+            {avatar}
+          </div>
+          {previewImage && (
+            <ImageLightbox
+              src={previewImage.url}
+              alt={previewImage.alt}
+              onClose={() => setPreviewImage(null)}
+            />
+          )}
+        </div>
+      );
+    }
+
     return (
       <div className={`group relative ${!compact ? 'w-full' : ''} flex min-w-0 justify-end`}>
         <div className={`flex min-w-0 items-start justify-end gap-2 ${messageGroupClass}`}>
@@ -3879,13 +3900,41 @@ function ChatMessageBubbleInner({
     );
   }
 
+  if (!compact) {
+    return (
+      <div className="group relative flex w-full min-w-0">
+        <div className="absolute -left-10 top-1">
+          {avatar}
+        </div>
+        <div className="flex w-full min-w-0 flex-col items-start">
+          <div className={`flex items-center gap-2 ${headerHeight}`}>
+            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+              {agentName}
+            </span>
+          </div>
+          <div className="flex w-full min-w-0 flex-col">
+            {bubble}
+            {footer}
+          </div>
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+    <div className="group relative flex">
       <div className={`flex gap-2.5 ${messageGroupClass}`}>
         {avatar}
         <div className="flex flex-col items-start flex-1 min-w-0">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700">
+            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>

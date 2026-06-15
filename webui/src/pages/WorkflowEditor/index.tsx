@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useContext, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -32,6 +32,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import { ThemeContext } from '@/contexts/ThemeContext';
 import { extractErrorMessage } from '@/utils/error';
 import {
   buildWorkflowGraphLayout,
@@ -92,13 +93,15 @@ const nodeMiniMapColors: Record<string, string> = {
   subworkflow: '#fb923c',
 };
 
-const edgeTheme: Record<WorkflowGraphEdgeRoute['kind'], {
+type EdgeTheme = Record<WorkflowGraphEdgeRoute['kind'], {
   stroke: string;
   label: string;
   labelBg: string;
   strokeWidth: number;
   strokeDasharray?: string;
-}> = {
+}>;
+
+const LIGHT_EDGE_THEME: EdgeTheme = {
   default: {
     stroke: '#94a3b8',
     label: '#64748b',
@@ -126,10 +129,39 @@ const edgeTheme: Record<WorkflowGraphEdgeRoute['kind'], {
   },
 };
 
+const DARK_EDGE_THEME: EdgeTheme = {
+  default: {
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
+    strokeWidth: 1.8,
+  },
+  branch: {
+    stroke: '#f59e0b',
+    label: '#fbbf24',
+    labelBg: '#3d3424',
+    strokeWidth: 2.2,
+  },
+  loop: {
+    stroke: '#a78bfa',
+    label: '#c4b5fd',
+    labelBg: '#363047',
+    strokeWidth: 2,
+  },
+  back: {
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
+    strokeWidth: 1.8,
+    strokeDasharray: '6 5',
+  },
+};
+
 function buildReactFlowEdge(
   edge: WorkflowJSON['edges'][number],
   index: number,
-  route: WorkflowGraphEdgeRoute = { kind: 'default' }
+  route: WorkflowGraphEdgeRoute = { kind: 'default' },
+  edgeTheme: EdgeTheme = LIGHT_EDGE_THEME
 ): Edge {
   const theme = edgeTheme[route.kind];
 
@@ -166,7 +198,7 @@ function buildReactFlowEdge(
 }
 
 // 将后端数据转换为 ReactFlow 格式
-function convertToReactFlowFormat(workflowJson: WorkflowJSON): { nodes: Node[]; edges: Edge[] } {
+function convertToReactFlowFormat(workflowJson: WorkflowJSON, edgeTheme: EdgeTheme = LIGHT_EDGE_THEME): { nodes: Node[]; edges: Edge[] } {
   const diagram = buildWorkflowGraphLayout(workflowJson);
   const nodes: Node[] = workflowJson.nodes.map((node) => ({
     id: node.id,
@@ -204,7 +236,7 @@ function convertToReactFlowFormat(workflowJson: WorkflowJSON): { nodes: Node[]; 
   }));
 
   const edges: Edge[] = workflowJson.edges.map((edge, index) =>
-    buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)])
+    buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)], edgeTheme)
   );
 
   return { nodes, edges };
@@ -251,7 +283,7 @@ interface EdgeData {
   const?: Record<string, any>;
 }
 
-function applyGraphSemantics(nodes: Node[], edges: Edge[], workflow: Workflow): { nodes: Node[]; edges: Edge[] } {
+function applyGraphSemantics(nodes: Node[], edges: Edge[], workflow: Workflow, edgeTheme: EdgeTheme = LIGHT_EDGE_THEME): { nodes: Node[]; edges: Edge[] } {
   const workflowJson = convertToWorkflowJSON(nodes, edges, workflow);
   const diagram = buildWorkflowGraphLayout(workflowJson);
   const updatedNodes = nodes.map((node) => ({
@@ -262,7 +294,7 @@ function applyGraphSemantics(nodes: Node[], edges: Edge[], workflow: Workflow): 
     },
   }));
   const updatedEdges = workflowJson.edges.map((edge, index) =>
-    buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)])
+    buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)], edgeTheme)
   );
 
   return { nodes: updatedNodes, edges: updatedEdges };
@@ -327,8 +359,11 @@ function convertToWorkflowJSON(nodes: Node[], edges: Edge[], workflow: Workflow)
 
 export default function WorkflowEditor() {
   const { t, i18n } = useTranslation('workflow');
+  const { theme } = useContext(ThemeContext);
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const isDark = theme === 'dark';
+  const edgeTheme = useMemo(() => (isDark ? DARK_EDGE_THEME : LIGHT_EDGE_THEME), [isDark]);
 
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -358,6 +393,13 @@ export default function WorkflowEditor() {
       setExecutionStopping(false);
     }
   }, [currentExecution]);
+
+  useEffect(() => {
+    if (!workflow) return;
+    const refreshed = applyGraphSemantics(nodes, edges, workflow, edgeTheme);
+    setNodes(refreshed.nodes);
+    setEdges(refreshed.edges);
+  }, [edgeTheme]);
 
   useEffect(() => {
     if (!id || !showExecutionPanel || !currentExecution?.id || currentExecution.status !== 'running') {
@@ -397,7 +439,7 @@ export default function WorkflowEditor() {
       const response = await workflowAPI.get(id!);
       setWorkflow(response.data);
       
-      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(response.data.workflowJson);
+      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(response.data.workflowJson, edgeTheme);
       setNodes(flowNodes);
       setEdges(flowEdges);
     } catch (error: any) {
@@ -452,13 +494,13 @@ export default function WorkflowEditor() {
           );
 
           if (!workflow) return nextEdges;
-          const refreshed = applyGraphSemantics(nodes, nextEdges, workflow);
+          const refreshed = applyGraphSemantics(nodes, nextEdges, workflow, edgeTheme);
           setNodes(refreshed.nodes);
           return refreshed.edges;
         }
       );
     },
-    [nodes, setEdges, setNodes, workflow]
+    [edgeTheme, nodes, setEdges, setNodes, workflow]
   );
 
   // 节点点击事件 - 显示属性面板
@@ -481,11 +523,11 @@ export default function WorkflowEditor() {
       const nextEdges = applyEdgeChanges(changes, eds);
       if (!workflow) return nextEdges;
 
-      const refreshed = applyGraphSemantics(nodes, nextEdges, workflow);
+      const refreshed = applyGraphSemantics(nodes, nextEdges, workflow, edgeTheme);
       setNodes(refreshed.nodes);
       return refreshed.edges;
     });
-  }, [nodes, setEdges, setNodes, workflow]);
+  }, [edgeTheme, nodes, setEdges, setNodes, workflow]);
 
   // 添加新节点
   const handleAddNode = useCallback((type: string) => {
@@ -547,13 +589,13 @@ export default function WorkflowEditor() {
       });
 
       if (!workflow) return updatedEdges;
-      const refreshed = applyGraphSemantics(nodes, updatedEdges, workflow);
+      const refreshed = applyGraphSemantics(nodes, updatedEdges, workflow, edgeTheme);
       setNodes(refreshed.nodes);
       return refreshed.edges;
     });
     setShowEdgePropertyPanel(false);
     setSelectedEdge(null);
-  }, [nodes, setEdges, setNodes, workflow]);
+  }, [edgeTheme, nodes, setEdges, setNodes, workflow]);
 
   // 删除选中的节点或边（键盘事件）
   useEffect(() => {
@@ -574,7 +616,7 @@ export default function WorkflowEditor() {
             const nextEdges = eds.filter((edge) => !edge.selected);
             if (!workflow) return nextEdges;
 
-            const refreshed = applyGraphSemantics(nodes, nextEdges, workflow);
+            const refreshed = applyGraphSemantics(nodes, nextEdges, workflow, edgeTheme);
             setNodes(refreshed.nodes);
             return refreshed.edges;
           });
@@ -596,7 +638,7 @@ export default function WorkflowEditor() {
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [nodes, edges, setNodes, setEdges, workflow]);
+  }, [edgeTheme, nodes, edges, setNodes, setEdges, workflow]);
 
   // 自动布局
   const handleAutoLayout = () => {
@@ -614,7 +656,7 @@ export default function WorkflowEditor() {
     }));
 
     const updatedEdges = workflowJson.edges.map((edge, index) =>
-      buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)])
+      buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)], edgeTheme)
     );
 
     setNodes(updatedNodes);
@@ -760,19 +802,19 @@ export default function WorkflowEditor() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
+    <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950">
       {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950">
         <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/workflows')}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
-            <h1 className="text-xl font-semibold text-gray-900">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
-            <p className="text-sm text-gray-500">{workflow.description || t('editor.noDescription')}</p>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
+            <p className="text-sm text-gray-500 dark:text-zinc-400">{workflow.description || t('editor.noDescription')}</p>
           </div>
           {validationResult && (
             <div className="flex items-center gap-2">
@@ -792,7 +834,7 @@ export default function WorkflowEditor() {
           <button
             onClick={() => setShowNodeToolbar(!showNodeToolbar)}
             className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
-              showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500' : 'text-gray-700 bg-white hover:bg-gray-50'
+              showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500 dark:bg-red-950/30 dark:text-red-200 dark:border-red-500/40' : 'text-gray-700 bg-white hover:bg-gray-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
             }`}
           >
             <Trash2 className="w-4 h-4" />
@@ -800,21 +842,21 @@ export default function WorkflowEditor() {
           </button>
           <button
             onClick={handleAutoLayout}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <Layout className="w-4 h-4" />
             {t('editor.autoLayout')}
           </button>
           <button
             onClick={handleValidate}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <CheckCircle className="w-4 h-4" />
             {t('editor.validate')}
           </button>
           <button
             onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <FileJson className="w-4 h-4" />
             {t('editor.export')}
@@ -907,32 +949,33 @@ export default function WorkflowEditor() {
           attributionPosition="bottom-left"
           deleteKeyCode={null}
         >
-          <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
+          <Background variant={BackgroundVariant.Dots} gap={12} size={1} color={isDark ? '#5a6573' : '#e2e8f0'} />
           <Controls />
           <MiniMap
             nodeColor={(node) => {
               return nodeMiniMapColors[node.type as keyof typeof nodeMiniMapColors] ?? '#94a3b8';
             }}
-            style={{ backgroundColor: '#f9fafb' }}
+            maskColor={isDark ? 'rgba(34, 39, 46, 0.72)' : 'rgba(241, 245, 249, 0.68)'}
+            style={{ backgroundColor: isDark ? '#303842' : '#f9fafb' }}
           />
           
           {/* 图例 */}
-          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('editor.nodeTypesLabel')}</h3>
+          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
             <div className="space-y-2">
               {Object.entries(nodeColors).map(([type, colors]) => (
                 <div key={type} className="flex items-center gap-2">
                   <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
-                  <span className="text-xs text-gray-700 capitalize">{type}</span>
+                  <span className="text-xs text-gray-700 capitalize dark:text-zinc-300">{type}</span>
                 </div>
               ))}
             </div>
           </Panel>
 
           {/* 统计信息 */}
-          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('editor.statsLabel')}</h3>
-            <div className="space-y-2 text-xs text-gray-600">
+          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.statsLabel')}</h3>
+            <div className="space-y-2 text-xs text-gray-600 dark:text-zinc-300">
               <div className="flex justify-between gap-4">
                 <span>{t('editor.nodeCountLabel')}</span>
                 <span className="font-medium">{nodes.length}</span>
