@@ -209,6 +209,8 @@
       "elapsed": "耗时",
       "workflowStage": "当前阶段：{{phase}}",
       "workflowNode": "节点：{{node}}",
+      "workflowLoopIteration": "循环",
+      "workflowLoopCurrent": "当前",
       "workflowStep": "步骤：{{step}}",
       "workflowPhase": {
         "queued": "排队中",

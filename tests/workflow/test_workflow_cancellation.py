@@ -117,6 +117,7 @@ def test_run_workflow_stops_after_cancel_signal() -> None:
         trace=False,
         on_step_complete=on_step_complete,
         cancel=cancel_event.is_set,
+        retain_history=True,
     )
 
     assert result.status == "CANCELLED"

@@ -17,10 +17,12 @@ covered by a separate route-level test that exercises the bind failure path.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from flocks.ingest.syslog import manager as syslog_manager
+from flocks.workflow import execution_store
 from flocks.workflow.triggers.models import TriggerDefinition
 
 
@@ -169,6 +171,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     manager = syslog_manager.SyslogManager()
     captured_run_kwargs: dict = {}
     recorded_exec_data: dict = {}
+    recorded_steps: list[tuple[str, int, dict]] = []
 
     async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
         return {"id": "exec-syslog", "workflowId": workflow_id, "inputParams": input_params}
@@ -176,8 +179,22 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
         recorded_exec_data.update(exec_data)
 
+    async def _fake_record_execution_step(exec_id, step_index, step):  # noqa: ANN001
+        recorded_steps.append((exec_id, step_index, step))
+        return step
+
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
+        kwargs["on_step_complete"](
+            SimpleNamespace(
+                model_dump=lambda mode="json": {
+                    "node_id": "receive_alert",
+                    "node_type": "python",
+                    "inputs": {"message": "demo"},
+                    "outputs": {"ok": True},
+                }
+            )
+        )
         return type(
             "RunResult",
             (),
@@ -194,6 +211,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
     trigger = TriggerDefinition.model_validate(
         {
@@ -220,8 +238,14 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["inputs"]["message"] == "demo"
     assert captured_run_kwargs["inputs"]["hostname"] == "router-a"
     assert captured_run_kwargs["inputs"]["pipeline"] == "syslog"
+    assert callable(captured_run_kwargs["on_step_complete"])
+    assert recorded_steps[0][0] == "exec-syslog"
+    assert recorded_steps[0][1] == 1
+    assert recorded_steps[0][2]["node_id"] == "receive_alert"
     assert recorded_exec_data["triggerId"] == "syslog-alerts"
     assert recorded_exec_data["triggerSource"] == "udp://0.0.0.0:5514"
+    assert recorded_exec_data["executionLog"] == []
+    assert recorded_exec_data["stepCount"] == 1
 
     captured_run_kwargs.clear()
     await manager._trigger_workflow(

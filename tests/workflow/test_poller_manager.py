@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from flocks.workflow import poller_manager
+from flocks.workflow import execution_store
 from flocks.workflow.runner import RunWorkflowResult
 
 
@@ -51,7 +53,15 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
             "inputs": {"dedup_source_workflow_name": "stream_alert_denoise_gt_fast"},
         }
 
-    def _fake_run_workflow(*, workflow: Any, inputs: dict[str, Any], timeout_s: int, trace: bool, cancel):  # noqa: ANN001
+    def _fake_run_workflow(  # noqa: ANN001
+        *,
+        workflow: Any,
+        inputs: dict[str, Any],
+        timeout_s: int,
+        trace: bool,
+        cancel,
+        on_step_complete,
+    ):
         captured_inputs.update(inputs)
         assert workflow == {"start": "n1", "nodes": [], "edges": []}
         assert timeout_s == 9
@@ -115,6 +125,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     manager = poller_manager.WorkflowPollerManager()
     created_records: list[dict[str, Any]] = []
     recorded_results: list[dict[str, Any]] = []
+    recorded_steps: list[tuple[str, int, dict[str, Any]]] = []
 
     async def _fake_read(_key: str) -> dict[str, Any]:
         return {
@@ -150,12 +161,38 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         _ = workflow_id, exec_id
         recorded_results.append(dict(exec_data))
 
-    def _fake_run_workflow(*, workflow: Any, inputs: dict[str, Any], timeout_s: int, trace: bool, cancel):  # noqa: ANN001
+    async def _fake_record_execution_step(
+        exec_id: str,
+        step_index: int,
+        step: dict[str, Any],
+    ) -> dict[str, Any]:
+        recorded_steps.append((exec_id, step_index, step))
+        return step
+
+    def _fake_run_workflow(  # noqa: ANN001
+        *,
+        workflow: Any,
+        inputs: dict[str, Any],
+        timeout_s: int,
+        trace: bool,
+        cancel,
+        on_step_complete,
+    ):
         assert workflow == {"start": "n1", "nodes": [], "edges": []}
         assert timeout_s == 9
         assert trace is False
         assert cancel() is False
         assert inputs["dedup_source_workflow_name"] == "stream_alert_denoise_gt_fast"
+        on_step_complete(
+            SimpleNamespace(
+                model_dump=lambda mode="json": {
+                    "node_id": "load",
+                    "node_type": "python",
+                    "inputs": {"iteration": 1, "total_iterations": 2},
+                    "outputs": {"load_stats": {"record_count": 9}},
+                }
+            )
+        )
         return RunWorkflowResult(
             status="SUCCEEDED",
             run_id="run-1",
@@ -176,6 +213,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     )
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
     status = await manager.run_once("wf-business-failure")
@@ -185,6 +223,12 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     assert recorded_results[0]["status"] == "error"
     assert recorded_results[0]["errorMessage"] == "business rule blocked"
     assert recorded_results[0]["currentPhase"] == "error"
+    assert recorded_results[0]["executionLog"] == []
+    assert recorded_results[0]["stepCount"] == 1
+    assert recorded_results[0]["loopProgress"]["total_iterations"] == 2
+    assert recorded_steps[0][0] == "exec-1"
+    assert recorded_steps[0][1] == 1
+    assert recorded_steps[0][2]["node_id"] == "load"
     assert status["lastStatus"] == "error"
     assert status["lastError"] == "business rule blocked"
     assert status["selectedCount"] == 9
@@ -205,8 +249,17 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         "inputs": {},
     }
 
-    def _fake_run_workflow(*, workflow: Any, inputs: dict[str, Any], timeout_s: int, trace: bool, cancel):  # noqa: ANN001
+    def _fake_run_workflow(  # noqa: ANN001
+        *,
+        workflow: Any,
+        inputs: dict[str, Any],
+        timeout_s: int,
+        trace: bool,
+        cancel,
+        on_step_complete,
+    ):
         _ = workflow, inputs, timeout_s, trace, cancel
+        _ = on_step_complete
         # Keep the run active until the test releases it so a second tick skips.
         asyncio.run(asyncio.wait_for(threading_event.wait(), timeout=2.0))
         return RunWorkflowResult(status="success", outputs={"load_stats": {"record_count": 1}})
@@ -280,8 +333,17 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     ) -> None:
         _ = workflow_id, exec_id, exec_data
 
-    def _fake_run_workflow(*, workflow: Any, inputs: dict[str, Any], timeout_s: int, trace: bool, cancel):  # noqa: ANN001
+    def _fake_run_workflow(  # noqa: ANN001
+        *,
+        workflow: Any,
+        inputs: dict[str, Any],
+        timeout_s: int,
+        trace: bool,
+        cancel,
+        on_step_complete,
+    ):
         _ = workflow, inputs, timeout_s, trace, cancel
+        _ = on_step_complete
         release_run.wait(timeout=0.2)
         return RunWorkflowResult(status="SUCCEEDED", run_id="run-stop")
 

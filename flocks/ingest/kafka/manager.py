@@ -34,6 +34,7 @@ from flocks.workflow.execution_store import (
     compact_history_for_storage,
     compact_outputs_for_storage,
     create_execution_record,
+    ExecutionStepRecorder,
     record_execution_result,
     resolve_execution_outcome,
 )
@@ -207,6 +208,20 @@ def _compact_history_for_kafka_storage(
                 ):
                     payload[key] = _summarize_large_value(value)
     return compacted
+
+
+def _compact_step_for_kafka_storage(
+    step: Any,
+    *,
+    input_key: str,
+    input_keys: Iterable[str] | None = None,
+) -> Dict[str, Any]:
+    compacted = _compact_history_for_kafka_storage(
+        [step],
+        input_key=input_key,
+        input_keys=input_keys,
+    )
+    return compacted[0] if compacted and isinstance(compacted[0], dict) else {}
 
 
 class KafkaManager:
@@ -655,9 +670,21 @@ class KafkaManager:
                 input_params=summarized_inputs,
             )
             exec_id = exec_data["id"]
+            loop = asyncio.get_running_loop()
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
+            step_recorder = ExecutionStepRecorder(
+                exec_id=exec_id,
+                loop=loop,
+                logger=log,
+                log_event="kafka.execution_step.write_failed",
+                step_compactor=lambda step: _compact_step_for_kafka_storage(
+                    step,
+                    input_key=input_key,
+                    input_keys=trigger_input_keys,
+                ),
+            )
             try:
                 result = await asyncio.to_thread(
                     run_workflow,
@@ -665,23 +692,23 @@ class KafkaManager:
                     inputs=mapped_inputs,
                     trace=False,
                     history_mode="summary",
+                    on_step_complete=step_recorder.on_step_complete,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time
+                step_count = step_recorder.step_count or result.steps
+                exec_data.update(step_recorder.summary)
                 exec_data.update({
                     "status": status,
                     "outputResults": _compact_for_kafka_storage(result.outputs),
                     "finishedAt": int(time.time() * 1000),
                     "duration": duration,
                     "errorMessage": error_msg,
-                    "executionLog": _compact_history_for_kafka_storage(
-                        result.history,
-                        input_key=input_key,
-                        input_keys=trigger_input_keys,
-                    ),
+                    "executionLog": [],
+                    "stepCount": step_count,
                     "currentNodeId": result.last_node_id,
                     "currentPhase": status,
-                    "currentStepIndex": result.steps,
+                    "currentStepIndex": step_count,
                     "triggerId": trigger.id,
                     "triggerType": trigger.type,
                     "deliveryId": trigger_meta.get("deliveryId"),
@@ -694,11 +721,13 @@ class KafkaManager:
                     "kafka.workflow_run_failed",
                     {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
                 )
+                exec_data.update(step_recorder.summary)
                 exec_data.update({
                     "status": "error",
                     "errorMessage": str(exc),
                     "finishedAt": int(time.time() * 1000),
                     "duration": duration,
+                    "executionLog": [],
                     "currentPhase": "error",
                     "triggerId": trigger.id,
                     "triggerType": trigger.type,

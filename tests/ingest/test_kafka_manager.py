@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from flocks.ingest.kafka import manager as kafka_manager
+from flocks.workflow import execution_store
 from flocks.workflow.triggers.models import TriggerDefinition
 
 
@@ -257,6 +258,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     captured_input_params: dict = {}
     captured_exec_data: dict = {}
     captured_run_kwargs: dict = {}
+    recorded_steps: list[tuple[str, int, dict]] = []
 
     async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
         captured_input_params.update(input_params or {})
@@ -265,9 +267,31 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
         captured_exec_data.update(exec_data)
 
+    async def _fake_record_execution_step(exec_id, step_index, step):  # noqa: ANN001
+        recorded_steps.append((exec_id, step_index, step))
+        return step
+
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
         large_alert = {"raw_log_id": "alert-1", "req_body": "x" * 50_000}
+        kwargs["on_step_complete"](
+            SimpleNamespace(
+                model_dump=lambda mode="json": {
+                    "node_id": "receive_alert",
+                    "inputs": {"kafka_message": {"alarmData": "x" * 50_000}},
+                    "outputs": {"raw_alerts": [large_alert]},
+                }
+            )
+        )
+        kwargs["on_step_complete"](
+            SimpleNamespace(
+                model_dump=lambda mode="json": {
+                    "node_id": "dedup_and_write",
+                    "inputs": {"filtered_alerts": [large_alert]},
+                    "outputs": {"enriched_alerts": [large_alert]},
+                }
+            )
+        )
         return SimpleNamespace(
             status="SUCCEEDED",
             error=None,
@@ -275,18 +299,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
                 "enriched_alerts": [large_alert],
                 "kafka_messages": [{"raw_log_id": "alert-1"}],
             },
-            history=[
-                {
-                    "node_id": "receive_alert",
-                    "inputs": {"kafka_message": {"alarmData": "x" * 50_000}},
-                    "outputs": {"raw_alerts": [large_alert]},
-                },
-                {
-                    "node_id": "dedup_and_write",
-                    "inputs": {"filtered_alerts": [large_alert]},
-                    "outputs": {"enriched_alerts": [large_alert]},
-                },
-            ],
+            history=[],
             last_node_id="done",
             steps=2,
         )
@@ -294,6 +307,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
     await manager._trigger_workflow(
         "wf-compact",
@@ -305,12 +319,18 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     assert captured_input_params["kafka_message"]["alarmData"]["_type"] == "string"
     assert captured_input_params["kafka_message"]["alarmData"]["chars"] == 50_000
     assert captured_run_kwargs["history_mode"] == "summary"
+    assert callable(captured_run_kwargs["on_step_complete"])
     assert captured_exec_data["outputResults"] == {
         "_enriched_alerts_count": 1,
         "_kafka_messages_count": 1,
     }
-    assert captured_exec_data["executionLog"][0]["outputs"] == {"_raw_alerts_count": 1}
-    assert captured_exec_data["executionLog"][1]["inputs"] == {"_filtered_alerts_count": 1}
+    assert captured_exec_data["executionLog"] == []
+    assert captured_exec_data["stepCount"] == 2
+    assert recorded_steps[0][0] == "exec-compact"
+    assert recorded_steps[0][1] == 1
+    assert recorded_steps[0][2]["outputs"] == {"_raw_alerts_count": 1}
+    assert recorded_steps[1][1] == 2
+    assert recorded_steps[1][2]["inputs"] == {"_filtered_alerts_count": 1}
     assert len(json.dumps(captured_exec_data, ensure_ascii=False)) < 10_000
 
 
