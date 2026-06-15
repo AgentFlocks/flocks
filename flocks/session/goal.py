@@ -27,11 +27,13 @@ GoalVerdict = Literal["complete", "blocked", "continue", "waiting", "inactive"]
 _MODEL_JUDGE_SYSTEM_PROMPT = """You are a strict goal completion judge.
 
 Return only valid JSON with exactly this shape:
-{"done": true|false, "reason": "one sentence"}
+{"verdict": "complete|blocked|waiting|continue", "reason": "one sentence"}
 
 Judging rules:
-- done=true only if the assistant's latest final response explicitly confirms the goal is complete, the requested deliverable is clearly produced, or the goal is impossible/blocked and the response clearly says why.
-- done=false if work remains, the assistant only made partial progress, the assistant asks the user for more input/clarification/approval, or the latest response is ambiguous.
+- verdict=complete only if the assistant's latest final response explicitly confirms the goal is complete or the requested deliverable is clearly produced.
+- verdict=blocked only if the latest response clearly says the goal cannot be completed and gives the specific blocker.
+- verdict=waiting if the assistant asks the user for more input, clarification, confirmation, approval, credentials, or any other user action before work can continue.
+- verdict=continue if work remains and the assistant can keep taking concrete steps without user input.
 - The reason must be concise and grounded only in the provided goal, user clarification, and latest response.
 - Keep the entire JSON response under 200 characters.
 - Do not include markdown, code fences, or any text outside the JSON object.
@@ -201,17 +203,14 @@ async def judge_goal_with_model(
     )
 
     payload = _extract_json_object(response.content)
-    done = payload.get("done")
+    verdict = str(payload.get("verdict") or "").strip().lower()
     reason = _trim_reason(str(payload.get("reason") or ""))
-    if not isinstance(done, bool):
-        raise ValueError("judge JSON field 'done' must be a boolean")
+    if verdict not in {"complete", "blocked", "waiting", "continue"}:
+        raise ValueError("judge JSON field 'verdict' must be one of complete, blocked, waiting, continue")
     if not reason:
         reason = "model judge returned no reason"
 
-    if not done:
-        return "continue", reason
-
-    return "complete", reason
+    return verdict, reason
 
 
 class GoalManager:
@@ -237,6 +236,15 @@ class GoalManager:
         state.updated_at = _now()
         await Storage.set(_goal_key(session_id), state.model_dump(exclude_none=True), "goal")
         return state
+
+    @classmethod
+    async def clear(cls, session_id: str) -> bool:
+        """Remove any persisted goal state for a session."""
+        try:
+            return await Storage.delete(_goal_key(session_id))
+        except Exception as exc:
+            log.warn("goal.clear.error", {"session_id": session_id, "error": str(exc)})
+            return False
 
     @classmethod
     async def set_goal(

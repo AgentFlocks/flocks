@@ -77,12 +77,24 @@ async def test_goal_records_only_first_initial_clarification():
 
 
 @pytest.mark.asyncio
+async def test_goal_clear_removes_persisted_state():
+    session_id = "goal_clear_session"
+    await GoalManager.set_goal(session_id, "make it work")
+
+    deleted = await GoalManager.clear(session_id)
+    state = await GoalManager.get(session_id)
+
+    assert deleted is True
+    assert state is None
+
+
+@pytest.mark.asyncio
 async def test_goal_evaluation_completes_when_judge_finds_done():
     session_id = "goal_complete_session"
     await GoalManager.set_goal(session_id, "finish implementation")
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": true, "reason": "The final response says the implementation and tests are complete."}'
+            content='{"verdict": "complete", "reason": "The final response says the implementation and tests are complete."}'
         ))
     )
 
@@ -102,12 +114,12 @@ async def test_goal_evaluation_completes_when_judge_finds_done():
 
 
 @pytest.mark.asyncio
-async def test_goal_evaluation_completes_when_judge_finds_goal_unachievable():
+async def test_goal_evaluation_blocks_when_judge_finds_goal_unachievable():
     session_id = "goal_blocked_session"
     await GoalManager.set_goal(session_id, "finish implementation")
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": true, "reason": "The repository is unavailable, so the goal is blocked."}'
+            content='{"verdict": "blocked", "reason": "The repository is unavailable, so the goal is blocked."}'
         ))
     )
 
@@ -120,10 +132,10 @@ async def test_goal_evaluation_completes_when_judge_finds_goal_unachievable():
         )
     state = await GoalManager.get(session_id)
 
-    assert decision.verdict == "complete"
+    assert decision.verdict == "blocked"
     assert decision.should_continue is False
     assert state is not None
-    assert state.status == "completed"
+    assert state.status == "blocked"
 
 
 @pytest.mark.asyncio
@@ -132,7 +144,7 @@ async def test_goal_evaluation_waits_when_agent_asks_for_clarification():
     await GoalManager.set_goal(session_id, "write tests 10 times")
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": false, "reason": "The assistant is asking the user for clarification."}'
+            content='{"verdict": "waiting", "reason": "The assistant is asking the user for clarification."}'
         ))
     )
 
@@ -145,11 +157,12 @@ async def test_goal_evaluation_waits_when_agent_asks_for_clarification():
         )
     state = await GoalManager.get(session_id)
 
-    assert decision.verdict == "continue"
-    assert decision.should_continue is True
+    assert decision.verdict == "waiting"
+    assert decision.should_continue is False
+    assert decision.reason == "The assistant is asking the user for clarification."
     assert state is not None
     assert state.status == "active"
-    assert state.last_verdict == "continue"
+    assert state.last_verdict == "waiting"
 
 
 @pytest.mark.asyncio
@@ -178,7 +191,7 @@ async def test_goal_evaluation_continues_until_budget_then_pauses():
     state = await GoalManager.set_goal(session_id, "keep going", max_turns=1)
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": false, "reason": "The work is not complete yet."}'
+            content='{"verdict": "continue", "reason": "The work is not complete yet."}'
         ))
     )
 
@@ -204,7 +217,7 @@ async def test_goal_evaluation_uses_model_judge_when_provider_model_are_availabl
     await GoalManager.set_goal(session_id, "finish implementation")
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": true, "reason": "The final response says the implementation and tests are complete."}'
+            content='{"verdict": "complete", "reason": "The final response says the implementation and tests are complete."}'
         ))
     )
 
@@ -232,7 +245,7 @@ async def test_goal_model_judge_receives_initial_clarification():
     )
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": false, "reason": "The response says more work remains."}'
+            content='{"verdict": "continue", "reason": "The response says more work remains."}'
         ))
     )
 
@@ -258,7 +271,7 @@ async def test_goal_model_judge_uses_provider_options_without_main_token_budget(
     await GoalManager.set_goal(session_id, "finish implementation")
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": true, "reason": "The final response says the goal is complete."}'
+            content='{"verdict": "complete", "reason": "The final response says the goal is complete."}'
         ))
     )
 
@@ -288,7 +301,7 @@ async def test_goal_evaluation_continues_when_model_judge_says_not_done():
     await GoalManager.set_goal(session_id, "finish implementation")
     provider = SimpleNamespace(
         chat=AsyncMock(return_value=SimpleNamespace(
-            content='{"done": false, "reason": "The response says more work remains."}'
+            content='{"verdict": "continue", "reason": "The response says more work remains."}'
         ))
     )
 
@@ -304,6 +317,30 @@ async def test_goal_evaluation_continues_when_model_judge_says_not_done():
     assert decision.verdict == "continue"
     assert decision.should_continue is True
     assert decision.reason == "The response says more work remains."
+
+
+@pytest.mark.asyncio
+async def test_goal_evaluation_waits_when_model_judge_returns_legacy_done_schema():
+    session_id = "goal_legacy_done_schema_session"
+    await GoalManager.set_goal(session_id, "finish implementation")
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=SimpleNamespace(
+            content='{"done": false, "reason": "The assistant is asking the user for clarification."}'
+        ))
+    )
+
+    with patch("flocks.session.goal.Provider.get", return_value=provider):
+        decision = await GoalManager.evaluate_after_turn(
+            session_id,
+            "Please clarify which tests to run.",
+            provider_id="test-provider",
+            model_id="test-model",
+        )
+
+    provider.chat.assert_awaited_once()
+    assert decision.verdict == "waiting"
+    assert decision.should_continue is False
+    assert decision.reason == "goal judge failed; waiting instead of continuing autonomously"
 
 
 @pytest.mark.asyncio

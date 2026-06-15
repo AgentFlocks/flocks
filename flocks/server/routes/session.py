@@ -3979,11 +3979,13 @@ async def _clear_session_history(sessionID: str) -> int:
         )
 
     from flocks.server.routes.event import publish_event
+    from flocks.session.goal import GoalManager
     from flocks.session.interaction_queue import InteractionQueue
     from flocks.session.message import Message
 
     await abort_session(sessionID)
     await InteractionQueue.clear(sessionID)
+    await GoalManager.clear(sessionID)
     try:
         await _publish_prompt_queue(sessionID)
     except Exception as exc:
