@@ -29,10 +29,12 @@ import {
   alertDenoiseDailySummary,
   deepInvestigations,
   incidentClusters,
+  responseActions,
 } from './mockData';
 
 type IncidentCluster = typeof incidentClusters[number];
 type DeepInvestigation = typeof deepInvestigations[number];
+type ResponseAction = typeof responseActions[number];
 type DenoiseCategory = typeof alertDenoiseDailySummary.categories[number];
 type DenoiseCategoryKey = DenoiseCategory['key'];
 type InvestigationSessionMessage = {
@@ -75,7 +77,7 @@ export default function SocAlertsPage() {
 }
 
 function AlertsOperation() {
-  const [activeTab, setActiveTab] = useState<'denoise' | 'triage' | 'investigation'>('triage');
+  const [activeTab, setActiveTab] = useState<'denoise' | 'triage' | 'investigation' | 'response'>('investigation');
 
   return (
     <div className="space-y-4">
@@ -121,14 +123,22 @@ function AlertsOperation() {
               icon={<Bot className="h-4 w-4" />}
               label="深度调查"
             />
+            <TabButton
+              active={activeTab === 'response'}
+              onClick={() => setActiveTab('response')}
+              icon={<ListChecks className="h-4 w-4" />}
+              label="响应处置"
+            />
           </div>
           {activeTab === 'triage' && <Badge tone="red">5 条 NDR 待研判</Badge>}
+          {activeTab === 'response' && <Badge tone="green">{responseActions.length} 条待处置</Badge>}
         </div>
 
         <div className="p-3">
           {activeTab === 'denoise' && <DenoiseAnalysis />}
           {activeTab === 'triage' && <TriageResult />}
           {activeTab === 'investigation' && <InvestigationResult />}
+          {activeTab === 'response' && <ResponseActionsResult />}
         </div>
       </div>
     </div>
@@ -654,6 +664,52 @@ function ListDenoiseReport() {
   );
 }
 
+function ResponseActionsResult() {
+  const pendingCount = responseActions.filter((item) => item.status === '待执行').length;
+  const processingCount = responseActions.filter((item) => item.status === '处理中').length;
+  const confirmCount = responseActions.filter((item) => item.status === '待确认').length;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-col gap-2 py-1 lg:flex-row lg:items-center lg:justify-between">
+        <SectionTitle
+          icon={<ListChecks className="h-5 w-5" />}
+          title="响应处置清单"
+          subtitle="汇总降噪扫描、告警研判和深度调查产生的处置动作，当前全部为 mock 数据。"
+        />
+        <div className="flex flex-wrap gap-2 text-xs font-semibold text-gray-600">
+          <span>待执行 {pendingCount}</span>
+          <span>处理中 {processingCount}</span>
+          <span>待确认 {confirmCount}</span>
+        </div>
+      </div>
+      <MockTable
+        headers={['动作 ID', '来源', '优先级', '处置对象', '处置动作', '关键证据', '责任组', '状态', '操作']}
+        rows={responseActions.map((item) => [
+          <span className="font-mono text-gray-900">{item.id}</span>,
+          item.source,
+          <Badge tone={item.priority === 'P1' ? 'red' : 'orange'}>{item.priority}</Badge>,
+          <span className="font-mono text-xs text-gray-900">{item.object}</span>,
+          <span className="font-medium text-gray-900">{item.action}</span>,
+          item.evidence,
+          item.owner,
+          <Badge tone={getResponseStatusTone(item)}>{item.status}</Badge>,
+          <div className="flex gap-2">
+            <button type="button" className="whitespace-nowrap text-red-600 hover:text-red-700">生成工单</button>
+            <button type="button" className="whitespace-nowrap text-gray-500 hover:text-gray-700">查看来源</button>
+          </div>,
+        ])}
+      />
+    </div>
+  );
+}
+
+function getResponseStatusTone(item: ResponseAction) {
+  if (item.status === '待执行') return 'red';
+  if (item.status === '处理中') return 'orange';
+  return 'blue';
+}
+
 function TriageResult() {
   const [selectedIncident, setSelectedIncident] = useState<IncidentCluster | null>(null);
 
@@ -713,6 +769,7 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
   const [stepsOpen, setStepsOpen] = useState(false);
   const steps = buildAnalysisSteps(incident);
   const isSuccess = incident.conclusion.verdict.includes('成功') || incident.conclusion.verdict.includes('成立');
+  const isPhishing = incident.title.includes('钓鱼');
 
   return (
     <div className="fixed inset-0 z-[70]">
@@ -789,12 +846,20 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
               </div>
               <h1 className="text-2xl font-bold tracking-normal text-gray-950">{getReportTitle(incident)}</h1>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600 lg:grid-cols-4">
-                {[
-                  ['源 IP', incident.srcIp],
-                  ['目标资产', incident.asset.name],
-                  ['响应码', `${incident.response.statusCode}`],
-                  ['置信度', `${incident.confidence}%`],
-                ].map(([label, value]) => (
+                {(isPhishing
+                  ? [
+                      ['源终端', incident.srcIp],
+                      ['访问 URL', incident.asset.name],
+                      ['微步标签', '钓鱼URL'],
+                      ['置信度', `${incident.confidence}%`],
+                    ]
+                  : [
+                      ['源 IP', incident.srcIp],
+                      ['目标资产', incident.asset.name],
+                      ['响应码', `${incident.response.statusCode}`],
+                      ['置信度', `${incident.confidence}%`],
+                    ]
+                ).map(([label, value]) => (
                   <div key={label} className="rounded-md bg-gray-50 px-3 py-2">
                     <span className="text-gray-400">{label}</span>
                     <span className="ml-2 font-semibold text-gray-800">{value}</span>
@@ -808,27 +873,54 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
                 {incident.title.includes('WordPress') && '攻击者试图利用 updatexml 函数执行 SQL 注入操作以获取数据库用户信息。从返回包判断，攻击者已经成功获取用户信息。相关漏洞“Wordpress -develop 等产品 SQL 注入漏洞”（CVE-2022-21661）。'}
               </p>
 
-              <ReportHeading>攻击payload</ReportHeading>
-              <ReportCodeBlock code={incident.request.payload} />
-              <p className="mt-4 text-sm font-semibold leading-7">具体含义解释：</p>
-              <ol className="mt-2 list-decimal space-y-2 pl-6 text-sm leading-7">
-                {getPayloadNotes(incident).map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
-              </ol>
+              {isPhishing ? (
+                <>
+                  <ReportHeading>微步情报命中</ReportHeading>
+                  <div className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm leading-7 text-gray-800">
+                    <div><span className="font-semibold text-gray-950">命中 URL：</span>hxxps://invoice-check.example/login</div>
+                    <div><span className="font-semibold text-gray-950">情报来源：</span>微步在线威胁情报</div>
+                    <div><span className="font-semibold text-gray-950">情报标签：</span>钓鱼 URL、凭证采集、仿冒供应商对账登录页</div>
+                    <div><span className="font-semibold text-gray-950">风险说明：</span>该 URL 被标记为钓鱼登录页，风险判断主要来自情报标签；请求体和响应体只作为访问事实补充，不作为核心判据。</div>
+                  </div>
+                  <ReportHeading>访问事实</ReportHeading>
+                  <p className="text-sm leading-7">
+                    NDR 记录到财务网段终端 {incident.srcIp} 访问上述钓鱼 URL。当前告警没有复杂攻击 payload，响应体内容也不是判断重点；需要优先确认访问者身份、邮件投递来源以及是否发生凭证提交。
+                  </p>
+                </>
+              ) : (
+                <>
+                  <ReportHeading>攻击payload</ReportHeading>
+                  <ReportCodeBlock code={incident.request.payload} />
+                  <p className="mt-4 text-sm font-semibold leading-7">具体含义解释：</p>
+                  <ol className="mt-2 list-decimal space-y-2 pl-6 text-sm leading-7">
+                    {getPayloadNotes(incident).map((note) => (
+                      <li key={note}>{note}</li>
+                    ))}
+                  </ol>
 
-              <p className="mt-5 text-sm font-semibold leading-7">{getResponseIntro(incident)}</p>
-              <ReportCodeBlock code={getResponseExample(incident)} />
-              <p className="mt-4 text-sm leading-7">{incident.request.llmAnalysis}</p>
-              <p className="mt-3 text-sm leading-7">{incident.response.llmAnalysis}</p>
+                  <p className="mt-5 text-sm font-semibold leading-7">{getResponseIntro(incident)}</p>
+                  <ReportCodeBlock code={getResponseExample(incident)} />
+                  <p className="mt-4 text-sm leading-7">{incident.request.llmAnalysis}</p>
+                  <p className="mt-3 text-sm leading-7">{incident.response.llmAnalysis}</p>
+                </>
+              )}
 
               <ReportHeading>重要证据</ReportHeading>
-              <ol className="list-decimal space-y-2 pl-6 text-sm leading-7">
-                <li>关联信息：{incident.asset.name} 的日志与 NDR 流量中出现非预期请求，命中规则 {incident.ndrRule}，请求证据包含 {incident.request.evidence.join('、')}。</li>
-                <li>威胁情报显示 {incident.srcIp} 判定为{incident.srcIntel.verdict}，{incident.srcIntel.summary}</li>
-                <li>资产信息显示目标为 {incident.asset.business}，暴露面为{incident.asset.exposure}，{incident.asset.context}</li>
-                <li>响应分析显示状态码为 {incident.response.statusCode}，关键证据包括 {incident.response.evidence.join('、')}。</li>
-              </ol>
+              {isPhishing ? (
+                <ol className="list-decimal space-y-2 pl-6 text-sm leading-7">
+                  <li>微步情报显示访问 URL hxxps://invoice-check.example/login 被标记为钓鱼 URL，标签包含凭证采集和仿冒供应商对账登录页。</li>
+                  <li>NDR 记录到源终端 {incident.srcIp} 访问该 URL，说明企业内部用户已经触达风险站点。</li>
+                  <li>源终端上下文显示该地址属于财务网段，{incident.srcIntel.summary}</li>
+                  <li>该告警需要和深度调查 INV-2026-0522-001 的邮件网关、EDR、OA 证据关联，确认邮件投递、点击用户和凭证提交风险。</li>
+                </ol>
+              ) : (
+                <ol className="list-decimal space-y-2 pl-6 text-sm leading-7">
+                  <li>关联信息：{incident.asset.name} 的日志与 NDR 流量中出现非预期请求，命中规则 {incident.ndrRule}，请求证据包含 {incident.request.evidence.join('、')}。</li>
+                  <li>威胁情报显示 {incident.srcIp} 判定为{incident.srcIntel.verdict}，{incident.srcIntel.summary}</li>
+                  <li>资产信息显示目标为 {incident.asset.business}，暴露面为{incident.asset.exposure}，{incident.asset.context}</li>
+                  <li>响应分析显示状态码为 {incident.response.statusCode}，关键证据包括 {incident.response.evidence.join('、')}。</li>
+                </ol>
+              )}
 
               <ReportHeading>处置建议</ReportHeading>
               <ol className="list-decimal space-y-2 pl-6 text-sm leading-7">
@@ -881,6 +973,31 @@ function ReportCodeBlock({ code }: { code: string }) {
 
 function buildAnalysisSteps(incident: IncidentCluster) {
   const firstSql = incident.title.includes('WordPress');
+  const phishing = incident.title.includes('钓鱼');
+  if (phishing) {
+    return [
+      {
+        title: 'NDR 访问事实确认',
+        content: `NDR 记录到源终端 ${incident.srcIp} 访问 ${incident.request.payload}。该告警没有复杂攻击 payload，网络侧核心价值是确认企业内部终端已经触达外部风险 URL。`,
+      },
+      {
+        title: '微步 URL 情报命中',
+        content: '将访问 URL 提交微步在线威胁情报查询后，返回钓鱼 URL 标签，威胁类型为 credential-phishing，场景为 fake-invoice-portal，说明该地址被用于仿冒供应商对账登录页收集账号密码。',
+      },
+      {
+        title: '源终端身份确认',
+        content: `${incident.srcIp} 位于办公网财务网段，关联用户 li.yan。用户为财务实习生，入职时间短，和供应商对账主题具备业务诱导相关性。`,
+      },
+      {
+        title: '邮件点击链路关联',
+        content: '该 URL 情报命中需要继续关联邮件网关与终端侧证据，确认是否存在同主题邮件投递、Outlook 拉起浏览器访问、以及是否还有其他收件人触达同一钓鱼 URL。',
+      },
+      {
+        title: '研判结论',
+        content: `核心证据为微步钓鱼 URL 标签和 NDR 访问事实。请求体与响应体不是主要判定依据，当前结论为：${incident.conclusion.verdict}。建议转入深度调查并执行账号冻结、密码重置和同主题邮件收件人检索。`,
+      },
+    ];
+  }
   return [
     {
       title: '日志类型分析',
@@ -918,7 +1035,7 @@ function buildAnalysisSteps(incident: IncidentCluster) {
 
 function getReportTitle(incident: IncidentCluster) {
   if (incident.title.includes('SQL')) return 'SQL注入攻击分析报告';
-  if (incident.title.includes('钓鱼')) return '钓鱼登录口访问分析报告';
+  if (incident.title.includes('钓鱼')) return '钓鱼URL情报命中分析报告';
   if (incident.title.includes('Log4Shell')) return 'Log4Shell漏洞利用分析报告';
   if (incident.title.includes('命令注入')) return '命令注入攻击分析报告';
   if (incident.title.includes('远控')) return 'WebShell远控执行分析报告';

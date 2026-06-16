@@ -21,8 +21,8 @@ const sceneCards = [
     stat: '1,023',
     label: '降噪后告警',
     metrics: [
-      { value: '5', label: '待研判' },
-      { value: '20', label: '待处置' },
+      { value: '5', label: '事件待确认' },
+      { value: '20', label: '待处置动作' },
     ],
     action: '确认攻击成功性，处理封禁、修复、复测建议',
   },

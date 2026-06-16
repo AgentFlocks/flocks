@@ -416,7 +416,7 @@ export default function Layout() {
       : 'agent';
 
   const workspaceTabs: Array<{ id: WorkspaceId; name: string; href: string; icon: typeof Bot }> = [
-    { id: 'agent', name: t('agentWorkspace'), href: '/sessions', icon: Bot },
+    { id: 'agent', name: t('agentWorkspace'), href: '/', icon: Bot },
     { id: 'soc', name: t('socWorkspace'), href: '/soc', icon: Shield },
     { id: 'system', name: t('systemCenter'), href: '/config', icon: UserCog },
   ];
