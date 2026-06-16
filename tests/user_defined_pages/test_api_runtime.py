@@ -157,6 +157,35 @@ async def test_api_runtime_rejects_oversized_request_body(runtime_store: UserDef
 
 
 @pytest.mark.asyncio
+async def test_api_runtime_treats_client_disconnect_as_closed_request(runtime_store: UserDefinedPagesStore):
+    runtime = UserDefinedPageApiRuntime(runtime_store)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/user-defined-pages/runtime-page/api/echo",
+            "raw_path": b"/api/user-defined-pages/runtime-page/api/echo",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        },
+        receive,
+    )
+
+    response = await runtime.dispatch("runtime-page", "echo", request, {"role": "admin"})
+
+    assert response.status_code == 499
+
+
+@pytest.mark.asyncio
 async def test_api_runtime_blocks_non_local_imports(runtime_store: UserDefinedPagesStore, runtime_app: FastAPI):
     runtime_store.save_source_file(
         "runtime-page",
