@@ -111,6 +111,7 @@ async def test_publish_invoke_stop_workflow_service(
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(Config, "_global_config", None)
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_DRIVER", "docker")
+    monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PIP_INDEX_URL", "https://mirror.example/simple")
     scanned = await center.scan_skill_workflows()
     workflow_id = scanned[0]["workflowId"]
 
@@ -158,6 +159,8 @@ async def test_publish_invoke_stop_workflow_service(
     assert "/runtime" in run_call[0][run_call[0].index("-w") + 1]
     assert "-e" in run_call[0]
     assert f"FLOCKS_WORKFLOW_SERVICE_API_KEY={published['apiKey']}" in run_call[0]
+    assert "PIP_INDEX_URL=https://mirror.example/simple" in run_call[0]
+    assert "UV_DEFAULT_INDEX=https://mirror.example/simple" in run_call[0]
     assert json_post_calls
     assert json_post_calls[0][0][0] == "http://127.0.0.1:19123/invoke"
     assert json_post_calls[0][0][3] == {"x-api-key": published["apiKey"]}

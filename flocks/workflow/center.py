@@ -28,6 +28,7 @@ from flocks.sandbox.docker import docker_container_state, exec_docker
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.models import Workflow
+from flocks.workflow.requirements import resolve_python_package_index_url
 from flocks.workflow.visibility import is_hidden_workflow
 
 log = Log.create(service="workflow.center")
@@ -835,6 +836,14 @@ async def _publish_workflow_docker(
             proxy_injections.extend(["-e", f"{env_name}={env_value}"])
     if proxy_injections:
         cmd[cmd.index(image_name):cmd.index(image_name)] = proxy_injections
+    python_index_url = resolve_python_package_index_url()
+    if python_index_url:
+        cmd[cmd.index(image_name):cmd.index(image_name)] = [
+            "-e",
+            f"PIP_INDEX_URL={python_index_url}",
+            "-e",
+            f"UV_DEFAULT_INDEX={python_index_url}",
+        ]
     if runtime_install:
         if has_requirements_snapshot:
             # Pre-install all pinned deps from requirements.txt (no resolver = fast),

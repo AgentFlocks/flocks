@@ -2067,8 +2067,126 @@ def _api_service_key(workflow_id: str) -> str:
     return f"{_API_SERVICE_PREFIX}{workflow_id}"
 
 
+def _workflow_id_from_api_service_key(key: Any) -> str:
+    return str(key).removeprefix(_API_SERVICE_PREFIX)
+
+
 def _kafka_config_key(workflow_id: str) -> str:
     return f"{_KAFKA_CONFIG_PREFIX}{workflow_id}"
+
+
+async def _prepare_workflow_api_registry(workflow_id: str) -> tuple[Dict[str, Any], int]:
+    """Write the current workflow snapshot to the workflow center registry."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise WorkflowNotFoundError(f"Workflow not found: {workflow_id}")
+
+    workflow_json = data["workflowJson"]
+    service_dir = Config.get_data_path() / "workflow-services" / "workflows" / workflow_id
+    service_dir.mkdir(parents=True, exist_ok=True)
+    workflow_path = service_dir / "workflow.json"
+    workflow_path.write_text(json.dumps(workflow_json), encoding="utf-8")
+
+    fp = hashlib.sha256(workflow_path.read_bytes()).hexdigest()
+    now_ms = int(time.time() * 1000)
+
+    existing_registry = await Storage.read(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}") or {}
+    registry_entry = {
+        "workflowId": workflow_id,
+        "name": data["name"],
+        "sourceType": "main_storage",
+        "workflowPath": str(workflow_path),
+        "fingerprint": fp,
+        "publishStatus": "unpublished",
+        "registeredAt": existing_registry.get("registeredAt", now_ms),
+        "updatedAt": now_ms,
+    }
+    await Storage.write(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
+    return data, now_ms
+
+
+def _workflow_api_autostart_enabled() -> bool:
+    raw = os.getenv("FLOCKS_WORKFLOW_API_AUTOSTART", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _service_driver_from_record(service: Dict[str, Any]) -> Optional[Literal["local", "docker"]]:
+    driver = str(service.get("driver") or "").strip().lower()
+    if driver in {"local", "docker"}:
+        return driver  # type: ignore[return-value]
+    return None
+
+
+def _is_manually_stopped_service(service: Dict[str, Any]) -> bool:
+    return str(service.get("status") or "").strip().lower() == "stopped" and bool(service.get("stoppedAt"))
+
+
+async def reconcile_published_workflow_api_services() -> Dict[str, int]:
+    """Restart persisted workflow API services after the main server restarts."""
+    stats = {"checked": 0, "healthy": 0, "restarted": 0, "failed": 0, "skipped": 0}
+    if not _workflow_api_autostart_enabled():
+        return stats
+
+    keys = await Storage.list_keys(_API_SERVICE_PREFIX)
+    for key in keys:
+        service = await Storage.read(key)
+        if not isinstance(service, dict):
+            continue
+
+        workflow_id = str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
+        if _is_manually_stopped_service(service):
+            stats["skipped"] += 1
+            continue
+
+        stats["checked"] += 1
+        try:
+            health = await get_workflow_health(workflow_id)
+        except Exception as exc:
+            health = {"ok": False, "error": str(exc)}
+
+        if health.get("ok"):
+            service["status"] = "running"
+            service["health"] = health
+            await Storage.write(_api_service_key(workflow_id), service)
+            stats["healthy"] += 1
+            continue
+
+        now_ms = int(time.time() * 1000)
+        service["lastStartAttemptAt"] = now_ms
+        try:
+            data, _ = await _prepare_workflow_api_registry(workflow_id)
+            active_record = await publish_workflow(
+                workflow_id,
+                image=service.get("image") or None,
+                driver=_service_driver_from_record(service),
+                api_key=service.get("apiKey") or None,
+            )
+
+            service_url = active_record.get("serviceUrl", "")
+            service.update({
+                "workflowId": workflow_id,
+                "workflowName": service.get("workflowName") or data["name"],
+                "serviceUrl": service_url,
+                "invokeUrl": f"{service_url}/invoke",
+                "apiKey": service.get("apiKey") or active_record.get("apiKey"),
+                "status": "running",
+                "containerName": active_record.get("containerName", ""),
+                "driver": active_record.get("driver") or service.get("driver"),
+                "image": active_record.get("image") or service.get("image"),
+                "restartedAt": int(time.time() * 1000),
+            })
+            service.pop("lastStartError", None)
+            service["health"] = {"ok": True, "restarted": True}
+            await Storage.write(_api_service_key(workflow_id), service)
+            stats["restarted"] += 1
+        except Exception as exc:
+            service["status"] = "error"
+            service["health"] = health
+            service["lastStartError"] = str(exc)
+            await Storage.write(_api_service_key(workflow_id), service)
+            log.warning("workflow.api.autostart_failed", {"id": workflow_id, "error": str(exc)})
+            stats["failed"] += 1
+    return stats
 
 
 class WorkflowServiceResponse(BaseModel):
@@ -2081,6 +2199,7 @@ class WorkflowServiceResponse(BaseModel):
     publishedAt: int
     containerName: Optional[str] = None
     driver: Optional[Literal["local", "docker"]] = None
+    image: Optional[str] = None
 
 
 class KafkaConfigRequest(BaseModel):
@@ -2175,33 +2294,7 @@ async def publish_workflow_as_api(
     starts the selected runtime, and returns the service URL and generated API key.
     """
     try:
-        data = _read_workflow_from_fs(workflow_id)
-        if not data:
-            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
-
-        workflow_json = data["workflowJson"]
-
-        # Write workflow JSON to a stable path that center.py can read
-        service_dir = Config.get_data_path() / "workflow-services" / "workflows" / workflow_id
-        service_dir.mkdir(parents=True, exist_ok=True)
-        workflow_path = service_dir / "workflow.json"
-        workflow_path.write_text(json.dumps(workflow_json), encoding="utf-8")
-
-        fp = hashlib.sha256(workflow_path.read_bytes()).hexdigest()
-        now_ms = int(time.time() * 1000)
-
-        existing_registry = await Storage.read(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}") or {}
-        registry_entry = {
-            "workflowId": workflow_id,
-            "name": data["name"],
-            "sourceType": "main_storage",
-            "workflowPath": str(workflow_path),
-            "fingerprint": fp,
-            "publishStatus": "unpublished",
-            "registeredAt": existing_registry.get("registeredAt", now_ms),
-            "updatedAt": now_ms,
-        }
-        await Storage.write(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
+        data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
         # Preserve existing API key across re-publishes so callers don't break.
         # The runtime must receive the same key before it starts so /invoke can
@@ -2221,6 +2314,7 @@ async def publish_workflow_as_api(
         invoke_url = f"{service_url}/invoke"
         container_name = active_record.get("containerName", "")
         driver = active_record.get("driver") or (req.driver if req else None)
+        image = active_record.get("image") or (req.image if req else None)
 
         service_info = {
             "workflowId": workflow_id,
@@ -2232,11 +2326,14 @@ async def publish_workflow_as_api(
             "publishedAt": now_ms,
             "containerName": container_name,
             "driver": driver,
+            "image": image,
         }
         await Storage.write(_api_service_key(workflow_id), service_info)
 
         log.info("workflow.api.published", {"id": workflow_id, "url": service_url})
         return service_info
+    except WorkflowNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except WorkflowCenterError as e:
@@ -2282,17 +2379,7 @@ async def get_workflow_service(workflow_id: str):
     Returns null if not published.
     """
     try:
-        service = await Storage.read(_api_service_key(workflow_id))
-        if isinstance(service, dict) and service.get("status") == "running":
-            try:
-                health = await get_workflow_health(workflow_id)
-            except Exception:
-                health = {}
-            if health and not health.get("ok"):
-                service["status"] = "error" if health.get("published") else "stopped"
-                service["health"] = health
-                await Storage.write(_api_service_key(workflow_id), service)
-        return service  # None / null if not found
+        return await Storage.read(_api_service_key(workflow_id))  # None / null if not found
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
