@@ -18,6 +18,7 @@ from typing import Any, Optional
 import yaml
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
+from starlette.requests import ClientDisconnect
 
 from flocks.user_defined_pages.models import UserDefinedPageApiMeta
 from flocks.user_defined_pages.store import UserDefinedPagesStore
@@ -30,6 +31,7 @@ _DEFAULT_TIMEOUT_MS = 5000
 _MAX_TIMEOUT_MS = 30000
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_REQUEST_BODY_BYTES = 1_000_000
+_CLIENT_CLOSED_REQUEST_STATUS = 499
 _STDLIB_DIR = Path(sysconfig.get_paths()["stdlib"]).resolve()
 
 
@@ -98,7 +100,14 @@ class UserDefinedPageApiRuntime:
         page_id = self._store.validate_page_id(page_id)
         if not self._store.page_dir(page_id).is_dir():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"page not found: {page_id}")
-        await self._guard_request_size(request)
+        try:
+            await self._guard_request_size(request)
+        except ClientDisconnect:
+            log.info(
+                "user_defined_pages.api.client_disconnected",
+                {"pageId": page_id, "method": request.method, "path": request.url.path},
+            )
+            return Response(status_code=_CLIENT_CLOSED_REQUEST_STATUS)
 
         runtime = await self._load_page_runtime(page_id, force_reload=False)
         normalized_path = "/" + api_path.strip("/")
