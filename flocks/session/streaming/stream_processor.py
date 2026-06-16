@@ -102,6 +102,12 @@ class StreamProcessor:
         reasoning_delta_callback: Optional[Callable[[str], Awaitable[None]]] = None,
         tool_start_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         tool_end_callback: Optional[Callable[[str, ToolResult], Awaitable[None]]] = None,
+        tool_checkpoint_callback: Optional[
+            Callable[[str, Dict[str, Any], MessageInfo], Awaitable[Optional[Dict[str, str]]]]
+        ] = None,
+        tool_patch_callback: Optional[
+            Callable[[MessageInfo, Dict[str, str]], Awaitable[None]]
+        ] = None,
         event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         config_data: Optional[Dict[str, Any]] = None,
         session_key: Optional[str] = None,
@@ -119,6 +125,8 @@ class StreamProcessor:
         self.reasoning_delta_callback = reasoning_delta_callback
         self.tool_start_callback = tool_start_callback
         self.tool_end_callback = tool_end_callback
+        self.tool_checkpoint_callback = tool_checkpoint_callback
+        self.tool_patch_callback = tool_patch_callback
         self.event_publish_callback = event_publish_callback
         self._config_data = config_data
         self._session_key = session_key or session_id
@@ -653,6 +661,20 @@ class StreamProcessor:
                         metadata={"sandbox": True, "blocked_by_policy": True},
                     )
                 else:
+                    rewind_checkpoint: Optional[Dict[str, str]] = None
+                    if self.tool_checkpoint_callback:
+                        try:
+                            rewind_checkpoint = await self.tool_checkpoint_callback(
+                                tool_name,
+                                tool_input,
+                                self.assistant_message,
+                            )
+                        except Exception as exc:
+                            log.debug("stream.rewind_checkpoint.start_failed", {
+                                "tool": tool_name,
+                                "error": str(exc),
+                            })
+
                     def _make_metadata_cb(
                         _part_id=tool_state.part_id,
                         _call_id=tool_call_id,
@@ -782,6 +804,17 @@ class StreamProcessor:
                         # errored, or interrupted tool state.
                         if cb and hasattr(cb, 'mark_finished'):
                             cb.mark_finished()
+                        if rewind_checkpoint and self.tool_patch_callback:
+                            try:
+                                await self.tool_patch_callback(
+                                    self.assistant_message,
+                                    rewind_checkpoint,
+                                )
+                            except Exception as exc:
+                                log.debug("stream.rewind_checkpoint.patch_failed", {
+                                    "tool": tool_name,
+                                    "error": str(exc),
+                                })
 
             # Hook pipeline: tool.execute.after
             try:

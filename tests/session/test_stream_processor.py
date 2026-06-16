@@ -59,6 +59,8 @@ def _make_processor(
     reasoning_callback=None,
     event_callback=None,
     abort_event=None,
+    tool_checkpoint_callback=None,
+    tool_patch_callback=None,
 ):
     return StreamProcessor(
         session_id=session_id,
@@ -67,6 +69,8 @@ def _make_processor(
         abort_event=abort_event,
         text_delta_callback=text_callback,
         reasoning_delta_callback=reasoning_callback,
+        tool_checkpoint_callback=tool_checkpoint_callback,
+        tool_patch_callback=tool_patch_callback,
         event_publish_callback=event_callback,
     )
 
@@ -399,6 +403,47 @@ class TestToolInputStart:
 # ---------------------------------------------------------------------------
 
 class TestToolCallExecution:
+    @pytest.mark.asyncio
+    async def test_tool_call_records_rewind_patch_around_execution(self):
+        events = []
+
+        async def _checkpoint(tool_name, tool_input, assistant_msg):
+            events.append(("checkpoint", tool_name, dict(tool_input), assistant_msg.id))
+            return {"snapshot": "hash-before-tool", "worktree": "/tmp/worktree"}
+
+        async def _record_patch(assistant_msg, checkpoint):
+            events.append(("patch", assistant_msg.id, checkpoint["snapshot"]))
+
+        async def _execute(*, tool_name, ctx, **kwargs):
+            events.append(("execute", tool_name, dict(kwargs)))
+            return ToolResult(success=True, output="ok", title=tool_name, metadata={})
+
+        proc = _make_processor(
+            tool_checkpoint_callback=_checkpoint,
+            tool_patch_callback=_record_patch,
+        )
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(side_effect=_execute),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_rewind", tool_name="write"))
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc_rewind",
+                    tool_name="write",
+                    input={"filePath": "code.py", "content": "updated"},
+                )
+            )
+
+        assert [event[0] for event in events] == ["checkpoint", "execute", "patch"]
+        assert events[0][1] == "write"
+        assert events[2][2] == "hash-before-tool"
+
     @pytest.mark.asyncio
     async def test_tool_call_executes_tool(self):
         proc = _make_processor()

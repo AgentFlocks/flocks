@@ -1301,6 +1301,17 @@ async def get_session_messages(
         from flocks.session.core.status import SessionStatus
 
         messages_with_parts = await Message.list_with_parts(sessionID, include_archived=True)
+        if session.revert and session.revert.message_id:
+            revert_index = next(
+                (
+                    index
+                    for index, msg_with_parts in enumerate(messages_with_parts)
+                    if msg_with_parts.info.id == session.revert.message_id
+                ),
+                None,
+            )
+            if revert_index is not None:
+                messages_with_parts = messages_with_parts[:revert_index]
         if sessionID not in SessionStatus.get_busy_session_ids():
             await abort_orphan_running_parts_in_messages(sessionID, messages_with_parts)
         if limit:

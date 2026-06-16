@@ -1088,15 +1088,27 @@ function getQueuedPromptText(item: QueuedPrompt): string {
   return typeof textPart?.text === 'string' ? textPart.text : '';
 }
 
-function getUserMessagePreview(message: Message, maxChars = 120): string {
-  const text = (message.parts || [])
+function getUserMessageText(message: Message): string {
+  return (message.parts || [])
     .filter((part) => part.type === 'text' && !part.synthetic)
     .map(getMessagePartDisplayText)
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function getUserMessagePreview(message: Message, maxChars = 120): string {
+  const text = getUserMessageText(message);
   const preview = text || message.id;
   return preview.length > maxChars ? `${preview.slice(0, maxChars - 1).trim()}…` : preview;
+}
+
+function getRewindDialogClassName(candidateCount: number): string {
+  return candidateCount > 6 ? 'max-h-[58vh]' : 'max-h-[420px]';
+}
+
+function getRewindDraftText(message: Message): string {
+  return getUserMessageText(message);
 }
 
 interface QueuedPromptPanelProps {
@@ -2245,12 +2257,20 @@ export default function SessionChat({
 
   const handleRewindTurnSelect = async (candidate: RewindTurnCandidate) => {
     if (!sessionId) return;
+    const draftText = getRewindDraftText(candidate.message);
     setRewindingMessageId(candidate.message.id);
     try {
       await sessionApi.rewind(sessionId, { messageID: candidate.message.id });
+      truncateAfterMessage(candidate.message.id, { includeTarget: true });
+      setInput(draftText);
       setShowRewindPicker(false);
-      await refetch();
-      toast.success(`Rewound to turn ${candidate.index}`);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        const cursor = draftText.length;
+        textareaRef.current?.setSelectionRange(cursor, cursor);
+      });
+      void refetch();
+      toast.success('Rewound. Edit the restored prompt and send again.');
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || 'Rewind failed');
     } finally {
@@ -3369,12 +3389,12 @@ export default function SessionChat({
         />
       )}
       {showRewindPicker && (
-        <div className="absolute inset-0 z-30 flex items-end justify-center bg-black/20 p-4 sm:items-center">
-          <div className="w-full max-w-2xl overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
+        <div className="absolute inset-0 z-30 flex items-end justify-center bg-zinc-950/25 p-4 backdrop-blur-[1px] sm:items-center">
+          <div className="w-full max-w-2xl overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-zinc-100 px-4 py-3">
               <div>
                 <div className="text-sm font-semibold text-zinc-900">Rewind to turn</div>
-                <div className="text-xs text-zinc-500">Choose the user turn to restore the conversation and tracked file changes to.</div>
+                <div className="mt-0.5 text-xs text-zinc-500">Pick a prompt to restore into the composer. Later turns and tracked file changes will be rewound.</div>
               </div>
               <button
                 type="button"
@@ -3385,7 +3405,7 @@ export default function SessionChat({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="max-h-[60vh] overflow-y-auto p-2">
+            <div className={`${getRewindDialogClassName(rewindCandidates.length)} overflow-y-auto p-2`}>
               {rewindCandidates.length === 0 ? (
                 <div className="px-3 py-8 text-center text-sm text-zinc-500">No user turns are available to rewind.</div>
               ) : (
@@ -3395,13 +3415,13 @@ export default function SessionChat({
                     type="button"
                     disabled={Boolean(rewindingMessageId)}
                     onClick={() => { void handleRewindTurnSelect(candidate); }}
-                    className="flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="group flex w-full items-start gap-3 rounded-md px-3 py-3 text-left transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <span className="mt-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-zinc-100 px-2 text-xs font-semibold text-zinc-600">
                       {candidate.index}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium text-zinc-900">{candidate.preview}</span>
+                      <span className="block whitespace-normal break-words text-sm font-medium leading-5 text-zinc-900">{candidate.preview}</span>
                       <span className="mt-0.5 block text-xs text-zinc-500">{formatSmartTime(candidate.message.timestamp)}</span>
                     </span>
                     {rewindingMessageId === candidate.message.id && <Loader2 className="mt-1 h-4 w-4 animate-spin text-zinc-400" />}

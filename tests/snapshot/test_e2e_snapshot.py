@@ -18,7 +18,7 @@ from pathlib import Path
 from flocks.snapshot import Snapshot, SnapshotPatch
 from flocks.session import Message, MessageRole, PatchPart, Session, SessionRevertManager, RevertInput
 from flocks.session.lifecycle.rewind import SessionRewind
-from flocks.session.runner import SessionRunner, StepResult
+from flocks.session.runner import SessionRunner
 from flocks.config.config import Config
 
 
@@ -115,6 +115,21 @@ class TestE2ESnapshotWorkflow:
         assert "# Main module" in self._read_file("src/main.py")
         assert "# Modified utils" in self._read_file("src/utils.py")
         assert "# Modified README" in self._read_file("README.md")
+
+    @pytest.mark.asyncio
+    async def test_revert_restores_deleted_file(self):
+        """Test deleted files are tracked and restored from checkpoints."""
+        initial_hash = await Snapshot.track(self.project_id, self.test_dir)
+        deleted_path = os.path.join(self.test_dir, "src/utils.py")
+        os.unlink(deleted_path)
+
+        patch = await Snapshot.patch(self.project_id, self.test_dir, initial_hash)
+        assert deleted_path in patch.files
+
+        await Snapshot.revert(self.project_id, self.test_dir, [patch])
+
+        assert os.path.exists(deleted_path)
+        assert "# Utils module" in self._read_file("src/utils.py")
     
     @pytest.mark.asyncio
     async def test_multiple_snapshot_points(self):
@@ -354,8 +369,8 @@ class TestE2ESessionRevert:
         assert candidates[0].preview == "Second change"
 
     @pytest.mark.asyncio
-    async def test_runner_records_patch_parts_for_rewind(self):
-        """Test runner records snapshot and patch parts for a step."""
+    async def test_runner_checkpoints_mutating_tools_once_per_turn(self, monkeypatch):
+        """Test mutating tools share one checkpoint per user turn and directory."""
         session = await Session.create(
             project_id=self.project_id,
             directory=self.test_dir,
@@ -376,22 +391,108 @@ class TestE2ESessionRevert:
         )
         runner = SessionRunner(session)
 
-        start_snapshot = await runner._record_step_start_snapshot(assistant)
-        self._create_file("code.py", "# Modified by runner")
-        await runner._record_step_finish_snapshot(
+        original_track = Snapshot.track
+        track_calls = 0
+
+        async def track_spy(project_id: str, worktree: str):
+            nonlocal track_calls
+            track_calls += 1
+            return await original_track(project_id, worktree)
+
+        monkeypatch.setattr(Snapshot, "track", track_spy)
+
+        runner._reset_rewind_checkpoint_turn(user.id)
+        first_checkpoint = await runner._checkpoint_before_tool(
+            "write",
+            {"filePath": "code.py"},
             assistant,
-            start_snapshot,
-            StepResult(action="stop", content="done"),
         )
+        self._create_file("code.py", "# Modified by runner")
+
+        second_checkpoint = await runner._checkpoint_before_tool(
+            "apply_patch",
+            {"patch": "test patch"},
+            assistant,
+        )
+        assert second_checkpoint is not None
+        self._create_file("src/from_patch.py", "# Created by patch")
+        await runner._record_tool_patch(assistant, second_checkpoint)
 
         parts = await Message.parts(assistant.id, session.id)
         part_types = [part.type for part in parts]
         patch_part = next(part for part in parts if part.type == "patch")
 
-        assert "step-start" in part_types
-        assert "step-finish" in part_types
+        assert track_calls == 1
+        assert first_checkpoint == second_checkpoint
+        assert "step-start" not in part_types
+        assert "step-finish" not in part_types
         assert "patch" in part_types
         assert os.path.join(self.test_dir, "code.py") in patch_part.files
+        assert os.path.join(self.test_dir, "src/from_patch.py") in patch_part.files
+
+    @pytest.mark.asyncio
+    async def test_read_only_shell_does_not_checkpoint(self, monkeypatch):
+        """Test read-only shell commands do not pay snapshot cost."""
+        session = await Session.create(
+            project_id=self.project_id,
+            directory=self.test_dir,
+            title="Read Only Shell",
+        )
+
+        async def fail_track(project_id: str, worktree: str):
+            raise AssertionError("read-only shell should not checkpoint")
+
+        monkeypatch.setattr(Snapshot, "track", fail_track)
+
+        await SessionRunner.shell(
+            session_id=session.id,
+            agent="test-agent",
+            command="printf 'hello'",
+            model={"providerID": "test-provider", "modelID": "test-model"},
+        )
+
+        assistant_messages = [
+            message
+            for message in await Message.list(session.id)
+            if message.role == MessageRole.ASSISTANT
+        ]
+        parts = await Message.parts(assistant_messages[-1].id, session.id)
+        part_types = [part.type for part in parts]
+        assert "tool" in part_types
+        assert "patch" not in part_types
+        assert "step-start" not in part_types
+        assert "step-finish" not in part_types
+
+    @pytest.mark.asyncio
+    async def test_shell_rewind_removes_created_files(self):
+        """Test shell commands record patches that rewind can restore."""
+        session = await Session.create(
+            project_id=self.project_id,
+            directory=self.test_dir,
+            title="Shell Rewind",
+        )
+
+        await SessionRunner.shell(
+            session_id=session.id,
+            agent="test-agent",
+            command="printf 'created by shell' > shell_new.py",
+            model={"providerID": "test-provider", "modelID": "test-model"},
+        )
+
+        shell_file = os.path.join(self.test_dir, "shell_new.py")
+        assert os.path.exists(shell_file)
+        assistant_messages = [
+            message
+            for message in await Message.list(session.id)
+            if message.role == MessageRole.ASSISTANT
+        ]
+        parts = await Message.parts(assistant_messages[-1].id, session.id)
+        patch_part = next(part for part in parts if part.type == "patch")
+        assert shell_file in patch_part.files
+
+        await SessionRewind.rewind(session.id)
+
+        assert not os.path.exists(shell_file)
 
 
 class TestCLISnapshotCommands:

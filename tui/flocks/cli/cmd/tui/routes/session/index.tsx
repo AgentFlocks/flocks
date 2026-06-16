@@ -340,10 +340,25 @@ export function Session() {
     )
   }
 
+  const revertBoundaryIndex = () => {
+    const revertID = session()?.revert?.messageID
+    if (!revertID) return -1
+    return messages().findIndex((message) => message.id === revertID)
+  }
+
+  const isMessageReverted = (messageID: string) => {
+    const boundary = revertBoundaryIndex()
+    if (boundary < 0) return false
+    const index = messages().findIndex((message) => message.id === messageID)
+    return index >= boundary
+  }
+
   const rewindOptions = (): DialogSelectOption<string>[] => {
-    const revert = session()?.revert?.messageID
-    return messages()
-      .filter((message) => (!revert || message.id < revert) && message.role === "user")
+    const allMessages = messages()
+    const boundary = revertBoundaryIndex()
+    const visibleEnd = boundary < 0 ? allMessages.length : boundary
+    return allMessages
+      .filter((message, index) => index < visibleEnd && message.role === "user")
       .map((message) => {
         const textPart = (sync.data.part[message.id] ?? []).find(
           (part) => part.type === "text" && !part.synthetic && !part.ignored,
@@ -355,14 +370,26 @@ export function Session() {
           footer: Locale.time(message.time.created),
           onSelect: async (dialog) => {
             const status = sync.data.session_status?.[route.sessionID]
-            if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
-            await sdk.client.session.revert({
-              sessionID: route.sessionID,
-              messageID: message.id,
-            })
-            prompt.set(promptFromMessage(message.id))
-            toBottom()
-            dialog.clear()
+            if (status?.type !== "idle") {
+              toast.show({ message: "Cannot rewind while the session is running", variant: "error" })
+              return
+            }
+            await sdk.client.session
+              .revert({
+                sessionID: route.sessionID,
+                messageID: message.id,
+              })
+              .then(() => {
+                prompt.set(promptFromMessage(message.id))
+                toBottom()
+                dialog.clear()
+              })
+              .catch((error) => {
+                toast.show({
+                  message: error instanceof Error ? error.message : "Failed to rewind session",
+                  variant: "error",
+                })
+              })
           },
         }
       })
@@ -542,8 +569,10 @@ export function Session() {
       onSelect: async (dialog) => {
         const status = sync.data.session_status?.[route.sessionID]
         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
-        const revert = session()?.revert?.messageID
-        const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
+        const allMessages = messages()
+        const boundary = revertBoundaryIndex()
+        const visibleEnd = boundary < 0 ? allMessages.length : boundary
+        const message = allMessages.slice(0, visibleEnd).findLast((x) => x.role === "user")
         if (!message) return
         sdk.client.session
           .revert({
@@ -582,7 +611,10 @@ export function Session() {
         dialog.clear()
         const messageID = session()?.revert?.messageID
         if (!messageID) return
-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
+        const boundary = revertBoundaryIndex()
+        const message = boundary < 0
+          ? undefined
+          : messages().slice(boundary + 1).find((x) => x.role === "user")
         if (!message) {
           sdk.client.session.unrevert({
             sessionID: route.sessionID,
@@ -829,9 +861,8 @@ export function Session() {
       keybind: "messages_copy",
       category: "Session",
       onSelect: (dialog) => {
-        const revertID = session()?.revert?.messageID
         const lastAssistantMessage = messages().findLast(
-          (msg) => msg.role === "assistant" && (!revertID || msg.id < revertID),
+          (msg) => msg.role === "assistant" && !isMessageReverted(msg.id),
         )
         if (!lastAssistantMessage) {
           toast.show({ message: "No assistant messages found", variant: "error" })
@@ -1029,7 +1060,7 @@ export function Session() {
   const revertRevertedMessages = createMemo(() => {
     const messageID = revertMessageID()
     if (!messageID) return []
-    return messages().filter((x) => x.id >= messageID && x.role === "user")
+    return messages().filter((x) => isMessageReverted(x.id) && x.role === "user")
   })
 
   const revert = createMemo(() => {
@@ -1153,7 +1184,7 @@ export function Session() {
                         )
                       })()}
                     </Match>
-                    <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
+                    <Match when={isMessageReverted(message.id)}>
                       <></>
                     </Match>
                     <Match when={message.role === "user"}>

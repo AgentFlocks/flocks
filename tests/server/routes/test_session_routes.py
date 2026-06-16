@@ -990,6 +990,37 @@ class TestSessionMessagesRemaining:
             message_id=None,
         )
 
+    @pytest.mark.asyncio
+    async def test_messages_route_hides_rewind_boundary_and_later_messages(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        session = await Session.get_by_id(session_id)
+        assert session is not None
+        first = await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="first turn",
+        )
+        second = await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="second turn",
+        )
+        await Session.update(
+            session.project_id,
+            session_id,
+            revert={"messageID": first.id},
+        )
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        message_ids = [message["info"]["id"] for message in resp.json()]
+        assert first.id not in message_ids
+        assert second.id not in message_ids
+
 
 # ===========================================================================
 # Utility endpoints

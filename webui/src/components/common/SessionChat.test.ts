@@ -888,6 +888,8 @@ describe('SessionChat agent mentions', () => {
 
   it('opens a turn picker for bare /rewind instead of sending a command', async () => {
     const user = userEvent.setup();
+    const refetch = vi.fn();
+    const truncateAfterMessage = vi.fn();
     useSessionMessagesMock.mockReturnValue({
       messages: [
         makeMessage({
@@ -911,12 +913,12 @@ describe('SessionChat agent mentions', () => {
         }),
       ],
       loading: false,
-      refetch: vi.fn(),
+      refetch,
       addMessage: vi.fn(),
       updateMessage: vi.fn(),
       updateMessagePart: vi.fn(),
       replaceMessageText: vi.fn(),
-      truncateAfterMessage: vi.fn(),
+      truncateAfterMessage,
       markMessageStopped: vi.fn(),
     });
 
@@ -931,6 +933,15 @@ describe('SessionChat agent mentions', () => {
       '/api/session/sess-1/command',
       expect.anything(),
     );
+
+    await user.click(screen.getByRole('button', { name: /second change/ }));
+
+    await waitFor(() => {
+      expect(sessionApiRewindMock).toHaveBeenCalledWith('sess-1', { messageID: 'user-2' });
+    });
+    expect(truncateAfterMessage).toHaveBeenCalledWith('user-2', { includeTarget: true });
+    expect(screen.getByRole('textbox')).toHaveValue('second change');
+    expect(refetch).toHaveBeenCalled();
   });
 });
 
