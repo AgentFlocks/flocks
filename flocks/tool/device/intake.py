@@ -23,7 +23,12 @@ from flocks.tool.device.models import (
     DeviceTestRequest,
     DeviceTestResult,
 )
-from flocks.tool.device.secrets import delete_secrets, persist_fields, resolve_for_runtime
+from flocks.tool.device.secrets import (
+    delete_secrets,
+    mask_for_display,
+    persist_fields,
+    resolve_for_runtime,
+)
 from flocks.tool.device.store import (
     delete_device_row,
     ensure_default_group,
@@ -261,7 +266,7 @@ async def test_device(
         raise DeviceNotFoundError("Device not found")
 
     db_fields: dict = json.loads(row["fields"] or "{}")
-    resolved = resolve_for_runtime(db_fields)
+    resolved = _resolve_test_fields(db_fields, body)
     persisted_base_url = (resolved.get("base_url") or "").strip()
 
     override_base_url = (body.base_url.strip() if body and body.base_url else "")
@@ -293,6 +298,29 @@ async def test_device(
         latency_ms=result.latency_ms,
     )
     return result
+
+
+def _resolve_test_fields(
+    db_fields: dict,
+    body: Optional[DeviceTestRequest],
+) -> dict[str, str]:
+    """Resolve persisted fields and apply unsaved form values for one probe."""
+    resolved = resolve_for_runtime(db_fields)
+    draft_fields = body.fields if body and body.fields else None
+    if not draft_fields:
+        return resolved
+
+    display_fields, _ = mask_for_display(db_fields)
+    merged = dict(resolved)
+    for key, value in draft_fields.items():
+        draft_value = value if isinstance(value, str) else ""
+        persisted_value = resolved.get(key, "")
+        display_value = display_fields.get(key, "")
+        is_masked_secret = bool(persisted_value) and display_value != persisted_value
+        if is_masked_secret and draft_value in {"", display_value}:
+            continue
+        merged[key] = draft_value
+    return merged
 
 
 async def _probe(base_url: str, *, verify_ssl: bool) -> DeviceTestResult:

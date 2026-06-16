@@ -176,7 +176,6 @@ async def route_delete_group(group_id: str):
 
 @router.get("", response_model=List[DeviceIntegration])
 async def route_list_devices(group_id: Optional[str] = None, refresh: bool = False):
-    await ensure_user_device_instances(refresh_templates=refresh)
     return await list_devices(group_id)
 
 

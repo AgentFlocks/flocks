@@ -53,6 +53,7 @@ vi.mock('react-i18next', () => ({
         'config.roomLabel': '所属机房',
         'config.saveBtn': '保存配置',
         'config.addBtn': '添加设备',
+        'config.testBtn': '连通测试',
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
@@ -230,6 +231,9 @@ describe('DeviceIntegrationPage', () => {
         updated_at: 0,
       },
     });
+    mocks.testDevice.mockResolvedValue({
+      data: { success: true, message: 'HTTP 200, 163ms', latency_ms: 163 },
+    });
     mocks.listGroups.mockResolvedValue({
       data: [{ id: 'default', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 }],
     });
@@ -243,7 +247,7 @@ describe('DeviceIntegrationPage', () => {
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
   });
 
-  it('refreshes devices and templates when the window regains focus', async () => {
+  it('refreshes devices and templates without syncing when the window regains focus', async () => {
     render(<DeviceIntegrationPage />);
 
     await screen.findByText('设备接入');
@@ -257,13 +261,11 @@ describe('DeviceIntegrationPage', () => {
     window.dispatchEvent(new Event('focus'));
 
     await waitFor(() => {
-      expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
-    });
-    await waitFor(() => {
       expect(mocks.listDevices).toHaveBeenCalledWith();
-      expect(mocks.listTemplates).toHaveBeenCalledWith({ refresh: true });
+      expect(mocks.listTemplates).toHaveBeenCalledWith();
       expect(mocks.listGroups).toHaveBeenCalled();
     });
+    expect(mocks.syncDevices).not.toHaveBeenCalled();
   });
 
   it('shows custom device option and access modes', async () => {
@@ -568,6 +570,109 @@ describe('DeviceIntegrationPage', () => {
         expect.objectContaining({ group_id: 'group-2' }),
       );
     });
+  });
+
+  it('tests connectivity with draft fields without replacing the form', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'onesig-02',
+      storage_key: 'onesig_api_v2_5_3',
+      service_id: 'onesig_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        base_url: 'https://persisted.example.com',
+        api_prefix: '/api',
+        username: 'admin',
+        password: 'p***word',
+      },
+      fields_set: { base_url: true, api_prefix: true, username: true, password: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3',
+          storage_key: 'onesig_api_v2_5_3',
+          service_id: 'onesig_api',
+          name: 'OneSIG',
+          vendor: 'threatbook',
+        }),
+      ],
+    });
+    mocks.getServiceMetadata.mockResolvedValueOnce({
+      data: {
+        name: 'OneSIG',
+        credential_schema: [
+          {
+            key: 'base_url',
+            label: 'Base URL',
+            storage: 'config',
+            sensitive: false,
+            required: true,
+            input_type: 'url',
+            config_key: 'base_url',
+          },
+          {
+            key: 'api_prefix',
+            label: 'API Prefix',
+            storage: 'config',
+            sensitive: false,
+            required: false,
+            input_type: 'text',
+            config_key: 'api_prefix',
+          },
+          {
+            key: 'username',
+            label: 'Username',
+            storage: 'config',
+            sensitive: false,
+            required: true,
+            input_type: 'text',
+            config_key: 'username',
+          },
+          {
+            key: 'password',
+            label: 'Password',
+            storage: 'secret',
+            sensitive: true,
+            required: true,
+            input_type: 'password',
+            config_key: 'password',
+          },
+        ],
+      },
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('onesig-02'));
+    const baseUrl = await screen.findByDisplayValue('https://persisted.example.com');
+    await user.clear(baseUrl);
+    await user.type(baseUrl, 'https://draft.example.com');
+    await user.click(screen.getByRole('button', { name: /连通测试/ }));
+
+    await waitFor(() => {
+      expect(mocks.testDevice).toHaveBeenCalledWith('device-1', {
+        fields: expect.objectContaining({
+          base_url: 'https://draft.example.com',
+          api_prefix: '/api',
+          username: 'admin',
+          password: 'p***word',
+        }),
+        verify_ssl: false,
+        base_url: 'https://draft.example.com',
+      });
+    });
+    expect(mocks.getDevice).not.toHaveBeenCalled();
+    expect(mocks.listDevices).toHaveBeenCalledTimes(1);
+    expect(screen.getByDisplayValue('https://draft.example.com')).toBeInTheDocument();
+    expect(await screen.findByText('HTTP 200, 163ms')).toBeInTheDocument();
   });
 
   it('reveals the full persisted secret when clicking show', async () => {

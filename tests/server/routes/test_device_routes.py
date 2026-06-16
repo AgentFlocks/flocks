@@ -157,6 +157,81 @@ class TestDeviceTestEndpoint:
         assert captured["probed_base_url"] == "https://staging.example.com"
 
     @pytest.mark.asyncio
+    async def test_draft_fields_win_over_persisted_fields_for_probe(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        captured: dict = {}
+        _install_route_stubs(
+            monkeypatch,
+            row=_fake_row(fields={"base_url": "https://persisted.example.com"}),
+            probe_result=DeviceTestResult(success=True, message="ok"),
+            captured=captured,
+        )
+
+        resp = await client.post(
+            "/api/devices/dev-test/test",
+            json={"fields": {"base_url": "https://draft.example.com"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert captured["probed_base_url"] == "https://draft.example.com"
+        assert captured["record_calls"] == [
+            {"device_id": "dev-test", "success": True, "message": "ok"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_masked_draft_secret_keeps_persisted_secret(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        captured: dict = {}
+        _install_route_stubs(
+            monkeypatch,
+            row=_fake_row(
+                fields={
+                    "base_url": "https://persisted.example.com",
+                    "password": "{secret:device_dev-test_password}",
+                }
+            ),
+            probe_result=DeviceTestResult(success=True, message="ok"),
+            captured=captured,
+        )
+        monkeypatch.setattr(
+            device_intake,
+            "resolve_for_runtime",
+            lambda db_fields: {
+                **db_fields,
+                "password": "real-password",
+            },
+        )
+        monkeypatch.setattr(
+            device_intake,
+            "mask_for_display",
+            lambda db_fields: (
+                {
+                    "base_url": "https://persisted.example.com",
+                    "password": "r***word",
+                },
+                {"base_url": True, "password": True},
+            ),
+        )
+
+        resolved = device_intake._resolve_test_fields(
+            {
+                "base_url": "https://persisted.example.com",
+                "password": "{secret:device_dev-test_password}",
+            },
+            device_intake.DeviceTestRequest(fields={"password": "r***word"}),
+        )
+        resp = await client.post(
+            "/api/devices/dev-test/test",
+            json={"fields": {"password": "r***word"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resolved["password"] == "real-password"
+        assert captured["probed_base_url"] == "https://persisted.example.com"
+
+    @pytest.mark.asyncio
     async def test_error_message_mentions_both_base_url_and_host(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ):
@@ -261,6 +336,28 @@ class TestDeviceCredentialEndpoint:
 
 
 class TestDeviceSyncEndpoint:
+    @pytest.mark.asyncio
+    async def test_list_devices_does_not_invoke_auto_instance_creation(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fail_ensure_user_device_instances(*, refresh_templates: bool):
+            raise AssertionError("GET /api/devices must stay read-only")
+
+        monkeypatch.setattr(
+            device_routes,
+            "ensure_user_device_instances",
+            fail_ensure_user_device_instances,
+        )
+        async def fake_list_devices(group_id=None):
+            return []
+
+        monkeypatch.setattr(device_routes, "list_devices", fake_list_devices)
+
+        resp = await client.get("/api/devices?refresh=true")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []
+
     @pytest.mark.asyncio
     async def test_sync_invokes_auto_instance_creation_with_refresh_flag(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch

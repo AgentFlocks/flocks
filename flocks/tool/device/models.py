@@ -164,6 +164,10 @@ class DeviceTestResult(BaseModel):
 class DeviceTestRequest(BaseModel):
     """Optional body for ``POST /devices/{id}/test``."""
 
+    fields: Optional[Dict[str, str]] = Field(
+        None,
+        description="Unsaved form fields to use for this probe only",
+    )
     base_url: Optional[str] = Field(
         None,
         description="Override the persisted base_url for this probe only",
