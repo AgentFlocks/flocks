@@ -21,6 +21,9 @@ import {
   ServerCog,
   ScrollText,
   ShieldCheck,
+  Shield,
+  AlertTriangle,
+  CircleUserRound,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -56,6 +59,9 @@ import { resolveUserDefinedPageIcon } from '@/utils/userDefinedPageIcons';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+type WorkspaceId = 'agent' | 'soc' | 'system';
+type NavItem = { name: string; href: string; icon: typeof Bot };
+type NavSection = { id: string; name: string; items: NavItem[] };
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
@@ -403,63 +409,119 @@ export default function Layout() {
   }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
 
-  // Stable across re-renders triggered by location changes (sidebar nav clicks)
-  // — the array only depends on the i18n translation function, which itself is
-  // stable as long as the language doesn't change. Without this, every route
-  // switch rebuilt the whole nav structure and cascaded re-renders down to
-  // every <Link>, contributing to perceptible navigation lag.
-  const navigation = useMemo(
-    () => [
-      {
-        name: '',
-        items: [
-          { name: t('flocksHome'), href: '/', icon: Home },
-          ...userDefinedPages
-            .filter((page) => page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
-            .map((page) => ({
-              name: page.title,
-              href: page.route,
-              icon: resolveUserDefinedPageIcon(page.icon),
-            })),
-        ],
-      },
-      {
-        name: t('aiWorkbench'),
-        items: [
-          { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-          { name: t('tasks'), href: '/tasks', icon: ListTodo },
-          { name: t('workflows'), href: '/workflows', icon: Workflow },
-        ],
-      },
-      {
-        name: t('agentHub'),
-        items: [
-          { name: t('agents'), href: '/agents', icon: Bot },
-          { name: t('skills'), href: '/skills', icon: BookOpen },
-          { name: t('tools'), href: '/tools', icon: Wrench },
-          { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-          { name: t('hub'), href: '/hub', icon: Archive },
-          { name: t('models'), href: '/models', icon: Brain },
-          { name: t('channels'), href: '/channels', icon: Radio },
-        ],
-      },
-      {
-        name: t('systemCenter'),
-        items: [
-          { name: t('accountManagement'), href: '/config', icon: UserCog },
-          { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
-          ...(hasFlocksproCapability && user?.role === 'admin'
-            ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
-            : []),
-          ...(user?.role === 'admin'
-            ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
-            : []),
-        ],
-      },
-    ],
-    [hasFlocksproCapability, userDefinedPages, t, user?.role],
+  const isNavigationItemActive = useCallback((href: string) => {
+    if (href === '/') return location.pathname === '/';
+    if (href === '/soc') {
+      return location.pathname === '/soc';
+    }
+    return location.pathname === href || location.pathname.startsWith(`${href}/`);
+  }, [location.pathname]);
+
+  const socPageLinks = useMemo(
+    () => userDefinedPages
+      .filter((page) => page.enabled && page.buildStatus === 'ready')
+      .map((page) => ({
+        name: page.title,
+        href: `/soc/pages/${page.id}`,
+        icon: resolveUserDefinedPageIcon(page.icon),
+      })),
+    [userDefinedPages],
   );
+
+  const systemPaths = [
+    '/config',
+    '/channels',
+    '/audit-logs',
+    '/flockspro-upgrade',
+    '/system-logs',
+  ];
+  const isSystemPath = systemPaths.some((path) =>
+    location.pathname === path || location.pathname.startsWith(`${path}/`),
+  );
+  const currentWorkspace: WorkspaceId = location.pathname === '/soc'
+    || location.pathname.startsWith('/soc/')
+    || location.pathname.startsWith('/user-defined-pages/')
+    ? 'soc'
+    : isSystemPath
+      ? 'system'
+      : 'agent';
+
+  const workspaceTabs = useMemo(
+    () => [
+      { id: 'agent' as const, name: t('agentWorkspace'), href: '/', icon: Bot },
+      { id: 'soc' as const, name: t('socWorkspace'), href: '/soc', icon: Shield },
+      { id: 'system' as const, name: t('systemConfig'), href: '/config', icon: UserCog },
+    ],
+    [t],
+  );
+
+  // Keep the section objects stable across route switches; the active item is
+  // computed separately from location.pathname while rendering.
+  const workspaceNavigation = useMemo<Record<WorkspaceId, NavSection[]>>(
+    () => ({
+      agent: [
+        {
+          id: 'home',
+          name: t('home'),
+          items: [
+            { name: t('flocksHome'), href: '/', icon: Home },
+          ],
+        },
+        {
+          id: 'aiWorkbench',
+          name: t('aiWorkbench'),
+          items: [
+            { name: t('sessions'), href: '/sessions', icon: MessageSquare },
+            { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+            { name: t('tasks'), href: '/tasks', icon: ListTodo },
+            { name: t('workflows'), href: '/workflows', icon: Workflow },
+          ],
+        },
+        {
+          id: 'agentHub',
+          name: t('agentHub'),
+          items: [
+            { name: t('agents'), href: '/agents', icon: Bot },
+            { name: t('skills'), href: '/skills', icon: BookOpen },
+            { name: t('tools'), href: '/tools', icon: Wrench },
+            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+            { name: t('hub'), href: '/hub', icon: Archive },
+            { name: t('models'), href: '/models', icon: Brain },
+          ],
+        },
+      ],
+      soc: [
+        {
+          id: 'socWorkspace',
+          name: t('socWorkspace'),
+          items: [
+            { name: t('socOverview'), href: '/soc', icon: Shield },
+            { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
+            ...socPageLinks,
+          ],
+        },
+      ],
+      system: [
+        {
+          id: 'systemConfig',
+          name: t('systemConfig'),
+          items: [
+            { name: t('systemConfig'), href: '/config', icon: UserCog },
+            { name: t('channels'), href: '/channels', icon: Radio },
+            { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
+            ...(hasFlocksproCapability && user?.role === 'admin'
+              ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
+              : []),
+            ...(user?.role === 'admin'
+              ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
+              : []),
+          ],
+        },
+      ],
+    }),
+    [hasFlocksproCapability, socPageLinks, t, user?.role],
+  );
+  const navigation = workspaceNavigation[currentWorkspace];
 
   const isFullScreenPage =
     matchPath('/workflows/create', location.pathname) ||
@@ -514,9 +576,69 @@ export default function Layout() {
         />
       )}
 
+      <header className="fixed inset-x-0 top-0 z-50 h-14 border-b border-zinc-200 bg-white shadow-sm">
+        <div className="flex h-full items-stretch justify-between">
+          <div className={`flex shrink-0 items-center border-r border-zinc-200 transition-all duration-300 ${collapsed ? 'lg:w-16' : 'lg:w-52'} w-52`}>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              className="ml-3 rounded-md p-2 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 lg:hidden"
+              aria-label={t('openNav')}
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <Link
+              to="/"
+              className={`flex min-w-0 flex-1 items-center ${collapsed ? 'lg:justify-center lg:px-0' : 'lg:px-6'} px-3`}
+              title={productName}
+            >
+              {collapsed ? (
+                <Sparkles className="hidden h-5 w-5 text-red-500 lg:block" />
+              ) : null}
+              <span className={`truncate text-xl font-bold text-zinc-950 ${collapsed ? 'lg:hidden' : ''}`}>
+                {productName}
+              </span>
+            </Link>
+          </div>
+          <nav className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+            {workspaceTabs.map((tab) => {
+              const isActive = tab.id === currentWorkspace;
+              return (
+                <Link
+                  key={tab.id}
+                  to={tab.href}
+                  className={`relative inline-flex min-w-28 items-center justify-center gap-2 border-r border-zinc-200 px-6 text-sm font-semibold whitespace-nowrap transition-colors ${
+                    isActive
+                      ? 'bg-zinc-100 text-zinc-950'
+                      : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+                  }`}
+                >
+                  {isActive ? <span className="absolute inset-x-0 top-0 h-0.5 bg-red-500" /> : null}
+                  <tab.icon className={`h-4 w-4 ${isActive ? 'text-red-600' : 'text-zinc-400'}`} />
+                  {tab.name}
+                </Link>
+              );
+            })}
+          </nav>
+          <div className="hidden shrink-0 items-center gap-3 border-l border-zinc-200 px-4 md:flex">
+            <div className="rounded-lg bg-zinc-100 p-1">
+              <LanguageSwitcher />
+            </div>
+            <Link
+              to="/config"
+              className="inline-flex max-w-56 items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-950"
+              title={user?.username || t('accountManagement')}
+            >
+              <CircleUserRound className="h-4 w-4 text-zinc-500" />
+              <span className="truncate">{user?.username || t('accountManagement')}</span>
+            </Link>
+          </div>
+        </div>
+      </header>
+
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200
+          fixed bottom-0 left-0 top-14 z-40 bg-zinc-100 border-r border-zinc-200
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
@@ -524,32 +646,10 @@ export default function Layout() {
         `}
       >
         <div className="flex flex-col h-full overflow-hidden">
-          {/* Logo */}
-          <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
-            {collapsed ? (
-              <div
-                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm"
-                title={productName}
-              >
-                <Sparkles className="w-4 h-4 text-zinc-500" />
-              </div>
-            ) : (
-              <>
-                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap">{productName}</span>
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </>
-            )}
-          </div>
-
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
             {navigation.map((section) => (
-              <div key={section.name} className="mb-6">
+              <div key={section.id} className="mb-6">
                 {!collapsed && section.name && (
                   <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap">
                     {section.name}
@@ -558,8 +658,7 @@ export default function Layout() {
                 {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
-                    const isActive = location.pathname === item.href
-                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
+                    const isActive = isNavigationItemActive(item.href);
                     return (
                       <Link
                         key={item.href}
@@ -589,15 +688,14 @@ export default function Layout() {
             ))}
           </nav>
 
-          {/* Bottom: Language switcher + version */}
+          {/* Bottom: version */}
           <div className={`border-t border-zinc-200 flex-shrink-0 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
-            <LanguageSwitcher collapsed={collapsed} />
             {!collapsed && (
               <>
                 {hasUpdate && canManageUpdates ? (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="mt-3 w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+                    className="w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
                   >
                     <div className="flex items-center gap-2 text-sm">
                       <span className="min-w-0 flex-1 truncate font-semibold text-amber-900">
@@ -617,7 +715,7 @@ export default function Layout() {
                 ) : (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors"
+                    className="w-full text-left group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors"
                   >
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors">
@@ -667,19 +765,19 @@ export default function Layout() {
         </button>
       </aside>
 
-      {/* Mobile top menu button */}
-      <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>
+      {/* Mobile close button */}
+      <div className={`lg:hidden fixed left-44 top-2 z-50 flex items-center ${sidebarOpen ? '' : 'hidden'}`}>
         <button
-          onClick={() => setSidebarOpen(true)}
-          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200"
+          onClick={() => setSidebarOpen(false)}
+          className="rounded-md border border-white/10 bg-[#101218] p-2 text-zinc-400 shadow-sm transition-colors hover:bg-white/5 hover:text-zinc-100"
         >
-          <Menu className="w-5 h-5" />
+          <X className="w-5 h-5" />
         </button>
       </div>
 
       {/* Main content area */}
       <div
-        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
+        className={`flex h-screen flex-col pt-14 transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
         <main className="flex-1 overflow-hidden bg-gray-50">
           {isFullScreenPage ? (

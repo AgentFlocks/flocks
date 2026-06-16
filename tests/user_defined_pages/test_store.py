@@ -15,7 +15,7 @@ def store(tmp_path, monkeypatch):
 def test_create_page_scaffold(store: UserDefinedPagesStore):
     detail = store.create_page(page_id="my-dashboard", title="我的大屏")
     assert detail.manifest.id == "my-dashboard"
-    assert detail.manifest.route == "/user-defined-pages/my-dashboard"
+    assert detail.manifest.route == "/soc/pages/my-dashboard"
     assert (store.page_dir("my-dashboard") / "src" / "Page.tsx").is_file()
     assert (store.page_dir("my-dashboard") / "manifest.json").is_file()
 
@@ -71,4 +71,4 @@ def test_manifest_roundtrip(store: UserDefinedPagesStore):
     assert manifest.title == "新标题"
     assert manifest.order == 10
     raw = json.loads((store.page_dir("roundtrip") / "manifest.json").read_text(encoding="utf-8"))
-    assert raw["route"] == "/user-defined-pages/roundtrip"
+    assert raw["route"] == "/soc/pages/roundtrip"

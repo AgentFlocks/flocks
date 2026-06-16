@@ -5,7 +5,7 @@
   "getStarted": "Setup Guide",
   "createUserDefinedPage": "Create Custom Page",
   "createUserDefinedPageSessionTitle": "Create Custom Page",
-  "createUserDefinedPageInitialMessage": "I want to create a new user-defined page in the Flocks left navigation. Please introduce what this feature can do, where pages are stored, where they appear in the navigation, and the full creation and development workflow. Also explain how to hide a page from the navigation or permanently delete it when I no longer need it. If I already have an idea, guide me step by step: choose a page ID and title, create the page scaffold, write the React page code, and explain how live preview works after saving. Finally, tell me what information you still need from me (such as page name, content to display, and data sources).",
+  "createUserDefinedPageInitialMessage": "I want to create a new custom display page in the Flocks SOC workspace. Please introduce what this feature can do, where pages are stored, where they appear in the SOC workspace navigation, and the full creation and development workflow. Also explain how to hide a page from the navigation or permanently delete it when I no longer need it. If I already have an idea, guide me step by step: choose a page ID and title, create the page scaffold, write the React page code, and explain how live preview works after saving. Finally, tell me what information you still need from me (such as page name, content to display, and data sources).",
   "createUserDefinedPageError": "Failed to create session. Please try again later.",
   "openSource": "Open Source",
   "systemCard": {

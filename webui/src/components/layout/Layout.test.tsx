@@ -60,11 +60,11 @@ const {
       {
         id: 'dash-1',
         title: '自定义仪表盘',
-        route: '/user-defined-pages/dash-1',
+        route: '/soc/pages/dash-1',
         icon: 'LayoutDashboard',
         order: 10,
         enabled: true,
-        placement: 'home.after',
+        placement: 'soc.workspace',
         buildHash: 'abc',
         buildStatus: 'ready',
       },
@@ -181,12 +181,13 @@ function makeProvider(id: string, name: string, models: Array<{ id: string; name
   };
 }
 
-function renderHomeWithLayout() {
+function renderHomeWithLayout(initialPath = '/') {
   return render(
-    <MemoryRouter initialEntries={['/']}>
+    <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Home />} />
+          <Route path="soc" element={<div>SOC page</div>} />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -195,7 +196,11 @@ function renderHomeWithLayout() {
 
 async function flushEffects() {
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
+    if (vi.isFakeTimers()) {
+      await vi.advanceTimersByTimeAsync(0);
+      return;
+    }
+    await Promise.resolve();
   });
 }
 
@@ -609,11 +614,11 @@ describe('Layout user defined pages navigation', () => {
     consoleUpgradeApi.getProPackageStatus.mockResolvedValue({ pro_enabled: false });
   });
 
-  it('renders custom user defined page links under the home section', async () => {
-    renderHomeWithLayout();
+  it('renders custom user defined page links under the SOC workspace section', async () => {
+    renderHomeWithLayout('/soc');
     expect(await screen.findByRole('link', { name: '自定义仪表盘' })).toHaveAttribute(
       'href',
-      '/user-defined-pages/dash-1',
+      '/soc/pages/dash-1',
     );
   });
 
@@ -623,22 +628,22 @@ describe('Layout user defined pages navigation', () => {
         {
           id: 'ready-page',
           title: '可用页面',
-          route: '/user-defined-pages/ready-page',
+          route: '/soc/pages/ready-page',
           icon: 'LayoutDashboard',
           order: 10,
           enabled: true,
-          placement: 'home.after',
+          placement: 'soc.workspace',
           buildHash: 'ready',
           buildStatus: 'ready',
         },
         {
           id: 'failed-page',
           title: '失败页面',
-          route: '/user-defined-pages/failed-page',
+          route: '/soc/pages/failed-page',
           icon: 'LayoutDashboard',
           order: 20,
           enabled: true,
-          placement: 'home.after',
+          placement: 'soc.workspace',
           buildHash: '',
           buildStatus: 'failed',
         },
@@ -648,7 +653,7 @@ describe('Layout user defined pages navigation', () => {
       refetch: vi.fn(),
     });
 
-    renderHomeWithLayout();
+    renderHomeWithLayout('/soc');
 
     expect(await screen.findByRole('link', { name: '可用页面' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '失败页面' })).not.toBeInTheDocument();

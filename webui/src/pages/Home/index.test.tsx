@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Home from './index';
 
@@ -65,36 +64,7 @@ describe('Home create user defined page entry', () => {
     });
   });
 
-  it('allows admins to create a session and navigate with the guided initial message', async () => {
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter>
-        <Home />
-      </MemoryRouter>,
-    );
-
-    await user.click(screen.getByRole('button', { name: 'createUserDefinedPage' }));
-
-    await waitFor(() => {
-      expect(createMock).toHaveBeenCalledWith({ title: 'createUserDefinedPageSessionTitle' });
-    });
-
-    expect(navigateMock).toHaveBeenCalledWith(
-      `/sessions?session=session-user-defined-1&message=${encodeURIComponent('createUserDefinedPageInitialMessage')}`,
-    );
-  });
-
-  it('hides the create user defined page entry for non-admin users', () => {
-    useAuthMock.mockReturnValue({
-      user: {
-        id: 'user-2',
-        username: 'member',
-        role: 'member',
-        status: 'active',
-        must_reset_password: false,
-      },
-    });
-
+  it('does not render the custom page creation entry on the home page', () => {
     render(
       <MemoryRouter>
         <Home />

@@ -83,6 +83,10 @@ describe('UserDefinedPageHost', () => {
       expect(screen.getByText('自定义页面内容')).toBeInTheDocument();
     });
     expect(installMock).toHaveBeenCalledWith('dash-1');
+    expect(loadBundleMock).toHaveBeenCalledWith(
+      '/api/user-defined-pages/dash-1/bundle.js?v=abc123',
+      'host.bundleMissingExport',
+    );
   });
 
   it('shows build error when bundle is not ready', async () => {

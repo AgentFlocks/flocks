@@ -16,8 +16,8 @@ class UserDefinedPageManifest(BaseModel):
     icon: str = Field("LayoutDashboard", description="Lucide icon name")
     order: int = Field(100, description="Sort order in navigation")
     enabled: bool = Field(True, description="Whether page appears in navigation")
-    placement: Literal["home.after"] = Field(
-        "home.after",
+    placement: Literal["home.after", "soc.workspace"] = Field(
+        "soc.workspace",
         description="Where to insert the nav item",
     )
     entry: str = Field("src/index.tsx", description="Source entry relative to page dir")

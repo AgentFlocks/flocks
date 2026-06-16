@@ -131,7 +131,7 @@ def _normalize_import_manifest(extracted_root: Path, page_id: str) -> None:
     normalized = manifest.model_copy(
         update={
             "id": page_id,
-            "route": f"/user-defined-pages/{page_id}",
+            "route": f"/soc/pages/{page_id}",
             "entry": entry,
             "updatedAt": int(time.time() * 1000),
         }
@@ -270,7 +270,6 @@ async def get_user_defined_page_bundle(page_id: str, v: Optional[str] = Query(No
         return FileResponse(
             path=bundle_path,
             media_type="application/javascript",
-            filename="page.js",
             headers=headers,
         )
     except ValueError as exc:

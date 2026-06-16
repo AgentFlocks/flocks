@@ -53,7 +53,7 @@ async def test_create_and_list_user_defined_pages(client: AsyncClient, user_defi
     items = list_resp.json()
     assert len(items) == 1
     assert items[0]["title"] == "仪表盘"
-    assert items[0]["route"] == "/user-defined-pages/dash-1"
+    assert items[0]["route"] == "/soc/pages/dash-1"
 
 
 @pytest.mark.asyncio
@@ -86,6 +86,7 @@ async def test_bundle_endpoint_available_after_create(client: AsyncClient, user_
     bundle_resp = await client.get("/api/user-defined-pages/empty-page/bundle.js")
     assert bundle_resp.status_code == 200
     assert "application/javascript" in bundle_resp.headers.get("content-type", "")
+    assert "content-disposition" not in bundle_resp.headers
     assert bundle_resp.text.strip()
 
 
@@ -212,12 +213,12 @@ async def test_import_normalizes_manifest_identity(client: AsyncClient, user_def
     assert import_resp.status_code == 200, import_resp.text
     body = import_resp.json()
     assert body["manifest"]["id"] == "fixed-page"
-    assert body["manifest"]["route"] == "/user-defined-pages/fixed-page"
+    assert body["manifest"]["route"] == "/soc/pages/fixed-page"
 
     list_resp = await client.get("/api/user-defined-pages")
     assert list_resp.status_code == 200
     assert list_resp.json()[0]["id"] == "fixed-page"
-    assert list_resp.json()[0]["route"] == "/user-defined-pages/fixed-page"
+    assert list_resp.json()[0]["route"] == "/soc/pages/fixed-page"
 
 
 @pytest.mark.asyncio

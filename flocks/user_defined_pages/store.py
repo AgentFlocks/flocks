@@ -166,11 +166,11 @@ class UserDefinedPagesStore:
         manifest = UserDefinedPageManifest(
             id=page_id,
             title=title.strip() or page_id,
-            route=f"/user-defined-pages/{page_id}",
+            route=f"/soc/pages/{page_id}",
             icon=icon,
             order=order,
             enabled=True,
-            placement="home.after",
+            placement="soc.workspace",
             entry="src/index.tsx",
             updatedAt=now_ms,
         )
@@ -200,7 +200,7 @@ class UserDefinedPagesStore:
         merged = existing.model_dump()
         merged.update(manifest_data)
         merged["id"] = page_id
-        merged["route"] = f"/user-defined-pages/{page_id}"
+        merged["route"] = f"/soc/pages/{page_id}"
         merged["updatedAt"] = int(time.time() * 1000)
         manifest = UserDefinedPageManifest.model_validate(merged)
         self._write_manifest(page_id, manifest)

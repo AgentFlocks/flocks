@@ -28,8 +28,6 @@ const ModelPage = lazy(() => import('@/pages/Model'));
 const SkillPage = lazy(() => import('@/pages/Skill'));
 const ConfigPage = lazy(() => import('@/pages/Config'));
 const ChannelPage = lazy(() => import('@/pages/Channel'));
-const PermissionPage = lazy(() => import('@/pages/Permission'));
-const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
 const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
 const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
@@ -37,6 +35,8 @@ const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
 const UserDefinedPageHost = lazy(() => import('@/pages/UserDefinedPageHost'));
+const SocOverviewPage = lazy(() => import('@/pages/Soc'));
+const SocAlertsPage = lazy(() => import('@/pages/Soc/Alerts'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -119,6 +119,7 @@ export function Routes() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="user-defined-pages/:pageId/*" element={<LazyRoute><UserDefinedPageHost /></LazyRoute>} />
+        <Route path="soc/pages/:pageId/*" element={<LazyRoute><UserDefinedPageHost /></LazyRoute>} />
 
         {/* AI 工作台 */}
         <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
@@ -133,6 +134,14 @@ export function Routes() {
         {/* 设备接入 */}
         <Route path="devices" element={<LazyRoute><DeviceIntegrationPage /></LazyRoute>} />
 
+        {/* SOC 工作区 */}
+        <Route path="soc" element={<LazyRoute><SocOverviewPage /></LazyRoute>} />
+        <Route path="soc/alerts" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
+        <Route path="soc/alerts/:incidentId" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
+        <Route path="soc/cases" element={<Navigate to="/soc/alerts" replace />} />
+        <Route path="soc/cases/:caseId" element={<Navigate to="/soc/alerts" replace />} />
+        <Route path="soc/reports" element={<Navigate to="/soc/alerts" replace />} />
+
         {/* Agent Smith */}
         <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
         <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
@@ -146,8 +155,8 @@ export function Routes() {
         <Route path="config/*" element={<Navigate to="/config" replace />} />
         <Route path="system-logs" element={<LazyRoute><SystemLogPage /></LazyRoute>} />
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
-        <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
-        <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
+        <Route path="permissions" element={<Navigate to="/config" replace />} />
+        <Route path="monitoring" element={<Navigate to="/config" replace />} />
         <Route path="audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
         <Route path="admin/users" element={<Navigate to="/config" replace />} />
         <Route
