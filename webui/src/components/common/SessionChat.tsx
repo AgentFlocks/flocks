@@ -1910,10 +1910,15 @@ export default function SessionChat({
       try {
         await submitAnswer(callID, requestId, answers);
       } catch (err: unknown) {
-        alert(`Submit failed: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        if (onError) {
+          onError(message);
+        } else {
+          toast.error(t('chat.questionSubmitFailed', 'Submit failed'), message);
+        }
       }
     },
-    [submitAnswer],
+    [onError, submitAnswer, t, toast],
   );
 
   const handleQuestionReject = useCallback(
@@ -1921,10 +1926,15 @@ export default function SessionChat({
       try {
         await submitReject(callID, requestId);
       } catch (err: unknown) {
-        alert(`Cancel failed: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        if (onError) {
+          onError(message);
+        } else {
+          toast.error(t('chat.questionCancelFailed', 'Cancel failed'), message);
+        }
       }
     },
-    [submitReject],
+    [onError, submitReject, t, toast],
   );
 
   const { status: sseStatus } = useSSE({
