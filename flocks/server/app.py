@@ -322,11 +322,16 @@ async def lifespan(app: FastAPI):
 
     # Sync workflows from .flocks/workflow/ filesystem into Storage
     try:
-        from flocks.server.routes.workflow import sync_workflows_from_filesystem
+        from flocks.server.routes.workflow import (
+            reconcile_published_workflow_api_services,
+            sync_workflows_from_filesystem,
+        )
 
         async def _sync_workflows_phase() -> None:
             imported = await sync_workflows_from_filesystem()
             log.info("workflow.sync.done", {"imported": imported})
+            api_services = await reconcile_published_workflow_api_services()
+            log.info("workflow.api_services.reconciled", api_services)
 
         _schedule_startup_phase(app, log, "workflow.sync_filesystem", _sync_workflows_phase)
     except Exception as e:
