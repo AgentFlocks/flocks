@@ -1042,7 +1042,7 @@ class ToolRegistry:
         try:
             from flocks.plugin import PluginLoader
 
-            PluginLoader.load_extension("TOOLS")
+            PluginLoader.load_extension("TOOLS", load_entry_points=True)
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
         after = set(cls._tools.keys())

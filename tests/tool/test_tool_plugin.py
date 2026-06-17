@@ -887,6 +887,26 @@ class TestPluginPyRegistration:
             ToolRegistry._plugin_tool_names = old_plugin_names
             ToolRegistry._enabled_defaults = old_enabled_defaults
 
+    def test_load_plugin_tools_loads_legacy_package_entry_points(self):
+        from flocks.tool.registry import ToolRegistry
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("flocks.plugin.PluginLoader.load_extension") as load_extension:
+                ToolRegistry._load_plugin_tools()
+
+            load_extension.assert_called_once_with("TOOLS", load_entry_points=True)
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
     def test_load_plugin_tools_marks_project_python_tools_native(self, tmp_path: Path):
         from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
 

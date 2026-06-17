@@ -259,6 +259,43 @@ class TestPluginLoader:
         ]
         assert tool_items == []
 
+    def test_load_extension_can_load_legacy_entry_points(self, tmp_path: Path, monkeypatch):
+        """Scoped loads opt in to the legacy flocks.plugins entry-point group."""
+        loaded = []
+
+        class _FakeEntryPoint:
+            name = "fake-tools"
+
+            def load(self):
+                def _target(_loader_cls):
+                    loaded.append("entry-point-called")
+
+                return _target
+
+        class _FakeEntryPoints:
+            def select(self, *, group: str):
+                assert group == "flocks.plugins"
+                return [_FakeEntryPoint()]
+
+        PluginLoader._plugin_root = tmp_path / "user_plugins"
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="TOOLS",
+            subdir="tools",
+            consumer=lambda items, src: None,
+        ))
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: _FakeEntryPoints(),
+        )
+
+        PluginLoader.load_extension(
+            "TOOLS",
+            project_dir=tmp_path / "project",
+            load_entry_points=True,
+        )
+
+        assert loaded == ["entry-point-called"]
+
     def test_dedup_first_wins(self, tmp_path: Path):
         agents_dir = tmp_path / "agents"
         _write_plugin(agents_dir, "a.py",

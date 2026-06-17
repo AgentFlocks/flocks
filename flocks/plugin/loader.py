@@ -250,12 +250,18 @@ class PluginLoader:
         attr_name: str,
         extra_sources: Optional[List[str]] = None,
         project_dir: Optional[Path] = None,
+        *,
+        load_entry_points: bool = False,
     ) -> None:
         """Load one registered extension point using normal plugin scan rules.
 
         This is the scoped counterpart to :meth:`load_all`. It scans the same
         user-level, project-level, and explicit ``cfg.plugin`` sources, but only
         dispatches the requested attribute (for example ``"TOOLS"``).
+
+        Set ``load_entry_points`` only for compatibility paths that still need
+        legacy package plugins from the global ``flocks.plugins`` entry-point
+        group.
         """
         ext = cls._extension_points.get(attr_name)
         if ext is None:
@@ -268,6 +274,8 @@ class PluginLoader:
             project_dir=project_dir or Path.cwd(),
             log_scope="load_extension",
         )
+        if load_entry_points:
+            cls._load_entry_points()
 
     @classmethod
     def load_for_extension(
