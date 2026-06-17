@@ -106,6 +106,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.driverDockerDesc': 'docker desc',
         'detail.run.apiKeyHide': '隐藏',
         'detail.run.apiKeyShow': '显示',
+        'detail.chat.backendConfigAccessGuide': '后端配置库认证方式：使用 server_api_token，并通过 Authorization: Bearer 访问 {{configEndpoint}}；兜底迁移接口是 {{configSyncEndpoint}}。',
         'detail.run.guidePanelTitle': 'Rex 辅助发布',
         'detail.run.guidePanelDesc': '选择一种发布方式',
         'detail.run.cardGuideTitle': 'Flocks辅助配置',
@@ -551,6 +552,14 @@ describe('IntegrationTab trigger workspace', () => {
     );
     expect(onGuidePrompt).toHaveBeenCalledWith(
       expect.stringContaining('config.json 和 workflow.json 不是直接写入目标'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('server_api_token'),
+      'Syslog 接入',
+    );
+    expect(onGuidePrompt).toHaveBeenCalledWith(
+      expect.stringContaining('Authorization: Bearer'),
       'Syslog 接入',
     );
     expect(onGuidePrompt).toHaveBeenCalledWith(

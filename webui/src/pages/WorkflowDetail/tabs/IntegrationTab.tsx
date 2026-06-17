@@ -81,6 +81,19 @@ const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
 const WORKFLOW_GUIDE_FILE_NAME = 'guide.md';
 
 type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
+type WorkflowPromptParams = Record<string, unknown> & {
+  backendConfigAccessGuide: string;
+};
+
+function withBackendConfigAccessGuide(
+  t: TranslateFn,
+  params: Record<string, unknown>,
+): WorkflowPromptParams {
+  return {
+    ...params,
+    backendConfigAccessGuide: t('detail.chat.backendConfigAccessGuide', params),
+  };
+}
 
 function formatWorkflowAPIEndpoints(id: string, triggerId?: string): string {
   return JSON.stringify(workflowAPIEndpoints(id, triggerId), null, 2);
@@ -182,11 +195,15 @@ function buildGuideQuestionPrompt(
   focus: string,
   instruction: string,
 ): string {
-  return t('detail.chat.welcome.guideQuestionPrompt', {
-    ...workflowGuidePromptParams(workflow),
-    focus,
-    instruction,
-  });
+  const promptParams = withBackendConfigAccessGuide(t, workflowGuidePromptParams(workflow));
+  return [
+    t('detail.chat.welcome.guideQuestionPrompt', {
+      ...promptParams,
+      focus,
+      instruction,
+    }),
+    promptParams.backendConfigAccessGuide,
+  ].join('\n\n');
 }
 
 function triggerGuideKind(type: WorkflowTriggerType): string {

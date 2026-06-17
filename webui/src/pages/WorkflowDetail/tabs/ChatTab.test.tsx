@@ -131,6 +131,7 @@ vi.mock('react-i18next', () => ({
     t: (key: string, params?: Record<string, unknown>) => {
       const translations: Record<string, string> = {
         'detail.chat.sessionTitle': '修改工作流「{{name}}」',
+        'detail.chat.backendConfigAccessGuide': '后端配置库认证方式：使用 server_api_token，并通过 Authorization: Bearer 访问 {{configEndpoint}}；兜底迁移接口是 {{configSyncEndpoint}}。',
         'detail.chat.contextMessage': [
           '工作流 ID： {{id}}',
           '工作流名称： {{name}}',
@@ -320,6 +321,8 @@ describe('WorkflowDetail ChatTab', () => {
     expect(capturedSessionOptions[0].contextMessage).toContain('前端当前 API 清单');
     expect(capturedSessionOptions[0].contextMessage).toContain('GET /api/workflow/stream_alert_denoise/service');
     expect(capturedSessionOptions[0].contextMessage).toContain('DELETE /api/workflow/stream_alert_denoise/triggers/{triggerId}');
+    expect(capturedSessionOptions[0].contextMessage).toContain('server_api_token');
+    expect(capturedSessionOptions[0].contextMessage).toContain('Authorization: Bearer');
   });
 
   it('includes the workflow id in workflow configuration shortcut prompts', async () => {
@@ -359,6 +362,16 @@ describe('WorkflowDetail ChatTab', () => {
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('/api/workflow/stream_alert_denoise/config'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('server_api_token'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Authorization: Bearer'),
       }),
     );
     expect(mockCreateAndSend).toHaveBeenCalledWith(
@@ -416,6 +429,11 @@ describe('WorkflowDetail ChatTab', () => {
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('必须调用 question 工具'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('server_api_token'),
       }),
     );
     expect(mockCreateAndSend).toHaveBeenCalledWith(
@@ -484,6 +502,11 @@ describe('WorkflowDetail ChatTab', () => {
     expect(mockCreateAndSend).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('/api/workflow/stream_alert_denoise/config'),
+      }),
+    );
+    expect(mockCreateAndSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Authorization: Bearer'),
       }),
     );
     expect(mockCreateAndSend).toHaveBeenCalledWith(
