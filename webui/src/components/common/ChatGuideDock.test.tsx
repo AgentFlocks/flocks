@@ -38,6 +38,9 @@ describe('ChatGuideDock', () => {
     expect(screen.getByTestId('chat-guide-expanded-panel')).toBeInTheDocument();
     expect(screen.getByText('Create Guides')).toBeInTheDocument();
     expect(screen.getByText('Create Cases')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Guide 6' }).parentElement?.parentElement).toHaveClass(
+      'grid-cols-[repeat(auto-fill,minmax(140px,1fr))]',
+    );
     expect(screen.getByRole('button', { name: 'Guide 6' })).toBeInTheDocument();
     expect(expandButton).toHaveAttribute('aria-expanded', 'true');
 

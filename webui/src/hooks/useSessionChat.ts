@@ -93,7 +93,7 @@ export function useSessionChat({
   );
 
   useEffect(() => {
-    if (!initialSessionId || initialSessionId === sessionIdRef.current) return;
+    if (initialSessionId === sessionIdRef.current) return;
     sessionIdRef.current = initialSessionId;
     createPromiseRef.current = null;
     setSessionId(initialSessionId);
