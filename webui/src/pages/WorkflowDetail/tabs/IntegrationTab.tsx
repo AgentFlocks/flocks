@@ -2052,9 +2052,6 @@ function TriggersSection({
           )}
         </div>
       )}
-    </div>
-  );
-}
 
 export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePrompt }: IntegrationTabProps) {
   const { t } = useTranslation('workflow');

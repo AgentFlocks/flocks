@@ -59,7 +59,24 @@ mkdir -p "$CAPTURE_ROOT/captures"
 
 ## 标准流程
 
-> 按照以下 1-12 的操作流程完成任务
+> 按照以下 1-11 的操作流程完成任务
+
+Copy this checklist and check off items as you complete them:
+
+```text
+Task Progress:
+- [ ] Step 1: Confirm target site/tab and prepare capture directory
+- [ ] Step 2: Check browser availability and open or attach target tab
+- [ ] Step 3: Wait for required manual login or authorization
+- [ ] Step 4: Inject Web2CLI capture hook and verify it is installed
+- [ ] Step 5: Perform the target page operation and confirm requests are captured
+- [ ] Step 6: Export captured API data and save browser auth state
+- [ ] Step 7: Analyze captured APIs and identify the CLI request chain
+- [ ] Step 8: Generate CLI, verify.json, and cli-reference.md
+- [ ] Step 9: Validate the generated CLI against live captured/authenticated data
+- [ ] Step 10: Integrate the WebCLI capability into a maintainable skill or device asset
+- [ ] Step 11: Summarize generated capability and close only the Web2CLI tab
+```
 
 Copy this checklist and check off items as you complete them:
 

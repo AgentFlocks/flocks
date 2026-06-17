@@ -524,6 +524,16 @@ export default function SessionPage() {
     });
   }, []);
 
+  const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
+    const rect = target.getBoundingClientRect();
+    setSelectorTooltip({
+      title,
+      lines,
+      x: rect.left - 8,
+      y: rect.top + rect.height / 2,
+    });
+  }, []);
+
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
     if (target?.canDelete === false) {
@@ -1148,6 +1158,101 @@ export default function SessionPage() {
                     ) : (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
                     )}
+                  </div>
+                </div>
+              )}
+            </div>
+          }
+          centerToolbarSlot={
+            <div className="relative" data-model-selector>
+              <button
+                type="button"
+                onClick={() => setShowModelOptions(!showModelOptions)}
+                disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
+                className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+                title={selectedModelOption ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}` : t('modelPicker.empty')}
+              >
+                <Cpu className="h-3 w-3 shrink-0" />
+                <span className="truncate font-medium">
+                  {selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
+                </span>
+                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
+              </button>
+              {showModelOptions && (
+                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm">
+                  <div className="border-b border-zinc-100 px-2.5 py-1.5">
+                    <div className="text-xs font-semibold text-zinc-700">{t('modelPicker.title')}</div>
+                    <div className="truncate text-[10px] text-zinc-400">{t('modelPicker.hint')}</div>
+                  </div>
+                  <div className="h-[13.5rem] overflow-y-auto p-1.5">
+                    {loadingProviders || loadingEnabledModels ? (
+                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
+                    ) : groupedChatModelOptions.length > 0 ? (
+                      groupedChatModelOptions.map((group) => (
+                        <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
+                          <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur">
+                            <span className="truncate">{group.providerName}</span>
+                            <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500">
+                              {t('modelPicker.count', { count: group.models.length })}
+                            </span>
+                          </div>
+                          <div className="space-y-0.5">
+                            {group.models.map((option) => (
+                              <button
+                                key={option.key}
+                                type="button"
+                                onClick={() => void handleSelectModel(option)}
+                                className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
+                                  selectedModelOption?.key === option.key
+                                    ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa]'
+                                    : 'text-zinc-700 hover:bg-zinc-50'
+                                }`}
+                              >
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <Cpu className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600' : 'text-zinc-400'}`} />
+                                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900">{option.label}</span>
+                                  {option.supportsVision === true && (
+                                    <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600">
+                                      {t('modelPicker.vision')}
+                                    </span>
+                                  )}
+                                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                                    <span
+                                      className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200"
+                                      onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                      onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                      onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                      onMouseOver={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                      onMouseLeave={() => setSelectorTooltip(null)}
+                                      onPointerLeave={() => setSelectorTooltip(null)}
+                                    >
+                                      <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500" />
+                                    </span>
+                                  </div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                    )}
+                  </div>
+                  <div className="border-t border-zinc-100 p-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowModelOptions(false);
+                        setSelectorTooltip(null);
+                        navigate('/models');
+                      }}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900"
+                    >
+                      <Plus className="h-3 w-3" />
+                      {t('modelPicker.addModel')}
+                    </button>
                   </div>
                 </div>
               )}

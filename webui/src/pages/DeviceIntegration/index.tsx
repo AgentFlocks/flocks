@@ -1542,6 +1542,36 @@ export default function DeviceIntegrationPage() {
   // Render
   // ──────────────────────────────────────────────────────────────────────────
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Group to use when adding a new device (follows sidebar selection).
+  // In "全部机房" view (null), pre-select the first available group so the
+  // dropdown has a sensible default; the user can change it in the panel.
+  // ──────────────────────────────────────────────────────────────────────────
+  const addDefaultGroupId = selectedGroupId ?? groups[0]?.id ?? DEFAULT_GROUP_ID;
+  // Whether the room field should be locked (read-only) in the config panel.
+  const groupLocked = selectedGroupId !== null;
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Stats for the main area header
+  // ──────────────────────────────────────────────────────────────────────────
+  const connectedCount = filteredDevices.filter(
+    (d) => d.enabled && (d.status === 'ok' || d.status === 'connected'),
+  ).length;
+  const errorCount = filteredDevices.filter((d) => d.enabled && d.status === 'error').length;
+
+  // Groups that actually render a section in the "全部机房" view (i.e. have at
+  // least one device) — drives the collapse-all toggle.
+  const nonEmptyGroupIds = useMemo(
+    () => groups.filter((g) => devices.some((d) => d.group_id === g.id)).map((g) => g.id),
+    [groups, devices],
+  );
+  const allCollapsed =
+    nonEmptyGroupIds.length > 0 && nonEmptyGroupIds.every((id) => collapsedGroups.has(id));
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Render
+  // ──────────────────────────────────────────────────────────────────────────
+
   return (
     <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden">
       <PageHeader
