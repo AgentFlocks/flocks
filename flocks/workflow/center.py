@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib import error as url_error
 from urllib import request as url_request
 
@@ -400,6 +400,12 @@ def _service_release_file(workflow_id: str, release_id: str) -> Path:
     return base / f"{release_id}.json"
 
 
+def _service_cache_dir(name: str) -> Path:
+    cache_dir = Config.get_data_path() / _SERVICE_DATA_DIR / "cache" / name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
 def _workflow_container_name(workflow_id: str, release_id: str) -> str:
     return f"flocks-wf-{workflow_id[:8]}-{release_id[:8]}"
 
@@ -475,6 +481,91 @@ async def _wait_service_healthy(service_url: str, retries: int = 20, interval_s:
         except Exception:
             await asyncio.sleep(interval_s)
             continue
+        await asyncio.sleep(interval_s)
+    return False
+
+
+def _docker_proxy_env_value(env_value: str) -> str:
+    """Translate host loopback proxy URLs so containers can reach them."""
+    raw = (env_value or "").strip()
+    if not raw:
+        return env_value
+
+    has_scheme = "://" in raw
+    parse_input = raw if has_scheme else f"http://{raw}"
+    try:
+        parsed = urlparse(parse_input)
+        hostname = (parsed.hostname or "").lower()
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return env_value
+
+        userinfo = ""
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo += f":{parsed.password}"
+            userinfo += "@"
+        netloc = f"{userinfo}host.docker.internal"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        rewritten = urlunparse((
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+        if not has_scheme and rewritten.startswith("http://"):
+            return rewritten[len("http://"):]
+        return rewritten
+    except Exception:
+        return env_value
+
+
+def _docker_proxy_uses_host_gateway(env_value: str) -> bool:
+    raw = (env_value or "").strip()
+    if not raw:
+        return False
+    parse_input = raw if "://" in raw else f"http://{raw}"
+    try:
+        return (urlparse(parse_input).hostname or "").lower() == "host.docker.internal"
+    except Exception:
+        return False
+
+
+async def _docker_logs_tail(container_name: str, *, lines: int = 80) -> str:
+    stdout, stderr, _ = await exec_docker(
+        ["logs", "--tail", str(lines), container_name],
+        allow_failure=True,
+        timeout_s=10,
+    )
+    return (stdout or stderr or "").strip()
+
+
+async def _wait_docker_service_healthy(
+    service_url: str,
+    container_name: str,
+    *,
+    retries: int,
+    interval_s: float,
+) -> bool:
+    for _ in range(retries):
+        try:
+            payload = await asyncio.to_thread(_json_get, f"{service_url}/health", 2.0)
+            if payload.get("ok") is True:
+                return True
+        except Exception:
+            pass
+
+        state = await docker_container_state(container_name)
+        if state.get("exists") and not state.get("running"):
+            logs = await _docker_logs_tail(container_name)
+            detail = logs or "container exited before reporting healthy"
+            raise WorkflowCenterError(
+                "Published workflow service container exited before health check "
+                f"passed: {detail}"
+            )
         await asyncio.sleep(interval_s)
     return False
 
@@ -876,6 +967,8 @@ async def _publish_workflow_docker(
     )
     project_root = Path.cwd().resolve()
     user_config_dir = Config.get_config_path().resolve()
+    pip_cache_dir = _service_cache_dir("pip")
+    uv_cache_dir = _service_cache_dir("uv")
     service_key = workflow_id
     runtime_api_key = api_key or _generate_api_key()
 
@@ -890,6 +983,10 @@ async def _publish_workflow_docker(
         f"{project_root}:/app:ro",
         "-v",
         f"{release_runtime_dir}:/runtime",
+        "-v",
+        f"{pip_cache_dir}:/root/.cache/pip",
+        "-v",
+        f"{uv_cache_dir}:/root/.cache/uv",
         "-w",
         "/runtime",
         "-e",
@@ -900,6 +997,8 @@ async def _publish_workflow_docker(
         "FLOCKS_CONFIG=/runtime/.flocks-config/flocks.json",
         "-e",
         f"{_SERVICE_API_KEY_ENV}={runtime_api_key}",
+        "-e",
+        "UV_CACHE_DIR=/root/.cache/uv",
         image_name,
     ]
     if user_config_dir.exists():
@@ -919,11 +1018,20 @@ async def _publish_workflow_docker(
         "no_proxy",
     ]
     proxy_injections: List[str] = []
+    needs_host_gateway = False
     for env_name in proxy_env_names:
         env_value = os.getenv(env_name)
         if env_value:
-            proxy_injections.extend(["-e", f"{env_name}={env_value}"])
+            docker_env_value = _docker_proxy_env_value(env_value)
+            if _docker_proxy_uses_host_gateway(docker_env_value):
+                needs_host_gateway = True
+            proxy_injections.extend(["-e", f"{env_name}={docker_env_value}"])
     if proxy_injections:
+        if needs_host_gateway:
+            cmd[cmd.index(image_name):cmd.index(image_name)] = [
+                "--add-host",
+                "host.docker.internal:host-gateway",
+            ]
         cmd[cmd.index(image_name):cmd.index(image_name)] = proxy_injections
     python_index_url = resolve_python_package_index_url()
     if python_index_url:
@@ -934,15 +1042,17 @@ async def _publish_workflow_docker(
             f"UV_DEFAULT_INDEX={python_index_url}",
         ]
     if runtime_install:
+        uv_bootstrap_cmd = "python -m pip install uv"
         if has_requirements_snapshot:
             # Pre-install all pinned deps from requirements.txt (no resolver = fast),
             # then install the project itself without re-resolving deps.
             install_cmd = (
-                "pip install --no-cache-dir -r /runtime/requirements.txt && "
-                "pip install --no-cache-dir --no-deps /app"
+                f"{uv_bootstrap_cmd} && "
+                "uv pip install --system -r /runtime/requirements.txt && "
+                "uv pip install --system --no-deps /app"
             )
         else:
-            install_cmd = "pip install --no-cache-dir /app"
+            install_cmd = f"{uv_bootstrap_cmd} && uv pip install --system /app"
         service_cmd = (
             f"{install_cmd} && "
             "python -m flocks.workflow.service_runtime "
@@ -976,8 +1086,9 @@ async def _publish_workflow_docker(
         stdout, _, _ = await exec_docker(cmd)
         container_id = stdout.strip()
         service_url = _host_service_url(host_port)
-        healthy = await _wait_service_healthy(
+        healthy = await _wait_docker_service_healthy(
             service_url,
+            container_name,
             retries=health_retries,
             interval_s=health_interval_s,
         )

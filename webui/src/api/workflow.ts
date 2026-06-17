@@ -445,7 +445,7 @@ export const workflowAPI = {
     client.get<WorkflowJSON>(`/api/workflow/${id}/export`),
 
   publish: (id: string, data?: { driver?: WorkflowServiceDriver }) =>
-    client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 300000 }),
+    client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 600000 }),
 
   unpublish: (id: string) =>
     client.post<{ ok: boolean }>(`/api/workflow/${id}/unpublish`),
