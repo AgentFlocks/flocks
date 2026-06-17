@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
-import SessionChat, { buildInstructionDisplayText } from './SessionChat';
+import SessionChat, { buildInstructionDisplayText, type SessionChatDisplay } from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import ChatGuideDock, { type ChatGuideAction } from './ChatGuideDock';
@@ -49,6 +49,10 @@ interface EntitySheetCtx {
 }
 
 const EntitySheetContext = createContext<EntitySheetCtx>({ openRex: () => {}, openTest: () => {} });
+const REX_WORKBENCH_DISPLAY: SessionChatDisplay = {
+  collapseIntermediateSteps: true,
+  processGroupsDefaultOpen: false,
+};
 
 /** Consume inside form content to get access to openRex() / openTest() */
 export function useEntitySheet() {
@@ -566,6 +570,7 @@ export default function EntitySheet({
                   placeholder={t('entity.rexInputPlaceholder')}
                   className="h-full"
                   emptyText={t('entity.rexReady')}
+                  display={REX_WORKBENCH_DISPLAY}
                   initialMessage={rexInitialMessage}
                   agentName={rexAgentName}
                   mentionAgents={rexMentionAgents}

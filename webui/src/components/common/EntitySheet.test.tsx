@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import SessionChat from '@/components/common/SessionChat';
 import EntitySheet from '@/components/common/EntitySheet';
 
 // ---------------------------------------------------------------------------
@@ -17,6 +18,17 @@ vi.mock('@/hooks/useSessionChat', () => ({
     reset: vi.fn(),
   })),
 }));
+
+vi.mock('@/components/common/SessionChat', async () => {
+  const React = await import('react');
+  return {
+    default: vi.fn((props: any) => React.createElement('div', {
+      'data-testid': 'session-chat',
+      'data-display': JSON.stringify(props.display ?? null),
+    })),
+    buildInstructionDisplayText: (label: string) => `@@flocks-instruction:${label}`,
+  };
+});
 
 // Provide a t() that returns actual Chinese text so the test assertions match
 // what users see in the browser (mirror of zh-CN/common.json entity section).
@@ -132,6 +144,28 @@ describe('EntitySheet', () => {
       await user.click(formTab);
 
       expect(screen.getByText('Form content')).toBeInTheDocument();
+    });
+
+    it('defaults Rex workbench process details collapsed like workflow workbenches', () => {
+      render(
+        <EntitySheet {...defaultProps} initialTab="rex">
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      expect(screen.getByTestId('session-chat')).toHaveAttribute(
+        'data-display',
+        JSON.stringify({ collapseIntermediateSteps: true, processGroupsDefaultOpen: false }),
+      );
+      expect(vi.mocked(SessionChat)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          display: {
+            collapseIntermediateSteps: true,
+            processGroupsDefaultOpen: false,
+          },
+        }),
+        undefined,
+      );
     });
   });
 
