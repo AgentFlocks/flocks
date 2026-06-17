@@ -8,9 +8,8 @@ Device B.
 Fix: store per-device tool overrides in the ``device_tool_settings`` SQLite
 table (ON DELETE CASCADE cleans up automatically on device removal).  The
 override is checked at ToolRegistry.execute() time, AFTER the shared global
-tool_settings have been applied.  A per-device enabled=True row can re-enable
-that one device when the shared in-memory tool was disabled by global state or
-failure protection.
+tool_settings have been applied.  A per-device ``enabled=False`` row disables
+only that device; switch-on removes the row and follows global state.
 """
 
 from __future__ import annotations
@@ -390,10 +389,10 @@ class TestDeviceToolIsolationExecution:
         assert result.success is False
         assert "disabled" in (result.error or "").lower()
 
-    async def test_per_device_enable_overrides_disabled_registry_tool(
+    async def test_legacy_per_device_enable_does_not_override_disabled_registry_tool(
         self, monkeypatch, db_env, isolated_registry
     ):
-        """A device page switch-on should persist and allow that device to run."""
+        """Historical enabled=True rows must not bypass global disabled state."""
         result = await self._run_tool(
             monkeypatch,
             db_env,
@@ -402,7 +401,8 @@ class TestDeviceToolIsolationExecution:
             enabled_in_registry=False,
             per_device_enabled=True,
         )
-        assert result.success is True
+        assert result.success is False
+        assert "disabled" in (result.error or "").lower()
 
     async def test_device_tool_failures_do_not_disable_shared_tool(self):
         tool = _device_tool("sangfor_af_login", "sangfor_af_v8_0_106", enabled=True)

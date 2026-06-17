@@ -13,7 +13,9 @@ Covers the connectivity-probe behaviour added when host+port providers
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Dict, Optional
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -21,6 +23,7 @@ from httpx import AsyncClient
 from flocks.server.routes import device as device_routes
 from flocks.tool.device import intake as device_intake
 from flocks.tool.device.models import DeviceTestResult
+from flocks.tool.registry import ToolCategory, ToolInfo
 
 
 def _fake_row(*, fields: Dict[str, str], verify_ssl: bool = False) -> dict:
@@ -333,6 +336,98 @@ class TestDeviceCredentialEndpoint:
         resp = await client.post("/api/devices/missing-id/credentials", json={})
 
         assert resp.status_code == 404
+
+
+class TestDeviceToolEndpoint:
+    @staticmethod
+    def _tool(*, enabled: bool = True):
+        return SimpleNamespace(
+            info=ToolInfo(
+                name="onesig_login",
+                description="OneSIG login",
+                category=ToolCategory.CUSTOM,
+                enabled=enabled,
+                source="device",
+                provider="onesig_api_v2_5_3_D20260321",
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_enable_deletes_per_device_override_without_writing_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls: dict[str, object] = {}
+        tool = self._tool(enabled=True)
+
+        async def fake_delete(device_id: str, tool_name: str):
+            calls["delete"] = (device_id, tool_name)
+            return True
+
+        async def fake_set(device_id: str, tool_name: str, enabled: bool):
+            calls["set"] = (device_id, tool_name, enabled)
+
+        monkeypatch.setattr(
+            device_routes,
+            "fetch_device",
+            AsyncMock(return_value={"storage_key": "onesig_api_v2_5_3_D20260321"}),
+        )
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.init", lambda: None)
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.get", lambda _name: tool)
+        monkeypatch.setattr(device_routes, "delete_device_tool_setting", fake_delete)
+        monkeypatch.setattr(device_routes, "set_device_tool_enabled", fake_set)
+
+        result = await device_routes.route_update_device_tool(
+            "dev-a",
+            "onesig_login",
+            device_routes.DeviceToolUpdateRequest(enabled=True),
+        )
+
+        assert calls["delete"] == ("dev-a", "onesig_login")
+        assert "set" not in calls
+        assert result.enabled_global is True
+        assert result.enabled_device is None
+        assert result.enabled_effective is True
+
+    @pytest.mark.asyncio
+    async def test_enable_global_tool_when_device_tool_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls: dict[str, object] = {}
+        tool = self._tool(enabled=False)
+
+        async def fake_delete(device_id: str, tool_name: str):
+            calls["delete"] = (device_id, tool_name)
+            return False
+
+        def fake_global_enable(target_tool, desired: bool):
+            calls["global_enable"] = (target_tool.info.name, desired)
+            target_tool.info.enabled = desired
+            return desired
+
+        monkeypatch.setattr(
+            device_routes,
+            "fetch_device",
+            AsyncMock(return_value={"storage_key": "onesig_api_v2_5_3_D20260321"}),
+        )
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.init", lambda: None)
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.get", lambda _name: tool)
+        monkeypatch.setattr(device_routes, "delete_device_tool_setting", fake_delete)
+        monkeypatch.setattr(
+            "flocks.server.routes.tool._set_global_tool_enabled",
+            fake_global_enable,
+        )
+
+        result = await device_routes.route_update_device_tool(
+            "dev-a",
+            "onesig_login",
+            device_routes.DeviceToolUpdateRequest(enabled=True),
+        )
+
+        assert calls["global_enable"] == ("onesig_login", True)
+        assert calls["delete"] == ("dev-a", "onesig_login")
+        assert result.enabled_global is True
+        assert result.enabled_device is None
+        assert result.enabled_effective is True
 
 
 class TestDeviceSyncEndpoint:

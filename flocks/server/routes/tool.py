@@ -423,6 +423,37 @@ def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
     return tool_info.enabled and _get_api_service_enabled(source_name)
 
 
+def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
+    """Persist and apply the global enabled state for a registry tool."""
+    default = _get_default_enabled(tool.info)
+    # Service gate: only matters when the user is trying to enable.
+    # Disabling is always honoured.
+    service_ok = _service_allows_enable(tool.info)
+    new_enabled = desired and service_ok
+
+    if desired == default:
+        removed = ConfigWriter.delete_tool_setting(tool.info.name)
+        log.info("tool.updated.reset_to_default", {
+            "name": tool.info.name,
+            "enabled": new_enabled,
+            "default": default,
+            "removed_overlay": removed,
+        })
+    else:
+        ConfigWriter.set_tool_setting(tool.info.name, {"enabled": desired})
+        log.info("tool.updated", {
+            "name": tool.info.name,
+            "enabled": new_enabled,
+            "requested": desired,
+            "blocked_by_service": desired and not service_ok,
+            "native": tool.info.native,
+            "store": "overlay",
+        })
+
+    tool.info.enabled = new_enabled
+    return new_enabled
+
+
 # Routes
 
 @router.get(
@@ -529,10 +560,11 @@ async def update_tool(
     Persists to the SQLite ``device_tool_settings`` table (one row per
     device_id × tool_name).  Only affects tool execution when ``device_id``
     is explicitly targeted, allowing Device A and Device B (same plugin
-    version, different names) to carry independent tool enabled/disabled
-    states, including an explicit enabled=True override when the shared
-    in-memory tool has been disabled. Rows are removed automatically via
-    ON DELETE CASCADE when the parent device row is deleted.
+    version, different names) to carry independent disabled overrides.
+    ``enabled=true`` clears the per-device disable and follows the global
+    tool setting; if the global tool is disabled, it is enabled first. Rows
+    are removed automatically via ON DELETE CASCADE when the parent device row
+    is deleted.
 
     Two behaviours of note (global mode only):
 
@@ -558,45 +590,35 @@ async def update_tool(
 
     # --- Per-device mode ---
     if device_id:
-        from flocks.tool.device.store import set_device_tool_enabled
+        from flocks.tool.device.store import (
+            delete_device_tool_setting,
+            set_device_tool_enabled,
+        )
 
-        await set_device_tool_enabled(device_id, tool_name, desired)
-        log.info("tool.device.updated", {
-            "name": tool_name,
-            "device_id": device_id,
-            "enabled": desired,
-        })
-        # The in-memory ToolInfo.enabled is NOT changed; it reflects global
-        # state.  Per-device gating happens at ToolRegistry.execute time.
+        if desired:
+            if not tool.info.enabled:
+                _set_global_tool_enabled(tool, True)
+            removed = await delete_device_tool_setting(device_id, tool_name)
+            log.info("tool.device.updated.reset_to_global", {
+                "name": tool_name,
+                "device_id": device_id,
+                "removed_override": removed,
+                "enabled_global": tool.info.enabled,
+            })
+        else:
+            await set_device_tool_enabled(device_id, tool_name, False)
+            log.info("tool.device.updated", {
+                "name": tool_name,
+                "device_id": device_id,
+                "enabled": False,
+            })
+        # The in-memory ToolInfo.enabled reflects global state. Per-device
+        # enabled=True is not a supported override; switch-on means clear the
+        # per-device disable and follow the global tool setting.
         return _build_tool_response(tool.info)
 
     # --- Global mode (original behaviour) ---
-    default = _get_default_enabled(tool.info)
-    # Service gate: only matters when the user is trying to enable.
-    # Disabling is always honoured.
-    service_ok = _service_allows_enable(tool.info)
-    new_enabled = desired and service_ok
-
-    if desired == default:
-        removed = ConfigWriter.delete_tool_setting(tool_name)
-        log.info("tool.updated.reset_to_default", {
-            "name": tool_name,
-            "enabled": new_enabled,
-            "default": default,
-            "removed_overlay": removed,
-        })
-    else:
-        ConfigWriter.set_tool_setting(tool_name, {"enabled": desired})
-        log.info("tool.updated", {
-            "name": tool_name,
-            "enabled": new_enabled,
-            "requested": desired,
-            "blocked_by_service": desired and not service_ok,
-            "native": tool.info.native,
-            "store": "overlay",
-        })
-
-    tool.info.enabled = new_enabled
+    _set_global_tool_enabled(tool, desired)
     return _build_tool_response(tool.info)
 
 

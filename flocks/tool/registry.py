@@ -817,12 +817,17 @@ class ToolRegistry:
                 error=f"Tool is disabled: {tool_name}"
             )
 
+        if not tool.info.enabled:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
+
         if device_id:
-            # Per-device tool enable gate: an individual device instance may
-            # have its own enabled override independent of the shared global
-            # tool_settings.  This prevents toggling a tool "for
-            # Device A" from affecting Device B when both share the same
-            # storage_key (same plugin version, different names).
+            # Per-device tool enable gate: a device instance may carry a
+            # disabled override independent of the shared global tool state.
+            # A stored enabled=True row is legacy data and is treated the same
+            # as no override; it must not bypass the global disabled state.
             try:
                 from flocks.tool.device.store import get_device_tool_enabled
                 per_device_enabled = await get_device_tool_enabled(device_id, tool_name)
@@ -838,12 +843,6 @@ class ToolRegistry:
                 log.debug("tool.device.per_device_gate_error", {
                     "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
                 })
-
-        if not tool.info.enabled and per_device_enabled is not True:
-            return ToolResult(
-                success=False,
-                error=f"Tool is disabled: {tool_name}"
-            )
 
         if device_id:
             from flocks.tool.credential_context import activate_device_credentials
