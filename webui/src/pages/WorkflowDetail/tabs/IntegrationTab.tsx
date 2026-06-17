@@ -2,6 +2,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -772,6 +773,10 @@ function maskedValue(value?: string, visible?: boolean): string {
   return `${value.slice(0, 4)}${'*'.repeat(Math.max(0, value.length - 8))}${value.slice(-4)}`;
 }
 
+function normalizeServiceDriver(driver?: string | null): WorkflowServiceDriver {
+  return driver === 'docker' ? 'docker' : 'local';
+}
+
 function cloneTrigger(trigger: WorkflowTrigger): WorkflowTrigger {
   return JSON.parse(JSON.stringify(trigger));
 }
@@ -940,48 +945,72 @@ function PublishSection({
   const [driver, setDriver] = useState<WorkflowServiceDriver>('local');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [configExpanded, setConfigExpanded] = useState(false);
+  const operationSeqRef = useRef(0);
+  const serviceDriver = service ? normalizeServiceDriver(service.driver) : null;
+  const driverChanged = Boolean(serviceDriver && driver !== serviceDriver);
+
+  const applyService = useCallback((nextService: WorkflowService | null) => {
+    setService(nextService);
+    if (nextService) {
+      setDriver(normalizeServiceDriver(nextService.driver));
+    }
+  }, []);
 
   const loadService = useCallback(async () => {
     try {
       const res = await workflowAPI.getService(workflowId);
-      setService(res.data);
-      if (res.data?.driver === 'local' || res.data?.driver === 'docker') {
-        setDriver(res.data.driver);
-      }
+      applyService(res.data);
     } catch {
-      setService(null);
+      applyService(null);
     } finally {
       setLoading(false);
     }
-  }, [workflowId]);
+  }, [applyService, workflowId]);
 
   useEffect(() => {
     loadService();
   }, [loadService]);
 
   const handlePublish = async () => {
+    const operationSeq = operationSeqRef.current + 1;
+    operationSeqRef.current = operationSeq;
     setPublishing(true);
     setError('');
     try {
       const res = await workflowAPI.publish(workflowId, { driver });
-      setService(res.data);
+      if (operationSeqRef.current === operationSeq) {
+        applyService(res.data);
+      }
     } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.publishFailed')));
+      if (operationSeqRef.current === operationSeq) {
+        setError(extractErrorMessage(err, t('detail.run.publishFailed')));
+      }
     } finally {
-      setPublishing(false);
+      if (operationSeqRef.current === operationSeq) {
+        setPublishing(false);
+      }
     }
   };
 
   const handleUnpublish = async () => {
+    const operationSeq = operationSeqRef.current + 1;
+    operationSeqRef.current = operationSeq;
+    setPublishing(false);
     setStopping(true);
     setError('');
     try {
       await workflowAPI.unpublish(workflowId);
-      await loadService();
+      if (operationSeqRef.current === operationSeq) {
+        await loadService();
+      }
     } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.stopFailed')));
+      if (operationSeqRef.current === operationSeq) {
+        setError(extractErrorMessage(err, t('detail.run.stopFailed')));
+      }
     } finally {
-      setStopping(false);
+      if (operationSeqRef.current === operationSeq) {
+        setStopping(false);
+      }
     }
   };
 
@@ -989,15 +1018,24 @@ function PublishSection({
     if (!window.confirm(t('detail.run.deleteServiceConfirm'))) {
       return;
     }
+    const operationSeq = operationSeqRef.current + 1;
+    operationSeqRef.current = operationSeq;
+    setPublishing(false);
     setDeleting(true);
     setError('');
     try {
       await workflowAPI.deleteService(workflowId);
-      setService(null);
+      if (operationSeqRef.current === operationSeq) {
+        applyService(null);
+      }
     } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.deleteServiceFailed')));
+      if (operationSeqRef.current === operationSeq) {
+        setError(extractErrorMessage(err, t('detail.run.deleteServiceFailed')));
+      }
     } finally {
-      setDeleting(false);
+      if (operationSeqRef.current === operationSeq) {
+        setDeleting(false);
+      }
     }
   };
 
@@ -1027,28 +1065,42 @@ function PublishSection({
     </button>
   );
 
-  const renderDriverSelector = () => (
+  const renderDriverSelector = (options?: { showApply?: boolean }) => (
     <div>
-      <div className="mb-2 text-xs font-medium text-zinc-500">运行方式</div>
-      <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
-        {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => {
-          const selected = driver === item;
-          return (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setDriver(item)}
-              className={`inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs font-medium transition-colors ${
-                selected
-                  ? 'bg-white text-gray-900 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-800'
-              }`}
-            >
-              {selected ? <Check className="h-3.5 w-3.5 text-gray-700" /> : null}
-              <span>{item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}</span>
-            </button>
-          );
-        })}
+      <div className="mb-2 text-xs font-medium text-zinc-500">{t('detail.run.serviceDriver')}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+          {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => {
+            const selected = driver === item;
+            return (
+              <button
+                key={item}
+                type="button"
+                onClick={() => setDriver(item)}
+                disabled={publishing || stopping || deleting}
+                className={`inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  selected
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-800'
+                }`}
+              >
+                {selected ? <Check className="h-3.5 w-3.5 text-gray-700" /> : null}
+                <span>{item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}</span>
+              </button>
+            );
+          })}
+        </div>
+        {options?.showApply && driverChanged ? (
+          <button
+            type="button"
+            onClick={handlePublish}
+            disabled={publishing || stopping || deleting}
+            className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-700 hover:border-gray-300 hover:bg-gray-50 disabled:opacity-60"
+          >
+            <Rocket className="h-3.5 w-3.5" />
+            {publishing ? t('detail.run.publishing') : t('detail.run.applyDriver')}
+          </button>
+        ) : null}
       </div>
       <div className="mt-2 text-[11px] leading-relaxed text-zinc-500">
         {driver === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
@@ -1129,6 +1181,7 @@ function PublishSection({
                 </div>
                 {configExpanded ? (
                   <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
+                    {renderDriverSelector({ showApply: true })}
                     <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
                     <div>
                       <div className="mb-2 text-xs font-medium text-zinc-500">Invoke URL</div>

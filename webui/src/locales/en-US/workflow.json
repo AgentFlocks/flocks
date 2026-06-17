@@ -301,6 +301,7 @@
       "serviceDriver": "Runtime",
       "driverLocal": "Local process",
       "driverDocker": "Docker container",
+      "applyDriver": "Apply runtime",
       "recommended": "Recommended",
       "driverLocalDesc": "Recommended first; starts faster for local development and debugging",
       "driverDockerDesc": "Runs isolated, best for validating container deployment",

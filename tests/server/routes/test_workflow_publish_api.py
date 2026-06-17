@@ -295,3 +295,50 @@ async def test_get_workflow_service_does_not_probe_runtime_health(
     assert result is service
     assert health_calls == []
     assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_list_workflow_services_marks_stale_running_service_stopped_in_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "wf-stale-service"
+    service_key = workflow_routes._api_service_key(workflow_id)
+    service = {
+        "workflowId": workflow_id,
+        "workflowName": "Stale Workflow",
+        "serviceUrl": "http://127.0.0.1:19002",
+        "invokeUrl": "http://127.0.0.1:19002/invoke",
+        "apiKey": "existing-api-key",
+        "status": "running",
+        "publishedAt": 123,
+        "driver": "local",
+    }
+    store: dict[str, Any] = {service_key: service}
+
+    async def fake_list_keys(prefix: str) -> list[str]:
+        assert prefix == workflow_routes._API_SERVICE_PREFIX
+        return [service_key]
+
+    async def fake_read(key: Any, *_args: Any, **_kwargs: Any) -> Any:
+        return store.get(str(key))
+
+    writes: list[tuple[Any, Any]] = []
+
+    async def fake_write(key: Any, value: Any) -> None:
+        writes.append((key, value))
+
+    monkeypatch.setattr(workflow_routes.Storage, "list_keys", fake_list_keys)
+    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
+    monkeypatch.setattr(workflow_routes.Storage, "write", fake_write)
+
+    result = await workflow_routes.list_workflow_services()
+
+    assert result[0]["status"] == "stopped"
+    assert result[0]["health"] == {
+        "ok": False,
+        "stale": True,
+        "reason": "missing_runtime",
+    }
+    assert "stoppedAt" not in result[0]
+    assert store[service_key]["status"] == "running"
+    assert writes == []

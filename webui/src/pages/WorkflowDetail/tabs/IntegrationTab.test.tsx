@@ -92,6 +92,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.publishAsApi': '发布为 API 服务',
         'detail.run.triggerSection': '触发能力',
         'detail.run.publishFailed': '发布失败',
+        'detail.run.publishing': '发布中，请稍候...',
         'detail.run.stopFailed': '停止失败',
         'detail.run.stopping': '停止中...',
         'detail.run.stopService': '停止服务',
@@ -102,6 +103,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.deleteServiceFailed': '删除 API 发布配置失败',
         'detail.run.driverLocal': '本地进程',
         'detail.run.driverDocker': 'Docker 容器',
+        'detail.run.applyDriver': '应用运行方式',
         'detail.run.driverLocalDesc': 'local desc',
         'detail.run.driverDockerDesc': 'docker desc',
         'detail.run.apiKeyHide': '隐藏',
@@ -305,6 +307,8 @@ describe('IntegrationTab trigger workspace', () => {
     expect(within(apiCard).queryByTestId('api-publish-config')).not.toBeInTheDocument();
     await user.click(within(apiCard).getByRole('button', { name: '配置' }));
     expect(within(apiCard).getByTestId('api-publish-config')).toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: '本地进程' })).toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: 'Docker 容器' })).toBeInTheDocument();
     expect(within(apiCard).getByText('Flocks辅助配置')).toBeInTheDocument();
     await user.click(within(apiCard).getByRole('button', { name: '辅助配置' }));
     expect(onGuidePrompt).toHaveBeenCalledWith(
@@ -370,6 +374,107 @@ describe('IntegrationTab trigger workspace', () => {
     });
     expect(within(screen.getByTestId('api-publish-card')).getByRole('button', { name: '发布' })).toBeInTheDocument();
     expect(within(screen.getByTestId('api-publish-card')).queryByRole('button', { name: '删除 API 发布配置' })).not.toBeInTheDocument();
+  });
+
+  it('allows changing the runtime driver after API publish', async () => {
+    const user = userEvent.setup();
+    const service = {
+      workflowId: 'wf-1',
+      workflowName: 'Demo Workflow',
+      serviceUrl: 'http://127.0.0.1:8080',
+      invokeUrl: 'http://127.0.0.1:8080/invoke',
+      apiKey: 'secret',
+      status: 'running' as const,
+      publishedAt: Date.now(),
+      driver: 'local' as const,
+    };
+    workflowAPI.getService.mockResolvedValue({ data: service });
+    workflowAPI.publish.mockResolvedValueOnce({
+      data: {
+        ...service,
+        serviceUrl: 'http://127.0.0.1:19000',
+        invokeUrl: 'http://127.0.0.1:19000/invoke',
+        driver: 'docker',
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+
+    const apiCard = await screen.findByTestId('api-publish-card');
+    await user.click(within(apiCard).getByRole('button', { name: '配置' }));
+    await user.click(within(apiCard).getByRole('button', { name: 'Docker 容器' }));
+    expect(within(apiCard).getByRole('button', { name: '应用运行方式' })).toBeInTheDocument();
+
+    await user.click(within(apiCard).getByRole('button', { name: '应用运行方式' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.publish).toHaveBeenCalledWith('wf-1', { driver: 'docker' });
+    });
+    await waitFor(() => {
+      expect(within(apiCard).queryByRole('button', { name: '应用运行方式' })).not.toBeInTheDocument();
+    });
+    expect(within(apiCard).getByText('http://127.0.0.1:19000/invoke')).toBeInTheDocument();
+  });
+
+  it('lets stopping supersede an in-flight driver switch publish', async () => {
+    const user = userEvent.setup();
+    const service = {
+      workflowId: 'wf-1',
+      workflowName: 'Demo Workflow',
+      serviceUrl: 'http://127.0.0.1:8080',
+      invokeUrl: 'http://127.0.0.1:8080/invoke',
+      apiKey: 'secret',
+      status: 'running' as const,
+      publishedAt: Date.now(),
+      driver: 'local' as const,
+    };
+    const stoppedService = {
+      ...service,
+      status: 'stopped' as const,
+      stoppedAt: Date.now(),
+    };
+    let resolvePublish!: (value: { data: Record<string, unknown> }) => void;
+    const pendingPublish = new Promise<{ data: Record<string, unknown> }>((resolve) => {
+      resolvePublish = resolve;
+    });
+
+    workflowAPI.getService
+      .mockResolvedValueOnce({ data: service })
+      .mockResolvedValueOnce({ data: stoppedService });
+    workflowAPI.publish.mockReturnValueOnce(pendingPublish);
+
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+
+    const apiCard = await screen.findByTestId('api-publish-card');
+    await user.click(within(apiCard).getByRole('button', { name: '配置' }));
+    await user.click(within(apiCard).getByRole('button', { name: 'Docker 容器' }));
+    await user.click(within(apiCard).getByRole('button', { name: '应用运行方式' }));
+    expect(within(apiCard).getByRole('button', { name: '发布中，请稍候...' })).toBeInTheDocument();
+
+    await user.click(within(apiCard).getByRole('button', { name: '停用' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.unpublish).toHaveBeenCalledWith('wf-1');
+    });
+    await waitFor(() => {
+      expect(within(apiCard).getByRole('button', { name: '启用' })).toBeInTheDocument();
+    });
+    expect(within(apiCard).queryByRole('button', { name: '发布中，请稍候...' })).not.toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: 'Docker 容器' })).toBeEnabled();
+
+    resolvePublish({
+      data: {
+        ...service,
+        serviceUrl: 'http://127.0.0.1:19000',
+        invokeUrl: 'http://127.0.0.1:19000/invoke',
+        driver: 'docker',
+      },
+    });
+
+    await waitFor(() => {
+      expect(within(apiCard).getByRole('button', { name: '启用' })).toBeInTheDocument();
+    });
+    expect(within(apiCard).queryByText('http://127.0.0.1:19000/invoke')).not.toBeInTheDocument();
   });
 
   it('keeps template-only triggers out of runtime cards while preserving publish controls', async () => {

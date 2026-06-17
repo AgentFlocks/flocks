@@ -19,6 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 from urllib import error as url_error
 from urllib import request as url_request
 
@@ -36,6 +37,7 @@ log = Log.create(service="workflow.center")
 _REGISTRY_PREFIX = "workflow_registry/"
 _RELEASE_PREFIX = "workflow_release/"
 _RUNTIME_PREFIX = "workflow_runtime/"
+_API_SERVICE_PREFIX = "workflow_api_service/"
 _SERVICE_DATA_DIR = "workflow-services"
 _DEFAULT_PORT_START = 19000
 _DEFAULT_PORT_END = 19999
@@ -47,9 +49,12 @@ _DEFAULT_RUNTIME_INSTALL_HEALTH_RETRIES = 450  # 450 × 2s = 15 minutes
 _DEFAULT_STOP_TIMEOUT_S = 15.0
 _DEFAULT_LOCAL_STOP_GRACE_S = 5.0
 _SERVICE_API_KEY_ENV = "FLOCKS_WORKFLOW_SERVICE_API_KEY"
+_PORT_RESERVATION_TTL_S = 30 * 60
 
 # Service driver: "local" runs as a subprocess; "docker" runs in a container.
 _DEFAULT_SERVICE_DRIVER = "local"
+_PORT_ALLOCATION_LOCK = asyncio.Lock()
+_IN_FLIGHT_PORT_RESERVATIONS: Dict[int, float] = {}
 
 
 class WorkflowCenterError(Exception):
@@ -167,14 +172,84 @@ def _is_port_available(port: int) -> bool:
             return False
 
 
+def _port_from_service_url(value: Any) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        parsed = urlparse(str(value))
+        return parsed.port
+    except (TypeError, ValueError):
+        return None
+
+
+def _ports_from_service_record(record: Any) -> set[int]:
+    if not isinstance(record, dict):
+        return set()
+
+    ports: set[int] = set()
+    for key in ("hostPort", "port"):
+        try:
+            port = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if 1 <= port <= 65535:
+            ports.add(port)
+
+    for key in ("serviceUrl", "invokeUrl"):
+        port = _port_from_service_url(record.get(key))
+        if port is not None:
+            ports.add(port)
+    return ports
+
+
+async def _reserved_service_ports() -> set[int]:
+    ports: set[int] = set()
+    for prefix in (_RUNTIME_PREFIX, _API_SERVICE_PREFIX, _REGISTRY_PREFIX):
+        try:
+            keys = await Storage.list_keys(prefix)
+        except Exception as exc:
+            log.warning("workflow.port.list_reserved_failed", {"prefix": prefix, "error": str(exc)})
+            continue
+
+        for key in keys:
+            try:
+                record = await Storage.read(key)
+            except Exception as exc:
+                log.warning("workflow.port.read_reserved_failed", {"key": _key_to_string(key), "error": str(exc)})
+                continue
+            ports.update(_ports_from_service_record(record))
+    return ports
+
+
+def _reserved_in_flight_ports() -> set[int]:
+    now = time.time()
+    expired = [
+        port
+        for port, expires_at in _IN_FLIGHT_PORT_RESERVATIONS.items()
+        if expires_at <= now
+    ]
+    for port in expired:
+        _IN_FLIGHT_PORT_RESERVATIONS.pop(port, None)
+    return set(_IN_FLIGHT_PORT_RESERVATIONS)
+
+
+def _release_port_reservation(port: Optional[int]) -> None:
+    if port is not None:
+        _IN_FLIGHT_PORT_RESERVATIONS.pop(port, None)
+
+
 async def _allocate_port() -> int:
     start = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", str(_DEFAULT_PORT_START)))
     end = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", str(_DEFAULT_PORT_END)))
     if start > end:
         raise WorkflowCenterError("Invalid workflow service port range")
-    for port in range(start, end + 1):
-        if _is_port_available(port):
-            return port
+    async with _PORT_ALLOCATION_LOCK:
+        reserved_ports = await _reserved_service_ports()
+        reserved_ports.update(_reserved_in_flight_ports())
+        for port in range(start, end + 1):
+            if port not in reserved_ports and _is_port_available(port):
+                _IN_FLIGHT_PORT_RESERVATIONS[port] = time.time() + _PORT_RESERVATION_TTL_S
+                return port
     raise WorkflowCenterError("No available workflow service port")
 
 
@@ -612,59 +687,73 @@ async def publish_workflow_local(workflow_id: str, *, api_key: Optional[str] = N
     service_key = workflow_id
     runtime_api_key = api_key or _generate_api_key()
 
-    env = os.environ.copy()
-    env[_SERVICE_API_KEY_ENV] = runtime_api_key
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m", "flocks.workflow.service_runtime",
-        "--workflow", str(release_snapshot_file),
-        "--workflow-id", workflow_id,
-        "--release-id", release_id,
-        "--host", "127.0.0.1",
-        "--port", str(host_port),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-        start_new_session=True,
-    )
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        env = os.environ.copy()
+        env[_SERVICE_API_KEY_ENV] = runtime_api_key
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m", "flocks.workflow.service_runtime",
+            "--workflow", str(release_snapshot_file),
+            "--workflow-id", workflow_id,
+            "--release-id", release_id,
+            "--host", "127.0.0.1",
+            "--port", str(host_port),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
 
-    await Storage.write(_local_pid_key(workflow_id), {
-        "pid": proc.pid,
-        "processGroupId": proc.pid,
-        "port": host_port,
-    })
+        await Storage.write(_local_pid_key(workflow_id), {
+            "pid": proc.pid,
+            "processGroupId": proc.pid,
+            "port": host_port,
+        })
 
-    health_retries = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_RETRIES", str(_DEFAULT_HEALTH_RETRIES)))
-    health_interval_s = float(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_INTERVAL_S", str(_DEFAULT_HEALTH_INTERVAL_S)))
+        health_retries = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_RETRIES", str(_DEFAULT_HEALTH_RETRIES)))
+        health_interval_s = float(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_INTERVAL_S", str(_DEFAULT_HEALTH_INTERVAL_S)))
 
-    healthy = await _wait_service_healthy(service_url, retries=health_retries, interval_s=health_interval_s)
-    if not healthy:
-        try:
-            await _stop_local_service(workflow_id)
-        except Exception:
-            pass
+        healthy = await _wait_service_healthy(service_url, retries=health_retries, interval_s=health_interval_s)
+        if not healthy:
+            try:
+                await _stop_local_service(workflow_id)
+            except Exception:
+                pass
+            raise WorkflowCenterError("Local workflow service failed health check")
+
+        active_record = {
+            "releaseId": release_id,
+            "workflowId": workflow_id,
+            "serviceKey": service_key,
+            "containerName": f"local-{workflow_id[:8]}-{release_id[:8]}",
+            "containerId": str(proc.pid),
+            "processGroupId": proc.pid,
+            "image": "local",
+            "hostPort": host_port,
+            "serviceUrl": service_url,
+            "status": "active",
+            "updatedAt": _now_ms(),
+            "driver": "local",
+            "apiKey": runtime_api_key,
+        }
+        await Storage.write(_active_release_key(workflow_id), active_record)
+        await Storage.write(_runtime_key(workflow_id), active_record)
+        _release_port_reservation(host_port)
+    except Exception as exc:
+        _release_port_reservation(host_port)
+        if proc is not None:
+            try:
+                _signal_local_process(proc.pid, signal.SIGTERM, proc.pid)
+                await _wait_for_pid_exit(proc.pid, 1.0)
+            except Exception:
+                pass
         registry["publishStatus"] = "failed"
         registry["updatedAt"] = _now_ms()
         await Storage.write(_registry_key(workflow_id), registry)
-        raise WorkflowCenterError("Local workflow service failed health check")
-
-    active_record = {
-        "releaseId": release_id,
-        "workflowId": workflow_id,
-        "serviceKey": service_key,
-        "containerName": f"local-{workflow_id[:8]}-{release_id[:8]}",
-        "containerId": str(proc.pid),
-        "processGroupId": proc.pid,
-        "image": "local",
-        "hostPort": host_port,
-        "serviceUrl": service_url,
-        "status": "active",
-        "updatedAt": _now_ms(),
-        "driver": "local",
-        "apiKey": runtime_api_key,
-    }
-    await Storage.write(_active_release_key(workflow_id), active_record)
-    await Storage.write(_runtime_key(workflow_id), active_record)
+        if isinstance(exc, WorkflowCenterError):
+            raise
+        raise WorkflowCenterError(str(exc)) from exc
 
     registry["publishStatus"] = "active"
     registry["activeReleaseId"] = release_id
@@ -915,6 +1004,7 @@ async def _publish_workflow_docker(
         }
         await Storage.write(_active_release_key(workflow_id), active_record)
         await Storage.write(_runtime_key(workflow_id), active_record)
+        _release_port_reservation(host_port)
 
         registry["publishStatus"] = "active"
         registry["activeReleaseId"] = release_id
@@ -937,6 +1027,7 @@ async def _publish_workflow_docker(
 
         return active_record
     except Exception as exc:
+        _release_port_reservation(host_port)
         await _stop_and_remove_container(container_name)
         release_record["status"] = "failed"
         release_record["deactivatedAt"] = _now_ms()
