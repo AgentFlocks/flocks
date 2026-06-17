@@ -501,7 +501,7 @@ describe('IntegrationTab trigger workspace', () => {
           publish: { type: 'api_service', enabled: false, status: 'stopped' },
           triggers: [],
         },
-      ],
+      },
     });
 
     render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);

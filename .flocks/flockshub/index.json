@@ -1786,23 +1786,6 @@
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/analyzing-slack-space-and-file-system-artifacts/manifest.json"
     },
     {
-      "id": "analyzing-supply-chain-malware-artifacts",
-      "type": "skill",
-      "name": "analyzing-supply-chain-malware-artifacts",
-      "description": "Investigate supply chain attack artifacts including trojanized software updates, compromised build pipelines, and sideloaded dependencies to identify intrusion vectors and scope of compromise.",
-      "version": "1.0",
-      "category": "detection",
-      "tags": [
-        "hids"
-      ],
-      "useCases": [
-        "endpoint-forensics"
-      ],
-      "trust": "community",
-      "riskLevel": "low",
-      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/analyzing-supply-chain-malware-artifacts/manifest.json"
-    },
-    {
       "id": "analyzing-threat-actor-ttps-with-mitre-attack",
       "type": "skill",
       "name": "analyzing-threat-actor-ttps-with-mitre-attack",
@@ -4564,23 +4547,6 @@
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/detecting-fileless-attacks-on-endpoints/manifest.json"
     },
     {
-      "id": "detecting-fileless-malware-techniques",
-      "type": "skill",
-      "name": "detecting-fileless-malware-techniques",
-      "description": "Detects and analyzes fileless malware that operates entirely in memory using PowerShell, WMI, .NET reflection, registry-resident payloads, and living-off-the-land binaries (LOLBins) without writing traditional executable files to disk. Activates for requests involving fileless threat detection, in-memory malware investigation, LOLBin abuse analysis, or WMI persistence examination.",
-      "version": "1.0.0",
-      "category": "detection",
-      "tags": [
-        "windows"
-      ],
-      "useCases": [
-        "endpoint-forensics"
-      ],
-      "trust": "community",
-      "riskLevel": "low",
-      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/detecting-fileless-malware-techniques/manifest.json"
-    },
-    {
       "id": "detecting-golden-ticket-attacks-in-kerberos-logs",
       "type": "skill",
       "name": "detecting-golden-ticket-attacks-in-kerberos-logs",
@@ -6446,25 +6412,6 @@
       "trust": "community",
       "riskLevel": "low",
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/hunting-credential-stuffing-attacks/manifest.json"
-    },
-    {
-      "id": "hunting-for-anomalous-powershell-execution",
-      "type": "skill",
-      "name": "hunting-for-anomalous-powershell-execution",
-      "description": "Hunt for malicious PowerShell activity by analyzing Script Block Logging (Event 4104), Module Logging (Event 4103), and process creation events. The analyst parses Windows Event Log EVTX files to detect obfuscated commands, AMSI bypass attempts, encoded payloads, credential dumping keywords, and suspicious download cradles. Activates for requests involving PowerShell threat hunting, script block analysis, encoded command detection, or AMSI bypass identification.",
-      "version": "1.0",
-      "category": "detection",
-      "tags": [
-        "iam",
-        "windows",
-        "ioc"
-      ],
-      "useCases": [
-        "log-analysis"
-      ],
-      "trust": "community",
-      "riskLevel": "low",
-      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/hunting-for-anomalous-powershell-execution/manifest.json"
     },
     {
       "id": "hunting-for-beaconing-with-frequency-analysis",
