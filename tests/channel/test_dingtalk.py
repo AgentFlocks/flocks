@@ -13,6 +13,8 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -368,6 +370,16 @@ class TestBuiltinChannelPlugin:
         error = plugin.validate_config({})
         assert error is not None
         assert "appKey" in error or "credentials" in error.lower()
+
+    def test_validate_config_rejects_dingtalk_prefixed_client_id(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        plugin = DingTalkChannel()
+        error = plugin.validate_config({
+            "clientId": "dingtalk_dingecjrxh34nr6aqbit",
+            "clientSecret": "s",
+        })
+        assert error is not None
+        assert "dingtalk_" in error
 
     def test_meta_aliases(self):
         from flocks.channel.builtin.dingtalk import DingTalkChannel
@@ -1016,25 +1028,31 @@ class TestStreamRunnerResilience:
 
         runner = self._make_runner()
 
-        # Fake stream client whose ``start()`` returns immediately every
-        # time — the exact pathology we want to detect.
-        class _ImmediateStartClient:
+        # Fake stream client; the runner's own session method is patched below
+        # to return immediately every time, which is the pathology we want to
+        # detect.
+        class _ImmediateClient:
             def __init__(self, *_a, **_kw):
-                self.start_calls = 0
                 self.websocket = None
 
             def register_callback_handler(self, *_a, **_kw):
                 pass
-
-            async def start(self):
-                self.start_calls += 1
 
             def close(self):
                 pass
 
         monkeypatch.setattr(
             stream_mod.dingtalk_stream, "DingTalkStreamClient",
-            _ImmediateStartClient,
+            _ImmediateClient,
+        )
+
+        async def _immediate_session(_runner):
+            return None
+
+        monkeypatch.setattr(
+            stream_mod.DingTalkStreamRunner,
+            "_start_stream_client_session",
+            _immediate_session,
         )
 
         with pytest.raises(stream_mod.DingTalkStreamStallError) as exc_info:
@@ -1078,19 +1096,6 @@ class TestStreamRunnerResilience:
             def register_callback_handler(self, *_a, **_kw):
                 pass
 
-            async def start(self):
-                call_count["n"] += 1
-                if call_count["n"] == 1:
-                    # Simulate a healthy run: deliver one message,
-                    # then return cleanly.  The runner counts
-                    # ``_messages_received`` directly, so we bump it
-                    # before returning to mimic an inbound frame.
-                    runner._messages_received += 1
-                    return
-                # On the 2nd call, stop the runner so the loop exits
-                # without further iterations.
-                runner._running = False
-
             def close(self):
                 pass
 
@@ -1099,9 +1104,68 @@ class TestStreamRunnerResilience:
             _MixedClient,
         )
 
+        async def _mixed_session(_runner):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Simulate a healthy run: deliver one message, then return
+                # cleanly.  The runner counts ``_messages_received`` directly,
+                # so we bump it before returning to mimic an inbound frame.
+                runner._messages_received += 1
+                return
+            # On the 2nd call, stop the runner so the loop exits without
+            # further iterations.
+            runner._running = False
+
+        monkeypatch.setattr(
+            stream_mod.DingTalkStreamRunner,
+            "_start_stream_client_session",
+            _mixed_session,
+        )
+
         await asyncio.wait_for(runner.run(), timeout=2.0)
         # Counter MUST have reset after the run that delivered a message.
         assert runner._consecutive_short_runs == 0
+
+    @pytest.mark.asyncio
+    async def test_blocking_open_connection_does_not_block_event_loop(self):
+        """Regression for the production freeze: SDK open_connection is sync.
+
+        The runner must push that call into a worker thread so a slow gateway
+        request cannot block FastAPI's main event loop.
+        """
+        runner = self._make_runner()
+        entered = threading.Event()
+
+        class _BlockingClient:
+            websocket = None
+
+            def pre_start(self):
+                pass
+
+            def open_connection(self):
+                entered.set()
+                time.sleep(0.2)
+                return None
+
+        runner._stream_client = _BlockingClient()
+        runner._running = True
+
+        started_at = time.monotonic()
+        task = asyncio.create_task(runner._start_stream_client_session())
+        try:
+            while not entered.is_set():
+                await asyncio.sleep(0)
+
+            await asyncio.sleep(0.02)
+            assert time.monotonic() - started_at < 0.1
+            assert not task.done()
+
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(task, timeout=1.0)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_dispatch_queue_drops_overflow_without_blocking(
@@ -1207,6 +1271,35 @@ class TestStreamRunnerResilience:
         # signal in case a frame slips through during shutdown.
         assert runner._messages_received == 1
         assert runner._dropped_messages == 0  # no QueueFull, just no queue
+
+    @pytest.mark.asyncio
+    async def test_enqueue_from_thread_hops_to_owner_loop(self):
+        """SDK callbacks from a non-owner thread must not touch asyncio.Queue."""
+        runner = self._make_runner(account_overrides={
+            "dispatchWorkers": 1,
+            "dispatchQueueSize": 2,
+        })
+        runner._loop = asyncio.get_running_loop()
+        runner._dispatch_queue = asyncio.Queue(
+            maxsize=runner._dispatch_queue_size,
+        )
+        message = SimpleNamespace(text="from-thread")
+
+        thread = threading.Thread(
+            target=runner._enqueue_dispatch,
+            args=(message,),
+        )
+        thread.start()
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+
+        for _ in range(20):
+            if runner._messages_received == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert runner._messages_received == 1
+        assert runner._dispatch_queue.get_nowait() is message
 
     def test_permanent_error_hierarchy(self):
         """``DingTalkStreamStallError`` MUST inherit from

@@ -73,6 +73,13 @@ class DingTalkChannel(ChannelPlugin):
                 "Missing required config: appKey/appSecret (also accepted as "
                 "clientId/clientSecret), at top-level or under accounts.<name>"
             )
+        for account in accounts:
+            app_key = str(account.get("appKey") or account.get("clientId") or "")
+            if app_key.startswith("dingtalk_"):
+                return (
+                    "Invalid DingTalk Client ID: use the app AppKey, for example "
+                    "'dingxxxxxxxxxxxxxxxx', not a value prefixed with 'dingtalk_'."
+                )
         return None
 
     # ------------------------------------------------------------------
