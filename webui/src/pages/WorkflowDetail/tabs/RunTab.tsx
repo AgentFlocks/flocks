@@ -50,6 +50,29 @@ function getExecutionDisplayMessage(
   return execution.errorMessage;
 }
 
+function getExecutionDisplayStatus(execution?: WorkflowExecution | null): string {
+  if (!execution) return 'unknown';
+  if (execution.status === 'running' && execution.currentPhase) {
+    return execution.currentPhase;
+  }
+  return execution.status;
+}
+
+function getExecutionDisplayMessage(
+  execution: WorkflowExecution | null | undefined,
+  t: (key: string) => string,
+): string {
+  if (!execution?.errorMessage) return '';
+  const displayStatus = getExecutionDisplayStatus(execution);
+  if (
+    displayStatus === 'cancelling'
+    && execution.errorMessage === 'Cancellation requested'
+  ) {
+    return t('detail.run.cancelRequested');
+  }
+  return execution.errorMessage;
+}
+
 function SectionHeader({
   title,
   expanded,

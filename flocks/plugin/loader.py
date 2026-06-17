@@ -241,6 +241,9 @@ class PluginLoader:
                 log_scope="load_all",
             )
 
+            if ext.load_once:
+                ext._loaded = True
+
         # 4. Installed package entry-points
         cls._load_entry_points()
 

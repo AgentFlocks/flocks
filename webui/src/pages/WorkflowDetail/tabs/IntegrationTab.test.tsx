@@ -501,7 +501,7 @@ describe('IntegrationTab trigger workspace', () => {
           publish: { type: 'api_service', enabled: false, status: 'stopped' },
           triggers: [],
         },
-      },
+      ],
     });
 
     render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
@@ -671,5 +671,35 @@ describe('IntegrationTab trigger workspace', () => {
       expect.stringContaining('后端接口不可用时必须停止配置流程'),
       'Syslog 接入',
     );
+  });
+
+  it('deletes selected trigger from the workspace', async () => {
+    const user = userEvent.setup();
+    workflowAPI.getTriggers.mockResolvedValue({
+      data: [
+        {
+          trigger: {
+            id: 'hook-1',
+            name: 'Webhook Trigger',
+            type: 'custom_webhook',
+            enabled: true,
+            source: { method: 'POST', path: '/demo' },
+            auth: { type: 'none' },
+            mapping: { event: '$.body' },
+            inputs: {},
+            testSamples: [{ name: 'default', payload: { example: true } }],
+          },
+          status: { state: 'ready' },
+        },
+      ],
+    });
+
+    render(<IntegrationTab workflow={workflow} />);
+
+    await user.click(await screen.findByRole('button', { name: '删除' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.deleteTrigger).toHaveBeenCalledWith('wf-1', 'hook-1');
+    });
   });
 });
