@@ -35,7 +35,7 @@ dependencies = [
     "rich>=13.7.0",
     "typer>=0.9.0",
     # AI & LLM
-    "litellm>=1.30.0",
+    "litellm==1.83.7",
     "anthropic>=0.86.0",
     "openai>=1.12.0",
     "google-genai>=0.3.0",
