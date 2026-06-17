@@ -1142,7 +1142,7 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
           <TextInput
             value={config.clientId ?? ''}
             onChange={(v) => set('clientId', v || undefined)}
-            placeholder="dingtalk_xxxxxxxxxxxxxxxxxx"
+            placeholder="dingxxxxxxxxxxxxxxxx"
           />
         </FieldRow>
         <FieldRow label="Client Secret" required hint={t('dingtalk.clientSecretHint')}>
