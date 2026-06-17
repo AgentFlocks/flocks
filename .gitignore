@@ -99,7 +99,7 @@ tmp/
 *.ipynb
 
 # Documentation (local / agent-generated; not versioned)
-docs/
+docs/design
 site/
 
 # Node.js (TUI)
