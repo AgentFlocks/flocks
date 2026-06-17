@@ -214,6 +214,88 @@ class TestPluginLoader:
         assert agent_items[0]["name"] == "agent-a"
         assert tool_items[0]["name"] == "tool-t"
 
+    def test_load_extension_scans_only_requested_extension(self, tmp_path: Path):
+        """Scoped loads should not scan or dispatch unrelated extension points."""
+        user_root = tmp_path / "user_plugins"
+        project_dir = tmp_path / "project"
+        _write_plugin(user_root / "agents", "user_agent.py", 'AGENTS = [{"name": "user-agent"}]\n')
+        _write_plugin(user_root / "tools", "tool.py", 'TOOLS = [{"name": "user-tool"}]\n')
+        _write_plugin(
+            project_dir / ".flocks" / "plugins" / "agents",
+            "project_agent.py",
+            'AGENTS = [{"name": "project-agent"}]\n',
+        )
+        extra_file = tmp_path / "extra.py"
+        extra_file.write_text(
+            'AGENTS = [{"name": "extra-agent"}]\n'
+            'TOOLS = [{"name": "extra-tool"}]\n'
+        )
+
+        agent_items = []
+        tool_items = []
+
+        PluginLoader._plugin_root = user_root
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="AGENTS", subdir="agents",
+            consumer=lambda items, src: agent_items.extend(items),
+            item_type=dict, dedup_key=lambda d: d["name"],
+        ))
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="TOOLS", subdir="tools",
+            consumer=lambda items, src: tool_items.extend(items),
+            item_type=dict, dedup_key=lambda d: d["name"],
+        ))
+
+        PluginLoader.load_extension(
+            "AGENTS",
+            extra_sources=[str(extra_file)],
+            project_dir=project_dir,
+        )
+
+        assert [item["name"] for item in agent_items] == [
+            "user-agent",
+            "project-agent",
+            "extra-agent",
+        ]
+        assert tool_items == []
+
+    def test_load_extension_can_load_legacy_entry_points(self, tmp_path: Path, monkeypatch):
+        """Scoped loads opt in to the legacy flocks.plugins entry-point group."""
+        loaded = []
+
+        class _FakeEntryPoint:
+            name = "fake-tools"
+
+            def load(self):
+                def _target(_loader_cls):
+                    loaded.append("entry-point-called")
+
+                return _target
+
+        class _FakeEntryPoints:
+            def select(self, *, group: str):
+                assert group == "flocks.plugins"
+                return [_FakeEntryPoint()]
+
+        PluginLoader._plugin_root = tmp_path / "user_plugins"
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="TOOLS",
+            subdir="tools",
+            consumer=lambda items, src: None,
+        ))
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: _FakeEntryPoints(),
+        )
+
+        PluginLoader.load_extension(
+            "TOOLS",
+            project_dir=tmp_path / "project",
+            load_entry_points=True,
+        )
+
+        assert loaded == ["entry-point-called"]
+
     def test_dedup_first_wins(self, tmp_path: Path):
         agents_dir = tmp_path / "agents"
         _write_plugin(agents_dir, "a.py",

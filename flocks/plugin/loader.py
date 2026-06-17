@@ -8,10 +8,11 @@ declares:
 - how to validate items and detect duplicates,
 - a *consumer* callback that receives the validated items.
 
-``PluginLoader.load_all()`` is called once during startup.  For every
-registered extension point it scans the corresponding subdirectory, loads each
-``.py`` module, extracts and validates the attribute, then hands the items to
-the consumer.
+``PluginLoader.load_all()`` loads every registered extension point.
+``PluginLoader.load_extension("TOOLS")`` loads one registered extension point
+with the same filesystem scanning rules. For every loaded extension point it
+scans the corresponding subdirectory, loads each ``.py`` module, extracts and
+validates the attribute, then hands the items to the consumer.
 
 Safety guarantees
 -----------------
@@ -231,67 +232,50 @@ class PluginLoader:
         4. Validate, dedup, and dispatch to the consumer.
         """
         project_dir = project_dir or Path.cwd()
-        project_plugin_root = project_dir / ".flocks" / "plugins"
 
         for ext in cls._extension_points.values():
-            if ext.load_once and ext._loaded:
-                log.debug(
-                    "plugin.load_all.skip_load_once",
-                    {
-                        "attr": ext.attr_name,
-                    },
-                )
-                continue
-
-            ext._seen_keys = set()
-
-            # 1. User-level plugin subdirectory (~/.flocks/plugins/{subdir}/)
-            subdir_path = cls._plugin_root / ext.subdir
-            default_sources = scan_directory(
-                subdir_path,
-                recursive=ext.recursive,
-                max_depth=ext.max_depth,
-                exclude_subdirs=ext.exclude_subdirs,
+            cls._load_extension_point(
+                ext,
+                extra_sources=extra_sources,
+                project_dir=project_dir,
+                log_scope="load_all",
             )
-            if default_sources:
-                log.debug(
-                    "plugin.scan",
-                    {
-                        "subdir": ext.subdir,
-                        "files": [Path(s).name for s in default_sources],
-                    },
-                )
-            cls._load_sources_for_ext(ext, default_sources, subdir_path)
-
-            # 2. Project-level plugin subdirectory (<project>/.flocks/plugins/{subdir}/)
-            project_subdir_path = project_plugin_root / ext.subdir
-            if project_subdir_path != subdir_path and project_subdir_path.is_dir():
-                project_sources = scan_directory(
-                    project_subdir_path,
-                    recursive=ext.recursive,
-                    max_depth=ext.max_depth,
-                    exclude_subdirs=ext.exclude_subdirs,
-                )
-                if project_sources:
-                    log.debug(
-                        "plugin.project.scan",
-                        {
-                            "subdir": ext.subdir,
-                            "project_dir": str(project_dir),
-                            "files": [Path(s).name for s in project_sources],
-                        },
-                    )
-                    cls._load_sources_for_ext(ext, project_sources, project_subdir_path)
-
-            # 3. Explicit sources from cfg.plugin
-            if extra_sources:
-                cls._load_sources_for_ext(ext, extra_sources, project_dir)
-
-            if ext.load_once:
-                ext._loaded = True
 
         # 4. Installed package entry-points
         cls._load_entry_points()
+
+    @classmethod
+    def load_extension(
+        cls,
+        attr_name: str,
+        extra_sources: Optional[List[str]] = None,
+        project_dir: Optional[Path] = None,
+        *,
+        load_entry_points: bool = False,
+    ) -> None:
+        """Load one registered extension point using normal plugin scan rules.
+
+        This is the scoped counterpart to :meth:`load_all`. It scans the same
+        user-level, project-level, and explicit ``cfg.plugin`` sources, but only
+        dispatches the requested attribute (for example ``"TOOLS"``).
+
+        Set ``load_entry_points`` only for compatibility paths that still need
+        legacy package plugins from the global ``flocks.plugins`` entry-point
+        group.
+        """
+        ext = cls._extension_points.get(attr_name)
+        if ext is None:
+            log.warn("plugin.ext_point.not_found", {"attr": attr_name})
+            return
+
+        cls._load_extension_point(
+            ext,
+            extra_sources=extra_sources,
+            project_dir=project_dir or Path.cwd(),
+            log_scope="load_extension",
+        )
+        if load_entry_points:
+            cls._load_entry_points()
 
     @classmethod
     def load_for_extension(
@@ -356,6 +340,73 @@ class PluginLoader:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _load_extension_point(
+        cls,
+        ext: ExtensionPoint,
+        *,
+        extra_sources: Optional[List[str]],
+        project_dir: Path,
+        log_scope: str,
+    ) -> None:
+        """Scan and load one registered extension point."""
+        if ext.load_once and ext._loaded:
+            log.debug(
+                f"plugin.{log_scope}.skip_load_once",
+                {
+                    "attr": ext.attr_name,
+                },
+            )
+            return
+
+        ext._seen_keys = set()
+        project_plugin_root = project_dir / ".flocks" / "plugins"
+
+        # 1. User-level plugin subdirectory (~/.flocks/plugins/{subdir}/)
+        subdir_path = cls._plugin_root / ext.subdir
+        default_sources = scan_directory(
+            subdir_path,
+            recursive=ext.recursive,
+            max_depth=ext.max_depth,
+            exclude_subdirs=ext.exclude_subdirs,
+        )
+        if default_sources:
+            log.debug(
+                "plugin.scan",
+                {
+                    "subdir": ext.subdir,
+                    "files": [Path(s).name for s in default_sources],
+                },
+            )
+        cls._load_sources_for_ext(ext, default_sources, subdir_path)
+
+        # 2. Project-level plugin subdirectory (<project>/.flocks/plugins/{subdir}/)
+        project_subdir_path = project_plugin_root / ext.subdir
+        if project_subdir_path != subdir_path and project_subdir_path.is_dir():
+            project_sources = scan_directory(
+                project_subdir_path,
+                recursive=ext.recursive,
+                max_depth=ext.max_depth,
+                exclude_subdirs=ext.exclude_subdirs,
+            )
+            if project_sources:
+                log.debug(
+                    "plugin.project.scan",
+                    {
+                        "subdir": ext.subdir,
+                        "project_dir": str(project_dir),
+                        "files": [Path(s).name for s in project_sources],
+                    },
+                )
+                cls._load_sources_for_ext(ext, project_sources, project_subdir_path)
+
+        # 3. Explicit sources from cfg.plugin
+        if extra_sources:
+            cls._load_sources_for_ext(ext, extra_sources, project_dir)
+
+        if ext.load_once:
+            ext._loaded = True
 
     @classmethod
     def _load_entry_points(cls) -> None:

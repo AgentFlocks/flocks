@@ -61,7 +61,7 @@ Usage:
 - For files longer than 2000 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=2000, then offset=2000 limit=2000, etc.)
 - Any lines longer than 2000 characters will be truncated
 - Text results are returned with a 5-digit, zero-padded 1-based line number prefix in the form `00001| `
-- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
+- You may call multiple independent tools in the same response. Prefer separate parallel Read calls when multiple files are likely to be useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
 - You can read image files using this tool."""
 

@@ -333,7 +333,8 @@ class Agent:
             consumer=_consume_agents,
             yaml_item_factory=_yaml_to_agent_info,
         ))
-        PluginLoader.load_all(
+        PluginLoader.load_extension(
+            "AGENTS",
             extra_sources=cfg.plugin or [],
             project_dir=Path.cwd(),
         )

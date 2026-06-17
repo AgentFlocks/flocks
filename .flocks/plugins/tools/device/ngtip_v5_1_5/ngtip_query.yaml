@@ -5,7 +5,7 @@ description: >
   intelligence, and IP geolocation APIs.
 description_cn: >
   NGTIP 情报查询分组工具。通过 `action` 参数调用失陷检测、IP 信誉、Hash 信誉、漏洞情报和 IP 地理位置接口。
-  Base URL 为情报查询端点（默认端口 8090）。所有接口支持 GET 传参（apikey 自动注入）。
+  Base URL 为情报查询端点（默认端口 8090）。所有接口支持 GET 传参（情报查询 apikey 自动注入）。
   【选用原则】
   - 出站场景（域名/失陷）优先使用 `query_dns`；
   - 入站场景（IP 行为分析）使用 `query_ip`；

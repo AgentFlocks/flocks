@@ -206,7 +206,8 @@ class HookPipeline:
             from flocks.plugin import PluginLoader
 
             cfg = await Config.get()
-            PluginLoader.load_all(
+            PluginLoader.load_extension(
+                "HOOKS",
                 extra_sources=cfg.plugin or [],
                 project_dir=load_project_dir,
             )

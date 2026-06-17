@@ -16,6 +16,7 @@ from flocks.tool.credential_context import (
     _config_override,
     _config_override_service,
     _config_override_storage_key,
+    activate_device_credentials,
     get_config_override,
 )
 
@@ -136,3 +137,43 @@ def test_identical_service_and_storage_key():
     )
     assert get_config_override("tdp_api") is _SAMPLE_CONFIG
     assert get_config_override("other") is None
+
+
+@pytest.mark.asyncio
+async def test_activate_preserves_legacy_fields_not_in_current_schema(monkeypatch):
+    """Old device rows can keep using fields removed from a newer schema."""
+
+    async def _fake_credentials(_device_id: str):
+        return {
+            "storage_key": "ngtip_api_v5_1_5",
+            "service_id": "ngtip_api",
+            "verify_ssl": False,
+            "fields": {
+                "apikey": "legacy-key",
+                "query_apikey": "query-key",
+            },
+        }
+
+    monkeypatch.setattr(
+        "flocks.tool.device.store.get_device_credentials",
+        _fake_credentials,
+    )
+    monkeypatch.setattr(
+        "flocks.tool.credential_context._load_credential_fields",
+        lambda _storage_key: [
+            {
+                "key": "query_apikey",
+                "storage": "secret",
+                "secret_id": "ngtip_query_apikey",
+                "config_key": "queryApiKey",
+            }
+        ],
+    )
+
+    async with activate_device_credentials("dev-a") as active:
+        assert active is True
+        config = get_config_override("ngtip_api_v5_1_5")
+
+    assert config is not None
+    assert config["queryApiKey"] == "{secret:ngtip_query_apikey}"
+    assert config["apikey"] == "legacy-key"

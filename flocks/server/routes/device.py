@@ -44,8 +44,8 @@ from flocks.tool.device.plugin_index import (
 from flocks.tool.device.secrets import resolve_for_runtime
 from flocks.tool.device.store import (
     create_group,
-    delete_device_tool_setting,
     delete_group,
+    delete_device_tool_setting,
     fetch_device,
     get_group,
     list_device_tool_settings,
@@ -325,7 +325,7 @@ async def route_list_device_tools(device_id: str):
     """列出设备对应插件的所有工具，并附带该设备的独立开关状态。
 
     返回的 ``enabled_effective`` 字段反映实际执行时的生效状态：
-    - 若存在 per-device 覆盖（enabled_device 非 null），以它为准；
+    - 若存在 per-device 禁用覆盖（enabled_device=false），以它为准；
     - 否则沿用全局 tool_settings（enabled_global）。
     """
     row = await fetch_device(device_id)
@@ -350,7 +350,8 @@ async def route_list_device_tools(device_id: str):
 
     result: List[DeviceToolInfo] = []
     for t in device_tools:
-        enabled_device: Optional[bool] = per_device.get(t.name)
+        raw_enabled_device: Optional[bool] = per_device.get(t.name)
+        enabled_device: Optional[bool] = False if raw_enabled_device is False else None
 
         enabled_global = t.enabled
         enabled_effective = (
@@ -374,10 +375,10 @@ async def route_list_device_tools(device_id: str):
 async def route_update_device_tool(
     device_id: str, tool_name: str, body: DeviceToolUpdateRequest
 ):
-    """设置或清除某工具在指定设备上的独立开关。
+    """设置某工具在指定设备上的独立开关。
 
     - ``enabled=false`` → 仅在该设备上禁用工具，不影响同版本其他设备；
-    - ``enabled=true``  → 移除 per-device 覆盖，恢复遵从全局工具开关。
+    - ``enabled=true``  → 清除该设备禁用覆盖并跟随全局；若全局禁用则先启用全局工具。
     """
     row = await fetch_device(device_id)
     if row is None:
@@ -397,7 +398,10 @@ async def route_update_device_tool(
         )
 
     if body.enabled:
-        # Removing the override restores global behaviour.
+        if not tool.info.enabled:
+            from flocks.server.routes.tool import _set_global_tool_enabled
+
+            _set_global_tool_enabled(tool, True)
         await delete_device_tool_setting(device_id, tool_name)
         enabled_device = None
     else:
