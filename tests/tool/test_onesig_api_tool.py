@@ -43,7 +43,7 @@ _HANDLER_PATH = (
     / ".flocks"
     / "plugins"
     / "tools"
-    / "api"
+    / "device"
     / "onesig_v2_5_3_D20260321"
     / "onesig.handler.py"
 )
@@ -113,6 +113,28 @@ def test_default_verify_ssl_is_off_for_private_deployments(handler):
     # constant back to True would silently break every self-signed deployment,
     # so guard it explicitly.
     assert handler.DEFAULT_VERIFY_SSL is False
+
+
+def test_resolve_runtime_config_uses_current_open_box_defaults(handler, monkeypatch):
+    monkeypatch.delenv("ONESIG_API_PREFIX", raising=False)
+    monkeypatch.delenv("ONESIG_OAEP_HASH", raising=False)
+    raw_service = {
+        "base_url": "https://onesig.example.local/",
+        "username": "admin",
+        "password": "supersecret",
+    }
+    secret_manager = MagicMock()
+    secret_manager.get.return_value = None
+
+    with (
+        patch.object(handler.ConfigWriter, "get_api_service_raw", return_value=raw_service),
+        patch.object(handler, "_get_secret_manager", return_value=secret_manager),
+    ):
+        config = handler._resolve_runtime_config()
+
+    assert config.api_prefix == ""
+    assert config.oaep_hash == "sha256"
+    assert config.build_url("/v3/captcha") == "https://onesig.example.local/v3/captcha"
 
 
 # ---------------------------------------------------------------------------

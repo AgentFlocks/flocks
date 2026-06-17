@@ -60,8 +60,31 @@ def _ensure_scheme(url: str) -> str:
     return url
 
 
-def _resolve_runtime_config() -> tuple[str, str, int, str, bool]:
-    """Returns (platform_base_url, query_base_url, timeout, apikey, verify_ssl)."""
+def _resolve_api_key(
+    raw: dict[str, Any],
+    *config_keys: str,
+    secret_names: tuple[str, ...] = (),
+    env_name: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve an NGTIP API key from config refs, secrets, then env."""
+    for key in config_keys:
+        value = _resolve_ref(raw.get(key))
+        if value:
+            return value
+
+    manager = _get_secret_manager()
+    for secret_name in secret_names:
+        value = manager.get(secret_name)
+        if value:
+            return value
+
+    if env_name:
+        return os.getenv(env_name)
+    return None
+
+
+def _resolve_runtime_config() -> tuple[str, str, int, Optional[str], Optional[str], bool]:
+    """Returns platform/query base URLs, timeout, query key, platform key, SSL flag."""
     raw = _service_config()
 
     platform_base_url = _ensure_scheme(
@@ -88,23 +111,48 @@ def _resolve_runtime_config() -> tuple[str, str, int, str, bool]:
     except (TypeError, ValueError):
         timeout = DEFAULT_TIMEOUT
 
-    apikey_ref = (
-        raw.get("apiKey")
-        or raw.get("apikey")
-        or raw.get("authentication", {}).get("key")
-    )
-    apikey = (
-        _resolve_ref(apikey_ref)
-        or _get_secret_manager().get("ngtip_apikey")
-        or _get_secret_manager().get(f"{SERVICE_ID}_apikey")
-        or os.getenv("NGTIP_APIKEY")
-    )
-    if not apikey:
-        raise ValueError(
-            "NGTIP API key not found. Configure ngtip_api.apiKey in your service settings "
-            "or set the NGTIP_APIKEY environment variable."
+    legacy_apikey = (
+        _resolve_ref(
+            raw.get("apiKey")
+            or raw.get("apikey")
+            or raw.get("authentication", {}).get("key")
         )
-    return platform_base_url, query_base_url, timeout, apikey, _resolve_verify_ssl(raw)
+        or _resolve_api_key(
+            raw,
+            secret_names=("ngtip_apikey", f"{SERVICE_ID}_apikey"),
+            env_name="NGTIP_APIKEY",
+        )
+    )
+
+    query_apikey = (
+        _resolve_api_key(
+            raw,
+            "queryApiKey",
+            "query_apikey",
+            secret_names=("ngtip_query_apikey", f"{SERVICE_ID}_query_apikey"),
+            env_name="NGTIP_QUERY_APIKEY",
+        )
+        or legacy_apikey
+    )
+    platform_apikey = (
+        _resolve_api_key(
+            raw,
+            "platformApiKey",
+            "platform_apikey",
+            secret_names=("ngtip_platform_apikey", f"{SERVICE_ID}_platform_apikey"),
+            env_name="NGTIP_PLATFORM_APIKEY",
+        )
+        or legacy_apikey
+    )
+
+    return (
+        platform_base_url,
+        query_base_url,
+        timeout,
+        query_apikey,
+        platform_apikey,
+        _resolve_verify_ssl(raw),
+    )
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -469,12 +517,27 @@ async def query(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
         return ToolResult(success=False, error=err)
 
     try:
-        _, query_base_url, timeout, apikey, verify_ssl = _resolve_runtime_config()
+        (
+            _,
+            query_base_url,
+            timeout,
+            query_apikey,
+            _,
+            verify_ssl,
+        ) = _resolve_runtime_config()
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc))
+    if not query_apikey:
+        return ToolResult(
+            success=False,
+            error=(
+                "NGTIP query API key not found. Configure queryApiKey in the NGTIP "
+                "device settings, or keep legacy apiKey/NGTIP_APIKEY as fallback."
+            ),
+        )
 
     url = f"{query_base_url}{spec.path}"
-    query_params = {"apikey": apikey, **spec.param_builder(params)}
+    query_params = {"apikey": query_apikey, **spec.param_builder(params)}
     result = await _get_request(url, query_params, timeout, verify_ssl, action)
     if result.success:
         result.metadata = {**(result.metadata or {}), "api": action}
@@ -495,19 +558,39 @@ async def platform(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
         return ToolResult(success=False, error=err)
 
     try:
-        platform_base_url, _, timeout, apikey, verify_ssl = _resolve_runtime_config()
+        (
+            platform_base_url,
+            _,
+            timeout,
+            _,
+            platform_apikey,
+            verify_ssl,
+        ) = _resolve_runtime_config()
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc))
+    if not platform_apikey and not spec.skip_apikey:
+        return ToolResult(
+            success=False,
+            error=(
+                "NGTIP platform API key not found. Configure platformApiKey in the "
+                "NGTIP "
+                "device settings, or keep legacy apiKey/NGTIP_APIKEY as fallback."
+            ),
+        )
 
     url = f"{platform_base_url}{spec.path}"
     payload = spec.payload_builder(params)
 
     if spec.method.upper() == "GET":
         if not spec.skip_apikey:
-            payload = {"apikey": apikey, **payload}
+            payload = {"apikey": platform_apikey, **payload}
         result = await _get_request(url, payload, timeout, verify_ssl, action)
     else:
-        body = {"apikey": apikey, **payload} if not spec.skip_apikey else payload
+        body = (
+            {"apikey": platform_apikey, **payload}
+            if not spec.skip_apikey
+            else payload
+        )
         result = await _post_request(url, body, timeout, verify_ssl, action)
 
     if result.success:

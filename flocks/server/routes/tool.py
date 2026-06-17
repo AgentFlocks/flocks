@@ -530,8 +530,9 @@ async def update_tool(
     device_id × tool_name).  Only affects tool execution when ``device_id``
     is explicitly targeted, allowing Device A and Device B (same plugin
     version, different names) to carry independent tool enabled/disabled
-    states.  Rows are removed automatically via ON DELETE CASCADE when the
-    parent device row is deleted.
+    states, including an explicit enabled=True override when the shared
+    in-memory tool has been disabled. Rows are removed automatically via
+    ON DELETE CASCADE when the parent device row is deleted.
 
     Two behaviours of note (global mode only):
 
@@ -557,26 +558,14 @@ async def update_tool(
 
     # --- Per-device mode ---
     if device_id:
-        from flocks.tool.device.store import (
-            delete_device_tool_setting,
-            set_device_tool_enabled,
-        )
-        if desired:
-            # "Enable" in per-device mode means removing the per-device
-            # override so the global/factory default takes effect again.
-            removed = await delete_device_tool_setting(device_id, tool_name)
-            log.info("tool.device.updated.reset_to_global", {
-                "name": tool_name,
-                "device_id": device_id,
-                "removed_override": removed,
-            })
-        else:
-            await set_device_tool_enabled(device_id, tool_name, False)
-            log.info("tool.device.updated", {
-                "name": tool_name,
-                "device_id": device_id,
-                "enabled": False,
-            })
+        from flocks.tool.device.store import set_device_tool_enabled
+
+        await set_device_tool_enabled(device_id, tool_name, desired)
+        log.info("tool.device.updated", {
+            "name": tool_name,
+            "device_id": device_id,
+            "enabled": desired,
+        })
         # The in-memory ToolInfo.enabled is NOT changed; it reflects global
         # state.  Per-device gating happens at ToolRegistry.execute time.
         return _build_tool_response(tool.info)

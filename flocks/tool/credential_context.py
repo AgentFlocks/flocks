@@ -200,11 +200,13 @@ async def _build_overrides(device_id: str) -> _DeviceOverrides:
     config_ovr: Dict[str, Any] = {}
 
     if credential_fields:
+        mapped_field_keys: set[str] = set()
         for field in credential_fields:
             fkey = field.get("key", "")
             value = resolved_fields.get(fkey)
             if value is None:
                 continue
+            mapped_field_keys.add(fkey)
             storage = field.get("storage", "secret")
             if storage == "secret":
                 sid = field.get("secret_id") or fkey
@@ -223,6 +225,12 @@ async def _build_overrides(device_id: str) -> _DeviceOverrides:
                 config_ovr[ckey] = value
                 if ckey != fkey:
                     config_ovr[fkey] = value
+        # Preserve legacy device-scoped fields that are no longer listed in
+        # the current provider schema. This keeps old devices working after a
+        # schema split such as NGTIP's apiKey -> queryApiKey/platformApiKey.
+        for key, value in resolved_fields.items():
+            if key not in mapped_field_keys and key not in config_ovr:
+                config_ovr[key] = value
     else:
         # Fallback: no credential_fields metadata – use field values as-is
         for k, v in resolved_fields.items():

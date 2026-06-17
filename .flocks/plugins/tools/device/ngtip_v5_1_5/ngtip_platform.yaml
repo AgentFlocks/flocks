@@ -7,7 +7,7 @@ description: >
 description_cn: >
   NGTIP 平台功能分组工具。通过 `action` 参数调用情报管理、资产管理、用户管理、情报生产、
   设备联动、漏洞资产匹配、态势情报订阅和行业攻击情报接口。
-  Base URL 为平台功能端点（默认无端口）。请求体为 JSON，apikey 自动注入。
+  Base URL 为平台功能端点（默认无端口）。请求体为 JSON，平台功能 apikey 自动注入。
   【选用原则】
   - 写入类接口（新增情报/资产/用户）返回值仅含 response_code 和 verbose_msg，无 data；
   - 导出/查询类接口返回 data 含分页信息（current_page / total_page / total_record / items）；

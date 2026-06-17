@@ -32,7 +32,7 @@ DESCRIPTION = """- Fast file pattern matching tool that works with any codebase 
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, prefer delegating that exploration or use a more specialized search workflow
-- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful."""
+- You may call multiple independent tools in the same response. Prefer separate parallel Glob calls when multiple searches are likely to be useful."""
 
 
 def find_ripgrep() -> Optional[str]:

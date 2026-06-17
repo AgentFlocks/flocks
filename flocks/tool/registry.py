@@ -777,12 +777,6 @@ class ToolRegistry:
                 error=f"Tool not found: {tool_name}"
             )
 
-        if not tool.info.enabled:
-            return ToolResult(
-                success=False,
-                error=f"Tool is disabled: {tool_name}"
-            )
-
         # Create default context if not provided
         if ctx is None:
             ctx = ToolContext(
@@ -796,6 +790,7 @@ class ToolRegistry:
         })
 
         device_id = kwargs.pop("device_id", None)
+        per_device_enabled = None
 
         if tool.info.source == "device" and tool.info.provider:
             try:
@@ -816,11 +811,16 @@ class ToolRegistry:
             if resolution_error:
                 return ToolResult(success=False, error=resolution_error)
             device_id = resolved_device_id
+        elif not tool.info.enabled:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
 
         if device_id:
             # Per-device tool enable gate: an individual device instance may
-            # have its own enabled=False override independent of the shared
-            # global tool_settings.  This prevents toggling a tool "for
+            # have its own enabled override independent of the shared global
+            # tool_settings.  This prevents toggling a tool "for
             # Device A" from affecting Device B when both share the same
             # storage_key (same plugin version, different names).
             try:
@@ -839,6 +839,13 @@ class ToolRegistry:
                     "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
                 })
 
+        if not tool.info.enabled and per_device_enabled is not True:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
+
+        if device_id:
             from flocks.tool.credential_context import activate_device_credentials
             async with activate_device_credentials(device_id) as activated:
                 if not activated:
@@ -1020,9 +1027,8 @@ class ToolRegistry:
     def _load_plugin_tools(cls) -> None:
         """Load plugin tools from both user-level and project-level plugin dirs on init.
 
-        Without this, YAML/Python plugin tools only appear after
-        ``PluginLoader.load_all()`` is triggered by Agent initialization
-        or an explicit ``POST /api/tools/refresh``.
+        Without this, YAML/Python plugin tools only appear after an explicit
+        ``POST /api/tools/refresh`` or a tool registry initialization pass.
 
         Scans both:
         - ``~/.flocks/plugins/tools/`` (user-level)
@@ -1035,7 +1041,8 @@ class ToolRegistry:
         before = set(cls._tools.keys())
         try:
             from flocks.plugin import PluginLoader
-            PluginLoader.load_all()
+
+            PluginLoader.load_extension("TOOLS")
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
         after = set(cls._tools.keys())
@@ -1565,8 +1572,17 @@ class ToolRegistry:
 
     @classmethod
     def _should_track_failure(cls, tool: Tool) -> bool:
-        """Track failures only for custom tools to avoid disabling core tools."""
-        return tool.info.category == ToolCategory.CUSTOM and tool.info.name != "invalid"
+        """Track failures only for standalone custom tools.
+
+        Device-backed tools have per-device switches; repeated upstream/API
+        failures should not mutate the shared in-memory switch for every
+        device instance.
+        """
+        return (
+            tool.info.category == ToolCategory.CUSTOM
+            and tool.info.name != "invalid"
+            and tool.info.source != "device"
+        )
 
     @classmethod
     def _is_countable_error(cls, error: Optional[str]) -> bool:

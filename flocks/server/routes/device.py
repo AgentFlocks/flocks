@@ -44,7 +44,6 @@ from flocks.tool.device.plugin_index import (
 from flocks.tool.device.secrets import resolve_for_runtime
 from flocks.tool.device.store import (
     create_group,
-    delete_device_tool_setting,
     delete_group,
     fetch_device,
     get_group,
@@ -374,10 +373,10 @@ async def route_list_device_tools(device_id: str):
 async def route_update_device_tool(
     device_id: str, tool_name: str, body: DeviceToolUpdateRequest
 ):
-    """设置或清除某工具在指定设备上的独立开关。
+    """设置某工具在指定设备上的独立开关。
 
     - ``enabled=false`` → 仅在该设备上禁用工具，不影响同版本其他设备；
-    - ``enabled=true``  → 移除 per-device 覆盖，恢复遵从全局工具开关。
+    - ``enabled=true``  → 仅在该设备上启用工具，不受全局工具状态回落影响。
     """
     row = await fetch_device(device_id)
     if row is None:
@@ -397,9 +396,8 @@ async def route_update_device_tool(
         )
 
     if body.enabled:
-        # Removing the override restores global behaviour.
-        await delete_device_tool_setting(device_id, tool_name)
-        enabled_device = None
+        await set_device_tool_enabled(device_id, tool_name, True)
+        enabled_device = True
     else:
         await set_device_tool_enabled(device_id, tool_name, False)
         enabled_device = False

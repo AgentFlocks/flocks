@@ -874,7 +874,10 @@ class TestPluginPyRegistration:
                     handler=lambda ctx, **kwargs: None,
                 ))
 
-            with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+            with patch(
+                "flocks.plugin.PluginLoader.load_extension",
+                side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+            ):
                 ToolRegistry._load_plugin_tools()
 
             assert ToolRegistry._plugin_tool_names == ["base64_encode"]
@@ -906,7 +909,10 @@ class TestPluginPyRegistration:
                     handler=lambda ctx, **kwargs: None,
                 ))
 
-            with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+            with patch(
+                "flocks.plugin.PluginLoader.load_extension",
+                side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+            ):
                 with patch(
                     "flocks.tool.tool_loader.discover_python_tool_sources",
                     return_value={"project_tool": project_tool_path},
@@ -944,7 +950,10 @@ class TestPluginPyRegistration:
                 ))
 
             with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
-                with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+                with patch(
+                    "flocks.plugin.PluginLoader.load_extension",
+                    side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+                ):
                     with patch(
                         "flocks.tool.tool_loader.discover_python_tool_sources",
                         return_value={"user_tool": user_tool_path},
@@ -981,7 +990,7 @@ class TestPluginPyRegistration:
             ToolRegistry._plugin_tool_names = []
             ToolRegistry._enabled_defaults = {}
 
-            with patch("flocks.plugin.PluginLoader.load_all", return_value=None):
+            with patch("flocks.plugin.PluginLoader.load_extension", return_value=None):
                 with patch(
                     "flocks.tool.tool_loader.discover_python_tool_sources",
                     return_value={"webfetch": colliding_tool_path},
@@ -1021,7 +1030,7 @@ class TestPluginPyRegistration:
             ToolRegistry._enabled_defaults = {}
 
             with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
-                with patch("flocks.plugin.PluginLoader.load_all", return_value=None):
+                with patch("flocks.plugin.PluginLoader.load_extension", return_value=None):
                     with patch(
                         "flocks.tool.tool_loader.discover_python_tool_sources",
                         return_value={"calculator": user_tool_path},

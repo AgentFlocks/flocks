@@ -6,22 +6,29 @@ integration_type: device
 description: >
   NGTIP (Next Generation Threat Intelligence Platform) API service.
   Covers two endpoint categories: intelligence query (port 8090) and
-  platform functions (management / write). Configure APIKEY and both
-  Base URLs in the credentials form.
+  platform functions (management / write). Configure separate APIKEYs
+  and both Base URLs in the credentials form.
 description_cn: >
   NGTIP 威胁情报平台 API 服务，覆盖情报查询（端口 8090）和平台功能（管理写入）两类接口。
-  需分别配置 APIKEY、平台功能 Base URL 和情报查询 Base URL。
+  可分别配置情报查询 APIKEY、平台功能 APIKEY、平台功能 Base URL 和情报查询 Base URL。
 auth:
   type: custom
-  secret: ngtip_apikey
+  secret: ngtip_query_apikey
 credential_fields:
-  - key: apikey
-    label: APIKEY
+  - key: query_apikey
+    label: 情报查询 APIKEY
     storage: secret
-    config_key: apiKey
-    secret_id: ngtip_apikey
+    config_key: queryApiKey
+    secret_id: ngtip_query_apikey
     input_type: password
-    required: true
+    required: false
+  - key: platform_apikey
+    label: 平台功能 APIKEY
+    storage: secret
+    config_key: platformApiKey
+    secret_id: ngtip_platform_apikey
+    input_type: password
+    required: false
   - key: base_url
     label: 平台功能 Base URL
     storage: config
@@ -44,4 +51,5 @@ notes: |
   NGTIP API 分为两类，Base URL 不同，务必在配置中均填写：
     - 平台功能接口：base_url（如 http://192.168.1.100）
     - 情报查询接口：query_base_url（如 http://192.168.1.100:8090）
-  认证：所有接口携带 apikey 参数。情报查询接口推荐 GET 传参，平台功能接口使用 POST JSON。
+  认证：所有接口携带 apikey 参数。情报查询接口使用“情报查询 APIKEY”，平台功能接口使用“平台功能 APIKEY”；
+  旧配置中的单个 apiKey 仍会作为兼容回退值使用。
