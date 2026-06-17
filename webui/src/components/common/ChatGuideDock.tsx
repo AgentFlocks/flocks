@@ -107,7 +107,7 @@ export default function ChatGuideDock({
                     {group.title}
                   </div>
                 )}
-                <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-1.5">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-1.5">
                   {group.actions.map((action) => renderActionButton(action, 'panel'))}
                 </div>
               </section>

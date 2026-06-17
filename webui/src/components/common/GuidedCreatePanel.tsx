@@ -113,7 +113,10 @@ function GuidedCreateSection({
   return (
     <section>
       <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
-      <div className="flex flex-col gap-1.5">
+      <div
+        data-testid={`guided-create-section-${title}`}
+        className="flex flex-col gap-1.5"
+      >
         {actions.map((action) => (
           <div
             key={action.label}

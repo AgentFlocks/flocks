@@ -49,6 +49,20 @@ function workflowRevisionKey(workflow: Workflow): string {
   ].join('\u0000');
 }
 
+type WorkflowPromptParams = Record<string, unknown> & {
+  backendConfigAccessGuide: string;
+};
+
+function withBackendConfigAccessGuide(
+  t: TranslateFn,
+  params: Record<string, unknown>,
+): WorkflowPromptParams {
+  return {
+    ...params,
+    backendConfigAccessGuide: t('detail.chat.backendConfigAccessGuide', params),
+  };
+}
+
 // ─────────────────────────────────────────────
 // ChatTab
 // ─────────────────────────────────────────────
@@ -118,6 +132,22 @@ export default function ChatTab({
   const workflowGuidePath = `${workflowDir}${WORKFLOW_GUIDE_FILE_NAME}`;
   const endpoints = workflowAPIEndpoints(workflow.id);
   const workflowConfigEndpoint = endpoints.config.read.replace(/^GET /, '');
+  const workflowChatPromptParams = withBackendConfigAccessGuide(t, {
+    id: workflow.id,
+    name: workflowDisplayName,
+    category: workflow.category,
+    dir: workflowDir,
+    mdPath: workflowMdPath,
+    jsonPath: `${workflowDir}workflow.json`,
+    guidePath: workflowGuidePath,
+    configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
+    configEndpoint: workflowConfigEndpoint,
+    configSyncEndpoint: endpoints.config.syncFallback.replace(/^POST /, ''),
+    publishEndpoint: endpoints.apiService.publish.replace(/^POST /, ''),
+    unpublishEndpoint: endpoints.apiService.unpublish.replace(/^POST /, ''),
+    triggersEndpoint: endpoints.triggers.list.replace(/^GET /, ''),
+    apiEndpoints: formatWorkflowAPIEndpoints(workflow.id),
+  });
 
   const {
     sessionId: hookSessionId,
@@ -129,22 +159,10 @@ export default function ChatTab({
   } = useSessionChat({
     title: t('detail.chat.sessionTitle', { name: workflowDisplayName }),
     category: 'workflow',
-    contextMessage: t('detail.chat.contextMessage', {
-      id: workflow.id,
-      name: workflowDisplayName,
-      category: workflow.category,
-      dir: workflowDir,
-      mdPath: workflowMdPath,
-      jsonPath: `${workflowDir}workflow.json`,
-      guidePath: workflowGuidePath,
-      configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
-      configEndpoint: workflowConfigEndpoint,
-      configSyncEndpoint: endpoints.config.syncFallback.replace(/^POST /, ''),
-      publishEndpoint: endpoints.apiService.publish.replace(/^POST /, ''),
-      unpublishEndpoint: endpoints.apiService.unpublish.replace(/^POST /, ''),
-      triggersEndpoint: endpoints.triggers.list.replace(/^GET /, ''),
-      apiEndpoints: formatWorkflowAPIEndpoints(workflow.id),
-    }),
+    contextMessage: [
+      t('detail.chat.contextMessage', workflowChatPromptParams),
+      workflowChatPromptParams.backendConfigAccessGuide,
+    ].join('\n\n'),
   });
 
   const sessionId = activeSessionId || hookSessionId;
@@ -674,14 +692,18 @@ function buildWorkflowGuideQuestionPrompt(
   focus: string,
   instruction: string,
 ): string {
-  return t(
-    'detail.chat.welcome.guideQuestionPrompt',
-    {
-      ...buildWorkflowPromptParams(workflow),
-      focus,
-      instruction,
-    },
-  );
+  const promptParams = withBackendConfigAccessGuide(t, buildWorkflowPromptParams(workflow));
+  return [
+    t(
+      'detail.chat.welcome.guideQuestionPrompt',
+      {
+        ...promptParams,
+        focus,
+        instruction,
+      },
+    ),
+    promptParams.backendConfigAccessGuide,
+  ].join('\n\n');
 }
 
 function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
@@ -722,7 +744,7 @@ function buildWorkflowEditActions(t: TranslateFn, workflow: Workflow): ChatGuide
 }
 
 function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGuideAction[] {
-  const promptParams = buildWorkflowPromptParams(workflow);
+  const promptParams = withBackendConfigAccessGuide(t, buildWorkflowPromptParams(workflow));
   const group = t('detail.chat.welcome.configSectionTitle');
   const buildQuestionPrompt = (focus: string, instruction: string) => (
     buildWorkflowGuideQuestionPrompt(t, workflow, focus, instruction)
@@ -731,7 +753,10 @@ function buildWorkflowConfigActions(t: TranslateFn, workflow: Workflow): ChatGui
     {
       label: t('detail.chat.welcome.guidePrimaryShort'),
       description: t('detail.chat.welcome.guidePrimaryDesc'),
-      prompt: t('detail.chat.welcome.guidePrompt', promptParams),
+      prompt: [
+        t('detail.chat.welcome.guidePrompt', promptParams),
+        promptParams.backendConfigAccessGuide,
+      ].join('\n\n'),
       group,
     },
     {

@@ -86,6 +86,7 @@ export interface ConversationBottomSlotActions {
   sending: boolean;
   streaming: boolean;
   sessionId?: string | null;
+  hasMessages: boolean;
 }
 
 export interface PromptDisplayOptions {
@@ -3197,6 +3198,7 @@ export default function SessionChat({
                     sending,
                     streaming: isStreaming,
                     sessionId,
+                    hasMessages: messages.length > 0,
                   })
                   : conversationBottomSlot}
               </div>

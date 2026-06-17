@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -118,3 +119,122 @@ async def test_publish_cleanup_uses_previous_runtime_driver(monkeypatch) -> None
     assert "workflow_runtime/wf-1" not in store
     assert "workflow_release/wf-1/active" not in store
     assert store["workflow_release/wf-1/rel-old"]["status"] == "inactive"
+
+
+@pytest.mark.asyncio
+async def test_allocate_port_skips_reserved_service_records(monkeypatch) -> None:
+    """Port allocation must not reuse API/runtime ports that are only visible in storage."""
+    store: dict[str, Any] = {
+        "workflow_api_service/wf-api": {
+            "workflowId": "wf-api",
+            "serviceUrl": "http://127.0.0.1:19000",
+            "invokeUrl": "http://127.0.0.1:19000/invoke",
+            "status": "running",
+        },
+        "workflow_runtime/wf-runtime": {
+            "workflowId": "wf-runtime",
+            "hostPort": 19001,
+            "serviceUrl": "http://127.0.0.1:19001",
+            "status": "active",
+        },
+        "workflow_registry/wf-registry": {
+            "workflowId": "wf-registry",
+            "serviceUrl": "http://127.0.0.1:19002",
+            "publishStatus": "active",
+        },
+    }
+
+    async def fake_list_keys(prefix):
+        return [key for key in store if key.startswith(str(prefix))]
+
+    async def fake_read(key):
+        return store.get(str(key))
+
+    monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", "19000")
+    monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", "19003")
+    monkeypatch.setattr(center.Storage, "list_keys", fake_list_keys)
+    monkeypatch.setattr(center.Storage, "read", fake_read)
+    monkeypatch.setattr(center, "_is_port_available", lambda _port: True)
+
+    assert await center._allocate_port() == 19003
+
+
+@pytest.mark.asyncio
+async def test_allocate_port_reserves_in_flight_allocations(monkeypatch) -> None:
+    """Back-to-back allocations in one server process must not race to the same port."""
+    center._IN_FLIGHT_PORT_RESERVATIONS.clear()
+
+    async def fake_list_keys(_prefix):
+        return []
+
+    monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", "19000")
+    monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", "19001")
+    monkeypatch.setattr(center.Storage, "list_keys", fake_list_keys)
+    monkeypatch.setattr(center, "_is_port_available", lambda _port: True)
+
+    try:
+        assert await center._allocate_port() == 19000
+        assert await center._allocate_port() == 19001
+    finally:
+        center._IN_FLIGHT_PORT_RESERVATIONS.clear()
+
+
+@pytest.mark.asyncio
+async def test_publish_workflow_local_releases_reserved_port_on_spawn_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    workflow_id = "wf-local-spawn-fail"
+    workflow_path = tmp_path / "workflow.json"
+    workflow_path.write_text(
+        json.dumps({
+            "id": workflow_id,
+            "start": "n1",
+            "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
+            "edges": [],
+        }),
+        encoding="utf-8",
+    )
+    store: dict[str, Any] = {
+        f"workflow_registry/{workflow_id}": {
+            "workflowId": workflow_id,
+            "workflowPath": str(workflow_path),
+            "publishStatus": "unpublished",
+        },
+    }
+
+    async def fake_read(key):
+        return store.get(str(key))
+
+    async def fake_write(key, value):
+        store[str(key)] = value
+
+    async def fake_stop_existing_runtime_for_publish(_workflow_id):
+        return None
+
+    async def fake_write_release_snapshot(_workflow_id, _release_id, _workflow_json):
+        return workflow_path
+
+    async def fake_allocate_port():
+        center._IN_FLIGHT_PORT_RESERVATIONS[19000] = 9999999999.0
+        return 19000
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    center._IN_FLIGHT_PORT_RESERVATIONS.clear()
+    monkeypatch.setattr(center.Storage, "read", fake_read)
+    monkeypatch.setattr(center.Storage, "write", fake_write)
+    monkeypatch.setattr(center, "_stop_existing_runtime_for_publish", fake_stop_existing_runtime_for_publish)
+    monkeypatch.setattr(center, "_write_release_snapshot", fake_write_release_snapshot)
+    monkeypatch.setattr(center, "_allocate_port", fake_allocate_port)
+    monkeypatch.setattr(center.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    try:
+        with pytest.raises(center.WorkflowCenterError, match="spawn failed"):
+            await center.publish_workflow_local(workflow_id)
+
+        assert 19000 not in center._IN_FLIGHT_PORT_RESERVATIONS
+        assert store[f"workflow_registry/{workflow_id}"]["publishStatus"] == "failed"
+    finally:
+        center._IN_FLIGHT_PORT_RESERVATIONS.clear()

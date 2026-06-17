@@ -323,15 +323,6 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     throw new Error(t('error.extractTimeout'));
   };
 
-  const handleRunTest = async (prompt: string) => {
-    if (!agent?.name) {
-      throw new Error(t('error.testUnavailable', { defaultValue: 'Agent is not ready for testing.' }));
-    }
-
-    const res = await agentAPI.test(agent.name, prompt);
-    return res.data.sessionId;
-  };
-
   return (
     <EntitySheet
       open
@@ -349,6 +340,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
       rexGuideIcon={<Bot className="h-5 w-5" />}
       initialTab={isEdit ? 'rex' : undefined}
+      rexSessionStorageKey={isEdit && agent?.name ? `agent-edit:${agent.name}` : undefined}
       {...rexComposerControls}
       submitDisabled={submitDisabled}
       submitLoading={loading}
@@ -357,12 +349,6 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={isEdit ? handleExtractFromRex : undefined}
-      onRunTest={isEdit ? handleRunTest : undefined}
-      defaultTestPrompt={isEdit
-        ? t('common:entity.defaultTestPrompt', {
-            defaultValue: 'Hello, please introduce yourself and your main capabilities.',
-          })
-        : undefined}
     >
       <AgentFormContent
         formData={formData}
@@ -853,7 +839,7 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean, isNative = fa
     ``,
     ...editableFieldLines,
     ``,
-    `配置完成后，用户会点击「从 Rex 提取配置」按钮，将配置自动填入表单。届时你会被要求只输出 JSON，请确保 JSON 格式正确。`,
+    `配置完成后，用户会点击引导按钮「从 Rex 提取配置」，将配置自动填入表单。届时你会被要求只输出 JSON，请确保 JSON 格式正确。`,
   ].join('\n');
 }
 
@@ -880,7 +866,7 @@ function buildRexWelcome(isEdit: boolean, agentName?: string, isNative = false):
 - 收敛工具 / Skill 权限
 - 调整温度并验证效果
 
-配置好后，点击底部「从 Rex 提取配置」即可自动填入表单。`;
+配置好后，点击引导按钮「从 Rex 提取配置」即可自动填入表单。`;
   }
   return `你好！我来帮你创建一个新的子 Agent。
 

@@ -2061,10 +2061,15 @@ async def export_workflow(workflow_id: str):
 _API_SERVICE_PREFIX = "workflow_api_service/"
 _KAFKA_CONFIG_PREFIX = WORKFLOW_KAFKA_CONFIG_PREFIX
 _REGISTRY_PREFIX_MAIN = "workflow_registry/"
+_RUNTIME_PREFIX_MAIN = "workflow_runtime/"
 
 
 def _api_service_key(workflow_id: str) -> str:
     return f"{_API_SERVICE_PREFIX}{workflow_id}"
+
+
+def _runtime_key_main(workflow_id: str) -> str:
+    return f"{_RUNTIME_PREFIX_MAIN}{workflow_id}"
 
 
 def _workflow_id_from_api_service_key(key: Any) -> str:
@@ -2119,6 +2124,37 @@ def _service_driver_from_record(service: Dict[str, Any]) -> Optional[Literal["lo
 
 def _is_manually_stopped_service(service: Dict[str, Any]) -> bool:
     return str(service.get("status") or "").strip().lower() == "stopped" and bool(service.get("stoppedAt"))
+
+
+async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return None
+
+    service = dict(entry)
+    workflow_id = str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
+    service["workflowId"] = workflow_id
+    runtime = await Storage.read(_runtime_key_main(workflow_id))
+
+    if isinstance(runtime, dict) and runtime:
+        service_url = runtime.get("serviceUrl") or service.get("serviceUrl") or ""
+        service["serviceUrl"] = service_url
+        service["invokeUrl"] = f"{service_url}/invoke" if service_url else service.get("invokeUrl", "")
+        service["status"] = "running" if runtime.get("status") in {"active", "running"} else service.get("status", "running")
+        service["driver"] = runtime.get("driver") or service.get("driver")
+        service["containerName"] = runtime.get("containerName") or service.get("containerName", "")
+        service["image"] = runtime.get("image") or service.get("image")
+        return service
+
+    status = str(service.get("status") or "").strip().lower()
+    if status in {"running", "publishing"}:
+        service["status"] = "stopped"
+        service["health"] = {
+            **(service.get("health") if isinstance(service.get("health"), dict) else {}),
+            "ok": False,
+            "stale": True,
+            "reason": "missing_runtime",
+        }
+    return service
 
 
 async def reconcile_published_workflow_api_services() -> Dict[str, int]:
@@ -2533,8 +2569,9 @@ async def list_workflow_services():
         services = []
         for key in keys:
             entry = await Storage.read(key)
-            if entry:
-                services.append(entry)
+            service = await _normalize_listed_api_service(key, entry)
+            if service:
+                services.append(service)
         services.sort(key=lambda s: s.get("publishedAt", 0), reverse=True)
         return services
     except Exception as e:

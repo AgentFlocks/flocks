@@ -127,6 +127,7 @@
     "cancelButton": "Cancel",
     "extracting": "Extracting...",
     "extractFromRex": "Extract from Rex",
+    "extractFromRexGuideDesc": "Extract Rex's configuration summary into the form.",
     "switchToForm": "Switch to Form",
     "guideCollapse": "Collapse creation guides",
     "guideExpand": "Expand creation guides",
