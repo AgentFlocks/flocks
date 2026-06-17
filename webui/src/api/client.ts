@@ -1,5 +1,7 @@
 import axios from 'axios';
 
+export const DEFAULT_API_TIMEOUT_MS = 30000;
+
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
@@ -37,17 +39,55 @@ const baseURL = resolveApiBaseURL(
 
 export const apiClient = axios.create({
   baseURL,
-  timeout: 30000, // 30 seconds - 缩短超时时间以更快发现连接问题
+  timeout: DEFAULT_API_TIMEOUT_MS, // 30 seconds - 缩短超时时间以更快发现连接问题
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
+export function shouldDisableApiTimeout(url?: string, method?: string): boolean {
+  if (!url) return false;
+
+  const normalizedMethod = (method || 'get').toLowerCase();
+  const path = (() => {
+    try {
+      return new URL(url, 'http://flocks.local').pathname;
+    } catch {
+      return url.split('?')[0] || url;
+    }
+  })();
+
+  if (normalizedMethod === 'post' && path === '/api/session') {
+    return true;
+  }
+
+  if (path.startsWith('/api/session/')) {
+    return (
+      ['post', 'patch', 'delete'].includes(normalizedMethod) &&
+      (
+        path.endsWith('/message') ||
+        path.endsWith('/prompt_async') ||
+        path.includes('/prompt_queue') ||
+        path.endsWith('/command') ||
+        path.endsWith('/abort')
+      )
+    );
+  }
+
+  if (normalizedMethod === 'post' && path.startsWith('/api/question/')) {
+    return path.endsWith('/reply') || path.endsWith('/reject');
+  }
+
+  return false;
+}
+
 // 请求拦截器
 apiClient.interceptors.request.use(
   (config) => {
-    // 可以在这里添加认证 token 等
+    if (shouldDisableApiTimeout(config.url, config.method)) {
+      config.timeout = 0;
+    }
     return config;
   },
   (error) => {
