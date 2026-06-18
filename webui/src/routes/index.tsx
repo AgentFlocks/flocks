@@ -37,6 +37,11 @@ const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade
 const UserDefinedPageHost = lazy(() => import('@/pages/UserDefinedPageHost'));
 const SocOverviewPage = lazy(() => import('@/pages/Soc'));
 const SocAlertsPage = lazy(() => import('@/pages/Soc/Alerts'));
+const SocAssetsPage = lazy(() => import('@/pages/Soc/Assets'));
+const SocIntelPage = lazy(() => import('@/pages/Soc/Intel'));
+const SocVulnerabilitiesPage = lazy(() => import('@/pages/Soc/Vulnerabilities'));
+const SocDrillsPage = lazy(() => import('@/pages/Soc/Drills'));
+const SocAttackSurfacePage = lazy(() => import('@/pages/Soc/AttackSurface'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -138,6 +143,12 @@ export function Routes() {
         <Route path="soc" element={<LazyRoute><SocOverviewPage /></LazyRoute>} />
         <Route path="soc/alerts" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
         <Route path="soc/alerts/:incidentId" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
+        <Route path="soc/inspections" element={<Navigate to="/soc/assets" replace />} />
+        <Route path="soc/assets" element={<LazyRoute><SocAssetsPage /></LazyRoute>} />
+        <Route path="soc/intel" element={<LazyRoute><SocIntelPage /></LazyRoute>} />
+        <Route path="soc/vulnerabilities" element={<LazyRoute><SocVulnerabilitiesPage /></LazyRoute>} />
+        <Route path="soc/drills" element={<LazyRoute><SocDrillsPage /></LazyRoute>} />
+        <Route path="soc/attack-surface" element={<LazyRoute><SocAttackSurfacePage /></LazyRoute>} />
         <Route path="soc/cases" element={<Navigate to="/soc/alerts" replace />} />
         <Route path="soc/cases/:caseId" element={<Navigate to="/soc/alerts" replace />} />
         <Route path="soc/reports" element={<Navigate to="/soc/alerts" replace />} />

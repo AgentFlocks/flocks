@@ -23,6 +23,11 @@ import {
   ShieldCheck,
   Shield,
   AlertTriangle,
+  Radar,
+  Bug,
+  Network,
+  MailWarning,
+  Globe2,
   CircleUserRound,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
@@ -497,6 +502,11 @@ export default function Layout() {
           items: [
             { name: t('socOverview'), href: '/soc', icon: Shield },
             { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
+            { name: t('socIntel'), href: '/soc/intel', icon: Radar },
+            { name: t('socVulnerabilities'), href: '/soc/vulnerabilities', icon: Bug },
+            { name: t('socAssets'), href: '/soc/assets', icon: Network },
+            { name: t('socDrills'), href: '/soc/drills', icon: MailWarning },
+            { name: t('socAttackSurface'), href: '/soc/attack-surface', icon: Globe2 },
             ...socPageLinks,
           ],
         },
