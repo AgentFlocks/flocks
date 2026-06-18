@@ -76,6 +76,31 @@ Type: filesandordirs; Name: "{app}\*"
 Type: dirifempty; Name: "{app}"
 
 [Code]
+procedure RemoveExistingFlocksRepoDir;
+var
+  ExistingRepoDir: string;
+begin
+  ExistingRepoDir := ExpandConstant('{app}\flocks');
+  if not DirExists(ExistingRepoDir) then
+    exit;
+
+  WizardForm.StatusLabel.Caption := 'Removing previous Flocks installation...';
+  if not DelTree(ExistingRepoDir, True, True, True) then
+  begin
+    RaiseException(
+      'Failed to remove previous Flocks installation directory:' + #13#10 +
+      ExistingRepoDir + #13#10 + #13#10 +
+      'Please close any running Flocks process and retry.'
+    );
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+    RemoveExistingFlocksRepoDir;
+end;
+
 function IsUnderBaseDir(const CandidateDir, BaseDir: string): Boolean;
 var
   NormalizedCandidate: string;
