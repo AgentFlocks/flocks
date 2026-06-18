@@ -215,6 +215,7 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
 
     useSessions.mockReturnValue({
       sessions: [session],
@@ -384,10 +385,31 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });
 
-  it('does not auto-attach the previously selected session on initial load', () => {
+  it('does not auto-attach the previously selected session on first app visit', () => {
     localStorage.setItem('flocks:last-selected-session', 'session-1');
 
     renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('attaches the previously selected session after the session page has been visited', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
+
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+  });
+
+  it('does not auto-attach the previously selected session when entering from home', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
+
+    renderSessionPage({
+      pathname: '/sessions',
+      state: { skipLastSelectedSessionRestore: true },
+    });
 
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });

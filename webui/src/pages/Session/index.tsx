@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
@@ -35,6 +35,7 @@ function sanitizeSessionExportName(value: string) {
 }
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
+const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ChatModelOption = {
   key: string;
@@ -63,6 +64,14 @@ function formatAgentName(name: string): string {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 }
 
+function readLastSelectedSessionId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_SELECTED_SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 function writeLastSelectedSessionId(sessionId: string | null) {
   try {
     if (sessionId) {
@@ -75,12 +84,38 @@ function writeLastSelectedSessionId(sessionId: string | null) {
   }
 }
 
+function hasVisitedSessionPage(): boolean {
+  try {
+    return window.sessionStorage.getItem(SESSION_PAGE_VISITED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function markSessionPageVisited() {
+  try {
+    window.sessionStorage.setItem(SESSION_PAGE_VISITED_STORAGE_KEY, 'true');
+  } catch {
+    // Ignore storage failures; this only controls best-effort restore behavior.
+  }
+}
+
+function shouldSkipLastSelectedSessionRestore(state: unknown): boolean {
+  return Boolean(
+    state
+      && typeof state === 'object'
+      && 'skipLastSelectedSessionRestore' in state
+      && (state as { skipLastSelectedSessionRestore?: unknown }).skipLastSelectedSessionRestore,
+  );
+}
+
 function makeModelKey(providerID: string, modelID: string): string {
   return `${providerID}::${modelID}`;
 }
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -308,6 +343,23 @@ export default function SessionPage() {
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
+
+  useEffect(() => {
+    if (loadingSessions) return;
+
+    const alreadyVisited = hasVisitedSessionPage();
+    markSessionPageVisited();
+
+    if (selectedSessionId) return;
+    if (searchParams.get('session')) return;
+    if (!alreadyVisited) return;
+    if (shouldSkipLastSelectedSessionRestore(location.state)) return;
+
+    const lastSelectedSessionId = readLastSelectedSessionId();
+    if (lastSelectedSessionId) {
+      setSelectedSessionId(lastSelectedSessionId);
+    }
+  }, [loadingSessions, location.state, searchParams, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSessionId) return;

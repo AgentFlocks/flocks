@@ -149,6 +149,7 @@ export default function Home() {
       <div className="grid md:grid-cols-3 gap-4 mb-10">
         <Link
           to="/sessions"
+          state={{ skipLastSelectedSessionRestore: true }}
           className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-sky-200 hover:shadow-md hover:shadow-sky-50 transition-all duration-200"
         >
           <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-sky-100 transition-colors">
