@@ -21,6 +21,38 @@ from .llm import get_lazy_llm
 from .tools import ToolFacade, get_tool_registry
 
 
+_BLOCKED_BUILTINS = frozenset({
+    'eval', 'exec', 'compile', '__import__',
+    'breakpoint', 'exit', 'quit',
+})
+
+_IMPORT_ALLOWLIST = frozenset({
+    'json', 're', 'math', 'datetime', 'time', 'hashlib', 'base64',
+    'urllib', 'collections', 'itertools', 'functools', 'copy',
+    'string', 'textwrap', 'uuid', 'csv', 'io', 'typing',
+    'dataclasses', 'enum', 'pathlib', 'decimal', 'fractions',
+    'statistics', 'operator', 'contextlib', 'abc',
+})
+
+
+def _make_safe_builtins() -> dict:
+    """Create a restricted builtins dict for workflow exec() contexts."""
+    import builtins as _b
+    safe = {k: v for k, v in _b.__dict__.items() if k not in _BLOCKED_BUILTINS}
+
+    def _safe_import(name, *args, **kwargs):
+        top = name.split('.')[0]
+        if top not in _IMPORT_ALLOWLIST:
+            raise ImportError(
+                f"Import of '{name}' is not allowed in workflow sandbox. "
+                f"Allowed top-level modules: {sorted(_IMPORT_ALLOWLIST)}"
+            )
+        return _b.__import__(name, *args, **kwargs)
+
+    safe['__import__'] = _safe_import
+    return safe
+
+
 class Runtime:
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         raise NotImplementedError
@@ -61,6 +93,7 @@ class PythonExecRuntime(Runtime):
         g = self.globals
         g["inputs"] = inputs
         g["outputs"] = {}
+        g["__builtins__"] = _make_safe_builtins()
 
         def _cancel_requested() -> bool:
             try:
