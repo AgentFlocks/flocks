@@ -266,7 +266,9 @@ export function useSessions(search = '') {
   }, []);
 
   useEffect(() => {
-    initializedRef.current = false;
+    if (!hasLoadedOnceRef.current) {
+      initializedRef.current = false;
+    }
     fetchSessions();
   }, [fetchSessions]);
 

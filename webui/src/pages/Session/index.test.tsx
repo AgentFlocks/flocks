@@ -96,6 +96,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     agentName,
     model,
     display,
+    hideInput,
   }: {
     sessionId?: string | null;
     agentName?: string;
@@ -103,6 +104,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     toolbarSlot?: React.ReactNode;
     centerToolbarSlot?: React.ReactNode;
     model?: { providerID: string; modelID: string } | null;
+    hideInput?: boolean;
     display?: {
       compact?: boolean;
       showActions?: boolean;
@@ -119,6 +121,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       data-model={model ? `${model.providerID}/${model.modelID}` : ''}
       data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
       data-process-groups-default-open={String(Boolean(display?.processGroupsDefaultOpen))}
+      data-hide-input={String(Boolean(hideInput))}
     >
       {sessionId ?? 'no-session'}
       {toolbarSlot}
@@ -457,6 +460,54 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    });
+  });
+
+  it('keeps a selected session that is valid but missing from the current list', async () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    sessionApi.get.mockResolvedValue({
+      ...session,
+      id: 'session-missing-from-list',
+      title: 'Fetched Session',
+      canWrite: false,
+    });
+
+    renderSessionPage('/sessions?session=session-missing-from-list');
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-missing-from-list');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-hide-input', 'true');
+    });
+  });
+
+  it('clears the selected session after confirming it no longer exists', async () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    sessionApi.get.mockRejectedValue({ response: { status: 404 } });
+
+    renderSessionPage('/sessions?session=session-deleted');
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
     });
   });
 

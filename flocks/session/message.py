@@ -716,7 +716,13 @@ class Message:
         cls._parts_persisted_mids[session_id] = persisted_mids
 
     @classmethod
-    async def _load_parts_for_message(cls, session_id: str, message_id: str) -> List[PartType]:
+    async def _load_parts_for_message(
+        cls,
+        session_id: str,
+        message_id: str,
+        *,
+        legacy_parts_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[PartType]:
         """Load one message's parts without hydrating every part in the session."""
         await cls._ensure_message_cache(session_id)
         cached = cls._parts_cache.setdefault(session_id, {}).get(message_id)
@@ -729,7 +735,10 @@ class Message:
         }
         parts_data = await Storage.get(cls._parts_item_key(session_id, message_id))
         if not isinstance(parts_data, list):
-            legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+            legacy_parts = legacy_parts_cache
+            if legacy_parts is None:
+                stored_legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                legacy_parts = stored_legacy_parts if isinstance(stored_legacy_parts, dict) else None
             if isinstance(legacy_parts, dict):
                 cls._parts_storage_format[session_id] = "legacy"
                 parts_data = legacy_parts.get(message_id, [])
@@ -1695,9 +1704,31 @@ class Message:
 
         has_more = len(candidate_messages) > safe_limit
         page_messages = candidate_messages[-safe_limit:]
+        legacy_parts_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None
+        missing_message_ids = [
+            message.id
+            for message in page_messages
+            if message.id not in cls._parts_cache.setdefault(session_id, {})
+        ]
+        if missing_message_ids:
+            has_per_message_parts = False
+            for message_id in missing_message_ids:
+                parts_data = await Storage.get(cls._parts_item_key(session_id, message_id))
+                if isinstance(parts_data, list):
+                    has_per_message_parts = True
+                    break
+            if not has_per_message_parts:
+                stored_legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                if isinstance(stored_legacy_parts, dict):
+                    legacy_parts_cache = stored_legacy_parts
+
         result = []
         for message in page_messages:
-            parts = await cls._load_parts_for_message(session_id, message.id)
+            parts = await cls._load_parts_for_message(
+                session_id,
+                message.id,
+                legacy_parts_cache=legacy_parts_cache,
+            )
             result.append(MessageWithParts(info=message, parts=parts))
         next_before = page_messages[0].id if has_more and page_messages else None
         return result, has_more, next_before

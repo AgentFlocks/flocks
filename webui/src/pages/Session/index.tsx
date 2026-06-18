@@ -23,7 +23,7 @@ import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
-import type { ModelDefinitionV2 } from '@/types';
+import type { ModelDefinitionV2, Session } from '@/types';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -141,6 +141,7 @@ export default function SessionPage() {
   const supportsVision = useDefaultModelVision();
   const [searchQuery, setSearchQuery] = useState('');
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
+  const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
@@ -251,10 +252,12 @@ export default function SessionPage() {
     ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
     : null;
   const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
-  const selectedSession = useMemo(
+  const listedSelectedSession = useMemo(
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
+  const selectedSession = listedSelectedSession
+    ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
 
   // 今天/昨天不限制；本周/上周/更早默认只显示 5 条
   const GROUP_DEFAULT_LIMIT: Record<string, number> = {
@@ -365,6 +368,37 @@ export default function SessionPage() {
     if (!selectedSessionId) return;
     writeLastSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setSelectedSessionFallback(null);
+      return;
+    }
+    if (listedSelectedSession) {
+      setSelectedSessionFallback(null);
+      return;
+    }
+    if (loadingSessions) return;
+
+    let cancelled = false;
+    sessionApi.get(selectedSessionId)
+      .then((session) => {
+        if (cancelled) return;
+        setSelectedSessionFallback(session as unknown as Session);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        const statusCode = err?.response?.status ?? err?.status;
+        if (statusCode === 403 || statusCode === 404) {
+          setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
+          setSelectedSessionFallback(null);
+          writeLastSelectedSessionId(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [listedSelectedSession, loadingSessions, selectedSessionId]);
 
   useEffect(() => {
     let cancelled = false;

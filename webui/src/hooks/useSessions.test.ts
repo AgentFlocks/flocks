@@ -569,4 +569,36 @@ describe('useSessions list loading', () => {
     expect(result.current.error).toBe('network down');
     expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
   });
+
+  it('keeps the page mounted while refetching after search changes', async () => {
+    let resolveSearch: (value: any[]) => void = () => {};
+    vi.mocked(sessionApi.list)
+      .mockResolvedValueOnce([{
+        id: 'session-1',
+        title: 'Session',
+        time: { created: 1, updated: 2 },
+        category: 'user',
+      }] as any)
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveSearch = resolve;
+      }) as any);
+
+    const { result, rerender } = renderHook(
+      ({ search }) => useSessions(search),
+      { initialProps: { search: '' } },
+    );
+    await act(async () => {});
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    rerender({ search: 'triage' });
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    await act(async () => {
+      resolveSearch([]);
+    });
+  });
 });
