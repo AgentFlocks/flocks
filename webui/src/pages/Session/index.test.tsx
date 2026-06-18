@@ -384,12 +384,12 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });
 
-  it('attaches the previously selected session on initial load', () => {
+  it('does not auto-attach the previously selected session on initial load', () => {
     localStorage.setItem('flocks:last-selected-session', 'session-1');
 
     renderSessionPage();
 
-    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });
 
   it('defaults session process groups open on the session management page', () => {

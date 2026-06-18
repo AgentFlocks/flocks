@@ -63,14 +63,6 @@ function formatAgentName(name: string): string {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 }
 
-function readLastSelectedSessionId(): string | null {
-  try {
-    return window.localStorage.getItem(LAST_SELECTED_SESSION_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
 function writeLastSelectedSessionId(sessionId: string | null) {
   try {
     if (sessionId) {
@@ -316,17 +308,6 @@ export default function SessionPage() {
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
-
-  useEffect(() => {
-    if (loadingSessions) return;
-    if (selectedSessionId) return;
-    if (searchParams.get('session')) return;
-
-    const lastSelectedSessionId = readLastSelectedSessionId();
-    if (lastSelectedSessionId) {
-      setSelectedSessionId(lastSelectedSessionId);
-    }
-  }, [loadingSessions, searchParams, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
