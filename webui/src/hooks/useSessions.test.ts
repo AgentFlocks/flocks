@@ -515,4 +515,58 @@ describe('useSessions list loading', () => {
     });
     expect(result.current.sessions).toHaveLength(1);
   });
+
+  it('keeps an optimistically added session when an older list request returns without it', async () => {
+    let resolveList: (value: any[]) => void = () => {};
+    vi.mocked(sessionApi.list).mockReturnValueOnce(new Promise((resolve) => {
+      resolveList = resolve;
+    }) as any);
+
+    const { result } = renderHook(() => useSessions());
+
+    act(() => {
+      result.current.addSession({
+        id: 'session-new',
+        title: 'New Session',
+        time: { created: 2, updated: 2 },
+        category: 'user',
+      } as any);
+    });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-new']);
+
+    await act(async () => {
+      resolveList([{
+        id: 'session-old',
+        title: 'Old Session',
+        time: { created: 1, updated: 1 },
+        category: 'user',
+      }]);
+    });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-new', 'session-old']);
+  });
+
+  it('preserves the current list when a background refetch fails', async () => {
+    vi.mocked(sessionApi.list)
+      .mockResolvedValueOnce([{
+        id: 'session-1',
+        title: 'Session',
+        time: { created: 1, updated: 2 },
+        category: 'user',
+      }] as any)
+      .mockRejectedValueOnce(new Error('network down'));
+
+    const { result } = renderHook(() => useSessions());
+    await act(async () => {});
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(result.current.error).toBe('network down');
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+  });
 });

@@ -113,6 +113,18 @@ function markMeasure(name: string, startMark: string) {
   }
 }
 
+function mergeSessionListWithOptimistic(fetched: Session[], optimistic: Map<string, Session>): Session[] {
+  if (optimistic.size === 0) return fetched;
+  const fetchedIds = new Set(fetched.map(session => session.id));
+  const optimisticRows = Array.from(optimistic.values()).filter(session => !fetchedIds.has(session.id));
+  return [...optimisticRows, ...fetched];
+}
+
+function appendSessionList(prev: Session[], fetched: Session[]): Session[] {
+  const existingIds = new Set(prev.map(session => session.id));
+  return [...prev, ...fetched.filter(session => !existingIds.has(session.id))];
+}
+
 /**
  * Pure reducer for updating a message part in the messages list.
  * Exported for unit testing.
@@ -178,12 +190,16 @@ export function useSessions(search = '') {
   // Track whether the initial fetch has completed — refetches should be silent
   const initializedRef = useRef(false);
   const sessionsRef = useRef<Session[]>([]);
+  const hasLoadedOnceRef = useRef(false);
+  const requestSeqRef = useRef(0);
+  const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
   const fetchSessions = useCallback(async (options?: { append?: boolean }) => {
     const append = Boolean(options?.append);
+    const requestSeq = ++requestSeqRef.current;
     try {
       // Only show the full-page loading state on the very first fetch.
       // Subsequent refetches (triggered by SSE events) update data silently
@@ -203,31 +219,45 @@ export function useSessions(search = '') {
         manager: true,
         roots: true,
         limit: SESSION_LIST_PAGE_SIZE,
-        offset: append ? sessionsRef.current.length : 0,
+        offset: append
+          ? sessionsRef.current.filter(session => !optimisticSessionsRef.current.has(session.id)).length
+          : 0,
         search: search.trim() || undefined,
       });
+      if (requestSeq !== requestSeqRef.current) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
       if (Array.isArray(response)) {
         const nextSessions = response.filter(
           (s: any) => (!s.category || VISIBLE_CATEGORIES.has(s.category)) && !s.parentID,
         );
-        setSessions(prev => append ? [...prev, ...nextSessions] : nextSessions);
+        nextSessions.forEach((session: Session) => optimisticSessionsRef.current.delete(session.id));
+        setSessions(prev => append
+          ? appendSessionList(prev, nextSessions)
+          : mergeSessionListWithOptimistic(nextSessions, optimisticSessionsRef.current));
         setHasMore(response.length >= SESSION_LIST_PAGE_SIZE);
+        hasLoadedOnceRef.current = true;
       } else {
-        if (!append) setSessions([]);
+        if (!append && !hasLoadedOnceRef.current) setSessions([]);
         setHasMore(false);
       }
     } catch (err: any) {
+      if (requestSeq !== requestSeqRef.current) return;
       setError(err.message || 'Failed to fetch sessions');
-      if (!append) setSessions([]);
+      if (!append && !hasLoadedOnceRef.current) setSessions([]);
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
-      initializedRef.current = true;
+      if (requestSeq === requestSeqRef.current) {
+        setLoading(false);
+        setLoadingMore(false);
+        initializedRef.current = true;
+      }
     }
   }, [search]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
+    const optimistic = optimisticSessionsRef.current.get(sessionId);
+    if (optimistic) {
+      optimisticSessionsRef.current.set(sessionId, { ...optimistic, title });
+    }
     setSessions(prev =>
       prev.map(session =>
         session.id === sessionId ? { ...session, title } : session,
@@ -241,16 +271,19 @@ export function useSessions(search = '') {
   }, [fetchSessions]);
 
   const removeSession = useCallback((sessionId: string) => {
+    optimisticSessionsRef.current.delete(sessionId);
     setSessions(prev => prev.filter(s => s.id !== sessionId));
   }, []);
 
   const removeSessions = useCallback((sessionIds: string[]) => {
     const idSet = new Set(sessionIds);
+    sessionIds.forEach(sessionId => optimisticSessionsRef.current.delete(sessionId));
     setSessions(prev => prev.filter(s => !idSet.has(s.id)));
   }, []);
 
   /** Optimistically prepend a newly created session without a full refetch. */
   const addSession = useCallback((session: Session) => {
+    optimisticSessionsRef.current.set(session.id, session);
     setSessions(prev => {
       if (prev.some(s => s.id === session.id)) return prev;
       return [session, ...prev];
