@@ -1825,19 +1825,23 @@ describe('SessionChat fallback polling', () => {
         truncateAfterMessage: vi.fn(),
       });
       clientGetMock.mockResolvedValueOnce({
-        data: [
-          {
-            info: {
-              id: 'assistant-1',
-              sessionID: 'sess-1',
-              role: 'assistant',
-              finish: 'tool-calls',
+        data: {
+          items: [
+            {
+              info: {
+                id: 'assistant-1',
+                sessionID: 'sess-1',
+                role: 'assistant',
+                finish: 'tool-calls',
+              },
+              parts: [
+                { id: 'tool-1', type: 'tool', state: { status: 'running' } },
+              ],
             },
-            parts: [
-              { id: 'tool-1', type: 'tool', state: { status: 'running' } },
-            ],
-          },
-        ],
+          ],
+          hasMore: false,
+          nextBefore: null,
+        },
       });
 
       render(React.createElement(SessionChat, {
@@ -1856,7 +1860,9 @@ describe('SessionChat fallback polling', () => {
 
       expect(refetch).not.toHaveBeenCalled();
       expect(onStreamingDone).not.toHaveBeenCalled();
-      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message');
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
+        params: { page: true, limit: 50, include_archived: true },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -1888,19 +1894,23 @@ describe('SessionChat fallback polling', () => {
       clientGetMock.mockImplementation((url: string) => {
         if (url === '/api/session/sess-1/message') {
           return Promise.resolve({
-            data: [
-              {
-                info: {
-                  id: 'assistant-1',
-                  sessionID: 'sess-1',
-                  role: 'assistant',
-                  finish: 'stop',
+            data: {
+              items: [
+                {
+                  info: {
+                    id: 'assistant-1',
+                    sessionID: 'sess-1',
+                    role: 'assistant',
+                    finish: 'stop',
+                  },
+                  parts: [
+                    { id: 'text-1', type: 'text', text: 'done' },
+                  ],
                 },
-                parts: [
-                  { id: 'text-1', type: 'text', text: 'done' },
-                ],
-              },
-            ],
+              ],
+              hasMore: false,
+              nextBefore: null,
+            },
           });
         }
         if (url === '/api/session/status') {

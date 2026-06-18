@@ -393,8 +393,6 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('defaults session process groups open on the session management page', () => {
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
-
     renderSessionPage();
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-collapse-intermediate', 'true');
@@ -545,7 +543,6 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('shows the pinned model for the selected session on load', async () => {
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
     useSessions.mockReturnValue({
       sessions: [{
         ...session,
@@ -571,7 +568,7 @@ describe('SessionPage session actions menu', () => {
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');
@@ -581,7 +578,6 @@ describe('SessionPage session actions menu', () => {
 
   it('persists model changes to the selected session', async () => {
     const user = userEvent.setup();
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
     useSessions.mockReturnValue({
       sessions: [session],
       loading: false,
@@ -608,7 +604,7 @@ describe('SessionPage session actions menu', () => {
       model_pinned: true,
     });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'openai/gpt-4o');
@@ -629,7 +625,6 @@ describe('SessionPage session actions menu', () => {
 
   it('resets the selected model to the default when creating a new session', async () => {
     const user = userEvent.setup();
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
     useSessions.mockReturnValue({
       sessions: [{
         ...session,
@@ -655,7 +650,7 @@ describe('SessionPage session actions menu', () => {
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');

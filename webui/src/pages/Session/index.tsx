@@ -119,7 +119,18 @@ export default function SessionPage() {
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
 
-  const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
+  const {
+    sessions,
+    loading: loadingSessions,
+    refetch: refetchSessions,
+    updateSessionTitle,
+    removeSession,
+    removeSessions,
+    addSession,
+    hasMore: hasMoreSessions,
+    loadingMore: loadingMoreSessions,
+    loadMore: loadMoreSessions,
+  } = useSessions(searchQuery);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
@@ -307,6 +318,17 @@ export default function SessionPage() {
   }, [searchParams, selectedSessionId, setSearchParams]);
 
   useEffect(() => {
+    if (loadingSessions) return;
+    if (selectedSessionId) return;
+    if (searchParams.get('session')) return;
+
+    const lastSelectedSessionId = readLastSelectedSessionId();
+    if (lastSelectedSessionId) {
+      setSelectedSessionId(lastSelectedSessionId);
+    }
+  }, [loadingSessions, searchParams, selectedSessionId]);
+
+  useEffect(() => {
     if (!selectedSessionId) return;
     writeLastSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
@@ -457,34 +479,6 @@ export default function SessionPage() {
       toast.error(t('chat.error', 'Error'), err.message);
     }
   }, [refetchSessions, selectedSessionId, toast, t]);
-
-  useEffect(() => {
-    if (loadingSessions) return;
-    if (searchParams.get('session')) return;
-
-    if (selectedSessionId && sessions.some((session) => session.id === selectedSessionId)) {
-      return;
-    }
-
-    const lastSelectedSessionId = readLastSelectedSessionId();
-    const fallbackSession = lastSelectedSessionId
-      ? sessions.find((session) => session.id === lastSelectedSessionId)
-      : undefined;
-
-    if (fallbackSession && fallbackSession.id !== selectedSessionId) {
-      setSelectedSessionId(fallbackSession.id);
-      return;
-    }
-
-    if (!fallbackSession && selectedSessionId) {
-      setSelectedSessionId(null);
-    }
-  }, [
-    loadingSessions,
-    searchParams,
-    selectedSessionId,
-    sessions,
-  ]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -868,6 +862,18 @@ export default function SessionPage() {
               </div>
               );
             })
+          )}
+          {hasMoreSessions && (
+            <div className="px-4 py-3">
+              <button
+                onClick={() => void loadMoreSessions()}
+                disabled={loadingMoreSessions}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900"
+              >
+                {loadingMoreSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                <span>{loadingMoreSessions ? t('loading') : t('loadMore', 'Load more')}</span>
+              </button>
+            </div>
           )}
         </div>
 
