@@ -589,6 +589,50 @@ class TestToolCallExecution:
         assert state.status == "error"
 
     @pytest.mark.asyncio
+    async def test_invalid_tool_call_records_parse_error_without_registry_execution(self):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        execute_mock = AsyncMock(return_value=ToolResult(success=True, output="should not run", title="invalid"))
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as mock_store,
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=execute_mock,
+            ),
+        ):
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc_invalid",
+                    tool_name="invalid",
+                    input={
+                        "tool": "edit",
+                        "error": "Failed to parse tool arguments (123 chars). Please ensure valid JSON.",
+                        "arguments_preview": "{\"file_path\":",
+                    },
+                )
+            )
+
+        execute_mock.assert_not_awaited()
+        state = proc.tool_calls["tc_invalid"]
+        assert state.status == "error"
+        assert "Failed to parse tool arguments for edit" in state.error
+        assert "Failed to parse tool arguments (123 chars)" in state.error
+
+        completed_part = mock_store.await_args_list[-1].args[2]
+        assert completed_part.tool == "edit"
+        assert completed_part.state.status == "error"
+        assert completed_part.state.input["tool"] == "edit"
+        assert completed_part.state.input["arguments_preview"] == "{\"file_path\":"
+        assert completed_part.state.error == state.error
+
+        published_part = event_callback.await_args_list[-1].args[1]["part"]
+        assert published_part["tool"] == "edit"
+        assert published_part["state"]["status"] == "error"
+        assert published_part["state"]["error"] == state.error
+
+    @pytest.mark.asyncio
     async def test_tool_start_callback_called(self):
         callback = AsyncMock()
         proc = _make_processor()

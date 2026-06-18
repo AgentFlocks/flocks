@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
@@ -23,7 +23,7 @@ import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
-import type { ModelDefinitionV2 } from '@/types';
+import type { ModelDefinitionV2, Session } from '@/types';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -35,6 +35,7 @@ function sanitizeSessionExportName(value: string) {
 }
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
+const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ChatModelOption = {
   key: string;
@@ -83,12 +84,38 @@ function writeLastSelectedSessionId(sessionId: string | null) {
   }
 }
 
+function hasVisitedSessionPage(): boolean {
+  try {
+    return window.sessionStorage.getItem(SESSION_PAGE_VISITED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function markSessionPageVisited() {
+  try {
+    window.sessionStorage.setItem(SESSION_PAGE_VISITED_STORAGE_KEY, 'true');
+  } catch {
+    // Ignore storage failures; this only controls best-effort restore behavior.
+  }
+}
+
+function shouldSkipLastSelectedSessionRestore(state: unknown): boolean {
+  return Boolean(
+    state
+      && typeof state === 'object'
+      && 'skipLastSelectedSessionRestore' in state
+      && (state as { skipLastSelectedSessionRestore?: unknown }).skipLastSelectedSessionRestore,
+  );
+}
+
 function makeModelKey(providerID: string, modelID: string): string {
   return `${providerID}::${modelID}`;
 }
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -114,12 +141,24 @@ export default function SessionPage() {
   const supportsVision = useDefaultModelVision();
   const [searchQuery, setSearchQuery] = useState('');
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
+  const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
 
-  const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
+  const {
+    sessions,
+    loading: loadingSessions,
+    refetch: refetchSessions,
+    updateSessionTitle,
+    removeSession,
+    removeSessions,
+    addSession,
+    hasMore: hasMoreSessions,
+    loadingMore: loadingMoreSessions,
+    loadMore: loadMoreSessions,
+  } = useSessions(searchQuery);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
@@ -213,10 +252,12 @@ export default function SessionPage() {
     ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
     : null;
   const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
-  const selectedSession = useMemo(
+  const listedSelectedSession = useMemo(
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
+  const selectedSession = listedSelectedSession
+    ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
 
   // 今天/昨天不限制；本周/上周/更早默认只显示 5 条
   const GROUP_DEFAULT_LIMIT: Record<string, number> = {
@@ -307,9 +348,57 @@ export default function SessionPage() {
   }, [searchParams, selectedSessionId, setSearchParams]);
 
   useEffect(() => {
+    if (loadingSessions) return;
+
+    const alreadyVisited = hasVisitedSessionPage();
+    markSessionPageVisited();
+
+    if (selectedSessionId) return;
+    if (searchParams.get('session')) return;
+    if (!alreadyVisited) return;
+    if (shouldSkipLastSelectedSessionRestore(location.state)) return;
+
+    const lastSelectedSessionId = readLastSelectedSessionId();
+    if (lastSelectedSessionId) {
+      setSelectedSessionId(lastSelectedSessionId);
+    }
+  }, [loadingSessions, location.state, searchParams, selectedSessionId]);
+
+  useEffect(() => {
     if (!selectedSessionId) return;
     writeLastSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setSelectedSessionFallback(null);
+      return;
+    }
+    if (listedSelectedSession) {
+      setSelectedSessionFallback(null);
+      return;
+    }
+    if (loadingSessions) return;
+
+    let cancelled = false;
+    sessionApi.get(selectedSessionId)
+      .then((session) => {
+        if (cancelled) return;
+        setSelectedSessionFallback(session as unknown as Session);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        const statusCode = err?.response?.status ?? err?.status;
+        if (statusCode === 403 || statusCode === 404) {
+          setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
+          setSelectedSessionFallback(null);
+          writeLastSelectedSessionId(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [listedSelectedSession, loadingSessions, selectedSessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -457,34 +546,6 @@ export default function SessionPage() {
       toast.error(t('chat.error', 'Error'), err.message);
     }
   }, [refetchSessions, selectedSessionId, toast, t]);
-
-  useEffect(() => {
-    if (loadingSessions) return;
-    if (searchParams.get('session')) return;
-
-    if (selectedSessionId && sessions.some((session) => session.id === selectedSessionId)) {
-      return;
-    }
-
-    const lastSelectedSessionId = readLastSelectedSessionId();
-    const fallbackSession = lastSelectedSessionId
-      ? sessions.find((session) => session.id === lastSelectedSessionId)
-      : undefined;
-
-    if (fallbackSession && fallbackSession.id !== selectedSessionId) {
-      setSelectedSessionId(fallbackSession.id);
-      return;
-    }
-
-    if (!fallbackSession && selectedSessionId) {
-      setSelectedSessionId(null);
-    }
-  }, [
-    loadingSessions,
-    searchParams,
-    selectedSessionId,
-    sessions,
-  ]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -868,6 +929,18 @@ export default function SessionPage() {
               </div>
               );
             })
+          )}
+          {hasMoreSessions && (
+            <div className="px-4 py-3">
+              <button
+                onClick={() => void loadMoreSessions()}
+                disabled={loadingMoreSessions}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900"
+              >
+                {loadingMoreSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                <span>{loadingMoreSessions ? t('loading') : t('loadMore', 'Load more')}</span>
+              </button>
+            </div>
           )}
         </div>
 

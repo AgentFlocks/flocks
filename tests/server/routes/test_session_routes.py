@@ -122,6 +122,60 @@ class TestSessionCRUD:
         assert child_id not in ids
 
     @pytest.mark.asyncio
+    async def test_list_sessions_light_manager_filters_and_omits_heavy_fields(self, client: AsyncClient):
+        """Lightweight manager list returns only sidebar metadata."""
+        from flocks.session.goal import GoalManager
+
+        user_resp = await client.post("/api/session", json={"title": "User"})
+        user_id = user_resp.json()["id"]
+        workflow_resp = await client.post(
+            "/api/session",
+            json={"title": "Workflow", "category": "workflow"},
+        )
+        workflow_id = workflow_resp.json()["id"]
+        task_resp = await client.post(
+            "/api/session",
+            json={"title": "Task", "category": "task"},
+        )
+        task_id = task_resp.json()["id"]
+        child_resp = await client.post(
+            "/api/session",
+            json={"title": "Child", "parentID": user_id},
+        )
+        child_id = child_resp.json()["id"]
+        await GoalManager.set_goal(user_id, "Do not hydrate in list mode")
+
+        resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        ids = {item["id"] for item in data}
+        assert user_id in ids
+        assert workflow_id in ids
+        assert task_id not in ids
+        assert child_id not in ids
+
+        row = next(item for item in data if item["id"] == user_id)
+        assert set(row) == {
+            "id",
+            "title",
+            "time",
+            "category",
+            "parentID",
+            "provider",
+            "model",
+            "model_pinned",
+            "canWrite",
+            "canDelete",
+            "isShared",
+        }
+        assert "goal" not in row
+        assert "summary" not in row
+
+    @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):
         """GET /api/session/{id} returns the specific session."""
         resp = await client.get(f"/api/session/{session_id}")
@@ -289,6 +343,41 @@ class TestSessionMessages:
         preloaded_recovery.assert_awaited_once()
         legacy_recovery.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_list_messages_page_uses_lazy_recent_path(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        old_msg = await Message.create(session_id, MessageRole.USER, "old")
+        mid_msg = await Message.create(session_id, MessageRole.USER, "middle")
+        new_msg = await Message.create(session_id, MessageRole.ASSISTANT, "new")
+
+        async def _fail_full_list(*args, **kwargs):
+            raise AssertionError("full list_with_parts should not be used for paged reads")
+
+        monkeypatch.setattr(Message, "list_with_parts", _fail_full_list)
+
+        first_resp = await client.get(
+            f"/api/session/{session_id}/message",
+            params={"page": "true", "limit": "2"},
+        )
+
+        assert first_resp.status_code == status.HTTP_200_OK
+        first_page = first_resp.json()
+        assert [item["info"]["id"] for item in first_page["items"]] == [mid_msg.id, new_msg.id]
+        assert first_page["hasMore"] is True
+        assert first_page["nextBefore"] == mid_msg.id
+
+        older_resp = await client.get(
+            f"/api/session/{session_id}/message",
+            params={"page": "true", "limit": "2", "before": first_page["nextBefore"]},
+        )
+        assert older_resp.status_code == status.HTTP_200_OK
+        older_page = older_resp.json()
+        assert [item["info"]["id"] for item in older_page["items"]] == [old_msg.id]
+        assert older_page["hasMore"] is False
 
 # ===========================================================================
 # Delete permissions (single-admin model)

@@ -35,6 +35,7 @@ log = Log.create(service="session-routes")
 
 # Default agent name constant
 DEFAULT_AGENT = "rex"
+DEFAULT_MESSAGE_PAGE_LIMIT = 50
 
 # File extensions that are safe to persist when materialising data-URL uploads.
 # Intentionally narrow: any extension outside this set is rejected to prevent
@@ -136,6 +137,23 @@ class SessionResponse(BaseModel):
     goal: Optional[SessionGoalResponse] = Field(None, description="Persisted session goal state")
 
 
+class SessionListItem(BaseModel):
+    """Lightweight session row for the session manager sidebar."""
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    id: str
+    title: str
+    time: SessionTime
+    category: str = "user"
+    parentID: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    model_pinned: bool = False
+    canWrite: bool = False
+    canDelete: bool = False
+    isShared: bool = False
+
+
 def _session_to_response(session: SessionModel) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
@@ -171,6 +189,29 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         canWrite=can_write,
         canDelete=can_delete,
         isShared=is_shared,
+    )
+
+
+def _session_to_list_item(session: SessionModel) -> SessionListItem:
+    """Convert a session to the lightweight manager-list response shape."""
+    current_user = get_current_auth_user()
+    return SessionListItem(
+        id=session.id,
+        title=session.title,
+        time=SessionTime(
+            created=session.time.created,
+            updated=session.time.updated,
+            compacting=session.time.compacting,
+            archived=session.time.archived,
+        ),
+        category=session.category,
+        parentID=session.parent_id,
+        provider=session.provider,
+        model=session.model,
+        model_pinned=session.model_pinned,
+        canWrite=SessionPolicy.can_write(session, current_user),
+        canDelete=SessionPolicy.can_delete(session, current_user),
+        isShared=SessionPolicy.is_shared(session),
     )
 
 
@@ -332,57 +373,89 @@ async def get_session_status() -> Dict[str, Any]:
 
 @router.get(
     "",
-    response_model=List[SessionResponse],
+    response_model=List[Union[SessionResponse, SessionListItem]],
     summary="List sessions",
     description="Get a list of all sessions, sorted by most recently updated",
 )
 async def list_sessions(
     request: Request,
+    view: Optional[Literal["list"]] = Query(None, description="Use lightweight list rows"),
+    manager: Optional[bool] = Query(None, description="Apply session-manager visibility filters"),
     directory: Optional[str] = Query(None, description="Filter by project directory"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
     search: Optional[str] = Query(None, description="Filter by title (case-insensitive)"),
     limit: Optional[int] = Query(None, ge=1, description="Maximum sessions to return"),
+    offset: Optional[int] = Query(None, ge=0, description="Number of filtered sessions to skip"),
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
-) -> List[SessionResponse]:
+) -> List[Union[SessionResponse, SessionListItem]]:
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
     _current_user = require_user(request)
+    list_started_at = time.perf_counter()
     all_sessions = await Session.list_all()
+    list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
     
     filtered = []
     term = search.lower() if search else None
+    manager_categories = {"user", "workflow", "entity-config"}
+    skip_remaining = offset or 0
     
     for session in all_sessions:
         if _is_hidden_from_session_manager(session):
             continue
         if directory is not None and session.directory != directory:
             continue
-        if roots and session.parent_id:
+        if (roots or manager) and session.parent_id:
             continue
         if start is not None and session.time.updated < start:
             continue
         if term is not None and term not in session.title.lower():
             continue
-        if category is not None:
+        if manager:
+            if session.category not in manager_categories:
+                continue
+        elif category is not None:
             if session.category != category:
                 continue
         elif session.category == "test":
             # exclude test sessions from the default listing
+            continue
+
+        if skip_remaining > 0:
+            skip_remaining -= 1
             continue
         
         filtered.append(session)
         
         if limit is not None and len(filtered) >= limit:
             break
-    
+
+    if view == "list":
+        response = [_session_to_list_item(s) for s in filtered]
+        log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
+            "total": len(all_sessions),
+            "count": len(response),
+            "roots": roots,
+            "manager": manager,
+            "limit": limit,
+            "offset": offset,
+            "search": bool(search),
+            "category": category,
+            "list_ms": round(list_elapsed_ms, 2),
+        })
+        return response
+
     response = [await _session_to_response_with_goal(s) for s in filtered]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
+        "manager": manager,
         "limit": limit,
+        "offset": offset,
         "search": bool(search),
         "category": category,
+        "list_ms": round(list_elapsed_ms, 2),
     })
     return response
 
@@ -514,6 +587,7 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
 )
 async def get_session_context_usage(sessionID: str, request: Request) -> ContextUsageSnapshot:
     """Return current prompt/context usage for a session."""
+    started_at = time.perf_counter()
     current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -522,7 +596,14 @@ async def get_session_context_usage(sessionID: str, request: Request) -> Context
             detail=f"Session {sessionID} not found",
         )
     _require_session_read_access(session, current_user)
-    return await build_context_usage_snapshot(sessionID, session=session)
+    snapshot = await build_context_usage_snapshot(sessionID, session=session)
+    log_route_timing(log, "session.context_usage.complete", started_at=started_at, extra={
+        "sessionID": sessionID,
+        "source": snapshot.source,
+        "used_tokens": snapshot.used_tokens,
+        "segments": len(snapshot.segments),
+    })
+    return snapshot
 
 
 @router.get(
@@ -1277,6 +1358,14 @@ class MessageWithParts(BaseModel):
     parts: List[MessagePartInfo] = []
 
 
+class MessagePage(BaseModel):
+    """Paged message response used by the WebUI session page."""
+    sessionID: str
+    items: List[MessageWithParts] = []
+    hasMore: bool = False
+    nextBefore: Optional[str] = None
+
+
 class MessageEditRequest(BaseModel):
     """Request to edit message text."""
 
@@ -1284,9 +1373,138 @@ class MessageEditRequest(BaseModel):
     partID: Optional[str] = Field(None, description="Specific text part ID to edit")
 
 
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+
+
+def _part_to_response_info(
+    part: Any,
+    *,
+    session_id: str,
+    message_id: str,
+    index: int = 0,
+) -> MessagePartInfo:
+    text_value = getattr(part, "text", None) if part.type in ("text", "reasoning", "thinking") else None
+
+    url_value = getattr(part, "url", None) if part.type == "file" else None
+
+    state_value = None
+    if part.type == "tool":
+        raw_state = getattr(part, "state", None)
+        if raw_state is not None:
+            if hasattr(raw_state, "model_dump"):
+                state_value = raw_state.model_dump()
+            elif isinstance(raw_state, dict):
+                state_value = raw_state
+
+    return MessagePartInfo(
+        id=part.id if hasattr(part, "id") else f"{message_id}_part_{index}",
+        messageID=message_id,
+        sessionID=session_id,
+        type=part.type,
+        text=text_value,
+        synthetic=getattr(part, "synthetic", None),
+        tool=getattr(part, "tool", None) if part.type == "tool" else None,
+        state=state_value,
+        callID=getattr(part, "callID", None) if part.type == "tool" else None,
+        metadata=getattr(part, "metadata", None),
+        url=url_value,
+        mime=getattr(part, "mime", None) if part.type == "file" else None,
+        filename=getattr(part, "filename", None) if part.type == "file" else None,
+    )
+
+
+async def _message_to_response_info(msg: Any, *, cwd: str) -> MessageInfo:
+    if msg.role == "user":
+        model_dict = getattr(msg, "model", None)
+        if model_dict and isinstance(model_dict, dict):
+            model_info = model_dict
+        else:
+            try:
+                from flocks.agent.registry import Agent
+
+                default_agent = await Agent.default_agent()
+                agent_obj = await Agent.get(default_agent)
+                if agent_obj and hasattr(agent_obj, "model") and agent_obj.model:
+                    model_info = agent_obj.model
+                else:
+                    model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
+            except Exception:
+                model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
+
+        return UserMessageInfo(
+            id=msg.id,
+            sessionID=msg.sessionID,
+            role="user",
+            time=msg.time,
+            agent=getattr(msg, "agent", None) or DEFAULT_AGENT,
+            model=model_info,
+            compacted=getattr(msg, "compacted", None),
+        )
+
+    tokens_raw = getattr(msg, "tokens", None)
+    if tokens_raw is not None and hasattr(tokens_raw, "model_dump"):
+        tokens_dict = tokens_raw.model_dump()
+    elif isinstance(tokens_raw, dict):
+        tokens_dict = tokens_raw
+    else:
+        tokens_dict = {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {"read": 0, "write": 0},
+        }
+
+    path_raw = getattr(msg, "path", None)
+    if path_raw is not None and hasattr(path_raw, "model_dump"):
+        path_dict = path_raw.model_dump()
+    elif isinstance(path_raw, dict):
+        path_dict = path_raw
+    else:
+        path_dict = {"cwd": cwd, "root": cwd}
+
+    return AssistantMessageInfo(
+        id=msg.id,
+        sessionID=msg.sessionID,
+        role="assistant",
+        time=msg.time,
+        parentID=getattr(msg, "parentID", None),
+        modelID=getattr(msg, "modelID", None) or "claude-sonnet-4-5-20250929",
+        providerID=getattr(msg, "providerID", None) or "anthropic",
+        mode=getattr(msg, "agent", None) or DEFAULT_AGENT,
+        agent=getattr(msg, "agent", None) or DEFAULT_AGENT,
+        path=path_dict,
+        cost=getattr(msg, "cost", 0.0) or 0.0,
+        tokens=tokens_dict,
+        error=getattr(msg, "error", None),
+        finish=getattr(msg, "finish", None),
+        compacted=getattr(msg, "compacted", None),
+    )
+
+
+async def _message_with_parts_to_response(
+    msg_with_parts: Any,
+    *,
+    session_id: str,
+    cwd: str,
+) -> MessageWithParts:
+    msg = msg_with_parts.info
+    info = await _message_to_response_info(msg, cwd=cwd)
+    parts = [
+        _part_to_response_info(
+            part,
+            session_id=session_id,
+            message_id=msg.id,
+            index=i,
+        )
+        for i, part in enumerate(msg_with_parts.parts)
+    ]
+    return MessageWithParts(info=info, parts=parts)
+
+
 @router.get(
     "/{sessionID}/message",
-    response_model=List[MessageWithParts],
+    response_model=Union[List[MessageWithParts], MessagePage],
     summary="Get session messages",
     description="Get all messages in a session",
 )
@@ -1294,11 +1512,15 @@ async def get_session_messages(
     sessionID: str,
     http_request: Request,
     limit: Optional[int] = Query(None, ge=1, description="Maximum messages to return"),
-) -> List[MessageWithParts]:
+    before: Optional[str] = Query(None, description="Load messages before this message id"),
+    page: bool = Query(False, description="Return paged response metadata"),
+    include_archived: bool = Query(True, description="Include compacted/archived messages"),
+) -> Union[List[MessageWithParts], MessagePage]:
     """Get session messages"""
     from flocks.session.message import Message
     import os
 
+    started_at = time.perf_counter()
     current_user = require_user(http_request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -1312,121 +1534,60 @@ async def get_session_messages(
         from flocks.session.orphan_tools import abort_orphan_running_parts_in_messages
         from flocks.session.core.status import SessionStatus
 
-        messages_with_parts = await Message.list_with_parts(sessionID, include_archived=True)
+        paged = page or before is not None
+        if paged or limit:
+            page_limit = limit or DEFAULT_MESSAGE_PAGE_LIMIT
+            messages_with_parts, has_more, next_before = await Message.list_recent_with_parts(
+                sessionID,
+                limit=page_limit,
+                before=before,
+                include_archived=include_archived,
+            )
+        else:
+            messages_with_parts = await Message.list_with_parts(
+                sessionID,
+                include_archived=include_archived,
+            )
+            has_more = False
+            next_before = None
+
         if sessionID not in SessionStatus.get_busy_session_ids():
             await abort_orphan_running_parts_in_messages(sessionID, messages_with_parts)
-        if limit:
-            messages_with_parts = messages_with_parts[-limit:]
-        
-        result = []
-        cwd = os.getcwd()
-        
-        for msg_with_parts in messages_with_parts:
-            msg = msg_with_parts.info
-            
-            # Create appropriate message info based on role
-            if msg.role == "user":
-                # Extract model from msg.model dict (UserMessageInfo has model as dict)
-                model_dict = getattr(msg, 'model', None)
-                if model_dict and isinstance(model_dict, dict):
-                    model_info = model_dict
-                else:
-                    # Fallback: try to get from Agent.default_agent's model
-                    try:
-                        from flocks.agent.registry import Agent
-                        default_agent = await Agent.default_agent()
-                        agent_obj = await Agent.get(default_agent)
-                        if agent_obj and hasattr(agent_obj, 'model') and agent_obj.model:
-                            model_info = agent_obj.model
-                        else:
-                            model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
-                    except Exception:
-                        model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
-                
-                info = UserMessageInfo(
-                    id=msg.id,
-                    sessionID=msg.sessionID,
-                    role="user",
-                    time=msg.time,
-                    agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                    model=model_info,
-                    compacted=getattr(msg, 'compacted', None),
-                )
-            else:
-                # Convert tokens to dict if it's a TokenUsage object
-                tokens_raw = getattr(msg, 'tokens', None)
-                if tokens_raw is not None and hasattr(tokens_raw, 'model_dump'):
-                    tokens_dict = tokens_raw.model_dump()
-                elif isinstance(tokens_raw, dict):
-                    tokens_dict = tokens_raw
-                else:
-                    tokens_dict = {
-                        "input": 0,
-                        "output": 0,
-                        "reasoning": 0,
-                        "cache": {"read": 0, "write": 0}
-                    }
-                
-                # Convert path to dict if it's a MessagePath object
-                path_raw = getattr(msg, 'path', None)
-                if path_raw is not None and hasattr(path_raw, 'model_dump'):
-                    path_dict = path_raw.model_dump()
-                elif isinstance(path_raw, dict):
-                    path_dict = path_raw
-                else:
-                    path_dict = {"cwd": cwd, "root": cwd}
-                
-                info = AssistantMessageInfo(
-                    id=msg.id,
-                    sessionID=msg.sessionID,
-                    role="assistant",
-                    time=msg.time,
-                    parentID=getattr(msg, 'parentID', None),
-                    modelID=getattr(msg, 'modelID', None) or "claude-sonnet-4-5-20250929",
-                    providerID=getattr(msg, 'providerID', None) or "anthropic",
-                    mode=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                    agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                    path=path_dict,
-                    cost=getattr(msg, 'cost', 0.0) or 0.0,
-                    tokens=tokens_dict,
-                    error=getattr(msg, 'error', None),
-                    finish=getattr(msg, 'finish', None),
-                    compacted=getattr(msg, 'compacted', None),
-                )
-            
-            parts = []
-            for i, part in enumerate(msg_with_parts.parts):
-                # Convert state to dict if it's a Pydantic model
-                state_value = None
-                if part.type == "tool":
-                    raw_state = getattr(part, 'state', None)
-                    if raw_state is not None:
-                        if hasattr(raw_state, 'model_dump'):
-                            state_value = raw_state.model_dump()
-                        elif isinstance(raw_state, dict):
-                            state_value = raw_state
 
-                part_info = MessagePartInfo(
-                    id=part.id if hasattr(part, 'id') else f"{msg.id}_part_{i}",
-                    messageID=msg.id,
-                    sessionID=sessionID,
-                    type=part.type,
-                    text=getattr(part, 'text', None) if part.type in ("text", "reasoning") else None,
-                    synthetic=getattr(part, 'synthetic', None),
-                    tool=getattr(part, 'tool', None) if part.type == "tool" else None,
-                    state=state_value,
-                    callID=getattr(part, 'callID', None) if part.type == "tool" else None,
-                    metadata=getattr(part, 'metadata', None),
-                    url=getattr(part, 'url', None) if part.type == "file" else None,
-                    mime=getattr(part, 'mime', None) if part.type == "file" else None,
-                    filename=getattr(part, 'filename', None) if part.type == "file" else None,
-                )
-                parts.append(part_info)
-            result.append(MessageWithParts(info=info, parts=parts))
-        
+        cwd = os.getcwd()
+        result = [
+            await _message_with_parts_to_response(
+                msg_with_parts,
+                session_id=sessionID,
+                cwd=cwd,
+            )
+            for msg_with_parts in messages_with_parts
+        ]
+
+        payload_bytes = len(_json_bytes([item.model_dump() for item in result]))
+        log_route_timing(log, "session.messages.page.complete", started_at=started_at, extra={
+            "sessionID": sessionID,
+            "count": len(result),
+            "parts": sum(len(message.parts) for message in result),
+            "paged": paged,
+            "limit": limit,
+            "before": bool(before),
+            "has_more": has_more,
+            "payload_bytes": payload_bytes,
+        })
+
+        if paged:
+            return MessagePage(
+                sessionID=sessionID,
+                items=result,
+                hasMore=has_more,
+                nextBefore=next_before,
+            )
         return result
     except Exception as e:
         log.error("session.messages.error", {"error": str(e), "sessionID": sessionID})
+        if page or before is not None:
+            return MessagePage(sessionID=sessionID, items=[], hasMore=False, nextBefore=None)
         return []
 
 
@@ -1450,82 +1611,13 @@ async def get_message(sessionID: str, messageID: str, http_request: Request) -> 
         )
     _require_session_read_access(session, current_user)
 
-    msg_with_parts = await Message.get_with_parts(sessionID, messageID)
+    msg_with_parts = await Message.get_with_parts_lazy(sessionID, messageID)
     if msg_with_parts:
-        msg = msg_with_parts.info
-        cwd = os.getcwd()
-        
-        # Create appropriate message info based on role
-        if msg.role == "user":
-            info = UserMessageInfo(
-                id=msg.id,
-                sessionID=msg.sessionID,
-                role="user",
-                time=msg.time,
-                agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                model={
-                    "providerID": getattr(msg, 'providerID', None) or "anthropic",
-                    "modelID": getattr(msg, 'modelID', None) or "claude-sonnet-4-5-20250929",
-                },
-            )
-        else:
-            # Convert tokens to dict if it's a TokenUsage object
-            tokens_raw = getattr(msg, 'tokens', None)
-            if tokens_raw is not None and hasattr(tokens_raw, 'model_dump'):
-                tokens_dict = tokens_raw.model_dump()
-            elif isinstance(tokens_raw, dict):
-                tokens_dict = tokens_raw
-            else:
-                tokens_dict = {
-                    "input": 0,
-                    "output": 0,
-                    "reasoning": 0,
-                    "cache": {"read": 0, "write": 0}
-                }
-            
-            # Convert path to dict if it's a MessagePath object
-            path_raw = getattr(msg, 'path', None)
-            if path_raw is not None and hasattr(path_raw, 'model_dump'):
-                path_dict = path_raw.model_dump()
-            elif isinstance(path_raw, dict):
-                path_dict = path_raw
-            else:
-                path_dict = {"cwd": cwd, "root": cwd}
-            
-            info = AssistantMessageInfo(
-                id=msg.id,
-                sessionID=msg.sessionID,
-                role="assistant",
-                time=msg.time,
-                parentID=getattr(msg, 'parentID', None),
-                modelID=getattr(msg, 'modelID', None) or "claude-sonnet-4-5-20250929",
-                providerID=getattr(msg, 'providerID', None) or "anthropic",
-                mode=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                path=path_dict,
-                cost=getattr(msg, 'cost', 0.0) or 0.0,
-                tokens=tokens_dict,
-            )
-        
-        parts = []
-        for i, part in enumerate(msg_with_parts.parts):
-            part_info = MessagePartInfo(
-                id=part.id if hasattr(part, 'id') else f"{msg.id}_part_{i}",
-                messageID=msg.id,
-                sessionID=sessionID,
-                type=part.type,
-                text=getattr(part, 'text', None) if part.type in ("text", "reasoning") else None,
-                synthetic=getattr(part, 'synthetic', None),
-                tool=getattr(part, 'tool', None) if part.type == "tool" else None,
-                state=getattr(part, 'state', None) if part.type == "tool" else None,
-                callID=getattr(part, 'callID', None) if part.type == "tool" else None,
-                metadata=getattr(part, 'metadata', None),
-                url=getattr(part, 'url', None) if part.type == "file" else None,
-                mime=getattr(part, 'mime', None) if part.type == "file" else None,
-                filename=getattr(part, 'filename', None) if part.type == "file" else None,
-            )
-            parts.append(part_info)
-        return MessageWithParts(info=info, parts=parts)
+        return await _message_with_parts_to_response(
+            msg_with_parts,
+            session_id=sessionID,
+            cwd=os.getcwd(),
+        )
     
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { applyMessagePartUpdate, useSessionMessages } from './useSessions';
+import { applyMessagePartUpdate, useSessionMessages, useSessions } from './useSessions';
+import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Message } from '@/types';
 
@@ -430,5 +431,174 @@ describe('updateMessagePart scheduling', () => {
     expect(msg?.parts).toHaveLength(2);
     expect((msg?.parts as any[])[1].text).toBe('保留这段已输出文本');
     expect((msg?.parts as any[])[0].state.status).toBe('completed');
+  });
+
+  it('fetches the first message page and prepends older messages', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-new',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { created: 200 },
+            },
+            parts: [],
+          }],
+          hasMore: true,
+          nextBefore: 'msg-new',
+        },
+      } as any)
+      .mockResolvedValueOnce({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-old',
+              sessionID: 'sess-1',
+              role: 'user',
+              time: { created: 100 },
+              model: { providerID: 'openai', modelID: 'gpt-4o' },
+            },
+            parts: [{ id: 'part-old', type: 'text', text: 'old' }],
+          }],
+          hasMore: false,
+          nextBefore: null,
+        },
+      } as any);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-new']);
+    expect(result.current.hasMore).toBe(true);
+    expect(client.get).toHaveBeenCalledWith('/api/session/sess-1/message', {
+      params: { page: true, limit: 50, include_archived: true },
+    });
+
+    await act(async () => {
+      await result.current.loadOlder();
+    });
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-old', 'msg-new']);
+    expect(result.current.hasMore).toBe(false);
+    expect(client.get).toHaveBeenLastCalledWith('/api/session/sess-1/message', {
+      params: { page: true, limit: 50, before: 'msg-new', include_archived: true },
+    });
+  });
+
+});
+
+describe('useSessions list loading', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('uses the lightweight session manager list endpoint', async () => {
+    vi.mocked(sessionApi.list).mockResolvedValueOnce([{
+      id: 'session-1',
+      title: 'Session',
+      time: { created: 1, updated: 2 },
+      category: 'user',
+    }] as any);
+
+    const { result } = renderHook(() => useSessions('triage'));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith({
+      view: 'list',
+      manager: true,
+      roots: true,
+      limit: 100,
+      offset: 0,
+      search: 'triage',
+    });
+    expect(result.current.sessions).toHaveLength(1);
+  });
+
+  it('keeps an optimistically added session when an older list request returns without it', async () => {
+    let resolveList: (value: any[]) => void = () => {};
+    vi.mocked(sessionApi.list).mockReturnValueOnce(new Promise((resolve) => {
+      resolveList = resolve;
+    }) as any);
+
+    const { result } = renderHook(() => useSessions());
+
+    act(() => {
+      result.current.addSession({
+        id: 'session-new',
+        title: 'New Session',
+        time: { created: 2, updated: 2 },
+        category: 'user',
+      } as any);
+    });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-new']);
+
+    await act(async () => {
+      resolveList([{
+        id: 'session-old',
+        title: 'Old Session',
+        time: { created: 1, updated: 1 },
+        category: 'user',
+      }]);
+    });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-new', 'session-old']);
+  });
+
+  it('preserves the current list when a background refetch fails', async () => {
+    vi.mocked(sessionApi.list)
+      .mockResolvedValueOnce([{
+        id: 'session-1',
+        title: 'Session',
+        time: { created: 1, updated: 2 },
+        category: 'user',
+      }] as any)
+      .mockRejectedValueOnce(new Error('network down'));
+
+    const { result } = renderHook(() => useSessions());
+    await act(async () => {});
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(result.current.error).toBe('network down');
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+  });
+
+  it('keeps the page mounted while refetching after search changes', async () => {
+    let resolveSearch: (value: any[]) => void = () => {};
+    vi.mocked(sessionApi.list)
+      .mockResolvedValueOnce([{
+        id: 'session-1',
+        title: 'Session',
+        time: { created: 1, updated: 2 },
+        category: 'user',
+      }] as any)
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveSearch = resolve;
+      }) as any);
+
+    const { result, rerender } = renderHook(
+      ({ search }) => useSessions(search),
+      { initialProps: { search: '' } },
+    );
+    await act(async () => {});
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    rerender({ search: 'triage' });
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
+
+    await act(async () => {
+      resolveSearch([]);
+    });
   });
 });

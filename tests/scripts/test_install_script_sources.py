@@ -238,6 +238,20 @@ def test_windows_bootstrap_installers_only_create_missing_parent_directories() -
         assert "Test-Path -LiteralPath $installParent" in script
 
 
+def test_windows_bootstrap_installers_remove_existing_install_directory_before_copy() -> None:
+    for path in (
+        REPO_ROOT / "install.ps1",
+        REPO_ROOT / "install_zh.ps1",
+    ):
+        script = path.read_text(encoding="utf-8-sig")
+        assert "function Remove-ExistingInstallDirectory" in script
+        assert "Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction Stop" in script
+        assert "Remove-ExistingInstallDirectory -TargetDir $InstallDir" in script
+        assert script.index("Remove-ExistingInstallDirectory -TargetDir $InstallDir") < script.index(
+            "Copy-Item -Path $projectRoot -Destination $InstallDir -Recurse -Force"
+        )
+
+
 def test_main_bash_installer_falls_back_to_nvm_when_brew_is_missing_on_macos() -> None:
     script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
     script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)

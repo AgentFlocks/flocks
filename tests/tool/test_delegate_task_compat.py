@@ -37,7 +37,7 @@ class TestDelegateTaskTolerance:
             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
             patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()) as skill_get,
             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
-            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
+            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)) as create_session,
             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
                 action="stop",
@@ -57,6 +57,10 @@ class TestDelegateTaskTolerance:
         assert result.title == "Investigate threatbook.cn assets"
         assert result.metadata["sessionId"] == "ses-child"
         skill_get.assert_not_awaited()
+        permissions = create_session.await_args.kwargs["permission"]
+        denied_permissions = {rule.permission for rule in permissions if rule.action == "deny"}
+        assert "delegate_task" not in denied_permissions
+        assert "task" not in denied_permissions
 
     @pytest.mark.asyncio
     async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):

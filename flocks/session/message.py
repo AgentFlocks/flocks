@@ -439,6 +439,7 @@ class Message:
     _parts_storage_format: Dict[str, Literal["legacy", "per_message"]] = {}
     _parts_persisted_mids: Dict[str, set[str]] = {}
     _parts_flush_tasks: Dict[str, asyncio.Task] = {}
+    _parts_fully_loaded: set[str] = set()
     _lru: OrderedDict[str, bool] = OrderedDict()  # LRU tracker: move_to_end() is O(1)
     
     # Maximum number of sessions to keep in cache before evicting oldest
@@ -565,21 +566,49 @@ class Message:
     
     @classmethod
     async def _ensure_cache(cls, session_id: str) -> None:
-        """Ensure messages for a session are loaded into cache from storage.
+        """Ensure messages and all parts for a session are loaded into cache.
 
         Uses a per-session lock so operations on different sessions are
         fully concurrent.
         """
+        await cls._ensure_message_cache(session_id)
+        if session_id in cls._parts_fully_loaded:
+            cls._lru.move_to_end(session_id)
+            return
+
+        lock = _session_locks.get(session_id)
+        async with lock:
+            if session_id in cls._parts_fully_loaded:
+                cls._lru.move_to_end(session_id)
+                return
+
+            message_times = {
+                message.id: message.time
+                for message in cls._messages_cache.get(session_id, [])
+            }
+            await cls._load_all_parts_locked(session_id, message_times=message_times)
+            cls._parts_fully_loaded.add(session_id)
+            cls._lru.move_to_end(session_id)
+            log.debug("message.cache.loaded", {"session_id": session_id, "parts": "all"})
+
+    @classmethod
+    async def _ensure_message_cache(cls, session_id: str) -> None:
+        """Ensure message metadata is cached without loading every part.
+
+        The session page only needs recent messages initially. Loading all
+        parts here would deserialize large tool outputs even when only the
+        newest page is requested.
+        """
         if session_id in cls._lru:
             cls._lru.move_to_end(session_id)
             return
-        
+
         lock = _session_locks.get(session_id)
         async with lock:
             if session_id in cls._lru:
                 cls._lru.move_to_end(session_id)
                 return
-            
+
             while len(cls._lru) >= cls._MAX_CACHED_SESSIONS:
                 evict_id, _ = cls._lru.popitem(last=False)
                 cls._cancel_parts_flush_task(evict_id)
@@ -590,13 +619,13 @@ class Message:
                 cls._parts_serialized_cache.pop(evict_id, None)
                 cls._parts_storage_format.pop(evict_id, None)
                 cls._parts_persisted_mids.pop(evict_id, None)
+                cls._parts_fully_loaded.discard(evict_id)
                 _session_locks.discard(evict_id)
                 log.debug("message.cache.evicted", {"session_id": evict_id})
-            
+
             storage_key = f"{cls._MESSAGE_PREFIX}:{session_id}"
             stored_data = await Storage.get(storage_key)
-            
-            message_times: Dict[str, Dict[str, int]] = {}
+
             if isinstance(stored_data, list):
                 messages = []
                 for msg_data in stored_data:
@@ -624,61 +653,113 @@ class Message:
                         continue
 
                     messages.append(message)
-                    message_times[message.id] = message.time
                 cls._messages_cache[session_id] = messages
             else:
                 cls._messages_cache[session_id] = []
-            
-            item_entries = await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
-            stored_parts: Dict[str, List[Dict[str, Any]]] = {}
-            persisted_mids: set[str] = set()
 
-            for key, value in item_entries:
-                if not cls._is_parts_item_key(key, session_id):
-                    continue
-                if not isinstance(value, list):
-                    continue
-                msg_id = key.rsplit(":", 1)[1]
-                stored_parts[msg_id] = value
-                persisted_mids.add(msg_id)
-
-            if stored_parts:
-                cls._parts_storage_format[session_id] = "per_message"
-            else:
-                legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
-                if isinstance(legacy_parts, dict):
-                    stored_parts = legacy_parts
-                    persisted_mids = set(legacy_parts.keys())
-                    cls._parts_storage_format[session_id] = "legacy"
-                else:
-                    cls._parts_storage_format[session_id] = "per_message"
-            
-            if stored_parts:
-                cls._parts_cache[session_id] = {}
-                cls._parts_revision_cache[session_id] = {}
-                for msg_id, parts_data in stored_parts.items():
-                    if not isinstance(parts_data, list):
-                        continue
-                    cls._parts_cache[session_id][msg_id] = cls._deserialize_parts_list(
-                        session_id,
-                        msg_id,
-                        parts_data,
-                        message_time=message_times.get(msg_id),
-                    )
-                    cls._parts_revision_cache[session_id][msg_id] = 0
-                cls._parts_serialized_cache[session_id] = {
-                    msg_id: list(parts_data)
-                    for msg_id, parts_data in stored_parts.items()
-                }
-            else:
-                cls._parts_cache[session_id] = {}
-                cls._parts_revision_cache[session_id] = {}
-                cls._parts_serialized_cache[session_id] = {}
-            cls._parts_persisted_mids[session_id] = persisted_mids
-            
+            cls._parts_cache.setdefault(session_id, {})
+            cls._parts_revision_cache.setdefault(session_id, {})
+            cls._parts_serialized_cache.setdefault(session_id, {})
+            cls._parts_storage_format.setdefault(session_id, "per_message")
+            cls._parts_persisted_mids.setdefault(session_id, set())
+            cls._parts_fully_loaded.discard(session_id)
             cls._rebuild_id_index(session_id)
             cls._lru[session_id] = True
-            log.debug("message.cache.loaded", {"session_id": session_id})
+            log.debug("message.cache.loaded", {"session_id": session_id, "parts": "lazy"})
+
+    @classmethod
+    async def _load_all_parts_locked(
+        cls,
+        session_id: str,
+        *,
+        message_times: Dict[str, Dict[str, int]],
+    ) -> None:
+        """Load all stored parts for a session. Caller must hold session lock."""
+        item_entries = await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
+        stored_parts: Dict[str, List[Dict[str, Any]]] = {}
+        persisted_mids: set[str] = set()
+
+        for key, value in item_entries:
+            if not cls._is_parts_item_key(key, session_id):
+                continue
+            if not isinstance(value, list):
+                continue
+            msg_id = key.rsplit(":", 1)[1]
+            stored_parts[msg_id] = value
+            persisted_mids.add(msg_id)
+
+        if stored_parts:
+            cls._parts_storage_format[session_id] = "per_message"
+        else:
+            legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+            if isinstance(legacy_parts, dict):
+                stored_parts = legacy_parts
+                persisted_mids = set(legacy_parts.keys())
+                cls._parts_storage_format[session_id] = "legacy"
+            else:
+                cls._parts_storage_format[session_id] = "per_message"
+
+        cls._parts_cache[session_id] = {}
+        cls._parts_revision_cache[session_id] = {}
+        cls._parts_serialized_cache[session_id] = {}
+        for msg_id, parts_data in stored_parts.items():
+            if not isinstance(parts_data, list):
+                continue
+            cls._parts_cache[session_id][msg_id] = cls._deserialize_parts_list(
+                session_id,
+                msg_id,
+                parts_data,
+                message_time=message_times.get(msg_id),
+            )
+            cls._parts_revision_cache[session_id][msg_id] = 0
+            cls._parts_serialized_cache[session_id][msg_id] = list(parts_data)
+        cls._parts_persisted_mids[session_id] = persisted_mids
+
+    @classmethod
+    async def _load_parts_for_message(
+        cls,
+        session_id: str,
+        message_id: str,
+        *,
+        legacy_parts_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[PartType]:
+        """Load one message's parts without hydrating every part in the session."""
+        await cls._ensure_message_cache(session_id)
+        cached = cls._parts_cache.setdefault(session_id, {}).get(message_id)
+        if cached is not None:
+            return list(cached)
+
+        message_times = {
+            message.id: message.time
+            for message in cls._messages_cache.get(session_id, [])
+        }
+        parts_data = await Storage.get(cls._parts_item_key(session_id, message_id))
+        if not isinstance(parts_data, list):
+            legacy_parts = legacy_parts_cache
+            if legacy_parts is None:
+                stored_legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                legacy_parts = stored_legacy_parts if isinstance(stored_legacy_parts, dict) else None
+            if isinstance(legacy_parts, dict):
+                cls._parts_storage_format[session_id] = "legacy"
+                parts_data = legacy_parts.get(message_id, [])
+                cls._parts_persisted_mids.setdefault(session_id, set()).update(legacy_parts.keys())
+            else:
+                cls._parts_storage_format.setdefault(session_id, "per_message")
+                parts_data = []
+        else:
+            cls._parts_storage_format[session_id] = "per_message"
+            cls._parts_persisted_mids.setdefault(session_id, set()).add(message_id)
+
+        parts = cls._deserialize_parts_list(
+            session_id,
+            message_id,
+            parts_data,
+            message_time=message_times.get(message_id),
+        )
+        cls._parts_cache.setdefault(session_id, {})[message_id] = parts
+        cls._parts_revision_cache.setdefault(session_id, {})[message_id] = 0
+        cls._parts_serialized_cache.setdefault(session_id, {})[message_id] = list(parts_data)
+        return list(parts)
     
     @classmethod
     def _rebuild_id_index(cls, session_id: str) -> None:
@@ -1295,7 +1376,7 @@ class Message:
         Returns:
             List of messages
         """
-        await cls._ensure_cache(session_id)
+        await cls._ensure_message_cache(session_id)
         messages = cls._messages_cache.get(session_id, [])
         if not include_archived:
             messages = [m for m in messages if not getattr(m, 'compacted', None)]
@@ -1304,7 +1385,7 @@ class Message:
     @classmethod
     async def get(cls, session_id: str, message_id: str) -> Optional[MessageInfo]:
         """Get a specific message by ID (O(1) via index)."""
-        await cls._ensure_cache(session_id)
+        await cls._ensure_message_cache(session_id)
         idx = cls._msg_id_index.get(session_id, {}).get(message_id)
         if idx is not None:
             messages = cls._messages_cache.get(session_id, [])
@@ -1594,6 +1675,72 @@ class Message:
             parts = cls._parts_cache.get(session_id, {}).get(message.id, [])
             result.append(MessageWithParts(info=message, parts=parts))
         return result
+
+    @classmethod
+    async def list_recent_with_parts(
+        cls,
+        session_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[str] = None,
+        include_archived: bool = True,
+    ) -> tuple[List[MessageWithParts], bool, Optional[str]]:
+        """List one recent page of messages and lazily load only their parts.
+
+        ``before`` is a message id cursor. The returned page preserves
+        chronological order and ``next_before`` is the first message id in the
+        page, suitable for loading older messages.
+        """
+        safe_limit = max(int(limit), 1)
+        messages = await cls.list(session_id, include_archived=include_archived)
+        if before:
+            before_index = next(
+                (idx for idx, message in enumerate(messages) if message.id == before),
+                len(messages),
+            )
+            candidate_messages = messages[:before_index]
+        else:
+            candidate_messages = messages
+
+        has_more = len(candidate_messages) > safe_limit
+        page_messages = candidate_messages[-safe_limit:]
+        legacy_parts_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None
+        missing_message_ids = [
+            message.id
+            for message in page_messages
+            if message.id not in cls._parts_cache.setdefault(session_id, {})
+        ]
+        if missing_message_ids:
+            has_per_message_parts = False
+            for message_id in missing_message_ids:
+                parts_data = await Storage.get(cls._parts_item_key(session_id, message_id))
+                if isinstance(parts_data, list):
+                    has_per_message_parts = True
+                    break
+            if not has_per_message_parts:
+                stored_legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                if isinstance(stored_legacy_parts, dict):
+                    legacy_parts_cache = stored_legacy_parts
+
+        result = []
+        for message in page_messages:
+            parts = await cls._load_parts_for_message(
+                session_id,
+                message.id,
+                legacy_parts_cache=legacy_parts_cache,
+            )
+            result.append(MessageWithParts(info=message, parts=parts))
+        next_before = page_messages[0].id if has_more and page_messages else None
+        return result, has_more, next_before
+
+    @classmethod
+    async def get_with_parts_lazy(cls, session_id: str, message_id: str) -> Optional[MessageWithParts]:
+        """Get one message with parts without hydrating all session parts."""
+        message = await cls.get(session_id, message_id)
+        if not message:
+            return None
+        parts = await cls._load_parts_for_message(session_id, message_id)
+        return MessageWithParts(info=message, parts=parts)
     
     @classmethod
     async def delete(cls, session_id: str, message_id: str) -> bool:
@@ -1685,6 +1832,7 @@ class Message:
             cls._parts_serialized_cache[session_id] = {}
             cls._parts_persisted_mids[session_id] = set()
             cls._parts_storage_format[session_id] = "per_message"
+            cls._parts_fully_loaded.add(session_id)
             cls._cancel_parts_flush_task(session_id)
             
             # Persist changes
@@ -1717,6 +1865,7 @@ class Message:
             cls._parts_serialized_cache.pop(session_id, None)
             cls._parts_storage_format.pop(session_id, None)
             cls._parts_persisted_mids.pop(session_id, None)
+            cls._parts_fully_loaded.discard(session_id)
             _session_locks.discard(session_id)
         else:
             for sid in list(cls._parts_flush_tasks):
@@ -1729,6 +1878,7 @@ class Message:
             cls._parts_serialized_cache.clear()
             cls._parts_storage_format.clear()
             cls._parts_persisted_mids.clear()
+            cls._parts_fully_loaded.clear()
             _session_locks.clear()
         log.debug("message.cache.invalidated", {"session_id": session_id})
     
@@ -2270,5 +2420,3 @@ class MessageSync:
     def remove_part(cls, session_id: str, message_id: str, part_id: str) -> bool:
         """Sync version"""
         return cls._run_async(Message.remove_part(session_id, message_id, part_id))
-
-

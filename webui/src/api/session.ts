@@ -11,6 +11,9 @@ export interface SessionMessagePartPayload {
   state?: Record<string, unknown>;
   callID?: string;
   metadata?: Record<string, unknown>;
+  url?: string | null;
+  mime?: string;
+  filename?: string;
 }
 
 export interface QueuedPrompt {
@@ -69,6 +72,8 @@ export interface SessionResponse {
 }
 
 export interface SessionListParams {
+  view?: 'list';
+  manager?: boolean;
   limit?: number;
   offset?: number;
   directory?: string;
@@ -76,6 +81,20 @@ export interface SessionListParams {
   start?: number;
   search?: string;
   category?: string;
+}
+
+export interface SessionMessagePage {
+  sessionID: string;
+  items: Array<{ info: Record<string, unknown>; parts: SessionMessagePartPayload[] }>;
+  hasMore: boolean;
+  nextBefore?: string | null;
+}
+
+export interface SessionMessageListParams {
+  limit?: number;
+  before?: string | null;
+  page?: boolean;
+  include_archived?: boolean;
 }
 
 export const sessionApi = {
@@ -156,6 +175,13 @@ export const sessionApi = {
    */
   getMessages: async (sessionId: string) => {
     const response = await client.get(`/api/session/${sessionId}/message`);
+    return response.data;
+  },
+
+  getMessagesPage: async (sessionId: string, params?: SessionMessageListParams): Promise<SessionMessagePage> => {
+    const response = await client.get(`/api/session/${sessionId}/message`, {
+      params: { page: true, limit: 50, include_archived: true, ...params },
+    });
     return response.data;
   },
 
