@@ -1599,6 +1599,67 @@ async def test_perform_update_schedules_handoff_after_handover(
 
 
 @pytest.mark.asyncio
+async def test_perform_update_defers_post_apply_tasks_without_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_root.mkdir()
+    install_root = tmp_path / "install-root"
+    venv_python = install_root / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+    popen_calls: list[tuple[list[str], Path | None, bool]] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+            enabled=True,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, cwd=None, close_fds=False: popen_calls.append((list(argv), cwd, close_fds)) or SimpleNamespace(pid=4321))
+
+    progresses = [
+        step
+        async for step in updater.perform_update(
+            "2026.4.1",
+            restart=False,
+            defer_post_apply=True,
+        )
+    ]
+
+    assert progresses[-1].stage == "done"
+    assert len(popen_calls) == 1
+    handoff_argv, cwd, close_fds = popen_calls[0]
+    assert cwd == install_root
+    assert close_fds is True
+    assert handoff_argv[:3] == [str(venv_python), "-m", "flocks.updater.restart_handoff"]
+    assert "--no-restart" in handoff_argv
+    assert "--" not in handoff_argv
+
+
+@pytest.mark.asyncio
 async def test_perform_update_errors_when_handover_fails_before_frontend_build(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

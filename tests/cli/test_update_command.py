@@ -1,7 +1,5 @@
 from io import StringIO
 
-import pytest
-import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -81,15 +79,21 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch) -
         *,
         zipball_url: str | None = None,
         tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
         restart: bool = True,
+        defer_post_apply: bool = False,
         locale: str | None = None,
         region: str | None = None,
     ):
         captured["latest_tag"] = latest_tag
         captured["zipball_url"] = zipball_url
         captured["tarball_url"] = tarball_url
+        captured["bundle_sha256"] = bundle_sha256
+        captured["bundle_format"] = bundle_format
         captured["perform_region"] = region
         captured["restart"] = restart
+        captured["defer_post_apply"] = defer_post_apply
         async for step in _fake_progress():
             yield step
 
@@ -117,13 +121,16 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch) -
     assert check_regions == ["cn"]
     assert confirm_prompts == ["\n是否使用中国镜像进行升级？", "\n是否立即升级？"]
     assert stop_calls == ["stop"]
-    assert build_calls == ["cn"]
+    assert build_calls == []
     assert captured == {
         "latest_tag": "2026.4.2",
         "zipball_url": "https://gitee.example.com/flocks.zip",
         "tarball_url": "https://gitee.example.com/flocks.tar.gz",
+        "bundle_sha256": None,
+        "bundle_format": None,
         "perform_region": "cn",
         "restart": False,
+        "defer_post_apply": True,
     }
     assert "已切换为中国镜像源" not in output.getvalue()
 
@@ -165,6 +172,7 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         bundle_sha256: str | None = None,
         bundle_format: str | None = None,
         restart: bool = True,
+        defer_post_apply: bool = False,
         locale: str | None = None,
         region: str | None = None,
     ):
@@ -175,6 +183,7 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         captured["bundle_format"] = bundle_format
         captured["perform_region"] = region
         captured["restart"] = restart
+        captured["defer_post_apply"] = defer_post_apply
         async for step in _fake_progress():
             yield step
 
@@ -203,11 +212,12 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         "check_region": "cn",
         "perform_region": "cn",
         "restart": False,
+        "defer_post_apply": True,
     }
     assert stop_calls == ["stop"]
-    assert build_calls == ["cn"]
+    assert build_calls == []
     assert "强制重新安装 v2026.4.2" in output.getvalue()
-    assert "升级完成" in output.getvalue()
+    assert "将在后台继续" in output.getvalue()
 
 
 def test_update_executes_flocks_stop_before_upgrade(monkeypatch) -> None:
@@ -238,11 +248,14 @@ def test_update_executes_flocks_stop_before_upgrade(monkeypatch) -> None:
         *,
         zipball_url: str | None = None,
         tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
         restart: bool = True,
+        defer_post_apply: bool = False,
         locale: str | None = None,
         region: str | None = None,
     ):
-        events.append("perform_update")
+        events.append(f"perform_update:{defer_post_apply}")
         async for step in _fake_progress():
             yield step
 
@@ -268,11 +281,11 @@ def test_update_executes_flocks_stop_before_upgrade(monkeypatch) -> None:
     asyncio.run(update_cmd._update(check=False, yes=False, force=False, region=None))
 
     assert confirm_prompts == ["\n是否使用中国镜像进行升级？", "\n是否立即升级？"]
-    assert events == ["stop", "perform_update", "build"]
+    assert events == ["stop", "perform_update:True"]
     assert "已执行 flocks stop" in output.getvalue()
 
 
-def test_update_reports_frontend_build_failure_after_common_upgrade(monkeypatch) -> None:
+def test_update_does_not_build_frontend_in_cli_process(monkeypatch) -> None:
     output = StringIO()
     monkeypatch.setattr(
         update_cmd,
@@ -296,7 +309,10 @@ def test_update_reports_frontend_build_failure_after_common_upgrade(monkeypatch)
         *,
         zipball_url: str | None = None,
         tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
         restart: bool = True,
+        defer_post_apply: bool = False,
         locale: str | None = None,
         region: str | None = None,
     ):
@@ -307,7 +323,7 @@ def test_update_reports_frontend_build_failure_after_common_upgrade(monkeypatch)
         return None
 
     async def fake_build_updated_frontend(*, locale: str | None = None, region: str | None = None) -> None:
-        raise RuntimeError("npm run build failed")
+        raise AssertionError("frontend build should be handled by restart_handoff")
 
     monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
     monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
@@ -317,8 +333,6 @@ def test_update_reports_frontend_build_failure_after_common_upgrade(monkeypatch)
 
     import asyncio
 
-    with pytest.raises(typer.Exit) as excinfo:
-        asyncio.run(update_cmd._update(check=False, yes=True, force=False, region=None))
+    asyncio.run(update_cmd._update(check=False, yes=True, force=False, region=None))
 
-    assert excinfo.value.exit_code == 1
-    assert "前端构建失败" in output.getvalue()
+    assert "将在后台继续" in output.getvalue()

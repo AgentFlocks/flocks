@@ -2712,6 +2712,7 @@ async def perform_update(
     bundle_format: str | None = None,
     console_session_token: str | None = None,
     restart: bool = True,
+    defer_post_apply: bool = False,
     locale: str | None = None,
     region: str | None = None,
     force_console_manifest: bool = False,
@@ -2997,7 +2998,7 @@ async def perform_update(
     # exits. This avoids mutating the active Python environment while the old
     # service is still running.
     # ------------------------------------------------------------------ #
-    if not restart:
+    if not restart and not defer_post_apply:
         task_error = await run_handoff_upgrade_tasks(
             install_root=install_root,
             uv_path=uv_path,
@@ -3021,6 +3022,66 @@ async def perform_update(
         yield UpdateProgress(
             stage="done",
             message=f"Upgraded to v{latest_tag}",
+            success=True,
+        )
+        return
+
+    if not restart:
+        helper_python = _venv_python_path(install_root)
+        if not helper_python.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            msg = f"Restart runtime is missing: {helper_python}"
+            yield UpdateProgress(stage="error", message=msg, success=False)
+            return
+
+        try:
+            handoff_argv = _build_restart_handoff_argv(
+                [],
+                install_root,
+                uv_path=uv_path,
+                sync_timeout=sync_timeout,
+                version=latest_tag,
+                current_version=current_version,
+                backup_path=backup_path,
+                uv_default_index=profile.uv_default_index,
+                npm_registry=profile.npm_registry,
+                pro_wheel_path=pro_wheel_path,
+                pro_bundle_manifest_path=pro_bundle_manifest_path,
+                bundle_sha256=bundle_sha256,
+                cleanup_dir=tmp_dir,
+                no_restart=True,
+                helper_python=helper_python,
+            )
+            log.info(
+                "updater.post_apply.handoff_spawn",
+                {
+                    "argv": handoff_argv,
+                    "restart": False,
+                },
+            )
+            subprocess.Popen(
+                handoff_argv,
+                cwd=install_root,
+                close_fds=True,
+            )
+        except Exception as exc:
+            log.error("updater.post_apply.handoff_spawn_failed", {"error": str(exc)})
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            yield UpdateProgress(
+                stage="error",
+                message=f"Failed to start post-upgrade handoff: {exc}",
+                success=False,
+            )
+            return
+
+        yield UpdateProgress(
+            stage="done",
+            message=(
+                "Applied update files. Dependency sync and frontend build "
+                "will continue in the background."
+            ),
             success=True,
         )
         return
@@ -3231,17 +3292,22 @@ def _build_restart_handoff_argv(
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
     cleanup_dir: Path | None = None,
+    no_restart: bool = False,
+    helper_python: Path | None = None,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
     from flocks.cli import service_manager
 
-    if not restart_argv:
+    if not restart_argv and not no_restart:
         raise ValueError("restart command is empty")
+    if not restart_argv and helper_python is None:
+        raise ValueError("helper python is required when restart command is empty")
 
     config = _current_service_config()
     paths = service_manager.ensure_runtime_dirs()
+    helper_executable = str(helper_python) if helper_python is not None else restart_argv[0]
     argv = [
-        restart_argv[0],
+        helper_executable,
         "-m",
         "flocks.updater.restart_handoff",
         "--parent-pid",
@@ -3281,7 +3347,10 @@ def _build_restart_handoff_argv(
         argv.extend(["--bundle-sha256", bundle_sha256])
     if cleanup_dir is not None:
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
-    argv.extend(["--", *restart_argv])
+    if no_restart:
+        argv.append("--no-restart")
+    if restart_argv:
+        argv.extend(["--", *restart_argv])
     return argv
 
 

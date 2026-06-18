@@ -134,6 +134,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pro-bundle-manifest-path")
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
+    parser.add_argument("--no-restart", action="store_true")
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.restart_argv and args.restart_argv[0] == "--":
@@ -167,11 +168,18 @@ def _rollback_failed_upgrade(args: argparse.Namespace, error: str) -> None:
     _record_handoff_log(f"upgrade_tasks_failed error={error}")
     backup_path = Path(args.backup_path) if args.backup_path else None
     try:
-        updater._rollback_failed_update(
-            backup_path,
-            Path(args.install_root),
-            args.current_version,
-        )
+        if updater._read_upgrade_state():
+            updater._rollback_failed_update(
+                backup_path,
+                Path(args.install_root),
+                args.current_version,
+            )
+        elif backup_path is not None:
+            updater._restore_backup_if_possible(
+                backup_path,
+                Path(args.install_root),
+                args.current_version,
+            )
     except Exception as exc:
         _record_handoff_log(f"rollback_failed error={exc}")
 
@@ -185,7 +193,7 @@ def _cleanup_dir(path_value: str | None) -> None:
 def run(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     restart_argv = list(args.restart_argv)
-    if not restart_argv:
+    if not restart_argv and not args.no_restart:
         _record_handoff_log("missing_restart_argv")
         return 2
 
@@ -214,6 +222,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         _rollback_failed_upgrade(args, task_error)
         _cleanup_dir(args.cleanup_dir)
         return 1
+
+    if args.no_restart:
+        _record_handoff_log("upgrade_tasks_completed no_restart=true")
+        _cleanup_dir(args.cleanup_dir)
+        return 0
 
     try:
         process = subprocess.Popen(

@@ -35,7 +35,7 @@ def update_command(
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
-    from flocks.updater import build_updated_frontend, check_update, perform_update, detect_deploy_mode
+    from flocks.updater import check_update, perform_update, detect_deploy_mode
 
     if not yes and not check and region is None:
         use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)
@@ -134,6 +134,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         bundle_sha256=info.bundle_sha256,
         bundle_format=info.bundle_format,
         restart=False,
+        defer_post_apply=True,
         region=region,
     ):
         if progress.stage == "error":
@@ -154,22 +155,12 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             active_stage = progress.stage
 
     step += 1
-    console.print(f"[cyan][{step}/{total_steps}] 构建前端...[/cyan]  ", end="")
-    try:
-        await build_updated_frontend(region=region)
-    except Exception as error:
-        console.print("[red]✗[/red]")
-        console.print(f"\n[red]✗ 前端构建失败：{error}[/red]")
-        raise typer.Exit(1)
-    console.print("[green]✓[/green]")
-
-    step += 1
     console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
     console.print("[green]✓[/green]")
 
-    append_upgrade_text_log(f"OK cli_update_completed version={version_to_apply}")
-    console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
-    console.print("[dim]如需恢复服务，请执行 [bold]flocks start[/bold][/dim]")
+    append_upgrade_text_log(f"OK cli_update_handoff_started version={version_to_apply}")
+    console.print(f"\n[green]✓ 已应用 v{version_to_apply}，依赖同步和前端构建将在后台继续[/green]")
+    console.print("[dim]后台完成后如需恢复服务，请执行 [bold]flocks start[/bold]；进度可查看 ~/.flocks/logs/update.log[/dim]")
 
 
 def _print_version_table(info) -> None:

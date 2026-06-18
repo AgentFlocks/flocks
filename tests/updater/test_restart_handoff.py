@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from flocks.updater import restart_handoff
 
 
-def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
-    return [
+def _handoff_args(tmp_path: Path, restart_argv: list[str], *, no_restart: bool = False) -> list[str]:
+    args = [
         "--parent-pid",
         "1234",
         "--backend-host",
@@ -28,9 +28,12 @@ def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
         "2026.4.1",
         "--current-version",
         "2026.3.31",
-        "--",
-        *restart_argv,
     ]
+    if no_restart:
+        args.append("--no-restart")
+    if restart_argv:
+        args.extend(["--", *restart_argv])
+    return args
 
 
 def test_run_waits_for_parent_and_backend_port_before_spawning(
@@ -75,6 +78,39 @@ def test_run_waits_for_parent_and_backend_port_before_spawning(
         f"record:4321:{restart_argv}:8000",
         "log:restart_spawned pid=4321",
     ]
+
+
+def test_run_no_restart_runs_tasks_without_spawning(monkeypatch, tmp_path: Path) -> None:
+    events: list[str] = []
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_ensure_backend_port_free",
+        lambda backend_port, backend_pid_file: events.append(f"free-port:{backend_port}:{backend_pid_file.name}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: events.append("spawn"),
+    )
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
+
+    code = restart_handoff.run(_handoff_args(tmp_path, [], no_restart=True))
+
+    assert code == 0
+    assert events[1:] == [
+        "wait-parent:1234",
+        "free-port:8000:backend.pid",
+        "tasks",
+        "log:upgrade_tasks_completed no_restart=true",
+    ]
+    assert "spawn" not in events
 
 
 def test_run_does_not_spawn_when_parent_exit_times_out(monkeypatch, tmp_path: Path) -> None:
