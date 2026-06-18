@@ -37,12 +37,6 @@ async def _subagent_session_permissions(agent_name: str) -> list:
     from flocks.agent.registry import Agent
     from flocks.session.session import PermissionRule as SessionPermissionRule
 
-    def deny_nested_delegation() -> list:
-        return [
-            SessionPermissionRule(permission="delegate_task", action="deny", pattern="*"),
-            SessionPermissionRule(permission="task", action="deny", pattern="*"),
-        ]
-
     try:
         agent = await Agent.get(agent_name)
     except Exception as exc:
@@ -67,7 +61,6 @@ async def _subagent_session_permissions(agent_name: str) -> list:
                     pattern=getattr(rule, "pattern", None) or "*",
                 )
             )
-        rules.extend(deny_nested_delegation())
         return rules
 
     if agent_name == "prometheus":
@@ -78,7 +71,6 @@ async def _subagent_session_permissions(agent_name: str) -> list:
         ])
     elif not rules:
         rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
-    rules.extend(deny_nested_delegation())
     return rules
 
 
