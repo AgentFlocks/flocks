@@ -15,6 +15,9 @@ const {
   refetchSessions,
   useSessions,
   useAgents,
+  useProviders,
+  defaultModelAPI,
+  modelV2API,
   toast,
 } = vi.hoisted(() => ({
   client: {
@@ -33,6 +36,13 @@ const {
   refetchSessions: vi.fn(),
   useSessions: vi.fn(),
   useAgents: vi.fn(),
+  useProviders: vi.fn(),
+  defaultModelAPI: {
+    getResolved: vi.fn(),
+  },
+  modelV2API: {
+    listDefinitions: vi.fn(),
+  },
   toast: {
     error: vi.fn(),
     info: vi.fn(),
@@ -58,6 +68,15 @@ vi.mock('@/hooks/useAgents', () => ({
   useAgents,
 }));
 
+vi.mock('@/hooks/useProviders', () => ({
+  useProviders,
+}));
+
+vi.mock('@/api/provider', () => ({
+  defaultModelAPI,
+  modelV2API,
+}));
+
 vi.mock('@/components/common/Toast', () => ({
   useToast: () => toast,
 }));
@@ -68,13 +87,61 @@ vi.mock('@/components/common/LoadingSpinner', () => ({
 
 vi.mock('@/components/common/SessionChat', () => ({
   __esModule: true,
-  default: ({ sessionId }: { sessionId?: string | null }) => (
-    <div data-testid="session-chat">{sessionId ?? 'no-session'}</div>
+  default: ({
+    sessionId,
+    mentionAgents,
+    toolbarSlot,
+    centerToolbarSlot,
+    onCreateAndSend,
+    agentName,
+    model,
+    display,
+    hideInput,
+  }: {
+    sessionId?: string | null;
+    agentName?: string;
+    mentionAgents?: Array<{ name: string }>;
+    toolbarSlot?: React.ReactNode;
+    centerToolbarSlot?: React.ReactNode;
+    model?: { providerID: string; modelID: string } | null;
+    hideInput?: boolean;
+    display?: {
+      compact?: boolean;
+      showActions?: boolean;
+      showTimestamp?: boolean;
+      collapseIntermediateSteps?: boolean;
+      processGroupsDefaultOpen?: boolean;
+    };
+    onCreateAndSend?: (text: string, imageParts?: unknown[], agentOverride?: string) => Promise<unknown> | unknown;
+  }) => (
+    <div
+      data-testid="session-chat"
+      data-agent-name={agentName ?? ''}
+      data-mention-agents={(mentionAgents ?? []).map((a) => a.name).join(',')}
+      data-model={model ? `${model.providerID}/${model.modelID}` : ''}
+      data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
+      data-process-groups-default-open={String(Boolean(display?.processGroupsDefaultOpen))}
+      data-hide-input={String(Boolean(hideInput))}
+    >
+      {sessionId ?? 'no-session'}
+      {toolbarSlot}
+      {centerToolbarSlot}
+      <button type="button" onClick={() => void onCreateAndSend?.('hello from empty session', [], agentName)}>
+        mock-create-and-send
+      </button>
+    </div>
   ),
 }));
 
 vi.mock('@/utils/agentDisplay', () => ({
   getAgentDisplayDescription: () => 'agent-description',
+  getAgentDisplayName: (agent: { name: string }) => agent.name.charAt(0).toUpperCase() + agent.name.slice(1),
+  isAgentUsableInChat: (agent: { mode?: string; hidden?: boolean; delegatable?: boolean; tags?: string[] }) => (
+    Boolean(agent)
+    && !agent.hidden
+    && !(agent.tags ?? []).includes('system')
+    && (agent.mode === 'primary' || agent.delegatable !== false)
+  ),
 }));
 
 vi.mock('@/utils/time', () => ({
@@ -109,6 +176,34 @@ const secondSession = {
   title: 'Second Session',
 };
 
+const modelProviders = [
+  { id: 'openai', name: 'OpenAI', configured: true },
+  { id: 'minimax', name: 'MiniMax', configured: true },
+];
+
+const modelDefinitions = [
+  {
+    provider_id: 'openai',
+    id: 'gpt-4o',
+    name: 'GPT-4o',
+    model_type: 'llm',
+    source: 'predefined',
+    capabilities: {},
+    pricing: null,
+    limits: {},
+  },
+  {
+    provider_id: 'minimax',
+    id: 'minimax-m3',
+    name: 'MiniMax M3',
+    model_type: 'llm',
+    source: 'predefined',
+    capabilities: {},
+    pricing: null,
+    limits: {},
+  },
+];
+
 function renderSessionPage(
   initialEntry: string | { pathname: string; state?: unknown } = '/sessions',
 ) {
@@ -123,6 +218,7 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
 
     useSessions.mockReturnValue({
       sessions: [session],
@@ -141,6 +237,15 @@ describe('SessionPage session actions menu', () => {
       error: null,
       refetch: vi.fn(),
     });
+    useProviders.mockReturnValue({
+      providers: [],
+      connectedIds: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
     client.post.mockResolvedValue({ data: secondSession });
@@ -283,12 +388,40 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });
 
-  it('attaches the previously selected session on initial load', () => {
+  it('does not auto-attach the previously selected session on first app visit', () => {
     localStorage.setItem('flocks:last-selected-session', 'session-1');
 
     renderSessionPage();
 
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('attaches the previously selected session after the session page has been visited', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
+
+    renderSessionPage();
+
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+  });
+
+  it('does not auto-attach the previously selected session when entering from home', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
+
+    renderSessionPage({
+      pathname: '/sessions',
+      state: { skipLastSelectedSessionRestore: true },
+    });
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('defaults session process groups open on the session management page', () => {
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-collapse-intermediate', 'true');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-process-groups-default-open', 'true');
   });
 
   it('syncs selected session when query param changes after mount', async () => {
@@ -328,5 +461,324 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
     });
+  });
+
+  it('keeps a selected session that is valid but missing from the current list', async () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    sessionApi.get.mockResolvedValue({
+      ...session,
+      id: 'session-missing-from-list',
+      title: 'Fetched Session',
+      canWrite: false,
+    });
+
+    renderSessionPage('/sessions?session=session-missing-from-list');
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-missing-from-list');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-hide-input', 'true');
+    });
+  });
+
+  it('clears the selected session after confirming it no longer exists', async () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    sessionApi.get.mockRejectedValue({ response: { status: 404 } });
+
+    renderSessionPage('/sessions?session=session-deleted');
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    });
+  });
+
+  it('lists the same visible agents as the Agent page selector logic', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'hidden-system',
+          description: 'System',
+          mode: 'subagent',
+          tags: ['system'],
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'oracle',
+          description: 'Oracle',
+          mode: 'subagent',
+          native: true,
+          delegatable: false,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-mention-agents', 'rex,explore');
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /hidden-system/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Oracle/i })).not.toBeInTheDocument();
+  });
+
+  it('resets the chat agent to Rex when creating a new session', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: /Explore/i }));
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+
+    await waitFor(() => {
+      expect(addSession).toHaveBeenCalledWith(secondSession);
+    });
+    expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
+  });
+
+  it('shows the pinned model for the selected session on load', async () => {
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        provider: 'minimax',
+        model: 'minimax-m3',
+        model_pinned: true,
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');
+    });
+    expect(defaultModelAPI.getResolved).not.toHaveBeenCalled();
+  });
+
+  it('persists model changes to the selected session', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [session],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+    sessionApi.update.mockResolvedValue({
+      ...session,
+      provider: 'minimax',
+      model: 'minimax-m3',
+      model_pinned: true,
+    });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'openai/gpt-4o');
+    });
+
+    await user.click(screen.getByRole('button', { name: /GPT-4o/i }));
+    await user.click(screen.getByRole('button', { name: /MiniMax M3/i }));
+
+    await waitFor(() => {
+      expect(sessionApi.update).toHaveBeenCalledWith('session-1', {
+        provider: 'minimax',
+        model: 'minimax-m3',
+        model_pinned: true,
+      });
+    });
+    expect(refetchSessions).toHaveBeenCalled();
+  });
+
+  it('resets the selected model to the default when creating a new session', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        provider: 'minimax',
+        model: 'minimax-m3',
+        model_pinned: true,
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');
+    });
+
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+
+    await waitFor(() => {
+      expect(addSession).toHaveBeenCalledWith(secondSession);
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'openai/gpt-4o');
+    });
+  });
+
+  it('uses the selected agent for the first message when an empty session is created by sending', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: /Explore/i }));
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.objectContaining({ agent: 'explore' }),
+      );
+    });
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
   });
 });

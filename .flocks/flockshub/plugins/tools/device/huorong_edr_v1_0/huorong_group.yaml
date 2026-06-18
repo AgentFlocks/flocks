@@ -1,0 +1,63 @@
+name: huorong_group
+description: >
+  Huorong EDR group management tool. Use the `action` parameter to list,
+  create, rename, or delete endpoint groups.
+description_cn: >
+  火绒终端分组管理工具。通过 `action` 参数调用分组查询、创建、重命名和删除接口。
+  请在火绒服务配置中分别填写 Access Key ID、Secret Key 和 Base URL。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: huorong_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        分组管理动作名，可选值：
+        - group_list
+          用途: 获取全部分组列表
+          必填: 无
+          常用: 无
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - group_create
+          用途: 创建分组
+          必填: `group_name`
+          常用: `parent_group`
+          风险提示: 写操作；会新增分组
+          是否任务型: 否
+        - group_rename
+          用途: 修改分组名称
+          必填: `group_id`、`group_name`
+          常用: `group_id`、`group_name`
+          风险提示: 写操作；会修改已有分组名称
+          是否任务型: 否
+        - group_delete
+          用途: 删除分组
+          必填: `group_id`
+          常用: `group_id`
+          风险提示: 高风险写操作；删除后分组及归属终端均受影响
+          是否任务型: 否
+      enum:
+        - group_list
+        - group_create
+        - group_rename
+        - group_delete
+    group_id:
+      type: integer
+      description: 分组 ID
+    group_name:
+      type: string
+      description: 分组名称
+    parent_group:
+      type: integer
+      description: 父分组 ID，默认为 0（根分组）
+      default: 0
+  required:
+    - action
+handler:
+  type: script
+  script_file: huorong.handler.py
+  function: group

@@ -1,0 +1,98 @@
+schema_version: 1
+provider: 360_waf
+
+connectivity:
+  tool: 360_waf_system
+  params:
+    action: waf_check_login
+
+fixtures:
+  360_waf_system:
+    - label: "Check current login session"
+      tags: [smoke, auth]
+      params:
+        action: waf_check_login
+      assert:
+        success: true
+    - label: "Get system information"
+      tags: [smoke, system]
+      params:
+        action: waf_system_info_get
+      assert:
+        success: true
+
+  360_waf_site:
+    - label: "List protected sites"
+      tags: [smoke, site]
+      params:
+        action: waf_site_list
+      assert:
+        success: true
+    - label: "List IP blacklist entries for a site"
+      tags: [site, blacklist]
+      params:
+        action: waf_blacklist_list
+        siteId: 1
+        type: 1
+
+  360_waf_policy_ops:
+    - label: "List WAF policies"
+      tags: [smoke, policy]
+      params:
+        action: waf_policy_list
+      assert:
+        success: true
+    - label: "List access-control policies"
+      tags: [smoke, policy]
+      params:
+        action: waf_ac_policy_list
+      assert:
+        success: true
+
+  360_waf_observability:
+    - label: "Search web security logs"
+      tags: [smoke, logs]
+      params:
+        action: waf_security_log_search
+        interval: hour
+        start: 0
+        limit: 20
+      assert:
+        success: true
+    - label: "Get attack-source IP dashboard"
+      tags: [dashboard]
+      params:
+        action: waf_dashboard_stats
+        kind: attack_source_ip
+        interval: hour
+
+  360_waf_api_readonly:
+    - label: "Show documented API catalog"
+      tags: [smoke, api]
+      params:
+        action: waf_api_catalog
+      assert:
+        success: true
+    - label: "Call system info through read-only REST helper"
+      tags: [api]
+      params:
+        action: waf_call_raw_readonly
+        path: /rest/api/sysinfo
+
+  360_waf_api_mutation:
+    - label: "Call system info through unified REST helper"
+      tags: [api]
+      params:
+        action: waf_call_api
+        method: GET
+        path: /rest/api/sysinfo
+      assert:
+        success: true
+
+  360_waf_file:
+    - label: "Download a device file"
+      tags: [file]
+      params:
+        action: waf_download_file
+        path: /download/example
+        save_path: ./outputs/360_waf_download.bin

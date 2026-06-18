@@ -3,8 +3,8 @@ provider: ngtip_api
 
 # Service-level connectivity probe.
 # `query_ip` is chosen because:
-#   - lightweight (GET; only `apikey` + `resource`),
-#   - exercises both `query_base_url` (port 8090) and the apikey,
+#   - lightweight (GET; only query `apikey` + `resource`),
+#   - exercises both `query_base_url` (port 8090) and the query apikey,
 #   - deterministic against 8.8.8.8 (Google DNS).
 connectivity:
   tool: ngtip_query

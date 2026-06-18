@@ -45,6 +45,11 @@ try:
 except ImportError:
     _PLUGIN_AGENTS_DIR = Path.home() / ".flocks" / "plugins" / "agents"
 
+
+def _project_plugin_agents_dir() -> Path:
+    """Return the current project's plugin agent directory."""
+    return Path.cwd() / ".flocks" / "plugins" / "agents"
+
 # ---------------------------------------------------------------------------
 # Prompt metadata parsing
 # ---------------------------------------------------------------------------
@@ -158,9 +163,13 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
         desc_cn = raw.get("description_cn")
         if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
             desc_cn = raw.get("descriptionCn")
+        name_cn = raw.get("name_cn")
+        if name_cn is None and isinstance(raw.get("nameCn"), str):
+            name_cn = raw.get("nameCn")
 
         return AgentInfo(
             name=name,
+            name_cn=name_cn,
             description=raw.get("description"),
             description_cn=desc_cn,
             mode=raw.get("mode", "subagent"),
@@ -311,16 +320,29 @@ def inject_dynamic_prompts(
 # YAML CRUD helpers (for plugin agents via API routes)
 # ---------------------------------------------------------------------------
 
-def _find_yaml_file(name: str) -> Optional[Path]:
-    """Find the YAML source file for a plugin agent by name."""
-    for suffix in (".yaml", ".yml"):
-        candidate = _PLUGIN_AGENTS_DIR / name / f"agent{suffix}"
-        if candidate.is_file():
-            return candidate
-        # Legacy: flat file layout (name.yaml)
-        flat = _PLUGIN_AGENTS_DIR / f"{name}{suffix}"
-        if flat.is_file():
-            return flat
+def _find_yaml_file(name: str, *, include_project: bool = True, include_user: bool = True) -> Optional[Path]:
+    """Find the YAML source file for a plugin agent by name.
+
+    Search order follows API edit precedence, not full runtime scan order:
+    user-level plugins first, then project-level plugins.
+    """
+    search_roots: List[Path] = []
+    if include_user:
+        search_roots.append(_PLUGIN_AGENTS_DIR)
+    if include_project:
+        project_dir = _project_plugin_agents_dir()
+        if project_dir not in search_roots:
+            search_roots.append(project_dir)
+
+    for root in search_roots:
+        for suffix in (".yaml", ".yml"):
+            candidate = root / name / f"agent{suffix}"
+            if candidate.is_file():
+                return candidate
+            # Legacy: flat file layout (name.yaml)
+            flat = root / f"{name}{suffix}"
+            if flat.is_file():
+                return flat
     return None
 
 
@@ -375,9 +397,13 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
     desc_cn = raw.get("description_cn")
     if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
         desc_cn = raw.get("descriptionCn")
+    name_cn = raw.get("name_cn")
+    if name_cn is None and isinstance(raw.get("nameCn"), str):
+        name_cn = raw.get("nameCn")
 
     return AgentInfo(
         name=name,
+        name_cn=name_cn,
         description=raw.get("description"),
         description_cn=desc_cn,
         mode=raw.get("mode", "subagent"),
@@ -468,7 +494,8 @@ def delete_yaml_agent(name: str) -> bool:
 
     Returns True on success, False if not found.
     """
-    path = _find_yaml_file(name)
+    # Deletion remains limited to user-managed plugin agents.
+    path = _find_yaml_file(name, include_project=False, include_user=True)
     if path is None:
         return False
 

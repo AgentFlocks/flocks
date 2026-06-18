@@ -8,6 +8,8 @@ interface LlmNodeData {
   description?: string;
   prompt?: string;
   model?: string;
+  join?: boolean;
+  join_mode?: string;
   bg?: string;
   border?: string;
   text?: string;
@@ -52,6 +54,11 @@ export default memo(function LlmNode({ data, selected }: NodeProps) {
         <div className="flex items-start gap-1 mt-2 p-2 bg-white rounded border border-gray-200">
           <Info className="w-3 h-3 text-gray-400 flex-shrink-0 mt-0.5" />
           <p className="text-xs text-gray-600 line-clamp-2">{d.description}</p>
+        </div>
+      )}
+      {d.join && (
+        <div className="mt-2 inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
+          Join: {d.join_mode || 'flat'}
         </div>
       )}
       <Handle

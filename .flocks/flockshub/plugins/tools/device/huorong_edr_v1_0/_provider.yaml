@@ -1,0 +1,50 @@
+name: huorong_edr
+vendor: huorong
+service_id: huorong_api
+version: "1.0"
+integration_type: device
+description: >
+  Huorong EDR (Endpoint Detection & Response) API service. Configure the
+  Access Key ID, Secret Key, and Base URL in the credentials form.
+  Base URL should point to your Huorong console (e.g., `http://192.168.1.100:801`).
+description_cn: >
+  火绒终端安全管理系统 API 服务。在配置页分别填写 Access Key ID（secret_id）、
+  Secret Key（secret_key）和 Base URL（控制台地址，例如 `http://192.168.1.100:801`）。
+auth:
+  type: custom
+  secret: huorong_secret_id
+  secret_secret: huorong_secret_key
+credential_fields:
+  - key: secret_id
+    label: Access Key ID
+    storage: secret
+    config_key: secretId
+    secret_id: huorong_secret_id
+    input_type: password
+    required: true
+  - key: secret_key
+    label: Secret Key
+    storage: secret
+    config_key: secretKey
+    secret_id: huorong_secret_key
+    input_type: password
+    required: true
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    default: "http://localhost:801"
+defaults:
+  base_url: "http://localhost:801"
+  timeout: 30
+  category: custom
+  product_version: "1.0"
+notes: |
+  火绒 API 使用 HMAC-SHA1 请求签名认证。
+  Authorization 请求头格式：HRESS{secret_id}:{expires}:{url_encoded_sign}
+  签名字符串：{secret_id}\n{expires}\n{METHOD}\n{content_md5}\n{canonical_resource}
+    - expires：Unix 秒级时间戳 + 3600
+    - content_md5：base64(md5(request_body))
+    - canonical_resource：请求路径去掉开头的 "/"
+  也支持 URL 查询参数方式：?ak={secret_id}&expires={expires}&sign={sign}

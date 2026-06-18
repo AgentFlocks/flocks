@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .errors import WorkflowValidationError
+from .triggers.models import TriggerDefinition, normalize_trigger_definitions
 
 
 class Node(BaseModel):
@@ -96,12 +97,15 @@ class Workflow(BaseModel):
     start: str = Field(min_length=1)
     nodes: List[Node] = Field(default_factory=list)
     edges: List[Edge] = Field(default_factory=list)
+    triggers: List[TriggerDefinition] = Field(default_factory=list)
     metadata: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def _validate_graph(self) -> "Workflow":
         if self.version is not None:
             self.version = None
+        if not self.triggers and isinstance(self.metadata, dict) and isinstance(self.metadata.get("triggers"), list):
+            self.triggers = normalize_trigger_definitions(self.metadata.get("triggers"))
         node_ids = [n.id for n in self.nodes]
         if len(node_ids) != len(set(node_ids)):
             dupes = sorted({x for x in node_ids if node_ids.count(x) > 1})

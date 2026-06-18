@@ -28,6 +28,29 @@
 
 ---
 
+## PowerShell 脚本编码规范
+
+新建或修改 `.ps1` 文件后，必须使用 **UTF-8 with BOM**（文件头 `EF BB BF`）+ **CRLF** 换行符。
+
+原因：Windows PowerShell 5.1 读取无 BOM 的 UTF-8 文件时会使用系统代码页（如 GBK）解码，可能导致中文字符字节错位，引号/大括号被吞，产生级联解析错误。
+
+验证编码（PowerShell）：
+
+```powershell
+$bytes = [System.IO.File]::ReadAllBytes("script.ps1")
+$bytes[0..2] | ForEach-Object { $_.ToString("X2") }
+# 正确输出：EF BB BF
+```
+
+保存为正确编码：
+
+```powershell
+$content = Get-Content "script.ps1" -Raw
+[System.IO.File]::WriteAllText("script.ps1", $content, [System.Text.UTF8Encoding]::new($true))
+```
+
+---
+
 ## Capability Gap Resolution Protocol
 
 **This protocol is mandatory for Rex and all primary agents.**

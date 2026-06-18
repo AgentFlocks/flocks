@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from flocks.tool.registry import _tool_event_should_reload
+from flocks.tool.registry import ToolFileWatcher, _tool_event_should_reload
 from flocks.agent.registry import _agent_event_should_reload
 from flocks.skill.skill import _skill_event_should_reload
 
@@ -58,6 +58,10 @@ def test_tool_watcher_rejects_irrelevant_paths() -> None:
 def test_tool_watcher_accepts_direct_modify_on_yaml() -> None:
     evt = _modify_event("/repo/.flocks/plugins/tools/api/foo/tool.yaml")
     assert _tool_event_should_reload(evt) is True
+
+
+def test_tool_watcher_includes_device_plugin_directory() -> None:
+    assert "device" in ToolFileWatcher._WATCH_SUBDIRS
 
 
 # ---------------------------------------------------------------------------

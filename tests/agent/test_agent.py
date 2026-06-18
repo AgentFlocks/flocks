@@ -187,6 +187,23 @@ class TestAgentListing:
         assert await delegatable("oracle") is True
 
     @pytest.mark.asyncio
+    async def test_is_delegatable_respects_sidecar_override(self, tmp_path, monkeypatch):
+        settings_file = tmp_path / "agent_delegatable_settings.json"
+        monkeypatch.setattr("flocks.agent.delegatable_settings.settings_path", lambda: settings_file)
+
+        import flocks.agent.delegatable_settings as delegatable_settings
+        from flocks.agent.registry import Agent as AgentRegistry, is_delegatable
+
+        AgentRegistry._delegatable_settings_mtime = 0.0
+        delegatable_settings.set_override("explore", False)
+        AgentRegistry.invalidate_cache()
+
+        agent = await AgentRegistry.get("explore")
+        assert agent is not None
+        assert agent.delegatable is False
+        assert is_delegatable("explore") is False
+
+    @pytest.mark.asyncio
     async def test_list_names(self):
         names = await Agent.list_names()
         for name in BUILTIN_AGENTS:

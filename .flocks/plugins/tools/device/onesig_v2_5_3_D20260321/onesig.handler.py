@@ -25,7 +25,7 @@ SERVICE_ID = "onesig_api"
 # ``/api/v3/...`` 全部 404。改成空字符串作为开盒即用值；个别需要前缀的
 # 部署仍可在 UI 上把 ``api_prefix`` 设成 ``"/api"`` 或其它值覆盖。
 DEFAULT_API_PREFIX = ""
-DEFAULT_OAEP_HASH = "sha1"
+DEFAULT_OAEP_HASH = "sha256"
 DEFAULT_TIMEOUT = 60
 DEFAULT_VERIFY_SSL = False
 DEFAULT_PERSIST_COOKIES = True

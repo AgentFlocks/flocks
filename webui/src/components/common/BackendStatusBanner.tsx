@@ -13,13 +13,13 @@ export function BackendStatusBanner() {
   const getBannerStyle = () => {
     switch (status) {
       case 'connecting':
-        return 'bg-yellow-50 border-yellow-200 text-yellow-800';
+        return 'bg-yellow-50 border-yellow-200 text-yellow-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-100';
       case 'disconnected':
-        return 'bg-red-50 border-red-200 text-red-800';
+        return 'bg-red-50 border-red-200 text-red-800 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100';
       case 'error':
-        return 'bg-red-50 border-red-200 text-red-800';
+        return 'bg-red-50 border-red-200 text-red-800 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100';
       default:
-        return 'bg-gray-50 border-gray-200 text-gray-800';
+        return 'bg-gray-50 border-gray-200 text-gray-800 dark:border-[#4a5563] dark:bg-[#303842] dark:text-[#d7dee8]';
     }
   };
 
@@ -72,7 +72,7 @@ export function BackendStatusBanner() {
           
           <button
             onClick={checkHealth}
-            className="px-4 py-2 bg-white/50 hover:bg-white/80 rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2"
+            className="px-4 py-2 bg-white/50 hover:bg-white/80 rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2 dark:bg-[#46515e]/70 dark:hover:bg-[#5a6573]"
           >
             <RefreshCw className="w-4 h-4" />
             <span>{t('backend.retry')}</span>

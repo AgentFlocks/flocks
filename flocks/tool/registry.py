@@ -680,7 +680,7 @@ class ToolRegistry:
         category: ToolCategory = ToolCategory.CUSTOM,
         parameters: Optional[List[ToolParameter]] = None,
         requires_confirmation: bool = False,
-        native: bool = False,
+        native: Optional[bool] = None,
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
         enabled: bool = True,
@@ -688,11 +688,11 @@ class ToolRegistry:
         """
         Decorator to register a function as a tool.
 
-        ``native`` defaults to False (safe default).  Built-in tools get
-        ``native=True`` in bulk by ``_register_builtin_tools()`` after all
-        built-in modules are imported, so callers don't need to pass it
-        explicitly.  User plugin Python files that use this decorator will
-        correctly stay ``native=False``.
+        ``native=None`` means the loading context decides. Built-in tools get
+        ``native=True`` in bulk by ``_register_builtin_tools()`` only when the
+        decorator did not explicitly pass ``native``. User plugin Python files
+        that use this decorator still default to ``native=False`` unless their
+        loading path marks them project-level.
 
         Usage:
             @ToolRegistry.register_function(
@@ -704,18 +704,20 @@ class ToolRegistry:
                 ...
         """
         def decorator(func: ToolHandler) -> ToolHandler:
-            info = ToolInfo(
-                name=name,
-                description=description,
-                description_cn=description_cn,
-                category=category,
-                parameters=parameters or [],
-                requires_confirmation=requires_confirmation,
-                native=native,
-                always_load=always_load,
-                tags=list(tags or []),
-                enabled=enabled,
-            )
+            info_kwargs: Dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "description_cn": description_cn,
+                "category": category,
+                "parameters": parameters or [],
+                "requires_confirmation": requires_confirmation,
+                "always_load": always_load,
+                "tags": list(tags or []),
+                "enabled": enabled,
+            }
+            if native is not None:
+                info_kwargs["native"] = native
+            info = ToolInfo(**info_kwargs)
             tool = Tool(info=info, handler=func)
             cls.register(tool)
             return func
@@ -775,12 +777,6 @@ class ToolRegistry:
                 error=f"Tool not found: {tool_name}"
             )
 
-        if not tool.info.enabled:
-            return ToolResult(
-                success=False,
-                error=f"Tool is disabled: {tool_name}"
-            )
-
         # Create default context if not provided
         if ctx is None:
             ctx = ToolContext(
@@ -794,6 +790,7 @@ class ToolRegistry:
         })
 
         device_id = kwargs.pop("device_id", None)
+        per_device_enabled = None
 
         if tool.info.source == "device" and tool.info.provider:
             try:
@@ -814,6 +811,38 @@ class ToolRegistry:
             if resolution_error:
                 return ToolResult(success=False, error=resolution_error)
             device_id = resolved_device_id
+        elif not tool.info.enabled:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
+
+        if not tool.info.enabled:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
+
+        if device_id:
+            # Per-device tool enable gate: a device instance may carry a
+            # disabled override independent of the shared global tool state.
+            # A stored enabled=True row is legacy data and is treated the same
+            # as no override; it must not bypass the global disabled state.
+            try:
+                from flocks.tool.device.store import get_device_tool_enabled
+                per_device_enabled = await get_device_tool_enabled(device_id, tool_name)
+                if per_device_enabled is False:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"工具 {tool_name!r} 在设备 {device_id!r} 上已禁用。"
+                            "如需启用，请在设备管理页面打开对应工具开关。"
+                        ),
+                    )
+            except Exception as _gate_err:
+                log.debug("tool.device.per_device_gate_error", {
+                    "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
+                })
 
         if device_id:
             from flocks.tool.credential_context import activate_device_credentials
@@ -997,9 +1026,8 @@ class ToolRegistry:
     def _load_plugin_tools(cls) -> None:
         """Load plugin tools from both user-level and project-level plugin dirs on init.
 
-        Without this, YAML/Python plugin tools only appear after
-        ``PluginLoader.load_all()`` is triggered by Agent initialization
-        or an explicit ``POST /api/tools/refresh``.
+        Without this, YAML/Python plugin tools only appear after an explicit
+        ``POST /api/tools/refresh`` or a tool registry initialization pass.
 
         Scans both:
         - ``~/.flocks/plugins/tools/`` (user-level)
@@ -1012,7 +1040,8 @@ class ToolRegistry:
         before = set(cls._tools.keys())
         try:
             from flocks.plugin import PluginLoader
-            PluginLoader.load_all()
+
+            PluginLoader.load_extension("TOOLS", load_entry_points=True)
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
         after = set(cls._tools.keys())
@@ -1426,17 +1455,17 @@ class ToolRegistry:
             # agent/ — agent delegation/coordination
             ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", ["schedule_task_center", "todo", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # system/ — questions, model config, memory, MCP management, session management, slash commands
+            ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context
             ("flocks.tool.device", ["device_context_tool"]),
             # channel/ — IM platform messaging
-            ("flocks.tool.channel", ["channel_message"]),
+            ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
             ("flocks.tool.wecom", ["wecom_mcp"]),
         ]
@@ -1447,17 +1476,18 @@ class ToolRegistry:
                 except ImportError as e:
                     log.warn("builtin_tools.import_failed", {"module": f"{package}.{mod_name}", "error": str(e)})
 
-        # Mark every tool registered during this call as native=True, except
-        # for built-in modules that should remain non-native by policy.
-        # This is done in bulk here so individual @register_function call
-        # sites don't need to pass native=True, and user plugin files using
-        # the same decorator won't be misclassified.
-        builtin_native_exceptions = {"lsp", "task"}
+        # Mark built-in tools native=True only when the decorator did not
+        # explicitly declare native. This keeps the default convenient for
+        # built-ins while preserving native=False for management tools that
+        # should be discovered through tool_search.
         for name in set(cls._tools.keys()) - before:
-            if name in builtin_native_exceptions:
-                cls._tools[name].info.native = False
+            tool = cls._tools[name]
+            fields_set = getattr(tool.info, "model_fields_set", None)
+            if fields_set is None:
+                fields_set = getattr(tool.info, "__fields_set__", set())
+            if "native" in fields_set:
                 continue
-            cls._tools[name].info.native = True
+            tool.info.native = True
 
         # Sample tools for testing (only register if not already registered)
         if "get_time" not in cls._tools:
@@ -1541,8 +1571,17 @@ class ToolRegistry:
 
     @classmethod
     def _should_track_failure(cls, tool: Tool) -> bool:
-        """Track failures only for custom tools to avoid disabling core tools."""
-        return tool.info.category == ToolCategory.CUSTOM and tool.info.name != "invalid"
+        """Track failures only for standalone custom tools.
+
+        Device-backed tools have per-device switches; repeated upstream/API
+        failures should not mutate the shared in-memory switch for every
+        device instance.
+        """
+        return (
+            tool.info.category == ToolCategory.CUSTOM
+            and tool.info.name != "invalid"
+            and tool.info.source != "device"
+        )
 
     @classmethod
     def _is_countable_error(cls, error: Optional[str]) -> bool:
@@ -1739,7 +1778,7 @@ def _tool_event_should_reload(event: object) -> bool:
 class ToolFileWatcher:
     """Watch plugin tool directories and auto-reload plugin tools on change.
 
-    Monitors the ``api/`` and ``python/`` subdirectories under:
+    Monitors the ``api/``, ``device/``, and ``python/`` subdirectories under:
     - ``~/.flocks/plugins/tools/``       (user-level)
     - ``<cwd>/.flocks/plugins/tools/``   (project-level)
 
@@ -1749,7 +1788,7 @@ class ToolFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 1.0
-    _WATCH_SUBDIRS = ("api", "python")
+    _WATCH_SUBDIRS = ("api", "device", "python")
 
     def __init__(self) -> None:
         self._observer: Optional[object] = None

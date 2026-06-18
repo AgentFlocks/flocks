@@ -1,24 +1,43 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { providerAPI } from '@/api/provider';
-import { deviceAPI, type DeviceIntegration, type DeviceGroup } from '@/api/device';
-import type { APIServiceSummary, APIServiceCredentialField, Tool } from '@/types';
+import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
+import type { APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
+import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const DEFAULT_GROUP_ID = 'default-room';
+const DEVICE_DRAWER_WIDTH = 560;
+const DEVICE_DRAWER_WIDTH_CSS = `${DEVICE_DRAWER_WIDTH}px`;
+
+/** Pull the backend's human-readable error detail (e.g. "机房名称已存在")
+ *  out of an axios error, falling back to a generic message. */
+function errDetail(err: unknown, fallback: string): string {
+  return (
+    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback
+  );
+}
 
 // ============================================================================
 // Vendor catalog
 //
 // Vendor identity comes from the backend: each `_provider.yaml` declares a
-// `vendor` field that propagates into `APIServiceSummary.vendor`. The frontend
+// `vendor` field that propagates into `DeviceTemplate.vendor`. The frontend
 // only owns the *presentation* (Chinese/English labels and color theme). When
 // a brand-new vendor key appears (i.e. one not in `VENDOR_PRESENTATION` below),
 // we still render it with a generic neutral label so the device is never
@@ -43,8 +62,6 @@ const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
 function vendorPresentation(vendorKey: string): DeviceVendor {
   const preset = VENDOR_PRESENTATION[vendorKey];
   if (preset) return { id: vendorKey, ...preset };
-  // Unknown vendor key: surface it as-is so the operator notices the gap
-  // instead of inheriting a wrong-but-pretty bucket.
   return {
     id: vendorKey,
     nameCn: vendorKey,
@@ -58,17 +75,18 @@ function vendorPresentation(vendorKey: string): DeviceVendor {
 // ============================================================================
 
 function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) {
+  const { t } = useTranslation('device');
   if (!enabled) return (
-    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><WifiOff className="w-3 h-3" />已禁用</span>
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><WifiOff className="w-3 h-3" />{t('status.disabled')}</span>
   );
   if (status === 'ok' || status === 'connected') return (
-    <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle className="w-3 h-3" />已连接</span>
+    <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle className="w-3 h-3" />{t('status.connected')}</span>
   );
   if (status === 'error') return (
-    <span className="inline-flex items-center gap-1 text-xs text-red-500"><XCircle className="w-3 h-3" />连接失败</span>
+    <span className="inline-flex items-center gap-1 text-xs text-red-500"><XCircle className="w-3 h-3" />{t('status.error')}</span>
   );
   return (
-    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><AlertTriangle className="w-3 h-3" />未检测</span>
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><AlertTriangle className="w-3 h-3" />{t('status.unknown')}</span>
   );
 }
 
@@ -82,7 +100,9 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
   selected: boolean;
   onClick: () => void;
 }) {
+  const { i18n } = useTranslation('device');
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
+  const vendorLabel = vendor ? (i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn) : undefined;
   return (
     <button
       onClick={onClick}
@@ -112,7 +132,7 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
             {vendor && (
               <>
                 <span className="text-zinc-200">·</span>
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{vendor.nameCn}</span>
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{vendorLabel}</span>
               </>
             )}
           </div>
@@ -126,21 +146,19 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // Add device wizard panel (step 1: vendor, step 2: product)
 // ============================================================================
 
-function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onClose }: {
-  templates: APIServiceSummary[];
+function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onClose }: {
+  templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
   initialVendor?: DeviceVendor;
-  onSelect: (template: APIServiceSummary) => void;
+  onSelect: (template: DeviceTemplate) => void;
+  onSelectCustom: (mode: CustomDeviceAccessMode) => void;
   onClose: () => void;
 }) {
+  const { t, i18n } = useTranslation('device');
+  const navigate = useNavigate();
   const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
+  const [showCustomModes, setShowCustomModes] = useState(false);
 
-  // Distinct vendor keys from the live template list. Templates whose YAML
-  // omits `vendor` are bucketed under the special "(未指定)" key so they
-  // remain visible (and obviously misconfigured) instead of disappearing.
-  //
-  // Order: pinned vendors first (threatbook 微步 is our default), then any
-  // other known vendor in catalog order, then unknown/unspecified last.
   const availableVendors = useMemo<DeviceVendor[]>(() => {
     const seen: string[] = [];
     for (const t of templates) {
@@ -160,7 +178,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
     });
     return seen.map((key) =>
       key === '__unspecified__'
-        ? { id: '__unspecified__', nameCn: '未指定厂商', nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
+        ? { id: '__unspecified__', nameCn: t('vendor.unspecified'), nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
         : vendorPresentation(key),
     );
   }, [templates]);
@@ -169,7 +187,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
     const counts: Record<string, number> = {};
     for (const t of templates) {
       const key = t.vendor || '__unspecified__';
-      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.id] ?? 0);
+      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.storage_key] ?? 0);
     }
     return counts;
   }, [templates, instanceCounts]);
@@ -179,25 +197,32 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
     return templates.filter((t) => (t.vendor || '__unspecified__') === selectedVendor.id);
   }, [templates, selectedVendor]);
 
+  const inModeSelection = showCustomModes && !selectedVendor;
+  const shouldShowVendorSecondary = (vendor: DeviceVendor) =>
+    vendor.nameCn.trim().toLocaleLowerCase() !== vendor.nameEn.trim().toLocaleLowerCase();
+
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
-      <button
-        type="button"
-        aria-label="关闭添加设备面板"
-        onClick={onClose}
+        <button
+          type="button"
+          aria-label={t('wizard.closeAriaLabel')}
+          onClick={onClose}
         className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
-        style={{ top: 64, right: 440 }}
+        style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
       />
       <div
-        className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-        style={{ width: 440, top: 64 }}
+        className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+        style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
           <div className="flex items-center gap-2.5">
-            {selectedVendor && (
+            {(selectedVendor || inModeSelection) && (
               <button
-                onClick={() => setSelectedVendor(null)}
+                onClick={() => {
+                  setSelectedVendor(null);
+                  setShowCustomModes(false);
+                }}
                 className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -205,20 +230,23 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
             )}
             <div>
               <h3 className="text-sm font-semibold text-zinc-900">
-                {selectedVendor ? `选择 ${selectedVendor.nameCn} 设备` : '添加设备'}
+                {selectedVendor
+                  ? t('wizard.selectVendorTitle', { vendor: i18n.language.startsWith('zh') ? selectedVendor.nameCn : selectedVendor.nameEn })
+                  : inModeSelection
+                    ? t('wizard.modeTitle')
+                    : t('wizard.title')}
               </h3>
               <div className="flex items-center gap-1.5 mt-0.5">
-                {/* Breadcrumb */}
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
-                  1 选择厂商
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
+                  {t('wizard.step1Custom')}
                 </span>
                 <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
-                  2 选择设备
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                  {t('wizard.step2Custom')}
                 </span>
                 <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
                 <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
-                  3 填写配置
+                  {t('wizard.step3Custom')}
                 </span>
               </div>
             </div>
@@ -230,56 +258,131 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
-          {!selectedVendor ? (
-            /* Step 1: Vendor selection */
+          {!selectedVendor && !inModeSelection ? (
             <>
-              <p className="text-xs text-zinc-400 mb-4">选择设备所属厂商，共 {availableVendors.length} 家</p>
-              <div className="grid grid-cols-2 gap-3">
+              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  onClick={() => setShowCustomModes(true)}
+                  className="group flex w-full items-center gap-3 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50"
+                >
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-blue-100 text-sm font-bold text-blue-700">
+                    自
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-zinc-800 truncate">{t('wizard.customCardTitle')}</p>
+                    <p className="text-[11px] text-zinc-400 truncate">{t('wizard.customCardSubtitle')}</p>
+                    <p className="text-[10px] text-blue-600 mt-1 font-medium truncate">
+                      {t('wizard.customCardCta')}
+                    </p>
+                  </div>
+                  <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-blue-300 transition-colors group-hover:text-blue-500" />
+                </button>
                 {availableVendors.map((vendor) => {
                   const count = vendorTotalCounts[vendor.id] ?? 0;
                   const productCount = templates.filter(
                     (t) => (t.vendor || '__unspecified__') === vendor.id,
                   ).length;
+                  const primaryName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
+                  const secondaryName = i18n.language.startsWith('zh') ? vendor.nameEn : vendor.nameCn;
+                  const showSecondary = shouldShowVendorSecondary(vendor);
                   return (
                     <button
                       key={vendor.id}
                       onClick={() => setSelectedVendor(vendor)}
-                      className="flex flex-col items-center gap-2.5 p-5 rounded-xl border border-zinc-200 bg-white hover:border-blue-300 hover:bg-blue-50/40 transition-all duration-150 group"
+                      className="group flex w-full items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
                     >
-                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold ${vendor.color}`}>
+                      <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-sm font-bold ${vendor.color}`}>
                         {vendor.nameCn[0]}
                       </div>
-                      <div className="text-center">
-                        <p className="text-sm font-semibold text-zinc-800">{vendor.nameCn}</p>
-                        <p className="text-xs text-zinc-400">{vendor.nameEn}</p>
-                        <p className="text-[10px] text-zinc-400 mt-0.5">
-                          {productCount} 种设备
-                          {count > 0 && <span className="text-blue-600 font-medium"> · 已接入 {count} 台</span>}
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-zinc-800 truncate">{primaryName}</p>
+                        {showSecondary && <p className="text-[11px] text-zinc-400 truncate">{secondaryName}</p>}
+                        <p className="text-[10px] text-zinc-400 mt-1 truncate">
+                          {t('wizard.productCount', { count: productCount })}
+                          {count > 0 && <span className="text-zinc-500"> / {t('wizard.instanceCount', { count })}</span>}
                         </p>
                       </div>
-                      <ChevronRight className="w-3.5 h-3.5 text-zinc-300 group-hover:text-blue-400 transition-colors" />
+                      <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300 transition-colors group-hover:text-blue-400" />
                     </button>
                   );
                 })}
               </div>
             </>
+          ) : inModeSelection ? (
+            <>
+              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseCustomMode')}</p>
+              <div className="space-y-3">
+                {[
+                  {
+                    key: 'api' as const,
+                    title: t('wizard.customModes.api.title'),
+                    desc: t('wizard.customModes.api.desc'),
+                  },
+                  {
+                    key: 'webcli' as const,
+                    title: t('wizard.customModes.webcli.title'),
+                    desc: t('wizard.customModes.webcli.desc'),
+                  },
+                  {
+                    key: 'workflow' as const,
+                    title: t('wizard.customModes.workflow.title'),
+                    desc: t('wizard.customModes.workflow.desc'),
+                  },
+                ].map((mode) => (
+                  <button
+                    key={mode.key}
+                    onClick={() => onSelectCustom(mode.key)}
+                    className="w-full text-left flex items-start gap-3 px-4 py-4 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
+                  >
+                    <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
+                      <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-zinc-800 leading-snug">{mode.title}</p>
+                      <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{mode.desc}</p>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
+                  </button>
+                ))}
+              </div>
+            </>
           ) : (
-            /* Step 2: Product selection */
             <>
               <p className="text-xs text-zinc-400 mb-4">
-                共 {vendorTemplates.length} 款设备，同款设备可多次接入
+                {t('wizard.productHint', { count: vendorTemplates.length })}
               </p>
               <div className="space-y-2">
                 {vendorTemplates.map((tpl) => {
-                  const count = instanceCounts[tpl.id] ?? 0;
+                  const count = instanceCounts[tpl.storage_key] ?? 0;
+                  const disabled = !tpl.installed;
+                  const stateHint = tpl.state === 'updateAvailable'
+                    ? t('wizard.installState.update')
+                    : tpl.state === 'broken'
+                      ? t('wizard.installState.broken')
+                      : t('wizard.installState.install');
+                  const stateBadge = tpl.state === 'updateAvailable'
+                    ? t('wizard.installState.updateAvailable')
+                    : tpl.state === 'broken'
+                      ? t('wizard.installState.brokenShort')
+                      : tpl.installed
+                        ? t('wizard.installState.installed')
+                        : t('wizard.installState.available');
+                  const hubUrl = `/hub?type=device&plugin=${encodeURIComponent(tpl.plugin_id)}&q=${encodeURIComponent(tpl.plugin_id)}`;
                   return (
                     <button
-                      key={tpl.id}
-                      onClick={() => onSelect(tpl)}
-                      className="w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
+                      key={tpl.storage_key}
+                      onClick={() => { if (disabled) navigate(hubUrl); else onSelect(tpl); }}
+                      className={`w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border transition-all group ${
+                        disabled
+                          ? 'border-zinc-100 bg-zinc-50 opacity-85 hover:border-amber-200 hover:bg-amber-50/30'
+                          : 'border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30'
+                      }`}
                     >
-                      <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
-                        <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
+                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors ${
+                        disabled ? 'bg-zinc-100' : 'bg-zinc-50 group-hover:bg-blue-50'
+                      }`}>
+                        <Plug className={`w-4 h-4 transition-colors ${disabled ? 'text-zinc-300' : 'text-zinc-400 group-hover:text-blue-500'}`} />
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
@@ -289,6 +392,15 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                               v{tpl.version}
                             </span>
                           )}
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5 font-medium ${
+                            tpl.installed
+                              ? 'bg-green-50 text-green-700'
+                              : tpl.state === 'broken'
+                                ? 'bg-red-50 text-red-700'
+                                : 'bg-amber-50 text-amber-700'
+                          }`}>
+                            {stateBadge}
+                          </span>
                         </div>
                         {(tpl.description_cn || tpl.description) && (
                           <p className="text-xs text-zinc-400 mt-0.5 line-clamp-2 leading-relaxed">
@@ -297,11 +409,16 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                         )}
                         {count > 0 && (
                           <span className="inline-block mt-1.5 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md font-medium">
-                            已接入 {count} 台
+                            {t('wizard.instanceCount', { count })}
+                          </span>
+                        )}
+                        {disabled && (
+                          <span className="inline-block mt-1.5 text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-md font-medium underline underline-offset-2">
+                            {stateHint}
                           </span>
                         )}
                       </div>
-                      <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
+                      <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-2 transition-colors ${disabled ? 'text-amber-300 group-hover:text-amber-500' : 'text-zinc-300 group-hover:text-blue-400'}`} />
                     </button>
                   );
                 })}
@@ -332,26 +449,34 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   );
 }
 
-function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onClose, onTest, onToggleVerifySsl, onToggleEnabled, onBack }: {
+function DeviceConfigPanel({
+  device, template, vendorKey, initialGroupId, groups, groupLocked,
+  onSave, onDelete, onClose, onTest, onBack,
+}: {
   device?: DeviceIntegration;
-  template?: APIServiceSummary;
+  template?: DeviceTemplate;
   vendorKey?: string;
-  onSave: (data: { name: string; fields: Record<string, string>; enabled: boolean; verify_ssl: boolean }) => Promise<void>;
+  initialGroupId: string;
+  groups: DeviceGroup[];
+  /** true = room is determined by the sidebar selection and cannot be changed here */
+  groupLocked: boolean;
+  onSave: (data: {
+    name: string;
+    fields: Record<string, string>;
+    enabled: boolean;
+    verify_ssl: boolean;
+    group_id: string;
+  }) => Promise<void>;
   onDelete?: () => Promise<void>;
   onClose: () => void;
-  /** Receives the current (unsaved) form values so the probe reflects the
-   *  on-screen toggle state instead of whatever was last persisted. */
-  onTest?: (overrides: { verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
-  /** Persist the SSL toggle immediately (without requiring "保存"). Only
-   *  meaningful when editing an existing device — for the "Add device"
-   *  wizard the value is held in local state until the row is created. */
-  onToggleVerifySsl?: (next: boolean) => Promise<void>;
-  onToggleEnabled?: (next: boolean) => Promise<void>;
+  onTest?: (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
   onBack?: () => void;
 }) {
   const toast = useToast();
+  const { t, i18n } = useTranslation('device');
   const [tab, setTab] = useState<PanelTab>('config');
   const [name, setName] = useState(device?.name ?? '');
+  const [groupId, setGroupId] = useState(device?.group_id ?? initialGroupId);
   const [fields, setFields] = useState<Record<string, string>>(() => device ? { ...device.fields } : {});
   const [enabled, setEnabled] = useState(device?.enabled ?? true);
   const [verifySsl, setVerifySsl] = useState(device?.verify_ssl ?? false);
@@ -362,27 +487,34 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [credFields, setCredFields] = useState<APIServiceCredentialField[]>([]);
   const [visibility, setVisibility] = useState<Record<string, boolean>>({});
+  const [revealingFields, setRevealingFields] = useState<Record<string, boolean>>({});
   const [serviceTools, setServiceTools] = useState<Tool[]>([]);
   const [toolModal, setToolModal] = useState<Tool | null>(null);
   const [metadata, setMetadata] = useState<{ name?: string; version?: string; description?: string; description_cn?: string; docs_url?: string } | null>(null);
   const [toolEnabled, setToolEnabled] = useState<Record<string, boolean>>({});
   const originalMasked = useRef<Record<string, string>>({});
+  const dirtyRef = useRef(false);
 
-  const serviceId = device?.service_id ?? template?.id ?? '';
-  // ``storage_key`` is the versioned, unambiguous identifier
-  // (e.g. ``onesig_api_v2_5_3_D20260321``) that tool registrations
-  // surface as ``ToolInfoResponse.source_name``. Use it directly for
-  // tool filtering so two devices that happen to share a service_id
-  // prefix (``onesig`` vs ``onesig_pro``) — or a plugin whose
-  // ``service_id`` already contains a ``_v…`` token — never bleed each
-  // other's tools into the device-edit panel. ``template?.id`` is also
-  // the storage_key (set by the wizard), so the create-mode form
-  // resolves to the right key too.
-  const storageKey = device?.storage_key ?? template?.id ?? '';
+  const serviceId = device?.service_id ?? template?.service_id ?? '';
+  const storageKey = device?.storage_key ?? template?.storage_key ?? '';
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
 
   useEffect(() => {
     if (!serviceId) return;
+    if (template) {
+      const schema = template.credential_schema ?? [];
+      setMetadata({
+        name: template.name,
+        version: template.version ?? undefined,
+        description: template.description ?? undefined,
+        description_cn: template.description_cn ?? undefined,
+      });
+      setCredFields(schema);
+      const defaults: Record<string, string> = {};
+      schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
+      setFields((prev) => ({ ...defaults, ...prev }));
+      return;
+    }
     providerAPI.getServiceMetadata(serviceId)
       .then((res) => {
         const meta = res.data;
@@ -397,7 +529,9 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
             }
           });
           originalMasked.current = masked;
-          setFields({ ...device.fields });
+          if (!dirtyRef.current) {
+            setFields({ ...device.fields });
+          }
         } else {
           const defaults: Record<string, string> = {};
           schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
@@ -406,36 +540,41 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
       })
       .catch(() => {});
 
-    toolAPI.list()
-      .then((res) => {
-        // Match against the device's storage_key exactly. The tool
-        // listing endpoint sets ``source_name = tool.provider``, which
-        // in turn equals the plugin's storage_key (see
-        // ``flocks/tool/tool_loader.py``). An exact comparison keeps
-        // multi-version installs of the same product cleanly isolated.
-        const matched = (res.data || []).filter(
-          (t) => !!storageKey && t.source_name === storageKey,
-        );
-        setServiceTools(matched);
-        const initEnabled: Record<string, boolean> = {};
-        matched.forEach((t) => { initEnabled[t.name] = t.enabled; });
-        setToolEnabled(initEnabled);
-      })
-      .catch(() => {});
-  }, [device, serviceId, storageKey]);
+    if (device) {
+      Promise.all([
+        toolAPI.list(),
+        deviceAPI.listDeviceTools(device.id),
+      ])
+        .then(([toolsRes, deviceToolsRes]) => {
+          const matched = (toolsRes.data || []).filter(
+            (t) => !!storageKey && t.source_name === storageKey,
+          );
+          setServiceTools(matched);
+          const perDevice: Record<string, DeviceToolInfo> = {};
+          (deviceToolsRes.data || []).forEach((dt) => { perDevice[dt.name] = dt; });
+          const initEnabled: Record<string, boolean> = {};
+          matched.forEach((t) => {
+            initEnabled[t.name] = perDevice[t.name]?.enabled_effective ?? t.enabled;
+          });
+          setToolEnabled(initEnabled);
+        })
+        .catch(() => {});
+    }
+  }, [device, serviceId, storageKey, template]);
 
   const handleSave = async () => {
-    if (!name.trim()) { toast.error('请填写设备名称'); return; }
+    if (!name.trim()) { toast.error(t('toast.nameRequired')); return; }
     setSaving(true);
     try {
       const payload: Record<string, string> = { ...fields };
       Object.entries(originalMasked.current).forEach(([k, masked]) => {
         if (payload[k] === masked) payload[k] = '';
       });
-      await onSave({ name: name.trim(), fields: payload, enabled, verify_ssl: verifySsl });
-      toast.success(device ? '配置已保存' : '设备已添加');
+      await onSave({ name: name.trim(), fields: payload, enabled, verify_ssl: verifySsl, group_id: groupId });
+      dirtyRef.current = false;
+      toast.success(device ? t('toast.saveDone') : t('toast.addDone'));
     } catch {
-      toast.error('保存失败');
+      toast.error(t('toast.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -446,13 +585,6 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
     setTesting(true);
     setTestResult(null);
     try {
-      // Probe with the form's current SSL toggle / base_url so the user can
-      // validate unsaved changes immediately. Empty base_url means "fall
-      // back to whatever is already in the DB".
-      // For providers that use host + port (e.g. Sangfor SIP) instead of
-      // base_url, construct the URL from those fields when available.
-      // If the operator already typed a scheme into ``host``, respect it
-      // instead of double-prefixing.
       let candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
       if (!candidateBaseUrl) {
         const host = (fields.host ?? '').trim();
@@ -464,6 +596,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
         }
       }
       setTestResult(await onTest({
+        fields,
         verify_ssl: verifySsl,
         base_url: candidateBaseUrl || undefined,
       }));
@@ -472,37 +605,47 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
     }
   };
 
-  // Toggle SSL on/off and persist immediately (no need to click 保存).
-  // Optimistic update with rollback on failure so the UI stays in sync
-  // with the backend even when the request errors out.
-  const handleToggleSsl = async () => {
+  const handleToggleSsl = () => {
     const next = !verifySsl;
+    dirtyRef.current = true;
     setVerifySsl(next);
-    if (!device || !onToggleVerifySsl) {
-      return;
-    }
-    try {
-      await onToggleVerifySsl(next);
-      toast.success(next ? '已开启 SSL 验证' : '已关闭 SSL 验证');
-    } catch {
-      setVerifySsl(!next);
-      toast.error('保存失败，已回滚');
-    }
   };
 
-  // Same immediate-persist pattern for the "启用设备" toggle.
-  const handleToggleEnabled = async () => {
+  const handleToggleEnabled = () => {
     const next = !enabled;
+    dirtyRef.current = true;
     setEnabled(next);
-    if (!device || !onToggleEnabled) {
+  };
+
+  const handleToggleFieldVisibility = async (field: APIServiceCredentialField, hasExisting: boolean) => {
+    const key = field.key;
+    if (visibility[key]) {
+      setVisibility((p) => ({ ...p, [key]: false }));
       return;
     }
+
+    const currentValue = fields[key] ?? '';
+    const maskedValue = originalMasked.current[key] ?? '';
+    const shouldRevealPersisted = !!device && hasExisting && (!currentValue || currentValue === maskedValue);
+    if (!shouldRevealPersisted) {
+      setVisibility((p) => ({ ...p, [key]: true }));
+      return;
+    }
+
+    setRevealingFields((p) => ({ ...p, [key]: true }));
     try {
-      await onToggleEnabled(next);
-      toast.success(next ? '设备已启用' : '设备已停用');
+      const res = await deviceAPI.revealCredentials(device.id, key);
+      const revealedValue = res.data.fields?.[key];
+      if (typeof revealedValue !== 'string') {
+        toast.error(t('config.secretRevealFailed'));
+        return;
+      }
+      setFields((p) => ({ ...p, [key]: revealedValue }));
+      setVisibility((p) => ({ ...p, [key]: true }));
     } catch {
-      setEnabled(!next);
-      toast.error('保存失败，已回滚');
+      toast.error(t('config.secretRevealFailed'));
+    } finally {
+      setRevealingFields((p) => ({ ...p, [key]: false }));
     }
   };
 
@@ -514,25 +657,27 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
     }
     if (!onDelete) return;
     setDeleting(true);
-    try { await onDelete(); toast.success('已删除设备'); }
-    catch { toast.error('删除失败'); }
+    try { await onDelete(); toast.success(t('toast.deleteDone')); }
+    catch { toast.error(t('toast.deleteFailed')); }
     finally { setDeleting(false); }
   };
 
   const handleToggleTool = async (toolName: string, next: boolean) => {
+    if (!device) return;
     try {
-      await toolAPI.setEnabled(toolName, next);
+      await deviceAPI.updateDeviceTool(device.id, toolName, next);
       setToolEnabled((p) => ({ ...p, [toolName]: next }));
-      setServiceTools((prev) => prev.map((t) => t.name === toolName ? { ...t, enabled: next } : t));
     } catch {
-      toast.error('操作失败');
+      toast.error(t('toast.actionFailed'));
     }
   };
 
   const TABS: { key: PanelTab; label: string; icon: React.ReactNode }[] = [
-    { key: 'config', label: '配置', icon: <Settings className="w-3.5 h-3.5" /> },
-    { key: 'tools',  label: `工具${serviceTools.length ? ` (${serviceTools.length})` : ''}`, icon: <Wrench className="w-3.5 h-3.5" /> },
-    { key: 'overview', label: '概览', icon: <AlertTriangle className="w-3.5 h-3.5 opacity-60" /> },
+    { key: 'config', label: t('config.tabConfig'), icon: <Settings className="w-3.5 h-3.5" /> },
+    ...(device
+      ? [{ key: 'tools' as PanelTab, label: serviceTools.length ? t('config.tabToolsCount', { count: serviceTools.length }) : t('config.tabTools'), icon: <Wrench className="w-3.5 h-3.5" /> }]
+      : []),
+    { key: 'overview', label: t('config.tabOverview'), icon: <AlertTriangle className="w-3.5 h-3.5 opacity-60" /> },
   ];
 
   return (
@@ -540,14 +685,14 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
       <div className="fixed inset-0 z-40 pointer-events-none">
         <button
           type="button"
-          aria-label="关闭设备配置面板"
+          aria-label={t('config.closeAriaLabel')}
           onClick={onClose}
           className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
-          style={{ top: 64, right: 480 }}
+          style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
         />
         <div
-          className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-          style={{ width: 480, top: 64 }}
+          className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+          style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -561,10 +706,10 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                 {device ? <PlugZap className="w-4 h-4 text-blue-500" /> : <Plus className="w-4 h-4 text-zinc-400" />}
               </div>
               <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : '填写配置'}</h3>
+                <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : t('config.newDeviceTitle')}</h3>
                 <div className="flex items-center gap-1.5 mt-0.5">
-                  {vendor && <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{vendor.nameCn}</span>}
-                  <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.id}</span>
+                  {vendor && <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</span>}
+                  <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.storage_key}</span>
                 </div>
               </div>
             </div>
@@ -598,23 +743,54 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
               <div className="px-5 py-4 space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
-                    设备名称 <span className="text-red-500">*</span>
+                    {t('config.nameLabel')} <span className="text-red-500">*</span>
                   </label>
                   <input
                     type="text"
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="例如：总部 AF 防火墙"
+                    onChange={(e) => {
+                      dirtyRef.current = true;
+                      setName(e.target.value);
+                    }}
+                    placeholder={t('config.namePlaceholder')}
                     className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
                   />
                 </div>
 
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
+                    {t('config.roomLabel')} <span className="text-red-500">*</span>
+                  </label>
+                  {groupLocked ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
+                      <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+                      <span className="text-sm text-zinc-600">
+                        {groups.find((g) => g.id === groupId)?.name ?? groupId}
+                      </span>
+                    </div>
+                  ) : (
+                    <select
+                      value={groupId}
+                      onChange={(e) => {
+                        dirtyRef.current = true;
+                        setGroupId(e.target.value);
+                      }}
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                    >
+                      {groups.map((g) => (
+                        <option key={g.id} value={g.id}>{g.name}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
                 {credFields.length > 0 && (
                   <div className="space-y-3">
-                    <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">连接参数</p>
+                    <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">{t('config.connectionParams')}</p>
                     {credFields.map((f) => {
                       const isSecret = f.storage === 'secret' || f.input_type === 'password';
                       const show = !!visibility[f.key];
+                      const revealing = !!revealingFields[f.key];
                       const hasExisting = !!device?.fields_set?.[f.key];
                       return (
                         <div key={f.key}>
@@ -626,22 +802,30 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                             <input
                               type={isSecret && !show ? 'password' : 'text'}
                               value={fields[f.key] ?? ''}
-                              onChange={(e) => setFields((p) => ({ ...p, [f.key]: e.target.value }))}
+                              onChange={(e) => {
+                                dirtyRef.current = true;
+                                setFields((p) => ({ ...p, [f.key]: e.target.value }));
+                              }}
                               placeholder={f.default_value ?? ''}
                               className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 pr-10"
                             />
                             {isSecret && (
                               <button
                                 type="button"
-                                onClick={() => setVisibility((p) => ({ ...p, [f.key]: !p[f.key] }))}
-                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+                                onClick={() => handleToggleFieldVisibility(f, hasExisting)}
+                                disabled={revealing}
+                                aria-label={show
+                                  ? t('config.hideSecretAria', { label: f.label })
+                                  : t('config.showSecretAria', { label: f.label })}
+                                title={show ? t('config.hideSecretAction') : t('config.showSecretAction')}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 disabled:opacity-60"
                               >
-                                {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                {revealing ? <Loader2 className="w-4 h-4 animate-spin" /> : show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                               </button>
                             )}
                           </div>
                           {isSecret && device && hasExisting && (
-                            <p className="mt-0.5 text-[11px] text-zinc-400">已配置 · 保持不变请勿修改，清空则删除</p>
+                            <p className="mt-0.5 text-[11px] text-zinc-400">{t('config.secretConfigured')}</p>
                           )}
                           {f.description && <p className="mt-0.5 text-xs text-zinc-400">{f.description}</p>}
                         </div>
@@ -653,15 +837,15 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                 <div className="rounded-xl border border-zinc-100 divide-y divide-zinc-100">
                   <div className="flex items-center justify-between px-4 py-3">
                     <div>
-                      <p className="text-sm font-medium text-zinc-700">SSL 验证</p>
-                      <p className="text-[11px] text-zinc-400 mt-0.5">关闭可访问自签名证书的内网设备</p>
+                      <p className="text-sm font-medium text-zinc-700">{t('config.sslLabel')}</p>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">{t('config.sslHint')}</p>
                     </div>
                     <Toggle on={verifySsl} onToggle={handleToggleSsl} />
                   </div>
                   <div className="flex items-center justify-between px-4 py-3">
                     <div>
-                      <p className="text-sm font-medium text-zinc-700">启用设备</p>
-                      <p className="text-[11px] text-zinc-400 mt-0.5">关闭后 Agent 不会调用此设备的工具</p>
+                      <p className="text-sm font-medium text-zinc-700">{t('config.enabledLabel')}</p>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">{t('config.enabledHint')}</p>
                     </div>
                     <Toggle on={enabled} onToggle={handleToggleEnabled} />
                   </div>
@@ -687,7 +871,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                         className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
                       >
                         {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
-                        连通测试
+                        {t('config.testBtn')}
                       </button>
                     )}
                     <button
@@ -696,7 +880,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                       className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                     >
                       {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                      {device ? '保存配置' : '确认接入'}
+                      {device ? t('config.saveBtn') : t('config.addBtn')}
                     </button>
                   </div>
                   {device && onDelete && (
@@ -706,7 +890,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                       className="w-full flex items-center justify-center gap-1.5 py-2 text-sm rounded-lg border border-red-100 text-red-500 hover:bg-red-50 disabled:opacity-50 transition-colors"
                     >
                       {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                      {confirmDelete ? '确认删除此设备配置？' : '删除设备'}
+                      {confirmDelete ? t('config.confirmDelete') : t('config.deleteBtn')}
                     </button>
                   )}
                 </div>
@@ -719,17 +903,17 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                 {serviceTools.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 text-zinc-400 gap-2">
                     <Wrench className="w-8 h-8 opacity-30" />
-                    <p className="text-sm">暂无关联工具</p>
+                    <p className="text-sm">{t('tools.empty')}</p>
                   </div>
                 ) : (
                   <div className="rounded-xl border border-zinc-100 overflow-hidden">
                     <table className="w-full table-fixed divide-y divide-zinc-100">
                       <thead className="bg-zinc-50">
                         <tr>
-                          <th className="w-[38%] px-4 py-2.5 text-left text-xs font-medium text-zinc-500">工具名称</th>
-                          <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500">描述</th>
-                          <th className="w-[72px] px-4 py-2.5 text-left text-xs font-medium text-zinc-500">状态</th>
-                          <th className="w-[80px] px-4 py-2.5 text-right text-xs font-medium text-zinc-500">操作</th>
+                          <th className="w-[38%] px-4 py-2.5 text-left text-xs font-medium text-zinc-500">{t('tools.colName')}</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500">{t('tools.colDesc')}</th>
+                          <th className="w-[72px] px-4 py-2.5 text-left text-xs font-medium text-zinc-500">{t('tools.colStatus')}</th>
+                          <th className="w-[80px] px-4 py-2.5 text-right text-xs font-medium text-zinc-500">{t('tools.colAction')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-zinc-100 bg-white">
@@ -750,10 +934,10 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                               </td>
                               <td className="px-4 py-3 text-right">
                                 <button
-                                  onClick={() => setToolModal(tool)}
+                                  onClick={() => setToolModal({ ...tool, enabled: isOn })}
                                   className="text-xs text-blue-600 hover:text-blue-800 font-medium"
                                 >
-                                  测试 / 详情
+                                  {t('tools.detail')}
                                 </button>
                               </td>
                             </tr>
@@ -771,10 +955,10 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
               <div className="px-5 py-4 space-y-3">
                 <div className="rounded-xl border border-zinc-100 divide-y divide-zinc-100 overflow-hidden">
                   {[
-                    { label: '服务名称', value: metadata?.name || serviceId },
-                    metadata?.version ? { label: '版本', value: metadata.version } : null,
-                    { label: '工具数量', value: String(serviceTools.length) },
-                    vendor ? { label: '厂商', value: vendor.nameCn } : null,
+                    { label: t('overview.serviceName'), value: metadata?.name || serviceId },
+                    metadata?.version ? { label: t('overview.version'), value: metadata.version } : null,
+                    { label: t('overview.toolCount'), value: String(serviceTools.length) },
+                    vendor ? { label: t('overview.vendor'), value: i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn } : null,
                     device?.storage_key ? { label: 'Storage Key', value: device.storage_key } : null,
                     device?.service_id ? { label: 'Service ID', value: device.service_id } : null,
                   ].filter(Boolean).map((row) => (
@@ -787,7 +971,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
 
                 {(metadata?.description_cn || metadata?.description) && (
                   <div className="rounded-xl border border-zinc-100 px-4 py-3">
-                    <p className="text-xs font-semibold text-zinc-400 mb-1.5 uppercase tracking-wide">服务简介</p>
+                    <p className="text-xs font-semibold text-zinc-400 mb-1.5 uppercase tracking-wide">{t('overview.serviceDesc')}</p>
                     <p className="text-sm text-zinc-600 leading-relaxed whitespace-pre-wrap">
                       {metadata?.description_cn || metadata?.description}
                     </p>
@@ -802,7 +986,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                     className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 px-1"
                   >
                     <ChevronRight className="w-4 h-4" />
-                    查看 API 文档
+                    {t('overview.viewDocs')}
                   </a>
                 )}
               </div>
@@ -815,6 +999,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
         <ToolDetailModal
           tool={toolModal}
           initialSection="test"
+          deviceId={device?.id}
           onClose={() => setToolModal(null)}
         />
       )}
@@ -823,87 +1008,273 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
 }
 
 // ============================================================================
-// Group banner (inline rename for the single default room)
+// Group sidebar — left panel for room navigation & management
 // ============================================================================
 
-function GroupBanner({ group, onRenamed }: {
-  group: DeviceGroup | undefined;
-  onRenamed: () => void;
+type RoomStatus = 'ok' | 'partial' | 'empty';
+
+function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, onDelete, onCreate }: {
+  groups: DeviceGroup[];
+  devices: DeviceIntegration[];
+  selectedGroupId: string | null;
+  onSelect: (id: string | null) => void;
+  onRename: (id: string, newName: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onCreate: (name: string) => Promise<void>;
 }) {
   const toast = useToast();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(group?.name ?? '');
-  const [saving, setSaving] = useState(false);
+  const { t } = useTranslation('device');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createDraft, setCreateDraft] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => { setDraft(group?.name ?? ''); }, [group?.name]);
+  // Device counts per group
+  const deviceCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    devices.forEach((d) => { c[d.group_id] = (c[d.group_id] || 0) + 1; });
+    return c;
+  }, [devices]);
 
-  if (!group) return null;
+  // Room connectivity status
+  const groupStatuses = useMemo((): Record<string, RoomStatus> => {
+    const s: Record<string, RoomStatus> = {};
+    groups.forEach((g) => {
+      const gd = devices.filter((d) => d.group_id === g.id && d.enabled);
+      if (gd.length === 0) { s[g.id] = 'empty'; return; }
+      const ok = gd.filter((d) => d.status === 'ok' || d.status === 'connected').length;
+      s[g.id] = ok === gd.length ? 'ok' : 'partial';
+    });
+    return s;
+  }, [groups, devices]);
 
-  const startEdit = () => { setDraft(group.name); setEditing(true); };
-  const cancelEdit = () => { setDraft(group.name); setEditing(false); };
-  const saveEdit = async () => {
-    const next = draft.trim();
-    if (!next || next === group.name) { cancelEdit(); return; }
-    setSaving(true);
+  const statusDotClass: Record<RoomStatus, string> = {
+    ok: 'bg-green-500',
+    partial: 'bg-yellow-400',
+    empty: 'bg-zinc-300',
+  };
+
+  const startEdit = (g: DeviceGroup, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingId(g.id);
+    setEditDraft(g.name);
+    setCreating(false);
+  };
+
+  const cancelEdit = () => { setEditingId(null); setEditDraft(''); };
+
+  const saveEdit = async (groupId: string) => {
+    const next = editDraft.trim();
+    const g = groups.find((x) => x.id === groupId);
+    if (!next || next === g?.name) { cancelEdit(); return; }
+    setBusy(true);
     try {
-      await deviceAPI.updateGroup(group.id, { name: next });
-      toast.success('机房名称已更新');
-      setEditing(false);
-      onRenamed();
+      await onRename(groupId, next);
+      setEditingId(null);
     } catch {
-      toast.error('更新失败');
+      // error already toasted by parent
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
 
+  const startCreate = () => {
+    setCreating(true);
+    setCreateDraft('');
+    setEditingId(null);
+  };
+
+  const cancelCreate = () => { setCreating(false); setCreateDraft(''); };
+
+  const saveCreate = async () => {
+    const name = createDraft.trim();
+    if (!name) { cancelCreate(); return; }
+    setBusy(true);
+    try {
+      await onCreate(name);
+      cancelCreate();
+    } catch {
+      // error already toasted by parent; keep input open so user can retry
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteClick = async (group: DeviceGroup, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const count = deviceCounts[group.id] || 0;
+    if (count > 0) {
+      toast.error(t('sidebar.deleteHasDevices', { name: group.name, count }));
+      return;
+    }
+    await onDelete(group.id);
+  };
+
   return (
-    <div className="px-6 py-2.5 border-b border-zinc-100 bg-zinc-50/60 flex items-center gap-2">
-      <Server className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-      <span className="text-xs text-zinc-400">当前机房</span>
-      {editing ? (
-        <>
-          <input
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void saveEdit();
-              if (e.key === 'Escape') cancelEdit();
-            }}
-            disabled={saving}
-            maxLength={40}
-            className="text-sm font-medium text-zinc-800 bg-white border border-zinc-200 rounded-md px-2 py-1 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 w-48"
-          />
-          <button
-            onClick={() => void saveEdit()}
-            disabled={saving}
-            className="p-1 rounded-md text-blue-600 hover:bg-blue-50 disabled:opacity-50"
-            title="保存"
-          >
-            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-          </button>
-          <button
-            onClick={cancelEdit}
-            disabled={saving}
-            className="p-1 rounded-md text-zinc-400 hover:bg-zinc-100"
-            title="取消"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </>
-      ) : (
-        <>
-          <span className="text-sm font-medium text-zinc-800 truncate">{group.name}</span>
-          <button
-            onClick={startEdit}
-            className="p-1 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100"
-            title="重命名"
-          >
-            <Pencil className="w-3 h-3" />
-          </button>
-        </>
-      )}
+    // self-stretch ensures the panel fills the full flex-row height so the
+    // right border reaches the bottom even when there are few rooms.
+    <div className="w-52 flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50">
+      {/* Header */}
+      <div className="px-3 py-2.5 flex items-center justify-between flex-shrink-0">
+        <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">{t('sidebar.heading')}</span>
+        <button
+          onClick={startCreate}
+          className="p-1 rounded text-zinc-400 hover:text-zinc-700 transition-colors"
+          title={t('sidebar.addRoom')}
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* Divider */}
+      <div className="h-px bg-zinc-200 mx-0" />
+
+      {/* Scrollable list */}
+      <div className="flex-1 overflow-y-auto py-1 px-2">
+        {/* "全部机房" item */}
+        <button
+          onClick={() => { onSelect(null); cancelEdit(); }}
+          className={`w-full flex items-center gap-2 px-2.5 py-2 text-left rounded transition-colors mt-1 ${
+            selectedGroupId === null
+              ? 'bg-blue-50 text-blue-700'
+              : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700'
+          }`}
+        >
+          <Building2 className="w-3.5 h-3.5 flex-shrink-0" />
+          <span className="text-sm flex-1 font-medium truncate">{t('sidebar.allRooms')}</span>
+          <span className={`text-[11px] font-semibold tabular-nums ${
+            selectedGroupId === null ? 'text-blue-500' : 'text-zinc-400'
+          }`}>
+            {devices.length}
+          </span>
+        </button>
+
+        <div className="h-px my-1 bg-zinc-200" />
+
+        {/* Individual rooms */}
+        {groups.map((group) => {
+          const count = deviceCounts[group.id] || 0;
+          const st = groupStatuses[group.id] || 'empty';
+          const isSelected = selectedGroupId === group.id;
+          const isEditing = editingId === group.id;
+          const isDefault = group.id === DEFAULT_GROUP_ID;
+
+          return (
+            <div
+              key={group.id}
+              className={`group/room relative flex items-center gap-2 px-2.5 py-2 rounded cursor-pointer transition-colors ${
+                isSelected
+                  ? 'bg-blue-50 text-blue-700'
+                  : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700'
+              }`}
+              onClick={() => { if (!isEditing) onSelect(group.id); }}
+            >
+              {/* Status dot */}
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDotClass[st]}`} />
+
+              {isEditing ? (
+                <>
+                  <input
+                    autoFocus
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void saveEdit(group.id);
+                      if (e.key === 'Escape') cancelEdit();
+                      e.stopPropagation();
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    disabled={busy}
+                    maxLength={40}
+                    className="flex-1 min-w-0 text-sm text-zinc-900 bg-white border border-zinc-300 rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-400"
+                  />
+                  <div className="flex items-center gap-0.5 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => void saveEdit(group.id)}
+                      disabled={busy}
+                      className="p-1 rounded text-blue-600 hover:bg-blue-100 disabled:opacity-50"
+                    >
+                      {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                    </button>
+                    <button onClick={cancelEdit} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span className="flex-1 text-sm truncate">{group.name}</span>
+                  <span className={`text-[11px] font-semibold tabular-nums flex-shrink-0 ${
+                    isSelected ? 'text-blue-500' : 'text-zinc-400'
+                  }`}>
+                    {count}
+                  </span>
+
+                  {/* Hover action buttons */}
+                  <div
+                    className="device-room-actions-fade absolute right-1 inset-y-0 hidden group-hover/room:flex items-center gap-0.5 pl-4"
+                    data-selected={isSelected ? 'true' : 'false'}
+                  >
+                    <button
+                      onClick={(e) => startEdit(group, e)}
+                      className="p-1 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
+                      title={t('sidebar.rename')}
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                    {!isDefault && (
+                      <button
+                        onClick={(e) => void handleDeleteClick(group, e)}
+                        className={`p-1 rounded transition-colors ${
+                          count > 0
+                            ? 'text-zinc-300 cursor-not-allowed'
+                            : 'text-zinc-400 hover:text-red-500'
+                        }`}
+                        title={count > 0 ? t('sidebar.deleteDisabled', { count }) : t('sidebar.deleteRoom')}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Inline new room form */}
+        {creating && (
+          <div className="flex items-center gap-2 px-2.5 py-2 rounded bg-blue-50 mt-0.5">
+            <Server className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+            <input
+              autoFocus
+              value={createDraft}
+              onChange={(e) => setCreateDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void saveCreate();
+                if (e.key === 'Escape') cancelCreate();
+              }}
+              disabled={busy}
+              placeholder={t('sidebar.roomNamePlaceholder')}
+              maxLength={40}
+              className="flex-1 min-w-0 text-sm text-zinc-900 bg-white border border-zinc-300 rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-400"
+            />
+            <div className="flex items-center gap-0.5 flex-shrink-0">
+              <button
+                onClick={() => void saveCreate()}
+                disabled={busy}
+                className="p-1 rounded text-blue-600 hover:bg-blue-100 disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+              </button>
+              <button onClick={cancelCreate} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -913,36 +1284,69 @@ function GroupBanner({ group, onRenamed }: {
 // ============================================================================
 
 type PanelMode =
+  | { kind: 'pick-group' }
   | { kind: 'wizard'; initialVendor?: DeviceVendor }
-  | { kind: 'add'; template: APIServiceSummary }
+  | { kind: 'add'; template: DeviceTemplate }
+  | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
 
 export default function DeviceIntegrationPage() {
   const toast = useToast();
+  const { t } = useTranslation('device');
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
-  const [templates, setTemplates] = useState<APIServiceSummary[]>([]);
+  const [templates, setTemplates] = useState<DeviceTemplate[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [panel, setPanel] = useState<PanelMode>(null);
+  const lastRefreshRef = useRef(0);
+  // null = "全部机房" aggregate view; string = specific group id
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  // Group ids whose section is collapsed in the "全部机房" view. Default
+  // (absent) = expanded, so brand-new rooms show their devices immediately.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
-  const currentGroup: DeviceGroup | undefined = groups[0];
+  const toggleGroupCollapsed = useCallback((groupId: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  }, []);
 
-  const fetchData = useCallback(async (silent = false) => {
+  const selectedGroup = useMemo(
+    () => groups.find((g) => g.id === selectedGroupId) ?? null,
+    [groups, selectedGroupId],
+  );
+
+  // Devices shown in the main area (filtered by selected room)
+  const filteredDevices = useMemo(
+    () => selectedGroupId ? devices.filter((d) => d.group_id === selectedGroupId) : devices,
+    [devices, selectedGroupId],
+  );
+
+  const fetchData = useCallback(async (silent = false, refreshTemplates = false): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
+      if (refreshTemplates) {
+        await deviceAPI.sync({ refresh: true });
+      }
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        providerAPI.listApiServices(),
+        deviceAPI.listTemplates(),
         deviceAPI.listGroups(),
       ]);
+      const nextTemplates = tplRes.data || [];
       setDevices(devRes.data || []);
-      setTemplates((tplRes.data || []).filter((s) => s.integration_type === 'device'));
+      setTemplates(nextTemplates);
       setGroups(grpRes.data || []);
+      return nextTemplates;
     } catch {
-      toast.error('加载失败');
+      toast.error(t('toast.loadFailed'));
+      return [];
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -951,6 +1355,31 @@ export default function DeviceIntegrationPage() {
 
   useEffect(() => { void fetchData(); }, [fetchData]);
 
+  const refreshOnResume = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRefreshRef.current < 1000) return;
+    lastRefreshRef.current = now;
+    void fetchData(true);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOnResume();
+      }
+    };
+    const handleWindowFocus = () => {
+      refreshOnResume();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [refreshOnResume]);
+
   // Count instances per storage_key (for wizard display)
   const instanceCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -958,24 +1387,13 @@ export default function DeviceIntegrationPage() {
     return counts;
   }, [devices]);
 
-  // storage_key (and bare service_id) → vendor key, sourced from the backend
-  // template list. Used to resolve vendor for already-installed devices
-  // (whose `DeviceIntegration` row does not carry the vendor field directly).
-  //
-  // Legacy devices may have been installed before api_versioning shipped, so
-  // their `storage_key` is the bare service_id (e.g. "tdp_api") rather than
-  // the versioned form ("tdp_api_v3_3_10"). We additionally index each
-  // template by its bare service_id (regex matches the backend's
-  // `storage_key_to_service_id`) so those rows still resolve correctly.
+  // storage_key / service_id → vendor key mapping
   const vendorByKey = useMemo(() => {
     const map: Record<string, string> = {};
     templates.forEach((t) => {
       if (!t.vendor) return;
-      map[t.id] = t.vendor;
-      const bareServiceId = t.id.replace(/_v[\w.]+$/i, '');
-      if (bareServiceId !== t.id && !map[bareServiceId]) {
-        map[bareServiceId] = t.vendor;
-      }
+      map[t.storage_key] = t.vendor;
+      map[t.service_id] = t.vendor;
     });
     return map;
   }, [templates]);
@@ -988,12 +1406,64 @@ export default function DeviceIntegrationPage() {
 
   const panelDeviceId = panel?.kind === 'edit' ? panel.device.id : null;
 
-  const handleSave = async (data: { name: string; fields: Record<string, string>; enabled: boolean; verify_ssl: boolean }) => {
+  // ──────────────────────────────────────────────────────────────────────────
+  // Group CRUD handlers
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // These three re-throw on failure (after toasting) so GroupSidebar's inline
+  // edit/create forms know to stay open for a retry instead of silently
+  // closing on a 409 (duplicate name) etc.
+  const handleCreateGroup = async (name: string) => {
+    try {
+      const res = await deviceAPI.createGroup({ name });
+      await fetchData(true);
+      setSelectedGroupId(res.data.id); // auto-select the newly created room
+      toast.success(`机房「${name}」已创建`);
+    } catch (err: unknown) {
+      toast.error(errDetail(err, '创建机房失败'));
+      throw err;
+    }
+  };
+
+  const handleRenameGroup = async (id: string, newName: string) => {
+    try {
+      await deviceAPI.updateGroup(id, { name: newName });
+      await fetchData(true);
+      toast.success('机房名称已更新');
+    } catch (err: unknown) {
+      toast.error(errDetail(err, '重命名失败'));
+      throw err;
+    }
+  };
+
+  const handleDeleteGroup = async (id: string) => {
+    try {
+      await deviceAPI.deleteGroup(id);
+      if (selectedGroupId === id) setSelectedGroupId(null);
+      await fetchData(true);
+      toast.success('机房已删除');
+    } catch (err: unknown) {
+      toast.error(errDetail(err, '删除失败'));
+    }
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Device CRUD handlers
+  // ──────────────────────────────────────────────────────────────────────────
+
+  const handleSave = async (data: {
+    name: string;
+    fields: Record<string, string>;
+    enabled: boolean;
+    verify_ssl: boolean;
+    group_id: string;
+  }) => {
     if (panel?.kind === 'add') {
       await deviceAPI.create({
         name: data.name,
-        storage_key: panel.template.id,
-        group_id: currentGroup?.id,
+        storage_key: panel.template.storage_key,
+        service_id: panel.template.service_id,
+        group_id: data.group_id,
         enabled: data.enabled,
         verify_ssl: data.verify_ssl,
         fields: data.fields,
@@ -1002,6 +1472,7 @@ export default function DeviceIntegrationPage() {
     } else if (panel?.kind === 'edit') {
       await deviceAPI.update(panel.device.id, {
         name: data.name,
+        group_id: data.group_id,
         enabled: data.enabled,
         verify_ssl: data.verify_ssl,
         fields: data.fields,
@@ -1010,6 +1481,9 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
     if (panel?.kind === 'edit') {
       const updated = await deviceAPI.get(panel.device.id);
+      if (selectedGroupId && updated.data.group_id !== selectedGroupId) {
+        setSelectedGroupId(updated.data.group_id);
+      }
       setPanel({ kind: 'edit', device: updated.data });
     }
   };
@@ -1021,48 +1495,65 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
   };
 
-  const handleTest = async (overrides: { verify_ssl: boolean; base_url?: string }) => {
+  const handleTest = async (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => {
     if (panel?.kind !== 'edit') return { success: false, message: '' };
     const res = await deviceAPI.test(panel.device.id, overrides);
-    await fetchData(true);
-    if (panel?.kind === 'edit') {
-      const updated = await deviceAPI.get(panel.device.id);
-      setPanel({ kind: 'edit', device: updated.data });
-    }
+    setDevices((current) => current.map((device) => (
+      device.id === panel.device.id
+        ? {
+            ...device,
+            status: res.data.success ? 'ok' : 'error',
+            message: res.data.message,
+            latency_ms: res.data.latency_ms ?? null,
+            checked_at: Date.now(),
+          }
+        : device
+    )));
     return res.data;
   };
 
-  // Persist the SSL toggle the moment it flips, without requiring 保存.
-  // Re-fetches the device so the open panel reflects the freshly stored row.
-  const handleToggleVerifySsl = async (next: boolean) => {
-    if (panel?.kind !== 'edit') return;
-    await deviceAPI.update(panel.device.id, { verify_ssl: next });
-    const updated = await deviceAPI.get(panel.device.id);
-    setPanel({ kind: 'edit', device: updated.data });
-    await fetchData(true);
-  };
+  // ──────────────────────────────────────────────────────────────────────────
+  // Group to use when adding a new device (follows sidebar selection).
+  // In "全部机房" view (null), pre-select the first available group so the
+  // dropdown has a sensible default; the user can change it in the panel.
+  // ──────────────────────────────────────────────────────────────────────────
+  const addDefaultGroupId = selectedGroupId ?? groups[0]?.id ?? DEFAULT_GROUP_ID;
+  // Whether the room field should be locked (read-only) in the config panel.
+  const groupLocked = selectedGroupId !== null;
 
-  // Same pattern for enabled — persists immediately without needing 保存.
-  const handleToggleEnabled = async (next: boolean) => {
-    if (panel?.kind !== 'edit') return;
-    await deviceAPI.update(panel.device.id, { enabled: next });
-    const updated = await deviceAPI.get(panel.device.id);
-    setPanel({ kind: 'edit', device: updated.data });
-    await fetchData(true);
-  };
+  // ──────────────────────────────────────────────────────────────────────────
+  // Stats for the main area header
+  // ──────────────────────────────────────────────────────────────────────────
+  const connectedCount = filteredDevices.filter(
+    (d) => d.enabled && (d.status === 'ok' || d.status === 'connected'),
+  ).length;
+  const errorCount = filteredDevices.filter((d) => d.enabled && d.status === 'error').length;
+
+  // Groups that actually render a section in the "全部机房" view (i.e. have at
+  // least one device) — drives the collapse-all toggle.
+  const nonEmptyGroupIds = useMemo(
+    () => groups.filter((g) => devices.some((d) => d.group_id === g.id)).map((g) => g.id),
+    [groups, devices],
+  );
+  const allCollapsed =
+    nonEmptyGroupIds.length > 0 && nonEmptyGroupIds.every((id) => collapsedGroups.has(id));
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Render
+  // ──────────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden">
       <PageHeader
-        title="设备接入"
-        description="配置安全设备 API 连接，使 Flocks 能够直接调用和控制这些设备"
-        icon={<Shield className="w-5 h-5" />}
+        title={t('pageTitle')}
+        description={t('pageDescription')}
+        icon={<ServerCog className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => void fetchData(true)}
+              onClick={() => void fetchData(true, true)}
               disabled={refreshing}
-              title="刷新"
+              title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
@@ -1072,63 +1563,236 @@ export default function DeviceIntegrationPage() {
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-medium"
             >
               <Plus className="w-3.5 h-3.5" />
-              添加设备
+              {t('toolbar.addDevice')}
             </button>
           </div>
         }
       />
 
-      <GroupBanner group={currentGroup} onRenamed={() => void fetchData(true)} />
+      {/* Content: sidebar + main area */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        {/* Left: room sidebar */}
+        {!loading && (
+          <GroupSidebar
+            groups={groups}
+            devices={devices}
+            selectedGroupId={selectedGroupId}
+            onSelect={setSelectedGroupId}
+            onRename={handleRenameGroup}
+            onDelete={handleDeleteGroup}
+            onCreate={handleCreateGroup}
+          />
+        )}
 
-      {loading ? (
-        <div className="flex-1 flex items-center justify-center"><LoadingSpinner /></div>
-      ) : (
-        <div className="flex-1 overflow-y-auto px-6 py-6">
-          {devices.length === 0 ? (
-            /* Empty state */
-            <div className="flex flex-col items-center justify-center py-24 gap-4">
-              <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
-                <PlugZap className="w-7 h-7 text-zinc-300" />
-              </div>
-              <div className="text-center">
-                <p className="text-sm font-semibold text-zinc-700">暂无已接入的设备</p>
-                <p className="text-xs text-zinc-400 mt-1.5">添加设备后，Flocks Agent 即可调用对应工具</p>
-              </div>
-              <button
-                onClick={() => setPanel({ kind: 'wizard' })}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                立即添加设备
-              </button>
-            </div>
+        {/* Right: main device area */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {loading ? (
+            <div className="flex-1 flex items-center justify-center"><LoadingSpinner /></div>
           ) : (
-            <section>
-              <div className="flex items-center gap-2 mb-4">
-                <PlugZap className="w-4 h-4 text-blue-600" />
-                <h3 className="text-sm font-semibold text-zinc-800">已接入设备</h3>
-                <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">{devices.length}</span>
-                {devices.filter((d) => d.status === 'ok' || d.status === 'connected').length > 0 && (
-                  <span className="text-xs text-green-600">
-                    {devices.filter((d) => d.status === 'ok' || d.status === 'connected').length} 已连接
-                  </span>
+            <>
+              {/* Room / aggregate header bar */}
+              <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-shrink-0">
+                {selectedGroup ? (
+                  <>
+                    <Server className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-zinc-800">{selectedGroup.name}</span>
+                    <span className="text-xs text-zinc-400">{t('header.devices', { count: filteredDevices.length })}</span>
+                    {connectedCount > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs text-green-600">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                        {t('header.connected', { count: connectedCount })}
+                      </span>
+                    )}
+                    {errorCount > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs text-red-500">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />
+                        {t('header.failed', { count: errorCount })}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <Building2 className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-zinc-800">{t('header.allRooms')}</span>
+                    <span className="text-xs text-zinc-400">
+                      {t('header.deviceCount', { count: devices.length, rooms: groups.length })}
+                    </span>
+                    {connectedCount > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs text-green-600">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                        {t('header.connected', { count: connectedCount })}
+                      </span>
+                    )}
+                    {errorCount > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs text-red-500">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />
+                        {t('header.failed', { count: errorCount })}
+                      </span>
+                    )}
+                    {nonEmptyGroupIds.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCollapsedGroups(allCollapsed ? new Set() : new Set(nonEmptyGroupIds))
+                        }
+                        className="ml-auto flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-700 transition-colors"
+                      >
+                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${allCollapsed ? '-rotate-90' : ''}`} />
+                        {allCollapsed ? t('toolbar.expandAll') : t('toolbar.collapseAll')}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {devices.map((d) => (
-                  <ActiveCard
-                    key={d.id}
-                    device={d}
-                    vendorKey={vendorOf(d)}
-                    selected={panelDeviceId === d.id}
-                    onClick={() => setPanel({ kind: 'edit', device: d })}
-                  />
-                ))}
+
+              {/* Device content area */}
+              <div className="flex-1 overflow-y-auto px-6 py-6">
+                {devices.length === 0 ? (
+                  /* Global empty state — no devices at all */
+                  <div className="flex flex-col items-center justify-center py-24 gap-4">
+                    <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
+                      <PlugZap className="w-7 h-7 text-zinc-300" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-semibold text-zinc-700">{t('empty.noDevices')}</p>
+                      <p className="text-xs text-zinc-400 mt-1.5">{t('empty.noDevicesHint')}</p>
+                    </div>
+                    <button
+                      onClick={() => setPanel({ kind: 'wizard' })}
+                      className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      {t('empty.addNow')}
+                    </button>
+                  </div>
+                ) : selectedGroupId === null ? (
+                  /* ── "全部机房" grouped view ── */
+                  <div className="space-y-8">
+                    {groups.map((group) => {
+                      const gDevices = devices.filter((d) => d.group_id === group.id);
+                      if (gDevices.length === 0) return null;
+                      const gConnected = gDevices.filter(
+                        (d) => d.enabled && (d.status === 'ok' || d.status === 'connected'),
+                      ).length;
+                      const collapsed = collapsedGroups.has(group.id);
+                      return (
+                        <section key={group.id}>
+                          <button
+                            type="button"
+                            onClick={() => toggleGroupCollapsed(group.id)}
+                            className="w-full flex items-center gap-2 mb-4 group/sec text-left"
+                            aria-expanded={!collapsed}
+                          >
+                            <ChevronDown
+                              className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${collapsed ? '-rotate-90' : ''}`}
+                            />
+                            <Server className="w-4 h-4 text-zinc-400" />
+                            <h3 className="text-sm font-semibold text-zinc-700 group-hover/sec:text-zinc-900">{group.name}</h3>
+                            <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
+                              {gDevices.length}
+                            </span>
+                            {gConnected > 0 && (
+                              <span className="text-xs text-green-600">{t('header.connected', { count: gConnected })}</span>
+                            )}
+                          </button>
+                          {!collapsed && (
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                              {gDevices.map((d) => (
+                                <ActiveCard
+                                  key={d.id}
+                                  device={d}
+                                  vendorKey={vendorOf(d)}
+                                  selected={panelDeviceId === d.id}
+                                  onClick={() => setPanel({ kind: 'edit', device: d })}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </section>
+                      );
+                    })}
+
+                    {/* Orphan fallback: devices whose group_id matches no known
+                        room (data drift / migration leftovers) must still be
+                        reachable — the "全部机房" view should never hide a device. */}
+                    {(() => {
+                      const known = new Set(groups.map((g) => g.id));
+                      const orphans = devices.filter((d) => !known.has(d.group_id));
+                      if (orphans.length === 0) return null;
+                      return (
+                        <section>
+                          <div className="flex items-center gap-2 mb-4">
+                            <AlertTriangle className="w-4 h-4 text-yellow-500" />
+                            <h3 className="text-sm font-semibold text-zinc-700">{t('section.ungrouped')}</h3>
+                            <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
+                              {orphans.length}
+                            </span>
+                            <span className="text-xs text-zinc-400">{t('section.ungroupedHint')}</span>
+                          </div>
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                            {orphans.map((d) => (
+                              <ActiveCard
+                                key={d.id}
+                                device={d}
+                                vendorKey={vendorOf(d)}
+                                selected={panelDeviceId === d.id}
+                                onClick={() => setPanel({ kind: 'edit', device: d })}
+                              />
+                            ))}
+                          </div>
+                        </section>
+                      );
+                    })()}
+                  </div>
+                ) : filteredDevices.length === 0 ? (
+                  /* ── Specific room, no devices ── */
+                  <div className="flex flex-col items-center justify-center py-24 gap-4">
+                    <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
+                      <Server className="w-7 h-7 text-zinc-300" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-semibold text-zinc-700">{t('empty.roomEmpty')}</p>
+                      <p className="text-xs text-zinc-400 mt-1.5">{t('empty.roomEmptyHint')}</p>
+                    </div>
+                    <button
+                      onClick={() => setPanel({ kind: 'wizard' })}
+                      className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      {t('empty.addNow')}
+                    </button>
+                  </div>
+                ) : (
+                  /* ── Specific room, has devices ── */
+                  <section>
+                    <div className="flex items-center gap-2 mb-4">
+                      <PlugZap className="w-4 h-4 text-blue-600" />
+                      <h3 className="text-sm font-semibold text-zinc-800">{t('section.activeDevices')}</h3>
+                      <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
+                        {filteredDevices.length}
+                      </span>
+                      {connectedCount > 0 && (
+                        <span className="text-xs text-green-600">{t('header.connected', { count: connectedCount })}</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                      {filteredDevices.map((d) => (
+                        <ActiveCard
+                          key={d.id}
+                          device={d}
+                          vendorKey={vendorOf(d)}
+                          selected={panelDeviceId === d.id}
+                          onClick={() => setPanel({ kind: 'edit', device: d })}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
               </div>
-            </section>
+            </>
           )}
         </div>
-      )}
+      </div>
 
       {/* Wizard panel (vendor → product selection) */}
       {panel?.kind === 'wizard' && (
@@ -1137,7 +1801,16 @@ export default function DeviceIntegrationPage() {
           instanceCounts={instanceCounts}
           initialVendor={panel.initialVendor}
           onSelect={(tpl) => setPanel({ kind: 'add', template: tpl })}
+          onSelectCustom={(mode) => setPanel({ kind: 'custom', mode })}
           onClose={() => setPanel(null)}
+        />
+      )}
+
+      {panel?.kind === 'custom' && (
+        <CustomDeviceAccessPanel
+          mode={panel.mode}
+          onClose={() => setPanel(null)}
+          onBack={() => setPanel({ kind: 'wizard' })}
         />
       )}
 
@@ -1145,19 +1818,23 @@ export default function DeviceIntegrationPage() {
       {(panel?.kind === 'add' || panel?.kind === 'edit') && (() => {
         const panelVendorKey = panel.kind === 'edit'
           ? vendorOf(panel.device)
-          : panel.template.vendor;
+          : panel.template.vendor ?? undefined;
+        const panelInitGroupId = panel.kind === 'edit'
+          ? panel.device.group_id
+          : addDefaultGroupId;
         return (
           <DeviceConfigPanel
-            key={panel.kind === 'edit' ? panel.device.id : panel.template.id}
+            key={panel.kind === 'edit' ? panel.device.id : panel.template.storage_key}
             device={panel.kind === 'edit' ? panel.device : undefined}
             template={panel.kind === 'add' ? panel.template : undefined}
             vendorKey={panelVendorKey}
+            initialGroupId={panelInitGroupId}
+            groups={groups}
+            groupLocked={panel.kind === 'add' ? groupLocked : false}
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={() => setPanel(null)}
             onTest={panel.kind === 'edit' ? handleTest : undefined}
-            onToggleVerifySsl={panel.kind === 'edit' ? handleToggleVerifySsl : undefined}
-            onToggleEnabled={panel.kind === 'edit' ? handleToggleEnabled : undefined}
             onBack={panel.kind === 'add'
               ? () => setPanel({
                   kind: 'wizard',

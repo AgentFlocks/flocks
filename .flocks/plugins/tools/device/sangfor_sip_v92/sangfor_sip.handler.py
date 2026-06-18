@@ -443,6 +443,25 @@ _ACTION_MAP = {
 
 # ── Tool entry points ─────────────────────────────────────────────────────────
 
+def _tool_result_fields() -> Optional[set[str]]:
+    fields = getattr(ToolResult, "model_fields", None) or getattr(ToolResult, "__fields__", None)
+    if isinstance(fields, dict):
+        return set(fields)
+    return None
+
+
+def _success_result(data: Any) -> ToolResult:
+    fields = _tool_result_fields()
+    if fields is None or "output" in fields:
+        try:
+            return ToolResult(success=True, output=data)
+        except TypeError:
+            if fields is not None and "data" not in fields:
+                raise
+            pass
+    return ToolResult(success=True, **{"data": data})
+
+
 async def _run(action: str, params: dict[str, Any]) -> ToolResult:
     handler_fn = _ACTION_MAP.get(action)
     if handler_fn is None:
@@ -458,7 +477,7 @@ async def _run(action: str, params: dict[str, Any]) -> ToolResult:
         timeout_obj = aiohttp.ClientTimeout(total=cfg.timeout)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout_obj) as session:
             data = await handler_fn(cfg, session, params)
-        return ToolResult(success=True, data=data)
+        return _success_result(data)
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))
 

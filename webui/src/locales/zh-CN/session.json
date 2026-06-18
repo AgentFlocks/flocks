@@ -39,6 +39,32 @@
   "loading": "加载中...",
   "noAgents": "暂无可用的Agent",
   "smartAssistant": "智能AI助手",
+  "agentPicker": {
+    "title": "选择对话 Agent",
+    "hint": "新会话首条默认由 Rex 处理；输入 @Agent 可路由单条消息",
+    "filter": {
+      "all": "全部",
+      "builtin": "内置",
+      "custom": "自定义"
+    },
+    "badge": {
+      "primary": "主 Agent",
+      "builtin": "内置",
+      "custom": "自定义"
+    }
+  },
+  "modelPicker": {
+    "title": "选择模型",
+    "hint": "作为本次对话发送时的模型覆盖",
+    "empty": "暂无可用模型",
+    "count": "{{count}} 个",
+    "vision": "视觉",
+    "free": "免费",
+    "noCost": "暂无费用",
+    "contextWindow": "上下文窗口：{{value}}",
+    "contextUnknown": "上下文窗口：未知",
+    "addModel": "添加模型"
+  },
   "welcome": {
     "title": "开始新的对话",
     "description": "AI 原生的安全运营助手，帮您进行威胁分析、应急响应、安全编排等任务",
@@ -57,6 +83,36 @@
     "emptyText": "暂无执行记录",
     "suggestions": "示例问题",
     "stopTitle": "停止执行",
+    "contextUsageTitle": "上下文已用：{{used}} / {{total}}（{{percent}}%）",
+    "contextUsageUnknown": "上下文使用量未知",
+    "contextUsage": {
+      "title": "上下文使用量",
+      "close": "关闭",
+      "full": "{{percent}}% 已用",
+      "tokens": "~{{used}} / {{total}} Tokens",
+      "excludedTokens": "已排除 {{tokens}}",
+      "noAttributedSegments": "暂无可归因明细",
+      "breakdown": {
+        "systemPrompt": "系统提示词",
+        "toolDefinitions": "工具定义",
+        "tools": "工具调用",
+        "skillLoad": "技能加载",
+        "agentDelegation": "智能体委派",
+        "conversation": "会话内容",
+        "reasoning": "思考过程",
+        "draft": "当前草稿",
+        "compactedHistory": "已压缩历史"
+      }
+    },
+    "goal": {
+      "dismiss": "关闭目标提示",
+      "status": {
+        "active": "目标",
+        "completed": "已完成",
+        "blocked": "已阻塞",
+        "paused": "已暂停"
+      }
+    },
     "edit": "编辑",
     "editRawHint": "当前显示的是原始未渲染内容，保存后会直接更新这条消息文本。",
     "editRawTitle": "编辑原始内容",
@@ -68,11 +124,30 @@
     "regenerate": "重新生成",
     "thinking": "思考中...",
     "streaming": "继续输出中...",
+    "process": {
+      "title": "过程（{{count}} 项）",
+      "reasoningCount": "{{count}} 段思考",
+      "toolCount": "{{count}} 次工具调用"
+    },
     "you": "你",
     "sending": "发送中...",
     "contextCompressed": "上下文已压缩",
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
+    "queue": {
+      "count": "{{count}} 个排队任务",
+      "enqueue": "加入队列",
+      "edit": "编辑排队任务",
+      "remove": "撤销排队任务",
+      "runNow": "立即执行",
+      "full": "最多只能排队 50 个任务",
+      "enqueueFailed": "加入队列失败",
+      "updateFailed": "更新排队任务失败",
+      "removeFailed": "撤销排队任务失败",
+      "runNowFailed": "立即执行失败",
+      "attachmentOnly": "附件消息",
+      "placeholderStreaming": "Rex 正在处理中，发送后将加入队列…"
+    },
     "compactionStage": {
       "load": "加载消息（{{count}} 条）",
       "strategyGeneric": "选择压缩策略",
@@ -86,6 +161,11 @@
       "mergeFailed": "合并失败",
       "summarizeDone": "生成摘要 {{chars}} 字",
       "complete": "压缩完成"
+    },
+    "mention": {
+      "title": "选择 Agent",
+      "navigate": "导航",
+      "select": "选择"
     },
     "removeNodeRef": "移除节点引用",
     "errors": {
@@ -112,8 +192,34 @@
       "error": "失败",
       "inputParams": "输入参数",
       "outputResult": "输出结果",
+      "todoStages": "Todo 阶段",
+      "todoStatus": {
+        "pending": "待办",
+        "inProgress": "进行中",
+        "completed": "完成",
+        "cancelled": "已取消"
+      },
+      "todoSummary": {
+        "progress": "进度",
+        "inProgress": "进行中",
+        "completed": "完成",
+        "done": "完成"
+      },
       "errorLabel": "错误",
-      "elapsed": "耗时"
+      "elapsed": "耗时",
+      "workflowStage": "当前阶段：{{phase}}",
+      "workflowNode": "节点：{{node}}",
+      "workflowLoopIteration": "循环",
+      "workflowLoopCurrent": "当前",
+      "workflowStep": "步骤：{{step}}",
+      "workflowPhase": {
+        "queued": "排队中",
+        "running": "执行中",
+        "success": "已完成",
+        "error": "执行失败",
+        "timeout": "超时",
+        "cancelled": "已取消"
+      }
     }
   },
   "groupToday": "今天",

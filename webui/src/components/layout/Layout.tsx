@@ -25,6 +25,7 @@ import {
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import LanguageSwitcher from '@/components/common/LanguageSwitcher';
+import ThemeToggle from '@/components/common/ThemeToggle';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
 // the home page never needs. To keep the lazy split effective, we don't
@@ -51,6 +52,8 @@ import {
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
+import { useUserDefinedPages } from '@/hooks/useUserDefinedPages';
+import { resolveUserDefinedPageIcon } from '@/utils/userDefinedPageIcons';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -114,6 +117,7 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
+  const { pages: userDefinedPages } = useUserDefinedPages();
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -411,6 +415,13 @@ export default function Layout() {
         name: '',
         items: [
           { name: t('flocksHome'), href: '/', icon: Home },
+          ...userDefinedPages
+            .filter((page) => page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
+            .map((page) => ({
+              name: page.title,
+              href: page.route,
+              icon: resolveUserDefinedPageIcon(page.icon),
+            })),
         ],
       },
       {
@@ -448,14 +459,15 @@ export default function Layout() {
         ],
       },
     ],
-    [hasFlocksproCapability, t, user?.role],
+    [hasFlocksproCapability, userDefinedPages, t, user?.role],
   );
 
   const isFullScreenPage =
     matchPath('/workflows/create', location.pathname) ||
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
-    matchPath('/sessions', location.pathname);
+    matchPath('/sessions', location.pathname) ||
+    matchPath('/devices', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
     ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
@@ -467,7 +479,7 @@ export default function Layout() {
     : productName;
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Modals render lazily — fallback={null} keeps the chunk download
           invisible to the user (they're already triggering an async UI). */}
       <Suspense fallback={null}>
@@ -498,14 +510,14 @@ export default function Layout() {
 
       {sidebarOpen && (
         <div
-          className="fixed inset-0 bg-gray-600 bg-opacity-75 z-40 lg:hidden"
+          className="fixed inset-0 bg-gray-600 bg-opacity-75 z-40 lg:hidden dark:bg-black dark:bg-opacity-75"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200
+          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200 dark:bg-zinc-950 dark:border-zinc-800
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
@@ -514,20 +526,20 @@ export default function Layout() {
       >
         <div className="flex flex-col h-full overflow-hidden">
           {/* Logo */}
-          <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
+          <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
             {collapsed ? (
               <div
-                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm"
+                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
                 title={productName}
               >
-                <Sparkles className="w-4 h-4 text-zinc-500" />
+                <Sparkles className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
               </div>
             ) : (
               <>
-                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap">{productName}</span>
+                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0"
+                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0 dark:hover:text-zinc-100"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -540,11 +552,11 @@ export default function Layout() {
             {navigation.map((section) => (
               <div key={section.name} className="mb-6">
                 {!collapsed && section.name && (
-                  <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap">
+                  <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
                     {section.name}
                   </h3>
                 )}
-                {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none" />}
+                {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
                     const isActive = location.pathname === item.href
@@ -559,13 +571,13 @@ export default function Layout() {
                           flex items-center rounded-lg transition-all duration-150
                           ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
                           ${isActive
-                            ? 'bg-white text-zinc-900 shadow-sm'
-                            : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900'
+                            ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
+                            : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
                           }
                         `}
                       >
                         <item.icon
-                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700' : 'text-zinc-400'}`}
+                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
                         />
                         {!collapsed && (
                           <span className="truncate">{item.name}</span>
@@ -579,41 +591,44 @@ export default function Layout() {
           </nav>
 
           {/* Bottom: Language switcher + version */}
-          <div className={`border-t border-zinc-200 flex-shrink-0 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
-            <LanguageSwitcher collapsed={collapsed} />
+          <div className={`border-t border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
+            <div className={`flex ${collapsed ? 'flex-col items-center gap-2' : 'items-center gap-2'}`}>
+              <LanguageSwitcher collapsed={collapsed} />
+              <ThemeToggle collapsed={collapsed} />
+            </div>
             {!collapsed && (
               <>
                 {hasUpdate && canManageUpdates ? (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="mt-3 w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+                    className="mt-3 w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md dark:border-amber-500/30 dark:from-amber-950/60 dark:via-orange-950/50 dark:to-rose-950/50"
                   >
                     <div className="flex items-center gap-2 text-sm">
-                      <span className="min-w-0 flex-1 truncate font-semibold text-amber-900">
+                      <span className="min-w-0 flex-1 truncate font-semibold text-amber-900 dark:text-amber-100">
                         {t('newVersion')} {formatUpdateVersion(latestVersion) || ''}
                       </span>
                       <span className="inline-flex flex-shrink-0 items-center rounded-full bg-amber-500 px-2 py-0.5 text-xs font-semibold text-white shadow-sm">
                         {t('updateNow')}
                       </span>
                     </div>
-                    <div className="mt-1 text-xs text-amber-700">
+                    <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
                       {currentVersionLabel}
                     </div>
-                    <div className="mt-0.5 text-xs font-medium text-amber-900">
+                    <div className="mt-0.5 text-xs font-medium text-amber-900 dark:text-amber-100">
                       AI Native SecOps Platform
                     </div>
                   </button>
                 ) : (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors"
+                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors dark:hover:bg-zinc-900"
                   >
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors">
+                      <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors dark:text-zinc-400 dark:group-hover:text-zinc-100">
                         {productName} {displayVersion || '...'}
                       </span>
                     </div>
-                    <div className="mt-0.5 text-xs text-zinc-400">AI Native SecOps Platform</div>
+                    <div className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">AI Native SecOps Platform</div>
                   </button>
                 )}
               </>
@@ -624,8 +639,8 @@ export default function Layout() {
                 title={hasUpdate && canManageUpdates ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }) : t('versionInfo')}
                 className={`relative rounded-xl p-2 transition-colors ${
                   hasUpdate && canManageUpdates
-                    ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
-                    : 'text-zinc-400 hover:text-zinc-600 hover:bg-white/60'
+                    ? 'bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/60'
+                    : 'text-zinc-400 hover:text-zinc-600 hover:bg-white/60 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
                 }`}
               >
                 {hasUpdate && canManageUpdates ? <ArrowUpCircle className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
@@ -648,6 +663,7 @@ export default function Layout() {
             w-3 h-20 items-center justify-center
             bg-zinc-200 hover:bg-zinc-300 border border-r-0 border-zinc-200 rounded-l-lg
             text-zinc-400 hover:text-zinc-600
+            dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-100
             transition-all duration-200
           "
           title={collapsed ? t('expandNav') : t('collapseNav')}
@@ -660,7 +676,7 @@ export default function Layout() {
       <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>
         <button
           onClick={() => setSidebarOpen(true)}
-          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200"
+          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
         >
           <Menu className="w-5 h-5" />
         </button>
@@ -670,7 +686,7 @@ export default function Layout() {
       <div
         className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
-        <main className="flex-1 overflow-hidden bg-gray-50">
+        <main className="flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           {isFullScreenPage ? (
             <Outlet />
           ) : (

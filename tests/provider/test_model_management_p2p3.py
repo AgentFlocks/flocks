@@ -166,6 +166,24 @@ class TestModelCatalog:
         assert ModelFeature.VISION in sonnet4.capabilities.features
         assert ModelFeature.REASONING in sonnet4.capabilities.features
 
+    def test_model_catalog_defaults_reasoning_on_when_omitted(self):
+        from flocks.provider.model_catalog import _parse_model_definitions
+
+        models = _parse_model_definitions(
+            "custom-defaults",
+            {
+                "custom-model": {
+                    "name": "Custom Model",
+                    "capabilities": {
+                        "supports_tools": True,
+                    },
+                }
+            },
+        )
+
+        assert models[0].capabilities.supports_reasoning is True
+        assert ModelFeature.REASONING in models[0].capabilities.features
+
     def test_google_gemini_multimodal(self):
         from flocks.provider.model_catalog import get_provider_model_definitions
         models = get_provider_model_definitions("google")

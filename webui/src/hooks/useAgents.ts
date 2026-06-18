@@ -61,6 +61,6 @@ export function useAgents() {
     agents,
     loading,
     error,
-    refetch: () => fetchAgents(),
+    refetch: (showLoading = true) => fetchAgents(showLoading),
   };
 }

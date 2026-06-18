@@ -673,6 +673,24 @@ class InboundDispatcher:
                 f"命令 `{display_text or prompt_text}` 暂不支持在当前渠道中以 slash 形式执行。"
             )
 
+        async def _clear_history() -> None:
+            try:
+                from flocks.server.routes.session import _clear_session_history
+
+                deleted_count = await _clear_session_history(binding.session_id)
+            except Exception as exc:
+                log.error("dispatcher.clear_command_failed", {
+                    "session_id": binding.session_id,
+                    "channel_id": msg.channel_id,
+                    "error": str(exc),
+                })
+                await callbacks.deliver_text(f"清空当前会话失败：{type(exc).__name__}")
+                return
+
+            await callbacks.deliver_text(
+                f"已清空当前会话历史，共删除 {deleted_count} 条消息。"
+            )
+
         async def _run_session_control(_event, parsed) -> bool:
             if parsed.canonical_name == "status":
                 await self._handle_status_command(binding, msg, callbacks)
@@ -718,6 +736,7 @@ class InboundDispatcher:
                 direct_response=_publish_direct_response,
                 run_llm=_run_llm,
                 session_control=_run_session_control,
+                clear_history=_clear_history,
             ),
         )
         return True
@@ -828,19 +847,24 @@ class InboundDispatcher:
         scope_override: Optional[str],
     ) -> None:
         from flocks.session.session import Session
-        from flocks.channel.inbound.session_binding import _build_title
+        from flocks.channel.inbound.session_binding import (
+            _build_title,
+            resolve_channel_session_owner_kwargs,
+        )
 
         session = await Session.get_by_id(binding.session_id)
         if not session:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
+        owner_kwargs = await resolve_channel_session_owner_kwargs(session)
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
             title=_build_title(msg),
             agent=session.agent,
             **Session.inherited_model_kwargs(session),
+            **owner_kwargs,
         )
         new_binding = await self.binding_service.rebind(
             msg,
@@ -848,6 +872,26 @@ class InboundDispatcher:
             agent_id=new_session.agent,
             scope_override=scope_override,
         )
+        # Archive the previous session so it no longer shows up as an *active*
+        # IM session. The binding has already moved to ``new_session`` via
+        # ``rebind`` above, but the old session retains ``status="active"`` and
+        # the same ``[Feishu]/[Wecom]/[Dingtalk]`` title prefix. Without this,
+        # repeated ``/new`` leaves multiple active sessions for the same
+        # conversation, and unattended scheduled tasks (which resolve the IM
+        # target via ``session_list(status="active")`` + title prefix) can no
+        # longer tell which one is current — sending to the wrong session or
+        # failing outright. Best-effort: archiving failure must not abort /new.
+        try:
+            await Session.update(
+                session.project_id,
+                session.id,
+                status="archived",
+            )
+        except Exception as exc:
+            log.warning("dispatcher.archive_previous_session_failed", {
+                "session_id": session.id,
+                "error": str(exc),
+            })
         await self._trigger_command_hook(
             "new",
             session.id,
@@ -1098,8 +1142,9 @@ class InboundDispatcher:
         import mimetypes
         import os
         from pathlib import Path
-        from urllib.parse import unquote, urlparse
+        from urllib.parse import urlparse
 
+        from flocks.session.utils.file_extractor import file_url_to_path
         from flocks.session.message import FilePart, Message, MessageRole
 
         create_kwargs: dict = dict(
@@ -1128,32 +1173,33 @@ class InboundDispatcher:
             parsed = urlparse(msg.media_url)
             scheme = parsed.scheme.lower()
 
-            if msg.channel_id == "feishu" and channel_config is not None:
-                # Feishu: media is still on the remote server, download first.
-                from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
+            raw_cfg = (
+                channel_config.model_dump(by_alias=True, exclude_none=True)
+                if channel_config is not None else {}
+            )
 
-                raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
-                media = await download_inbound_media(msg, raw_cfg)
-                if not media:
-                    return
+            media = await _download_channel_media(msg, raw_cfg)
 
-                await Message.store_part(
-                    session_id,
-                    message.id,
-                    FilePart(
-                        sessionID=session_id,
-                        messageID=message.id,
-                        mime=media.mime,
-                        filename=media.filename,
-                        url=media.url,
-                        source=media.source,
-                    ),
+            file_part: Optional[FilePart] = None
+            if media is not None:
+                file_part = FilePart(
+                    sessionID=session_id,
+                    messageID=message.id,
+                    mime=media.mime,
+                    filename=media.filename,
+                    url=media.url,
+                    source=media.source,
                 )
-
+                await Message.store_part(session_id, message.id, file_part)
+                log.info("dispatcher.inbound_media_attached", {
+                    "channel_id": msg.channel_id,
+                    "filename": media.filename,
+                    "mime": media.mime,
+                })
             elif scheme in ("", "file"):
                 # Local file already downloaded by the channel plugin (e.g. weixin).
-                # file:// URIs may have URL-encoded paths (e.g. Chinese filenames).
-                local_path = unquote(parsed.path) if scheme == "file" else msg.media_url
+                # file:// URIs may have URL-encoded or Windows drive paths.
+                local_path = file_url_to_path(msg.media_url) if scheme == "file" else msg.media_url
                 if not os.path.isfile(local_path):
                     log.warning("dispatcher.inbound_media_missing", {
                         "channel_id": msg.channel_id,
@@ -1167,23 +1213,72 @@ class InboundDispatcher:
                     or "application/octet-stream"
                 )
                 file_uri = Path(local_path).resolve().as_uri()
-                await Message.store_part(
-                    session_id,
-                    message.id,
-                    FilePart(
-                        sessionID=session_id,
-                        messageID=message.id,
-                        mime=mime,
-                        filename=filename,
-                        url=file_uri,
-                        source=None,
-                    ),
+                file_part = FilePart(
+                    sessionID=session_id,
+                    messageID=message.id,
+                    mime=mime,
+                    filename=filename,
+                    url=file_uri,
+                    source=None,
                 )
+                await Message.store_part(session_id, message.id, file_part)
                 log.info("dispatcher.inbound_media_attached", {
                     "channel_id": msg.channel_id,
                     "filename": filename,
                     "mime": mime,
                 })
+            else:
+                # Remote URL with no channel-specific downloader — keep the
+                # reference as a TextPart hint so the agent at least knows
+                # the message carried media. Do not fabricate a FilePart.
+                log.debug("dispatcher.inbound_media_remote_only", {
+                    "channel_id": msg.channel_id,
+                    "media_url": msg.media_url[:200],
+                })
+                return
+
+            # Replace the placeholder text ([图片消息] / [文件消息] / [文件消息: x])
+            # with a path hint so the agent can see the attachment is local.
+            try:
+                from pathlib import PurePosixPath
+                from flocks.session.message import TextPart
+
+                file_path_str = (
+                    file_part.url.replace("file://", "") if file_part else ""
+                )
+                display_path = str(PurePosixPath(file_path_str)) if file_path_str else ""
+                parts = await Message.parts(message.id, session_id=session_id)
+                for p in parts:
+                    if p.type == "text" and hasattr(p, "text") and p.text:
+                        if _is_placeholder_text(p.text):
+                            updated = TextPart(
+                                id=p.id,
+                                sessionID=session_id,
+                                messageID=message.id,
+                                type="text",
+                                text=f"Attached files:\n- {display_path}",
+                            )
+                            await Message.store_part(session_id, message.id, updated)
+                            try:
+                                from flocks.server.routes.event import publish_event
+                                await publish_event("message.part.updated", {
+                                    "part": updated.model_dump(by_alias=True, exclude_none=True),
+                                    "sessionID": session_id,
+                                })
+                            except Exception:
+                                pass
+                            break
+            except Exception:
+                pass
+
+            try:
+                from flocks.server.routes.event import publish_event
+                await publish_event("message.part.updated", {
+                    "part": file_part.model_dump(by_alias=True, exclude_none=True),
+                    "sessionID": session_id,
+                })
+            except Exception:
+                pass
 
         except Exception as e:
             log.warning("dispatcher.inbound_media_download_failed", {
@@ -1387,3 +1482,88 @@ async def _fetch_quoted_message(
 # 权限错误通知冷却时间（同一账号 5 分钟内只通知一次）
 _PERM_NOTICE_COOLDOWN = 300
 _perm_notice_last: dict[str, float] = {}
+
+
+# ---------------------------------------------------------------------------
+# Per-channel inbound media download
+# ---------------------------------------------------------------------------
+
+# Mapping of channel_id → module-level ``download_inbound_media`` callable.
+# A channel opts in by adding an entry here.  The dispatcher looks up
+# ``msg.channel_id`` to decide whether to invoke a custom downloader
+# (e.g. WeCom decrypt + download, Telegram getFile resolve) or fall
+# back to the generic ``file://`` / no-scheme handler.
+_DOWNLOADERS: dict[str, Any] = {}
+
+
+def register_inbound_media_downloader(channel_id: str, downloader: Any) -> None:
+    """Register a per-channel ``download_inbound_media`` callable."""
+    _DOWNLOADERS[channel_id] = downloader
+
+
+def _is_placeholder_text(text: str) -> bool:
+    """True if *text* is one of the channel-generated media placeholders."""
+    if not text:
+        return False
+    placeholders = (
+        "[图片消息]",
+        "[文件消息]",
+        "[Image]",
+        "[Attachment]",
+        "[图片]",
+        "[文件]",
+    )
+    if text in placeholders:
+        return True
+    return text.startswith("[文件消息:")
+
+
+# Best-effort eager registration at import time.  Channels that need
+# more control can call ``register_inbound_media_downloader`` themselves.
+try:
+    from flocks.channel.builtin.feishu import inbound_media as _feishu_inbound_media
+    register_inbound_media_downloader("feishu", _feishu_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover - feishu not installed
+    pass
+
+try:
+    from flocks.channel.builtin.wecom import inbound_media as _wecom_inbound_media
+    register_inbound_media_downloader("wecom", _wecom_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover - wecom SDK not installed
+    pass
+
+try:
+    from flocks.channel.builtin.dingtalk import inbound_media as _dingtalk_inbound_media
+    register_inbound_media_downloader("dingtalk", _dingtalk_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover
+    pass
+
+try:
+    from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
+    register_inbound_media_downloader("telegram", _telegram_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover
+    pass
+
+
+async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
+    """Dispatch inbound media download to the appropriate channel handler.
+
+    Looks up the channel's downloader module dynamically so test
+    monkeypatches that target ``flocks.channel.builtin.<channel>.inbound_media``
+    still apply — caching a bound callable would otherwise freeze the
+    reference at module-import time and bypass the patch.
+    """
+    channel_id = msg.channel_id
+    if channel_id == "feishu":
+        from flocks.channel.builtin.feishu import inbound_media as _feishu_inbound_media
+        return await _feishu_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "wecom":
+        from flocks.channel.builtin.wecom import inbound_media as _wecom_inbound_media
+        return await _wecom_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "dingtalk":
+        from flocks.channel.builtin.dingtalk import inbound_media as _dingtalk_inbound_media
+        return await _dingtalk_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "telegram":
+        from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
+        return await _telegram_inbound_media.download_inbound_media(msg, config)
+    return None

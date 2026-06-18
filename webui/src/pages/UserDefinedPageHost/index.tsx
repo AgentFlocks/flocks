@@ -1,0 +1,181 @@
+import {
+  Component,
+  type ComponentType,
+  type ErrorInfo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useState,
+} from 'react';
+import { useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import i18n from '@/i18n';
+import { AlertCircle, Loader2 } from 'lucide-react';
+import { getApiBase } from '@/api/client';
+import { userDefinedPagesAPI } from '@/api/userDefinedPages';
+import { useSSE } from '@/hooks/useSSE';
+import { installUserDefinedPageRuntime, loadUserDefinedPageBundle } from './runtime';
+
+interface UserDefinedPageErrorBoundaryProps {
+  children: ReactNode;
+  errorTitle: string;
+  fallbackMessage: string;
+  onError?: (message: string) => void;
+}
+
+interface UserDefinedPageErrorBoundaryState {
+  hasError: boolean;
+  message: string;
+}
+
+class UserDefinedPageErrorBoundary extends Component<
+  UserDefinedPageErrorBoundaryProps,
+  UserDefinedPageErrorBoundaryState
+> {
+  state: UserDefinedPageErrorBoundaryState = { hasError: false, message: '' };
+
+  static getDerivedStateFromError(error: Error): UserDefinedPageErrorBoundaryState {
+    return { hasError: true, message: error.message || '' };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    this.props.onError?.(error.message || this.props.fallbackMessage);
+    console.error('[UserDefinedPageHost] render error:', error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const message = this.state.message || this.props.fallbackMessage;
+      return (
+        <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">
+          <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+          <div>
+            <div className="font-medium">{this.props.errorTitle}</div>
+            <div className="mt-1 text-sm">{message}</div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function UserDefinedPageHost() {
+  const { pageId } = useParams<{ pageId: string }>();
+  const { t } = useTranslation('userDefinedPage');
+  const tr = useCallback(
+    (key: string) => i18n.t(key, { ns: 'userDefinedPage' }),
+    [],
+  );
+  const [PageComponent, setPageComponent] = useState<ComponentType | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [buildHash, setBuildHash] = useState('');
+
+  const loadBundle = useCallback(async (hash: string) => {
+    if (!pageId || !hash) return;
+    installUserDefinedPageRuntime(pageId);
+    const base = getApiBase();
+    const url = `${base}/api/user-defined-pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
+    const component = await loadUserDefinedPageBundle(url, tr('host.bundleMissingExport'));
+    setPageComponent(() => component);
+    setError(null);
+  }, [pageId, tr]);
+
+  const refreshPage = useCallback(async (hash?: string) => {
+    if (!pageId) return;
+    setLoading(true);
+    try {
+      const response = await userDefinedPagesAPI.get(pageId);
+      const nextHash = hash || response.data.build.hash;
+      setBuildHash(nextHash);
+      if (response.data.build.status !== 'ready' || !nextHash) {
+        setPageComponent(null);
+        setError(response.data.build.error || tr('host.notBuilt'));
+        return;
+      }
+      await loadBundle(nextHash);
+    } catch (err: unknown) {
+      setPageComponent(null);
+      setError(err instanceof Error ? err.message : tr('host.loadFailed'));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadBundle, pageId, tr]);
+
+  useEffect(() => {
+    void refreshPage();
+  }, [refreshPage]);
+
+  useSSE({
+    url: '/api/event',
+    onEvent: useCallback((evt) => {
+      if (!pageId) return;
+      if (evt.type === 'user_defined_pages.updated' && evt.properties?.id === pageId) {
+        const hash = evt.properties?.hash as string | undefined;
+        void refreshPage(hash);
+        return;
+      }
+      if (evt.type === 'user_defined_pages.build_failed' && evt.properties?.id === pageId) {
+        setError((evt.properties?.error as string | undefined) || tr('host.buildFailed'));
+        setLoading(false);
+        return;
+      }
+      if (evt.type === 'user_defined_pages.api_changed' && evt.properties?.id === pageId) {
+        setError(null);
+        return;
+      }
+      if (evt.type === 'user_defined_pages.api_failed' && evt.properties?.id === pageId) {
+        setError((evt.properties?.error as string | undefined) || tr('host.apiFailed'));
+        setLoading(false);
+      }
+    }, [pageId, refreshPage, tr]),
+    reconnect: { maxRetries: 5, initialDelay: 2000 },
+  });
+
+  if (!pageId) {
+    return <div className="text-sm text-zinc-500">{t('host.missingPageId')}</div>;
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-zinc-500">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {t('host.loading')}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+        <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <div>
+          <div className="font-medium">{t('host.unavailableTitle')}</div>
+          <div className="mt-1 text-sm">{error}</div>
+          <button
+            type="button"
+            onClick={() => void refreshPage(buildHash)}
+            className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
+          >
+            {t('host.retry')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!PageComponent) {
+    return <div className="text-sm text-zinc-500">{t('host.emptyComponent')}</div>;
+  }
+
+  return (
+    <UserDefinedPageErrorBoundary
+      errorTitle={t('host.renderFailedTitle')}
+      fallbackMessage={t('host.renderFailed')}
+      onError={setError}
+    >
+      <PageComponent />
+    </UserDefinedPageErrorBoundary>
+  );
+}

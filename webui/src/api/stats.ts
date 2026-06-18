@@ -43,7 +43,7 @@ export const statsApi = {
       const agentList = Array.isArray(agents.data) ? agents.data : [];
       const workflowList = Array.isArray(workflows.data) ? workflows.data : [];
       // Exclude `system` category skills so the count matches the Skills page,
-      // which hides system skills (e.g. find-skills, onboarding) from the user.
+      // which hides system skills (e.g. onboarding) from the user.
       const skillList = (Array.isArray(skills.data) ? skills.data : []).filter(
         (s: any) => s?.category !== 'system'
       );

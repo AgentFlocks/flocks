@@ -54,8 +54,7 @@ def _get_cli_callbacks() -> Optional['RunnerCallbacks']:
 
 # Tool display styles
 TOOL_STYLES: Dict[str, tuple] = {
-    "todowrite": ("Todo", "yellow bold"),
-    "todoread": ("Todo", "yellow bold"),
+    "todo": ("Todo", "yellow bold"),
     "bash": ("Bash", "red bold"),
     "edit": ("Edit", "green bold"),
     "write": ("Write", "green bold"),
@@ -339,6 +338,7 @@ class CLISessionRunner:
             from flocks.input.dispatcher import dispatch_user_input
             from flocks.input.events import UserInputEvent
             from flocks.input.output import CliOutputSink
+            from flocks.session.message import Message
 
             event = UserInputEvent(
                 source_type="cli",
@@ -349,6 +349,12 @@ class CLISessionRunner:
                 model={"providerID": provider_id, "modelID": model_id},
                 display_text=stripped,
             )
+
+            async def _clear_history() -> None:
+                await Message.clear(self._session.id)
+                await self._clear_screen()
+                self.console.print("[dim]Conversation history cleared.[/dim]")
+
             handled = await dispatch_user_input(
                 event,
                 CliOutputSink(
@@ -365,6 +371,7 @@ class CLISessionRunner:
                         dispatch_commands=False,
                     ),
                     clear_screen=self._clear_screen,
+                    clear_history=_clear_history,
                 ),
             )
             if handled.handled:
@@ -774,7 +781,7 @@ class CLISessionRunner:
   /skills          List skills (same as /skills list)
   /skills list     List skills
   /skills refresh  Refresh skills
-  /clear           Clear screen
+  /clear           Clear session history
   /exit            Exit session
   /quit            Exit session
   /q               Exit session

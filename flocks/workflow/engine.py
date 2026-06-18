@@ -9,7 +9,7 @@ import time
 import traceback
 import uuid
 import json
-from typing import Any, Callable, Deque, Dict, List, NamedTuple, Optional, Set, Tuple, TypeVar
+from typing import Any, Callable, Deque, Dict, List, Literal, NamedTuple, Optional, Set, Tuple, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -39,12 +39,45 @@ class _ExecOutcome(NamedTuple):
     is_cancelled: bool = False
 
 
+def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
+    """Return a bounded, non-retaining summary for logs and lightweight history."""
+    if depth >= 2:
+        if isinstance(value, (list, tuple, set)):
+            return {"_type": type(value).__name__, "count": len(value)}
+        if isinstance(value, dict):
+            return {"_type": "dict", "keys": list(value.keys())[:20]}
+        if isinstance(value, str) and len(value) > 200:
+            return {"_type": "string", "chars": len(value), "preview": value[:200]}
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _summarize_for_observability(item, depth=depth + 1)
+            for key, item in list(value.items())[:50]
+        }
+    if isinstance(value, (list, tuple, set)):
+        return {
+            "_type": type(value).__name__,
+            "count": len(value),
+            "preview": [
+                _summarize_for_observability(item, depth=depth + 1)
+                for item in list(value)[:3]
+            ],
+        }
+    if isinstance(value, str) and len(value) > 200:
+        return {"_type": "string", "chars": len(value), "preview": value[:200]}
+    return value
+
+
 def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
-    """Serialize outputs for logs with bounded size."""
+    """Serialize an output summary for logs with bounded size."""
     try:
-        text = json.dumps(outputs, ensure_ascii=False, default=str)
+        text = json.dumps(
+            _summarize_for_observability(outputs),
+            ensure_ascii=False,
+            default=str,
+        )
     except Exception:
-        text = repr(outputs)
+        text = repr(_summarize_for_observability(outputs))
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"...[truncated:{len(text) - max_chars}]"
@@ -64,6 +97,7 @@ class ExecutionResult(BaseModel):
     steps: int
     history: list[StepResult] = Field(default_factory=list)
     last_node_id: Optional[str] = None
+    outputs: Dict[str, Any] = Field(default_factory=dict)
     run_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -110,6 +144,7 @@ class WorkflowEngine:
     mutate_workflow: bool = False
     workflow_path: Optional[str] = None
     node_timeout_s: Optional[float] = 300.0
+    history_mode: Literal["full", "summary"] = "summary"
     _depth: int = 0
     max_parallel_workers: int = 4
     workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)
@@ -119,6 +154,8 @@ class WorkflowEngine:
             raise ValueError("max_steps must be > 0")
         if self.max_parallel_workers < 1:
             raise ValueError("max_parallel_workers must be >= 1")
+        if self.history_mode not in ("full", "summary"):
+            raise ValueError("history_mode must be 'full' or 'summary'")
         if self.runtime is None:
             self.runtime = PythonExecRuntime()
         if self.code_gen is None:
@@ -156,6 +193,7 @@ class WorkflowEngine:
         cancel: Optional[Callable[[], bool]] = None,
         on_step_start: Optional[StepStartHook[Any]] = None,
         on_step_end: Optional[StepEndHook[Any]] = None,
+        retain_history: bool = False,
     ) -> ExecutionResult:
         assert self.runtime is not None
         nodes = self.workflow.nodes_by_id()
@@ -169,6 +207,7 @@ class WorkflowEngine:
             [(self.workflow.start, initial_inputs or {}, None)]
         )
         history: list[StepResult] = []
+        last_outputs: Dict[str, Any] = {}
         step_count = 0
         last_node_id: Optional[str] = None
         rid = (run_id or uuid.uuid4().hex).strip() or uuid.uuid4().hex
@@ -186,11 +225,16 @@ class WorkflowEngine:
             previous_cancel_checker = self.runtime.cancel_checker
             self.runtime.cancel_checker = cancel
         try:
+            def _retain_step(step: StepResult) -> None:
+                if retain_history:
+                    history.append(step)
+
             def _build_execution_context() -> Dict[str, Any]:
                 return {
                     "run_id": rid,
                     "steps": step_count,
                     "last_node_id": last_node_id,
+                    "outputs": last_outputs,
                     "history": history,
                 }
 
@@ -266,15 +310,22 @@ class WorkflowEngine:
                         inputs = merged
                         join_seen_sources.pop(node_id, None)
 
-                    # Dedup: skip if same node already ran with identical inputs
-                    try:
-                        _hash_raw = json.dumps(
-                            {"n": node_id, "i": inputs},
-                            sort_keys=True, ensure_ascii=False, default=str,
-                        )
-                        _input_hash = hashlib.sha256(_hash_raw.encode()).hexdigest()[:16]
-                    except Exception:
+                    # Dedup: skip if same node already ran with identical inputs.
+                    # Lightweight history mode is used by high-throughput ingest
+                    # paths with large payloads; hashing full inputs there would
+                    # serialize the same large alert lists we are trying not to
+                    # retain.
+                    if self.history_mode == "summary":
                         _input_hash = ""
+                    else:
+                        try:
+                            _hash_raw = json.dumps(
+                                {"n": node_id, "i": inputs},
+                                sort_keys=True, ensure_ascii=False, default=str,
+                            )
+                            _input_hash = hashlib.sha256(_hash_raw.encode()).hexdigest()[:16]
+                        except Exception:
+                            _input_hash = ""
                     if _input_hash and node_id in _dedup_hashes and _dedup_hashes[node_id] == _input_hash:
                         _logger.info(
                             "wf.step.dedup_skip node=%s (identical input hash %s)",
@@ -413,14 +464,47 @@ class WorkflowEngine:
                     _nid, _nd, _inp, _src = ready[_eo.idx]
                     _sn = step_count + _eo.idx + 1
                     last_node_id = _nid
+                    last_outputs = (
+                        _summarize_for_observability(_eo.outputs)
+                        if self.history_mode == "summary"
+                        else _eo.outputs
+                    )
+
+                    def _build_step_result(
+                        *,
+                        outputs: Dict[str, Any],
+                        stdout: str,
+                        error: Optional[str],
+                        traceback_text: Optional[str] = None,
+                    ) -> StepResult:
+                        if self.history_mode == "summary":
+                            return StepResult(
+                                node_id=_nid,
+                                inputs=_summarize_for_observability(_inp),
+                                outputs=_summarize_for_observability(outputs),
+                                stdout=stdout,
+                                error=error,
+                                traceback=traceback_text,
+                                duration_ms=_eo.duration_ms,
+                            )
+                        return StepResult(
+                            node_id=_nid,
+                            inputs=_inp,
+                            outputs=outputs,
+                            stdout=stdout,
+                            error=error,
+                            traceback=traceback_text,
+                            duration_ms=_eo.duration_ms,
+                        )
 
                     if _eo.is_cancelled:
-                        step_res = StepResult(
-                            node_id=_nid, inputs=_inp, outputs={},
-                            stdout=_eo.stdout, error=_eo.error or "Run cancelled",
-                            traceback=_eo.traceback, duration_ms=_eo.duration_ms,
+                        step_res = _build_step_result(
+                            outputs={},
+                            stdout=_eo.stdout,
+                            error=_eo.error or "Run cancelled",
+                            traceback_text=_eo.traceback,
                         )
-                        history.append(step_res)
+                        _retain_step(step_res)
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
@@ -440,12 +524,13 @@ class WorkflowEngine:
                             if _eo.traceback:
                                 print("[WF] traceback:")
                                 print(_eo.traceback.rstrip())
-                        step_res = StepResult(
-                            node_id=_nid, inputs=_inp, outputs=_eo.outputs,
-                            stdout=_eo.stdout, error=_eo.error, traceback=_eo.traceback,
-                            duration_ms=_eo.duration_ms,
+                        step_res = _build_step_result(
+                            outputs=_eo.outputs,
+                            stdout=_eo.stdout,
+                            error=_eo.error,
+                            traceback_text=_eo.traceback,
                         )
-                        history.append(step_res)
+                        _retain_step(step_res)
                         _status = "timeout" if _eo.is_timeout else "error"
                         (_logger.warning if _eo.is_timeout else _logger.error)(
                             f"wf.step.{_status}",
@@ -455,17 +540,29 @@ class WorkflowEngine:
                                 **({"timeout_s": self.node_timeout_s} if _eo.is_timeout else {"traceback": (_eo.traceback or "")[:500]}),
                             },
                         )
+                        outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
-                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs=%s error=%s",
-                            _sn, _nid, _nd.type, _status, _eo.duration_ms,
-                            _outputs_for_log(_eo.outputs), _eo.error,
+                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
+                            _sn, _nid, _nd.type, _status, _eo.duration_ms, outputs_keys,
                             extra={
                                 "run_id": rid, "step": _sn, "node_id": _nid,
                                 "node_type": _nd.type, "status": _status,
-                                "duration_ms": _eo.duration_ms, "outputs_keys": list(_eo.outputs.keys()),
-                                "outputs": _outputs_for_log(_eo.outputs), "error": _eo.error,
+                                "duration_ms": _eo.duration_ms, "outputs_keys": outputs_keys,
+                                "error": _eo.error,
                             },
                         )
+                        if _logger.isEnabledFor(logging.DEBUG):
+                            outputs_for_debug = _outputs_for_log(_eo.outputs)
+                            _logger.debug(
+                                "wf.step.outputs step=%s node=%s status=%s outputs=%s",
+                                _sn, _nid, _status, outputs_for_debug,
+                                extra={
+                                    "run_id": rid, "step": _sn, "node_id": _nid,
+                                    "node_type": _nd.type, "status": _status,
+                                    "outputs": outputs_for_debug,
+                                    "error": _eo.error,
+                                },
+                            )
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
@@ -482,6 +579,7 @@ class WorkflowEngine:
                                     "run_id": rid,
                                     "steps": step_count + len(exec_results),
                                     "last_node_id": _nid,
+                                    "outputs": last_outputs,
                                     "history": history,
                                 },
                             )
@@ -495,21 +593,35 @@ class WorkflowEngine:
                                 print("[WF] outputs=" + json.dumps(_eo.outputs, ensure_ascii=False, default=str))
                             except Exception:
                                 print(f"[WF] outputs=<unserializable> {_eo.outputs!r}")
-                        step_res = StepResult(
-                            node_id=_nid, inputs=_inp, outputs=_eo.outputs,
-                            stdout=_eo.stdout, error=None, duration_ms=_eo.duration_ms,
+                        step_res = _build_step_result(
+                            outputs=_eo.outputs,
+                            stdout=_eo.stdout,
+                            error=None,
                         )
-                        history.append(step_res)
+                        _retain_step(step_res)
+                        outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
-                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs=%s",
-                            _sn, _nid, _nd.type, "ok", _eo.duration_ms, _outputs_for_log(_eo.outputs),
+                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
+                            _sn, _nid, _nd.type, "ok", _eo.duration_ms, outputs_keys,
                             extra={
                                 "run_id": rid, "step": _sn, "node_id": _nid,
                                 "node_type": _nd.type, "status": "ok",
-                                "duration_ms": _eo.duration_ms, "outputs_keys": list(_eo.outputs.keys()),
-                                "outputs": _outputs_for_log(_eo.outputs), "error": None,
+                                "duration_ms": _eo.duration_ms, "outputs_keys": outputs_keys,
+                                "error": None,
                             },
                         )
+                        if _logger.isEnabledFor(logging.DEBUG):
+                            outputs_for_debug = _outputs_for_log(_eo.outputs)
+                            _logger.debug(
+                                "wf.step.outputs step=%s node=%s status=%s outputs=%s",
+                                _sn, _nid, "ok", outputs_for_debug,
+                                extra={
+                                    "run_id": rid, "step": _sn, "node_id": _nid,
+                                    "node_type": _nd.type, "status": "ok",
+                                    "outputs": outputs_for_debug,
+                                    "error": None,
+                                },
+                            )
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
@@ -545,7 +657,13 @@ class WorkflowEngine:
                     f"{nid} expected={expected} seen={seen}" for nid, expected, seen in pending_joins
                 )
                 raise NodeExecutionError(node_id=pending_joins[0][0], message=msg)
-            return ExecutionResult(steps=step_count, history=history, last_node_id=last_node_id, run_id=rid)
+            return ExecutionResult(
+                steps=step_count,
+                history=history,
+                last_node_id=last_node_id,
+                outputs=last_outputs,
+                run_id=rid,
+            )
         finally:
             if isinstance(self.runtime, PythonExecRuntime):
                 self.runtime.cancel_checker = previous_cancel_checker
@@ -626,7 +744,7 @@ class WorkflowEngine:
         if node.type == "tool":
             return self._execute_tool_node(node, inputs, _runtime=_runtime)
         if node.type == "llm":
-            return self._execute_llm_node(node, inputs)
+            return self._execute_llm_node(node, inputs, _runtime=_runtime)
         if node.type == "http_request":
             return self._execute_http_request_node(node, inputs)
         if node.type == "subworkflow":
@@ -672,7 +790,13 @@ class WorkflowEngine:
         output_k = node.output_key or "result"
         return {output_k: result}, ""
 
-    def _execute_llm_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    def _execute_llm_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
         """Execute an LLM node: render Jinja2 prompt template, call LLM."""
         assert node.prompt, "llm node requires prompt"
         try:
@@ -684,9 +808,13 @@ class WorkflowEngine:
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
         from .llm import get_llm_client
+        _rt = _runtime or self.runtime
+        cancel_checker = getattr(_rt, "cancel_checker", None)
         try:
-            client = get_llm_client(model=node.model)
+            client = get_llm_client(model=node.model, cancel_checker=cancel_checker)
             text = client.ask(rendered)
+        except RunCancelledError:
+            raise
         except Exception as e:
             raise NodeExecutionError(
                 node_id=node.id,
@@ -776,11 +904,12 @@ class WorkflowEngine:
             use_llm=self.use_llm,
             trace=self.trace,
             node_timeout_s=self.node_timeout_s,
+            history_mode=self.history_mode,
             _depth=self._depth + 1,
             workflow_loader=self.workflow_loader,
         )
         result = sub_engine.run(initial_inputs=sub_inputs)
-        last_outputs = result.history[-1].outputs if result.history else {}
+        last_outputs = result.outputs or (result.history[-1].outputs if result.history else {})
         output_k = node.output_key or "output"
         return {output_k: last_outputs}, ""
 

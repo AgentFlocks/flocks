@@ -886,7 +886,7 @@ async def test_refresh_approved_request_does_not_auto_activate_install(
     assert "auto_install_task_scheduled_at" not in payload["details"]
 
 
-async def test_start_approved_request_streams_upgrade_and_marks_activated(
+async def test_start_approved_request_streams_restart_without_marking_activated(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -948,10 +948,71 @@ async def test_start_approved_request_streams_upgrade_and_marks_activated(
     assert "Restarting service" in resp.text
 
     stored = await Storage.get(f"console:upgrade_request:{request_id}")
-    assert stored["status"] == "activated"
+    assert stored["status"] == "approved"
     assert stored["details"]["auto_install_result"] == "restarting"
-    assert stored["details"]["auto_install_version"] == "v2026.5.9"
-    assert reported == [("success", None)]
+    assert "auto_install_version" not in stored["details"]
+    assert reported == []
+
+
+async def test_start_approved_request_reports_error_after_restart_stage(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+    from flocks.updater.models import UpdateProgress
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    request_id = "req_start_restart_then_error"
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "approved",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_start",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {"company": "acme"},
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    async def _fake_perform_pro_bundle_install(*args, **kwargs):
+        yield UpdateProgress(stage="fetching", message="Downloading Flocks Pro bundle...", success=None)
+        yield UpdateProgress(stage="restarting", message="Restarting service...", success=None)
+        yield UpdateProgress(stage="error", message="Failed to build restart command: missing python", success=False)
+
+    async def _noop(_record: dict):
+        return None
+
+    reported: list[tuple[str, str | None]] = []
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        reported.append((install_result, error_message))
+
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_install", _fake_perform_pro_bundle_install)
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_mark_console_upgrade_activated", _noop)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
+
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/start")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert "Restarting service" in resp.text
+    assert "Failed to build restart command" in resp.text
+    stored = await Storage.get(f"console:upgrade_request:{request_id}")
+    assert stored["status"] == "approved"
+    assert stored["details"]["auto_install_result"] == "failed"
+    assert stored["details"]["auto_install_error"] == "Failed to build restart command: missing python"
+    assert reported == [("failed", "Failed to build restart command: missing python")]
 
 
 async def test_start_activated_request_reinstalls_when_pro_package_missing(
@@ -1178,3 +1239,48 @@ async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
     assert payload["details"]["auto_install_result"] == "done"
     assert payload["details"]["auto_install_version"] == "v2026.5.9"
 
+
+async def test_report_pro_bundle_installation_uses_license_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    posted_payloads: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            posted_payloads.append(json)
+            assert url == "https://console.example.com/v1/pro-bundles/installations"
+            assert headers == {"Authorization": "Bearer token_abc"}
+            return _Response()
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    await _set_bound_console_session()
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _Client())
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {"installed_version": "v2026.5.9"},
+    )
+
+    record = {
+        "request_id": "req_receipt",
+        "status": "approved",
+        "activate_key": "activation_token",
+        "license_id": "lic_receipt",
+        "details": {"license_id": "lic_receipt"},
+    }
+
+    await console_routes._report_pro_bundle_installation(record, install_result="success")
+
+    assert posted_payloads[0]["license_id"] == "lic_receipt"

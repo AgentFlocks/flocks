@@ -74,6 +74,7 @@ PUBLIC_PREFIXES = (
 # unsafely processes inputs.  See: https://github.com/AgentFlocks/flocks/issues/454
 PUBLIC_PATH_REGEXES = (
     re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
+    re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),
 )
 
 

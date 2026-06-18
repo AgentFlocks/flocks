@@ -1,0 +1,42 @@
+name: 360_waf_site
+description: >
+  360 WAF v5.5 站点工具。通过 action 查询受保护站点列表、站点黑名单
+  或站点白名单记录。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_waf
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 站点类操作名称。
+      enum:
+        - waf_site_list
+        - waf_blacklist_list
+        - waf_whitelist_list
+        - waf_whitelist_check_ip
+        - test
+    id:
+      type: string
+      description: 站点或白名单查询使用的站点 ID。
+    name:
+      type: string
+      description: 站点名称模糊过滤条件。
+    siteId:
+      type: integer
+      description: 查询黑名单使用的站点 ID。
+    type:
+      type: integer
+      description: 名单类型，通常 1 表示 IP，2 表示 URL 或域名。
+      enum: [1, 2]
+    ip:
+      type: string
+      description: 检查是否命中白名单的客户端 IP。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_waf.handler.py
+  function: site

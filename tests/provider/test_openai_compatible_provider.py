@@ -119,11 +119,12 @@ class TestOpenAICompatibleProviderTemperature:
 
 
 class TestOpenAICompatibleProviderMiniMaxFallback:
-    def test_is_minimax_empty_response_target_matches_supported_aliases(self):
+    def test_is_minimax_empty_response_target_matches_all_minimax_aliases(self):
         assert OpenAICompatibleProvider._is_minimax_empty_response_target("MiniMax-M2.5") is True
         assert OpenAICompatibleProvider._is_minimax_empty_response_target("minimax_m2.7") is True
+        assert OpenAICompatibleProvider._is_minimax_empty_response_target("minimax-m3") is True
         assert OpenAICompatibleProvider._is_minimax_empty_response_target("custom-minimax-m2.5-prod") is True
-        assert OpenAICompatibleProvider._is_minimax_empty_response_target("foo/minimax-m2.7-202506") is True
+        assert OpenAICompatibleProvider._is_minimax_empty_response_target("foo/minimax-m3-202506") is True
         assert OpenAICompatibleProvider._is_minimax_empty_response_target("gpt-4o-mini") is False
 
     @pytest.mark.asyncio

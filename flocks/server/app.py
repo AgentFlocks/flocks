@@ -182,6 +182,20 @@ async def lifespan(app: FastAPI):
     await _run_startup_phase(log, "storage.init", Storage.init)
     log.info("storage.initialized")
 
+    async def _recover_orphan_tool_parts() -> None:
+        from flocks.session.orphan_tools import abort_all_orphan_running_parts
+
+        repaired = await abort_all_orphan_running_parts()
+        if repaired:
+            log.info("session.orphan_tools.recovered", {"count": repaired})
+
+    _schedule_startup_phase(
+        app,
+        log,
+        "session.recover_orphan_tools",
+        _recover_orphan_tool_parts,
+    )
+
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
     try:
@@ -308,11 +322,16 @@ async def lifespan(app: FastAPI):
 
     # Sync workflows from .flocks/workflow/ filesystem into Storage
     try:
-        from flocks.server.routes.workflow import sync_workflows_from_filesystem
+        from flocks.server.routes.workflow import (
+            reconcile_published_workflow_api_services,
+            sync_workflows_from_filesystem,
+        )
 
         async def _sync_workflows_phase() -> None:
             imported = await sync_workflows_from_filesystem()
             log.info("workflow.sync.done", {"imported": imported})
+            api_services = await reconcile_published_workflow_api_services()
+            log.info("workflow.api_services.reconciled", api_services)
 
         _schedule_startup_phase(app, log, "workflow.sync_filesystem", _sync_workflows_phase)
     except Exception as e:
@@ -381,6 +400,28 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("tool.watcher.init_failed", {"error": str(e)})
 
+    # Start user-defined pages watcher (auto-build user custom pages)
+    try:
+        from flocks.user_defined_pages.bootstrap import reconcile_user_defined_pages
+        from flocks.user_defined_pages.watcher import set_event_loop, start_watcher
+
+        set_event_loop(asyncio.get_running_loop())
+
+        _schedule_startup_phase(
+            app,
+            log,
+            "user_defined_pages.bootstrap",
+            reconcile_user_defined_pages,
+        )
+
+        def _start_user_defined_pages_watcher() -> None:
+            start_watcher()
+            log.info("user_defined_pages.watcher.initialized")
+
+        _schedule_startup_phase(app, log, "user_defined_pages.watcher.start", _start_user_defined_pages_watcher)
+    except Exception as e:
+        log.warning("user_defined_pages.watcher.init_failed", {"error": str(e)})
+
     # Start Channel Gateway (connect enabled IM channels)
     try:
         from flocks.channel.gateway.manager import default_manager
@@ -393,26 +434,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
-    # Start syslog listeners for workflows with syslog enabled.
-    # Use a background task with a short delay so the main startup path is not
-    # blocked and to break the crash-restart loop where an immediate syslog
-    # flood would bring the server back down before it is fully ready.
+    # Start the unified workflow trigger runtime after the server is ready.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        async def _delayed_syslog_start() -> None:
-            # Wait for storage and tool registry to be fully initialised before
-            # resuming syslog listeners.
+        async def _delayed_trigger_runtime_start() -> None:
             await asyncio.sleep(3)
             try:
-                await default_syslog_manager.start_all()
-                log.info("syslog.manager.started")
+                await default_trigger_runtime.start_all()
+                log.info("workflow.trigger_runtime.started")
             except Exception as exc:
-                log.warning("syslog.manager.start_failed", {"error": str(exc)})
+                log.warning("workflow.trigger_runtime.start_failed", {"error": str(exc)})
 
-        _schedule_startup_phase(app, log, "syslog.manager.start", _delayed_syslog_start)
+        _schedule_startup_phase(app, log, "workflow.trigger_runtime.start", _delayed_trigger_runtime_start)
     except Exception as e:
-        log.warning("syslog.manager.start_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
     try:
         from flocks.updater.updater import recover_upgrade_state
@@ -477,14 +513,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.stop_failed", {"error": str(e)})
 
-    # Stop syslog listeners
+    # Stop the unified workflow trigger runtime.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        await default_syslog_manager.stop_all()
-        log.info("syslog.manager.stopped")
+        await default_trigger_runtime.stop_all()
+        log.info("workflow.trigger_runtime.stopped")
     except Exception as e:
-        log.warning("syslog.manager.stop_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.stop_failed", {"error": str(e)})
 
     # Stop Task Center
     try:
@@ -502,6 +538,13 @@ async def lifespan(app: FastAPI):
         Skill.stop_watcher()
     except Exception as e:
         log.warning("skill.watcher.stop_failed", {"error": str(e)})
+
+    # Stop user-defined pages watcher
+    try:
+        from flocks.user_defined_pages.watcher import stop_watcher
+        stop_watcher()
+    except Exception as e:
+        log.warning("user_defined_pages.watcher.stop_failed", {"error": str(e)})
 
     # Shutdown MCP connections
     try:
@@ -941,7 +984,7 @@ from flocks.server.routes.question import router as question_router
 # P3: TUI control routes for remote TUI control
 from flocks.server.routes.tui import router as tui_router
 # WebUI: Workflow routes
-from flocks.server.routes.workflow import router as workflow_router
+from flocks.server.routes.workflow import router as workflow_router, webhook_router as workflow_webhook_router
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
@@ -970,6 +1013,7 @@ from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
 from flocks.server.routes.console_upgrade import router as console_upgrade_router
+from flocks.server.routes.user_defined_pages import router as user_defined_pages_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -991,6 +1035,7 @@ app.include_router(lsp_router, prefix="/api/lsp", tags=["LSP"])
 app.include_router(mcp_router, prefix="/api/mcp", tags=["MCP"])
 # WebUI: Workflow routes
 app.include_router(workflow_router, prefix="/api", tags=["Workflow"])
+app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 # WebUI: Skill & Command routes
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
@@ -1028,6 +1073,7 @@ app.include_router(notifications_router, prefix="/api/notifications", tags=["Not
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
+app.include_router(user_defined_pages_router, prefix="/api", tags=["UserDefinedPages"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)

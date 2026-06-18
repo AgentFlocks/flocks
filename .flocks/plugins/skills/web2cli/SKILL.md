@@ -51,16 +51,50 @@ mkdir -p "$CAPTURE_ROOT/captures"
 - 浏览器内存中的原始捕获数据：`window.__capturedRequests`
 - 导出的接口抓包 JSON：`$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json`
 - 浏览器认证状态：`$CAPTURE_ROOT/auth-state.json`
-- 操作适配规格：`$CAPTURE_ROOT/web2cli-spec.json`
 - 站点自适应 Hook（仅当 base 失败时创建）：`$CAPTURE_ROOT/hook.js`
-- 生成的 CLI 工具：`$CAPTURE_ROOT/<normalized_capture_name>_cli.py`，`generate-cli.py` 会把 `-` 等非 Python 模块名字符替换为 `_`
+- 生成的 CLI 工具：`$CAPTURE_ROOT/<normalized_capture_name>_cli.py`，文件名中的 `-` 等非 Python 模块名字符需替换为 `_`
 - 生成的验证材料：`$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json`
-- 生成的接口文档：`$CAPTURE_ROOT/${CAPTURE_NAME}_api.md`
+- 生成的接口文档：`$CAPTURE_ROOT/cli-reference.md`
 - 生成的 Postman 集合：`$CAPTURE_ROOT/${CAPTURE_NAME}_postman.json`
 
 ## 标准流程
 
-> 按照以下 1-12 的操作流程完成任务
+> 按照以下 1-11 的操作流程完成任务
+
+Copy this checklist and check off items as you complete them:
+
+```text
+Task Progress:
+- [ ] Step 1: Confirm target site/tab and prepare capture directory
+- [ ] Step 2: Check browser availability and open or attach target tab
+- [ ] Step 3: Wait for required manual login or authorization
+- [ ] Step 4: Inject Web2CLI capture hook and verify it is installed
+- [ ] Step 5: Perform the target page operation and confirm requests are captured
+- [ ] Step 6: Export captured API data and save browser auth state
+- [ ] Step 7: Analyze captured APIs and identify the CLI request chain
+- [ ] Step 8: Generate CLI, verify.json, and cli-reference.md
+- [ ] Step 9: Validate the generated CLI against live captured/authenticated data
+- [ ] Step 10: Integrate the WebCLI capability into a maintainable skill or device asset
+- [ ] Step 11: Summarize generated capability and close only the Web2CLI tab
+```
+
+Copy this checklist and check off items as you complete them:
+
+```text
+Task Progress:
+- [ ] Step 1: Open or create the target browser tab
+- [ ] Step 2: Wait for required manual login or authorization
+- [ ] Step 3: Inject the Web2CLI capture hook and verify it is installed
+- [ ] Step 4: Perform or ask the user to perform the target page operation
+- [ ] Step 5: Export captured API data from window.__capturedRequests
+- [ ] Step 6: Save browser auth state to auth-state.json
+- [ ] Step 7: Analyze captured web APIs and remove unrelated traffic
+- [ ] Step 8: Decide whether the final asset belongs in a skill or device plugin
+- [ ] Step 9: Generate the target implementation, verify.json, and cli-reference.md
+- [ ] Step 10: Validate the generated CLI or device tool with live auth data
+- [ ] Step 11: Integrate the WebCLI capability into long-term skill/device assets
+- [ ] Step 12: Summarize generated capability and close only the Web2CLI tab
+```
 
 ### 1. 打开浏览器或创建 Tab
 
@@ -133,8 +167,9 @@ print(js("window.__apiCapture.config.captureMode"))
 
 ### 4. 明确需要捕获的功能/操作
 
-- 要求用户手动操作要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
-- 或者请求用户描述需要 hook 的操作或功能，便于你直接去页面代替用户执行
+- 方式 1：要求用户手动操作要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
+- 方式 2：请求用户描述需要 hook 的操作或功能，你直接去页面代替用户执行
+- 方式 3：用户之前已经描述了需要的 CLI功能，你直接去页面代替用户执行
 
 需要确认捕获是否开始时：
 
@@ -255,83 +290,98 @@ jq -r '.[].method' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sort | un
 jq '.[] | select(.method == "POST") | {url: .url, body: .requestBody}' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 ```
 
-### 8. 生成 web2cli-spec 规格
+### 8. 判断最终产物落点
 
-先基于 `"$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"` 生成中间契约层 `web2cli-spec.json`。
+生成任何 CLI、device tool 或最终文件前，必须先判断本次 WebCLI 能力最终应该沉淀到哪里。不要先生成一个孤立 CLI，再在后续步骤才决定是否改成 device tool。
 
-```bash
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-spec.py \
-  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
-  --base-url "https://example.com" \
-  --output "$CAPTURE_ROOT/web2cli-spec.json"
-```
+根据用户目标和场景二选一：
 
-`web2cli-spec.json` 是抓包结果到最终 CLI 之间的可编辑契约，包含：
+- **通用网站、查询脚本、内部系统操作、非设备页接入**：最终主 CLI 放在 skill 的 `scripts/`，按 `references/skill-integration.md` 集成为长期维护的 skill / CLI 资产。
+- **安全设备接入、来自设备接入页、需要出现在设备页配置和调用**：最终主实现放在 `tools/device/<plugin_id>/` 下，按 `references/device-tool-requirements.md` 生成 device plugin，并按 `references/skill-integration.md` 补齐 skill 文档入口。CLI 只可作为可选调试/回归入口，不作为设备运行时主路径。
 
-- 目标站点与命令名
-- 鉴权策略（如 `PUBLIC` / `COOKIE` / `HEADER`）
-- 主请求的 method、endpoint、query/body/payload 模板
-- CLI 参数定义
-- 固定输出列定义
-- 验证材料初稿
+如果用户目标不清楚，先用 `question` 明确最终落点，再继续生成。
 
-生成后必须检查并按需修正：
+### 9. 按目标落点生成可验证实现
 
-- `strategy` 是否正确
-- `args` 是否符合实际操作意图
-- `columns` 与字段路径是否对应目标数据
-- `verify` 的最少行数、必填列是否合理
+第 8 步确定的最终落点决定主实现形态：**通用 CLI** 和 **device plugin** 二选一。无论选择哪一种，都必须同时完成 skill 集成；区别在于 CLI 场景的 skill 包含 `scripts/` 主脚本，device 场景的 skill 只沉淀文档入口、浏览器经验、认证恢复和 device tool 使用说明，不在 skill 中放置独立 CLI 主实现。
 
-### 9. 基于 spec 生成 CLI 工具
+两种场景共用 `$CAPTURE_ROOT/cli-reference.md`，它既可以记录 CLI 用法，也可以记录 device tool 的参数、能力、验证方式和回归方法。
 
-从 `"$CAPTURE_ROOT/web2cli-spec.json"` 生成最终 CLI。
+#### 9.1 通用 CLI / Skill 场景
 
-```bash
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  --spec "$CAPTURE_ROOT/web2cli-spec.json" \
-  --format python \
-  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_cli.py"
-```
+选择通用 CLI 作为主实现时，生成前必须读取并遵循：
 
-如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成器会自动规范化输出文件名，例如 `test-domain_cli.py` 会写为 `test_domain_cli.py`，并在命令输出中打印实际路径。
+- `$WEB2CLI_SKILL/references/cli-requirements.md`
+- `$WEB2CLI_SKILL/references/skill-integration.md`
 
-生成验证文件：
+基于抓包结果、认证状态和用户目标，生成 CLI、验证材料和接口文档。阶段性产物至少包含：
 
-```bash
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  --spec "$CAPTURE_ROOT/web2cli-spec.json" \
-  --format verify \
-  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"
-```
+- `$CAPTURE_ROOT/<normalized_capture_name>_cli.py`
+- `$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json`
+- `$CAPTURE_ROOT/cli-reference.md`
 
-生成接口文档：
+如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成 CLI 文件名时必须规范化为 `_`，例如 `test-domain_cli.py` 应写为 `test_domain_cli.py`。
 
-```bash
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  --spec "$CAPTURE_ROOT/web2cli-spec.json" \
-  --format markdown \
-  --title "${CAPTURE_NAME} API Documentation" \
-  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_api.md"
-```
+随后按 `references/skill-integration.md` 将主 CLI 集成到 skill 的 `scripts/`，并补齐 skill 级文档：
 
-### 10. CLI工具验证与修改
+- `$HOME/.flocks/plugins/skills/<name>-use/scripts/<name>_cli.py`
+- `$HOME/.flocks/plugins/skills/<name>-use/references/browser-workflow.md`
+- `$HOME/.flocks/plugins/skills/<name>-use/references/cli-reference.md`
+- `$HOME/.flocks/plugins/skills/<name>-use/SKILL.md`
 
-根据生成的 CLI ，任意选择一个接口调用测试可用性
-- CLI 工具可用性
+不要把最终 CLI 保留成一次性抓包文件名。
+
+#### 9.2 安全设备接入场景
+
+选择 device plugin 作为主实现时，生成前必须读取并遵循：
+
+- `$WEB2CLI_SKILL/references/device-tool-requirements.md`
+- `$WEB2CLI_SKILL/references/skill-integration.md`
+
+基于抓包结果、认证状态和用户目标，生成 device 插件目录、验证材料和接口文档。主实现只落到 device plugin：
+
+- `$HOME/.flocks/plugins/tools/device/<plugin_id>/_provider.yaml`
+- `$HOME/.flocks/plugins/tools/device/<plugin_id>/<domain>.yaml`
+- `$HOME/.flocks/plugins/tools/device/<plugin_id>/<name>.handler.py`
+- `$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json`
+- `$CAPTURE_ROOT/cli-reference.md`
+
+同时创建或更新对应产品 skill，但该 skill 不应包含 `scripts/` 主 CLI：
+
+- `$HOME/.flocks/plugins/skills/<name>-use/references/browser-workflow.md`
+- `$HOME/.flocks/plugins/skills/<name>-use/references/cli-reference.md`
+- `$HOME/.flocks/plugins/skills/<name>-use/SKILL.md`
+
+device 场景不要求先生成 `$CAPTURE_ROOT/<normalized_capture_name>_cli.py`，也不要在 skill 的 `scripts/` 下放置一份与 device tool 平行演进的 CLI 主实现。如确实需要 CLI 做调试或回归，只能作为 device plugin 目录下的可选辅助文件，并必须明确它不是设备运行时主路径。
+
+### 10. 验证与修改
+
+根据第 8 步确定的目标落点验证可用性：
+
+- 通用 CLI / Skill 场景：用生成的 CLI 任意选择一个接口调用测试可用性
+- 安全设备接入场景：用生成的 device tool 或可选 CLI 任意选择一个低风险接口调用测试可用性
 - 认证状态可用性
 - `verify.json` 的输出约束是否满足
-- method、endpoint、query/body/payload 的一致性，必要时根据${CAPTURE_NAME}_api.json调整
+- method、endpoint、query/body/payload 的一致性，必要时根据 `${CAPTURE_NAME}_api.json` 调整
 
-推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再用生成的 CLI 以默认参数执行一次，确认固定输出列与认证状态都正确。
+推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再以默认参数执行一次最小验证，确认固定输出列与认证状态都正确。
 
-### 11. CLI 工具集成到skill
+### 11. 将 WebCLI 能力沉淀为最终产物
 
-将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
+无论主实现放在哪里，都必须保留 skill 级文档入口，供长期维护、认证恢复、重新抓包和排障使用：
+
+- `references/browser-workflow.md` 必须记录浏览器连接检查、登录步骤、state 保存位置和认证恢复流程
+- `references/cli-reference.md` 必须记录 CLI 或 device tool 的能力、参数、验证方式和回归方法
+- `SKILL.md` 必须说明当前能力最终落点：`scripts/` 或 `tools/device/<plugin_id>/`
+
+注意：skill 文档入口必选，不等于必须把主 CLI 代码也放进 skill 的 `scripts/`。安全设备接入场景下，主实现应以 device tool 为准。
+
+不要只停留在一次性 CLI 或临时抓包结果；最终都要沉淀成可长期维护的资产。
 
 ### 12. summary并关闭浏览器 tab
 
-1. 总结当前生成的 CLI 工具有哪些接口/能力
-2. 确保 CLI 可用后关闭浏览器或 Tab
+1. 总结当前生成的 CLI 或 device tool 有哪些接口/能力
+2. 确保生成的主实现可用后关闭浏览器或 Tab
 
 #### 关闭浏览器或 Tab
 
@@ -383,4 +433,6 @@ else:
 - 登录状态失效：重新登录后再次执行保存状态命令。
 
 ## Reference
-- references/cli-in-skill.md 将生成的 CLI 集成到 skill 中使用
+- references/cli-requirements.md 说明通用 CLI 主实现的生成要求
+- references/device-tool-requirements.md 说明 device tool 主实现的生成要求
+- references/skill-integration.md 说明 CLI 和 device tool 两种主实现如何接入长期维护的产品 skill

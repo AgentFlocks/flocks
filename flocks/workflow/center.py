@@ -19,6 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse
 from urllib import error as url_error
 from urllib import request as url_request
 
@@ -28,12 +29,15 @@ from flocks.sandbox.docker import docker_container_state, exec_docker
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.models import Workflow
+from flocks.workflow.requirements import resolve_python_package_index_url
+from flocks.workflow.visibility import is_hidden_workflow
 
 log = Log.create(service="workflow.center")
 
 _REGISTRY_PREFIX = "workflow_registry/"
 _RELEASE_PREFIX = "workflow_release/"
 _RUNTIME_PREFIX = "workflow_runtime/"
+_API_SERVICE_PREFIX = "workflow_api_service/"
 _SERVICE_DATA_DIR = "workflow-services"
 _DEFAULT_PORT_START = 19000
 _DEFAULT_PORT_END = 19999
@@ -44,9 +48,13 @@ _DEFAULT_HEALTH_INTERVAL_S = 2.0
 _DEFAULT_RUNTIME_INSTALL_HEALTH_RETRIES = 450  # 450 × 2s = 15 minutes
 _DEFAULT_STOP_TIMEOUT_S = 15.0
 _DEFAULT_LOCAL_STOP_GRACE_S = 5.0
+_SERVICE_API_KEY_ENV = "FLOCKS_WORKFLOW_SERVICE_API_KEY"
+_PORT_RESERVATION_TTL_S = 30 * 60
 
 # Service driver: "local" runs as a subprocess; "docker" runs in a container.
 _DEFAULT_SERVICE_DRIVER = "local"
+_PORT_ALLOCATION_LOCK = asyncio.Lock()
+_IN_FLIGHT_PORT_RESERVATIONS: Dict[int, float] = {}
 
 
 class WorkflowCenterError(Exception):
@@ -98,6 +106,17 @@ def _fingerprint(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 128), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _generate_api_key() -> str:
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def _workflow_service_auth_headers(runtime: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    api_key = runtime.get("apiKey")
+    if not api_key:
+        return None
+    return {"x-api-key": str(api_key)}
 
 
 GLOBAL_WORKFLOW_ROOT: Path = Path.home() / ".flocks" / "workflow"
@@ -153,14 +172,84 @@ def _is_port_available(port: int) -> bool:
             return False
 
 
+def _port_from_service_url(value: Any) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        parsed = urlparse(str(value))
+        return parsed.port
+    except (TypeError, ValueError):
+        return None
+
+
+def _ports_from_service_record(record: Any) -> set[int]:
+    if not isinstance(record, dict):
+        return set()
+
+    ports: set[int] = set()
+    for key in ("hostPort", "port"):
+        try:
+            port = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if 1 <= port <= 65535:
+            ports.add(port)
+
+    for key in ("serviceUrl", "invokeUrl"):
+        port = _port_from_service_url(record.get(key))
+        if port is not None:
+            ports.add(port)
+    return ports
+
+
+async def _reserved_service_ports() -> set[int]:
+    ports: set[int] = set()
+    for prefix in (_RUNTIME_PREFIX, _API_SERVICE_PREFIX, _REGISTRY_PREFIX):
+        try:
+            keys = await Storage.list_keys(prefix)
+        except Exception as exc:
+            log.warning("workflow.port.list_reserved_failed", {"prefix": prefix, "error": str(exc)})
+            continue
+
+        for key in keys:
+            try:
+                record = await Storage.read(key)
+            except Exception as exc:
+                log.warning("workflow.port.read_reserved_failed", {"key": _key_to_string(key), "error": str(exc)})
+                continue
+            ports.update(_ports_from_service_record(record))
+    return ports
+
+
+def _reserved_in_flight_ports() -> set[int]:
+    now = time.time()
+    expired = [
+        port
+        for port, expires_at in _IN_FLIGHT_PORT_RESERVATIONS.items()
+        if expires_at <= now
+    ]
+    for port in expired:
+        _IN_FLIGHT_PORT_RESERVATIONS.pop(port, None)
+    return set(_IN_FLIGHT_PORT_RESERVATIONS)
+
+
+def _release_port_reservation(port: Optional[int]) -> None:
+    if port is not None:
+        _IN_FLIGHT_PORT_RESERVATIONS.pop(port, None)
+
+
 async def _allocate_port() -> int:
     start = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", str(_DEFAULT_PORT_START)))
     end = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", str(_DEFAULT_PORT_END)))
     if start > end:
         raise WorkflowCenterError("Invalid workflow service port range")
-    for port in range(start, end + 1):
-        if _is_port_available(port):
-            return port
+    async with _PORT_ALLOCATION_LOCK:
+        reserved_ports = await _reserved_service_ports()
+        reserved_ports.update(_reserved_in_flight_ports())
+        for port in range(start, end + 1):
+            if port not in reserved_ports and _is_port_available(port):
+                _IN_FLIGHT_PORT_RESERVATIONS[port] = time.time() + _PORT_RESERVATION_TTL_S
+                return port
     raise WorkflowCenterError("No available workflow service port")
 
 
@@ -186,6 +275,14 @@ async def _scan_workflow_dir(
     for workflow_path in sorted(workflow_root.glob("*/workflow.json")):
         try:
             raw = json.loads(workflow_path.read_text(encoding="utf-8"))
+            meta_path = workflow_path.parent / "meta.json"
+            meta = (
+                json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta_path.is_file()
+                else None
+            )
+            if is_hidden_workflow(raw, meta):
+                continue
             Workflow.from_dict(raw)
         except Exception as exc:
             log.warning(
@@ -303,6 +400,12 @@ def _service_release_file(workflow_id: str, release_id: str) -> Path:
     return base / f"{release_id}.json"
 
 
+def _service_cache_dir(name: str) -> Path:
+    cache_dir = Config.get_data_path() / _SERVICE_DATA_DIR / "cache" / name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
 def _workflow_container_name(workflow_id: str, release_id: str) -> str:
     return f"flocks-wf-{workflow_id[:8]}-{release_id[:8]}"
 
@@ -342,11 +445,19 @@ def _host_service_url(port: int) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _json_post(url: str, payload: Dict[str, Any], timeout_s: float = 10.0) -> Dict[str, Any]:
+def _json_post(
+    url: str,
+    payload: Dict[str, Any],
+    timeout_s: float = 10.0,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = url_request.Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     with url_request.urlopen(request, timeout=timeout_s) as response:
@@ -370,6 +481,91 @@ async def _wait_service_healthy(service_url: str, retries: int = 20, interval_s:
         except Exception:
             await asyncio.sleep(interval_s)
             continue
+        await asyncio.sleep(interval_s)
+    return False
+
+
+def _docker_proxy_env_value(env_value: str) -> str:
+    """Translate host loopback proxy URLs so containers can reach them."""
+    raw = (env_value or "").strip()
+    if not raw:
+        return env_value
+
+    has_scheme = "://" in raw
+    parse_input = raw if has_scheme else f"http://{raw}"
+    try:
+        parsed = urlparse(parse_input)
+        hostname = (parsed.hostname or "").lower()
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return env_value
+
+        userinfo = ""
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo += f":{parsed.password}"
+            userinfo += "@"
+        netloc = f"{userinfo}host.docker.internal"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        rewritten = urlunparse((
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+        if not has_scheme and rewritten.startswith("http://"):
+            return rewritten[len("http://"):]
+        return rewritten
+    except Exception:
+        return env_value
+
+
+def _docker_proxy_uses_host_gateway(env_value: str) -> bool:
+    raw = (env_value or "").strip()
+    if not raw:
+        return False
+    parse_input = raw if "://" in raw else f"http://{raw}"
+    try:
+        return (urlparse(parse_input).hostname or "").lower() == "host.docker.internal"
+    except Exception:
+        return False
+
+
+async def _docker_logs_tail(container_name: str, *, lines: int = 80) -> str:
+    stdout, stderr, _ = await exec_docker(
+        ["logs", "--tail", str(lines), container_name],
+        allow_failure=True,
+        timeout_s=10,
+    )
+    return (stdout or stderr or "").strip()
+
+
+async def _wait_docker_service_healthy(
+    service_url: str,
+    container_name: str,
+    *,
+    retries: int,
+    interval_s: float,
+) -> bool:
+    for _ in range(retries):
+        try:
+            payload = await asyncio.to_thread(_json_get, f"{service_url}/health", 2.0)
+            if payload.get("ok") is True:
+                return True
+        except Exception:
+            pass
+
+        state = await docker_container_state(container_name)
+        if state.get("exists") and not state.get("running"):
+            logs = await _docker_logs_tail(container_name)
+            detail = logs or "container exited before reporting healthy"
+            raise WorkflowCenterError(
+                "Published workflow service container exited before health check "
+                f"passed: {detail}"
+            )
         await asyncio.sleep(interval_s)
     return False
 
@@ -553,7 +749,7 @@ async def _stop_existing_runtime_for_publish(workflow_id: str) -> None:
         await _stop_local_service(workflow_id)
 
 
-async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
+async def publish_workflow_local(workflow_id: str, *, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Publish a workflow as a local subprocess using the current Python env.
 
     This is the default driver for development: no Docker, instant startup,
@@ -580,58 +776,75 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
     host_port = await _allocate_port()
     service_url = _host_service_url(host_port)
     service_key = workflow_id
+    runtime_api_key = api_key or _generate_api_key()
 
-    env = os.environ.copy()
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m", "flocks.workflow.service_runtime",
-        "--workflow", str(release_snapshot_file),
-        "--workflow-id", workflow_id,
-        "--release-id", release_id,
-        "--host", "127.0.0.1",
-        "--port", str(host_port),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-        start_new_session=True,
-    )
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        env = os.environ.copy()
+        env[_SERVICE_API_KEY_ENV] = runtime_api_key
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m", "flocks.workflow.service_runtime",
+            "--workflow", str(release_snapshot_file),
+            "--workflow-id", workflow_id,
+            "--release-id", release_id,
+            "--host", "127.0.0.1",
+            "--port", str(host_port),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
 
-    await Storage.write(_local_pid_key(workflow_id), {
-        "pid": proc.pid,
-        "processGroupId": proc.pid,
-        "port": host_port,
-    })
+        await Storage.write(_local_pid_key(workflow_id), {
+            "pid": proc.pid,
+            "processGroupId": proc.pid,
+            "port": host_port,
+        })
 
-    health_retries = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_RETRIES", str(_DEFAULT_HEALTH_RETRIES)))
-    health_interval_s = float(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_INTERVAL_S", str(_DEFAULT_HEALTH_INTERVAL_S)))
+        health_retries = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_RETRIES", str(_DEFAULT_HEALTH_RETRIES)))
+        health_interval_s = float(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_INTERVAL_S", str(_DEFAULT_HEALTH_INTERVAL_S)))
 
-    healthy = await _wait_service_healthy(service_url, retries=health_retries, interval_s=health_interval_s)
-    if not healthy:
-        try:
-            await _stop_local_service(workflow_id)
-        except Exception:
-            pass
+        healthy = await _wait_service_healthy(service_url, retries=health_retries, interval_s=health_interval_s)
+        if not healthy:
+            try:
+                await _stop_local_service(workflow_id)
+            except Exception:
+                pass
+            raise WorkflowCenterError("Local workflow service failed health check")
+
+        active_record = {
+            "releaseId": release_id,
+            "workflowId": workflow_id,
+            "serviceKey": service_key,
+            "containerName": f"local-{workflow_id[:8]}-{release_id[:8]}",
+            "containerId": str(proc.pid),
+            "processGroupId": proc.pid,
+            "image": "local",
+            "hostPort": host_port,
+            "serviceUrl": service_url,
+            "status": "active",
+            "updatedAt": _now_ms(),
+            "driver": "local",
+            "apiKey": runtime_api_key,
+        }
+        await Storage.write(_active_release_key(workflow_id), active_record)
+        await Storage.write(_runtime_key(workflow_id), active_record)
+        _release_port_reservation(host_port)
+    except Exception as exc:
+        _release_port_reservation(host_port)
+        if proc is not None:
+            try:
+                _signal_local_process(proc.pid, signal.SIGTERM, proc.pid)
+                await _wait_for_pid_exit(proc.pid, 1.0)
+            except Exception:
+                pass
         registry["publishStatus"] = "failed"
         registry["updatedAt"] = _now_ms()
         await Storage.write(_registry_key(workflow_id), registry)
-        raise WorkflowCenterError("Local workflow service failed health check")
-
-    active_record = {
-        "releaseId": release_id,
-        "workflowId": workflow_id,
-        "serviceKey": service_key,
-        "containerName": f"local-{workflow_id[:8]}-{release_id[:8]}",
-        "containerId": str(proc.pid),
-        "processGroupId": proc.pid,
-        "image": "local",
-        "hostPort": host_port,
-        "serviceUrl": service_url,
-        "status": "active",
-        "updatedAt": _now_ms(),
-        "driver": "local",
-    }
-    await Storage.write(_active_release_key(workflow_id), active_record)
-    await Storage.write(_runtime_key(workflow_id), active_record)
+        if isinstance(exc, WorkflowCenterError):
+            raise
+        raise WorkflowCenterError(str(exc)) from exc
 
     registry["publishStatus"] = "active"
     registry["activeReleaseId"] = release_id
@@ -669,14 +882,15 @@ async def publish_workflow(
     workflow_id: str,
     image: Optional[str] = None,
     driver: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Publish a workflow using the configured service driver (local or docker)."""
     resolved_driver = (driver or _service_driver()).strip().lower()
     if resolved_driver == "docker":
-        return await _publish_workflow_docker(workflow_id, image=image)
+        return await _publish_workflow_docker(workflow_id, image=image, api_key=api_key)
     if resolved_driver != "local":
         raise WorkflowCenterError(f"Unsupported workflow service driver: {resolved_driver}")
-    return await publish_workflow_local(workflow_id)
+    return await publish_workflow_local(workflow_id, api_key=api_key)
 
 
 async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
@@ -692,7 +906,12 @@ async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
     return await stop_local_service(workflow_id)
 
 
-async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None) -> Dict[str, Any]:
+async def _publish_workflow_docker(
+    workflow_id: str,
+    image: Optional[str] = None,
+    *,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Publish a registered workflow as a Docker service container."""
     registry = await _read_registry(workflow_id)
     workflow_path = Path(str(registry["workflowPath"]))
@@ -748,7 +967,10 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
     )
     project_root = Path.cwd().resolve()
     user_config_dir = Config.get_config_path().resolve()
+    pip_cache_dir = _service_cache_dir("pip")
+    uv_cache_dir = _service_cache_dir("uv")
     service_key = workflow_id
+    runtime_api_key = api_key or _generate_api_key()
 
     cmd = [
         "run",
@@ -761,6 +983,10 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
         f"{project_root}:/app:ro",
         "-v",
         f"{release_runtime_dir}:/runtime",
+        "-v",
+        f"{pip_cache_dir}:/root/.cache/pip",
+        "-v",
+        f"{uv_cache_dir}:/root/.cache/uv",
         "-w",
         "/runtime",
         "-e",
@@ -769,6 +995,10 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
         "FLOCKS_CONFIG_DIR=/runtime/.flocks-config",
         "-e",
         "FLOCKS_CONFIG=/runtime/.flocks-config/flocks.json",
+        "-e",
+        f"{_SERVICE_API_KEY_ENV}={runtime_api_key}",
+        "-e",
+        "UV_CACHE_DIR=/root/.cache/uv",
         image_name,
     ]
     if user_config_dir.exists():
@@ -788,22 +1018,41 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
         "no_proxy",
     ]
     proxy_injections: List[str] = []
+    needs_host_gateway = False
     for env_name in proxy_env_names:
         env_value = os.getenv(env_name)
         if env_value:
-            proxy_injections.extend(["-e", f"{env_name}={env_value}"])
+            docker_env_value = _docker_proxy_env_value(env_value)
+            if _docker_proxy_uses_host_gateway(docker_env_value):
+                needs_host_gateway = True
+            proxy_injections.extend(["-e", f"{env_name}={docker_env_value}"])
     if proxy_injections:
+        if needs_host_gateway:
+            cmd[cmd.index(image_name):cmd.index(image_name)] = [
+                "--add-host",
+                "host.docker.internal:host-gateway",
+            ]
         cmd[cmd.index(image_name):cmd.index(image_name)] = proxy_injections
+    python_index_url = resolve_python_package_index_url()
+    if python_index_url:
+        cmd[cmd.index(image_name):cmd.index(image_name)] = [
+            "-e",
+            f"PIP_INDEX_URL={python_index_url}",
+            "-e",
+            f"UV_DEFAULT_INDEX={python_index_url}",
+        ]
     if runtime_install:
+        uv_bootstrap_cmd = "python -m pip install uv"
         if has_requirements_snapshot:
             # Pre-install all pinned deps from requirements.txt (no resolver = fast),
             # then install the project itself without re-resolving deps.
             install_cmd = (
-                "pip install --no-cache-dir -r /runtime/requirements.txt && "
-                "pip install --no-cache-dir --no-deps /app"
+                f"{uv_bootstrap_cmd} && "
+                "uv pip install --system -r /runtime/requirements.txt && "
+                "uv pip install --system --no-deps /app"
             )
         else:
-            install_cmd = "pip install --no-cache-dir /app"
+            install_cmd = f"{uv_bootstrap_cmd} && uv pip install --system /app"
         service_cmd = (
             f"{install_cmd} && "
             "python -m flocks.workflow.service_runtime "
@@ -837,8 +1086,9 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
         stdout, _, _ = await exec_docker(cmd)
         container_id = stdout.strip()
         service_url = _host_service_url(host_port)
-        healthy = await _wait_service_healthy(
+        healthy = await _wait_docker_service_healthy(
             service_url,
+            container_name,
             retries=health_retries,
             interval_s=health_interval_s,
         )
@@ -861,9 +1111,11 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
             "status": "active",
             "updatedAt": _now_ms(),
             "driver": "docker",
+            "apiKey": runtime_api_key,
         }
         await Storage.write(_active_release_key(workflow_id), active_record)
         await Storage.write(_runtime_key(workflow_id), active_record)
+        _release_port_reservation(host_port)
 
         registry["publishStatus"] = "active"
         registry["activeReleaseId"] = release_id
@@ -886,6 +1138,7 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
 
         return active_record
     except Exception as exc:
+        _release_port_reservation(host_port)
         await _stop_and_remove_container(container_name)
         release_record["status"] = "failed"
         release_record["deactivatedAt"] = _now_ms()
@@ -1015,7 +1268,13 @@ async def invoke_published_workflow(
         payload["timeout_s"] = timeout_s
 
     try:
-        result = await asyncio.to_thread(_json_post, f"{service_url}/invoke", payload, timeout_s or 30.0)
+        result = await asyncio.to_thread(
+            _json_post,
+            f"{service_url}/invoke",
+            payload,
+            timeout_s or 30.0,
+            _workflow_service_auth_headers(runtime),
+        )
         result.setdefault("workflowId", workflow_id)
         result.setdefault("releaseId", runtime.get("releaseId"))
         return result

@@ -418,10 +418,13 @@ def test_stdin_bridge_rpc_tool_and_llm(monkeypatch: pytest.MonkeyPatch) -> None:
             return {"ok": True, "name": name}
 
     class FakeLLM:
-        def ask(self, prompt, temperature=0.2):
+        def ask(self, prompt, temperature=0.2, **_kwargs):
             return f"LLM:{prompt}:{temperature}"
 
-    monkeypatch.setattr("flocks.workflow.repl_runtime.get_lazy_llm", lambda: FakeLLM())
+    monkeypatch.setattr(
+        "flocks.workflow.repl_runtime.get_lazy_llm",
+        lambda **_kwargs: FakeLLM(),
+    )
     runtime = SandboxPythonExecRuntime(
         sandbox={"container_name": "c", "workspace_dir": "/tmp", "container_workdir": "/workspace"},
         tool_registry=FakeRegistry(),

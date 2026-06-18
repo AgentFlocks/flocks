@@ -1,4 +1,5 @@
 name: asset-survey
+name_cn: 互联网资产测绘智能体
 description: >-
   Internet asset survey and reconnaissance agent. Translates natural language queries into
   structured asset mapping searches. Discovers and analyzes internet-facing assets including
@@ -23,8 +24,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - websearch
   - webfetch
   - threatbook_mcp_hrti_query

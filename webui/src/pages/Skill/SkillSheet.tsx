@@ -7,13 +7,15 @@
  * - Rex chat mode (natural language → extract config into form)
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BookOpen, Lock, Pencil, Eye, Save, Loader2, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
+import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
+import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 
 interface SkillFormData {
   name: string;
@@ -25,7 +27,7 @@ function buildRexContext(isEdit: boolean, formData: SkillFormData): string {
   if (!isEdit) {
     return `你是 Skill 创建助手。用户希望通过对话来创建一个新的 Skill。
 
-请使用 skill-builder skill 根据用户需求完成创建，产物写入 ~/.flocks/plugins/skills/<skill-name>/ 目录。
+请先加载并遵守项目内 .flocks/plugins/skills/skill-builder（skill-builder skill），再根据用户需求完成创建，产物写入 ~/.flocks/plugins/skills/<skill-name>/ 目录。
 
 **创建流程：**
 1. 先确认用户需求：Skill 名称（kebab-case）、描述、主要功能、作用域（用户/global 或项目）
@@ -33,8 +35,9 @@ function buildRexContext(isEdit: boolean, formData: SkillFormData): string {
 3. 执行 skill 要求的验证，确保 skill 可被系统发现
 
 **重要约束：**
-- 必须先加载 skill-builder skill，再动手写文件
+- 必须先加载 .flocks/plugins/skills/skill-builder，再动手写文件
 - 禁止写到 .flocks/skills/ 等内置 skill 目录
+- 默认写入 ~/.flocks/plugins/skills/<skill-name>/，除非用户明确要求项目级路径
 
 请先引导用户描述需求，信息不足时可追问，然后按 skill 一次性完成创建。`;
   }
@@ -100,6 +103,11 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   const [deleting, setDeleting] = useState(false);
   // Toggle between edit (textarea) and preview (Markdown render) for the content area
   const [contentEditing, setContentEditing] = useState(false);
+  const createGuideGroups = useMemo(() => buildGuidedCreateGroups([
+    { title: t('create.guideSectionTitle'), actions: t('create.guideActions', { returnObjects: true }) },
+    { title: t('create.caseSectionTitle'), actions: t('create.caseActions', { returnObjects: true }) },
+  ]), [t]);
+  const rexComposerControls = useRexComposerControls();
 
   const canSubmit = !isReadonly && (formData.name && formData.description && formData.content);
 
@@ -174,12 +182,16 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
       icon={<BookOpen className="w-5 h-5" />}
       rexSystemContext={buildRexContext(isEdit, formData)}
       rexWelcomeMessage={buildRexWelcome(isEdit, skill?.name)}
+      rexGuideGroups={!isEdit ? createGuideGroups : undefined}
+      rexGuidePanelTitle={!isEdit ? t('create.guidePanelTitle') : undefined}
+      rexGuidePanelDesc={!isEdit ? t('create.guidePanelDesc') : undefined}
+      rexGuideEmptyTitle={!isEdit ? t('create.emptyStateTitle') : undefined}
+      rexGuideIcon={!isEdit ? <BookOpen className="h-5 w-5" /> : undefined}
+      {...(!isEdit ? rexComposerControls : {})}
       submitDisabled={!canSubmit}
       submitLoading={loading}
       submitLabel={isReadonly ? t('sheet.submitClose') : undefined}
       hideForm={!isEdit}
-      width={700}
-      maxWidth={900}
       onClose={onClose}
       onSubmit={handleSubmit}
       footerLeft={isEdit ? (

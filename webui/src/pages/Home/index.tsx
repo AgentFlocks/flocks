@@ -13,12 +13,17 @@ import {
   Wrench,
   BookOpen,
   Cpu,
+  LayoutDashboard,
+  Loader2,
 } from 'lucide-react';
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useStats } from '@/hooks/useStats';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { sessionApi } from '@/api/session';
+import { useToast } from '@/components/common/Toast';
+import { useAuth } from '@/contexts/AuthContext';
 
 const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
 const GITEE_URL = 'https://gitee.com/flocks/flocks';
@@ -27,7 +32,27 @@ const GITEE_LOGO_URL = `${import.meta.env.BASE_URL}gitee-logo.png`;
 export default function Home() {
   const { stats, loading, error } = useStats();
   const { t } = useTranslation('home');
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { user } = useAuth();
+  const canCreateUserDefinedPage = user?.role === 'admin';
   const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
+  const [creatingUserDefinedPageSession, setCreatingUserDefinedPageSession] = useState(false);
+
+  const handleCreateUserDefinedPage = useCallback(async () => {
+    if (creatingUserDefinedPageSession) return;
+    setCreatingUserDefinedPageSession(true);
+    try {
+      const session = await sessionApi.create({ title: t('createUserDefinedPageSessionTitle') });
+      const message = t('createUserDefinedPageInitialMessage');
+      navigate(`/sessions?session=${session.id}&message=${encodeURIComponent(message)}`);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : t('createUserDefinedPageError');
+      toast.error(t('createUserDefinedPageError'), detail);
+    } finally {
+      setCreatingUserDefinedPageSession(false);
+    }
+  }, [creatingUserDefinedPageSession, navigate, t, toast]);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -65,6 +90,22 @@ export default function Home() {
               {t('getStarted')}
               <ChevronRight className="ml-1.5 w-4 h-4" />
             </button>
+
+            {canCreateUserDefinedPage ? (
+              <button
+                type="button"
+                onClick={() => void handleCreateUserDefinedPage()}
+                disabled={creatingUserDefinedPageSession}
+                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-100 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-red-500/40 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {creatingUserDefinedPageSession ? (
+                  <Loader2 className="mr-2 w-4 h-4 animate-spin" />
+                ) : (
+                  <LayoutDashboard className="mr-2 w-4 h-4 text-red-300" />
+                )}
+                {t('createUserDefinedPage')}
+              </button>
+            ) : null}
 
             <div className="relative">
               <button
@@ -108,6 +149,7 @@ export default function Home() {
       <div className="grid md:grid-cols-3 gap-4 mb-10">
         <Link
           to="/sessions"
+          state={{ skipLastSelectedSessionRestore: true }}
           className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-sky-200 hover:shadow-md hover:shadow-sky-50 transition-all duration-200"
         >
           <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-sky-100 transition-colors">

@@ -1,11 +1,13 @@
 import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import WorkflowPage from './index';
 
-const { mockNavigate, mockUseWorkflows } = vi.hoisted(() => ({
+const { mockNavigate, mockUseWorkflows, mockLanguage } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
   mockUseWorkflows: vi.fn(),
+  mockLanguage: { current: 'zh-CN' },
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -27,6 +29,7 @@ vi.mock('react-i18next', () => ({
       };
       return translations[key] ?? key;
     },
+    i18n: { language: mockLanguage.current },
   }),
 }));
 
@@ -84,6 +87,7 @@ function makeWorkflow(overrides: Partial<any> = {}) {
 describe('WorkflowPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockLanguage.current = 'zh-CN';
     mockUseWorkflows.mockReturnValue({
       workflows: [],
       loading: false,
@@ -112,6 +116,68 @@ describe('WorkflowPage', () => {
     expect(within(customRegion).queryByText('Project Workflow')).not.toBeInTheDocument();
     expect(within(builtinRegion).getByText('Project Workflow')).toBeInTheDocument();
     expect(within(builtinRegion).queryByText('Global Workflow')).not.toBeInTheDocument();
+  });
+
+  it('按当前语言展示本地化工作流名称', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: [
+        makeWorkflow({
+          id: 'wf-localized',
+          name: 'localized_workflow',
+          source: 'global',
+          nameI18n: {
+            'zh-CN': '中文工作流',
+            'en-US': 'English Workflow',
+          },
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+
+    expect(screen.getByText('中文工作流')).toBeInTheDocument();
+    expect(screen.queryByText('localized_workflow')).not.toBeInTheDocument();
+  });
+
+  it('从创建入口进入时显式开启新建草稿', async () => {
+    const user = userEvent.setup();
+    mockUseWorkflows.mockReturnValue({
+      workflows: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+
+    const createButtons = screen.getAllByRole('button', { name: /创建工作流/ });
+    await user.click(createButtons[0]);
+    await user.click(createButtons[1]);
+
+    expect(mockNavigate).toHaveBeenCalledTimes(2);
+    expect(mockNavigate).toHaveBeenNthCalledWith(
+      1,
+      '/workflows/new',
+      expect.objectContaining({
+        state: expect.objectContaining({
+          freshCreate: true,
+          ts: expect.any(Number),
+        }),
+      }),
+    );
+    expect(mockNavigate).toHaveBeenNthCalledWith(
+      2,
+      '/workflows/new',
+      expect.objectContaining({
+        state: expect.objectContaining({
+          freshCreate: true,
+          ts: expect.any(Number),
+        }),
+      }),
+    );
   });
 
   it('没有自定义工作流时不渲染空分组', () => {

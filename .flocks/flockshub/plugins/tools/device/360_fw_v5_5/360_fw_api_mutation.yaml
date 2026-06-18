@@ -1,0 +1,38 @@
+name: 360_fw_api_mutation
+description: >
+  360 FW v5.5 官方 REST 变更调用工具。该工具通过 Flocks requires_confirmation
+  触发确认；保存配置、改密码、清配置、重启、恢复、升级、许可写入、HA 写入、
+  全局开关写入、清会话/命中、ISP 修改、生产顺序移动、BGP 清路由等高风险接口会直接拒绝。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: REST 变更操作名称。
+      enum:
+        - fw_call_mutation
+        - fw_call_api
+        - test
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE]
+      description: HTTP 方法。
+    path:
+      type: string
+      description: 已收录的 /API 相对路径，例如 /addressobj。
+    query:
+      type: object
+      description: 可选查询参数，会编码为普通 URL query string。
+    body:
+      type: string
+      description: POST、PUT 或 DELETE 调用使用的 JSON 请求体，传入对象或数组的 JSON 字符串。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: api_mutation

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+_CN_PYPI_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple"
+
 
 def _default_cache_dir() -> Path:
     raw = os.getenv("FLOCKS_WORKFLOW_REQUIREMENTS_CACHE_DIR")
@@ -28,6 +30,40 @@ def _normalize_requirements(reqs: Iterable[str]) -> List[str]:
             continue
         out.append(s)
     return sorted(out)
+
+
+def _is_cn_region(value: Optional[str]) -> bool:
+    normalized = (value or "").strip().lower().replace("_", "-")
+    return normalized in {"cn", "china", "zh", "zh-cn"}
+
+
+def _is_zh_locale(value: Optional[str]) -> bool:
+    normalized = (value or "").strip().lower().replace("_", "-")
+    return normalized.startswith("zh")
+
+
+def resolve_python_package_index_url() -> Optional[str]:
+    """Return the preferred Python package index for workflow installs."""
+    for env_name in (
+        "FLOCKS_WORKFLOW_SERVICE_PIP_INDEX_URL",
+        "FLOCKS_WORKFLOW_REQUIREMENTS_PIP_INDEX_URL",
+        "PIP_INDEX_URL",
+        "UV_INDEX_URL",
+        "UV_DEFAULT_INDEX",
+        "FLOCKS_UV_DEFAULT_INDEX",
+    ):
+        value = os.getenv(env_name)
+        if value and value.strip():
+            return value.strip()
+
+    if _is_cn_region(os.getenv("FLOCKS_UPDATE_REGION")):
+        return _CN_PYPI_INDEX_URL
+    if _is_cn_region(os.getenv("FLOCKS_INSTALL_LANGUAGE")):
+        return _CN_PYPI_INDEX_URL
+    for env_name in ("LANGUAGE", "LC_ALL", "LANG"):
+        if _is_zh_locale(os.getenv(env_name)):
+            return _CN_PYPI_INDEX_URL
+    return None
 
 
 def requirements_cache_key(requirements: Sequence[str], *, python_executable: Optional[str] = None) -> str:
@@ -56,6 +92,7 @@ def requirements_from_workflow_metadata(metadata: Optional[Dict[str, Any]]) -> L
 class RequirementsInstaller:
     installer: str = "auto"
     cache_dir: Path = None  # type: ignore[assignment]
+    index_url: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cache_dir", self.cache_dir or _default_cache_dir())
@@ -79,10 +116,13 @@ class RequirementsInstaller:
         if marker.exists():
             return False
         which = self._select_installer()
+        index_url = self.index_url or resolve_python_package_index_url()
+        index_args = ["--default-index", index_url] if index_url else []
         if which == "uv":
-            cmd = ["uv", "pip", "install", "--python", sys.executable, *reqs]
+            cmd = ["uv", "pip", "install", "--python", sys.executable, *index_args, *reqs]
         else:
-            cmd = [sys.executable, "-m", "pip", "install", *reqs]
+            pip_index_args = ["--index-url", index_url] if index_url else []
+            cmd = [sys.executable, "-m", "pip", "install", *pip_index_args, *reqs]
         subprocess.run(cmd, check=True)
         marker.write_text("\n".join(reqs) + "\n", encoding="utf-8")
         return True
@@ -96,6 +136,7 @@ class SandboxRequirementsInstaller:
     python_executable: str = "python3"
     marker_root: str = "/workspace/.flocks/workflow/requirements"
     site_packages_dir: str = "/workspace/.flocks/workflow/site-packages"
+    index_url: Optional[str] = None
 
     def _select_installer(self) -> str:
         v = (self.installer or "auto").strip().lower()
@@ -165,7 +206,9 @@ class SandboxRequirementsInstaller:
         subprocess.run(mkdir_cmd, check=True)
 
         which = self._select_installer()
+        index_url = self.index_url or resolve_python_package_index_url()
         if which == "uv":
+            index_args = ["--default-index", index_url] if index_url else []
             install_cmd = [
                 *base_cmd,
                 "uv",
@@ -175,9 +218,11 @@ class SandboxRequirementsInstaller:
                 py,
                 "--target",
                 self.site_packages_dir,
+                *index_args,
                 *reqs,
             ]
         else:
+            index_args = ["--index-url", index_url] if index_url else []
             install_cmd = [
                 *base_cmd,
                 py,
@@ -188,6 +233,7 @@ class SandboxRequirementsInstaller:
                 "--no-cache-dir",
                 "--target",
                 self.site_packages_dir,
+                *index_args,
                 *reqs,
             ]
         subprocess.run(install_cmd, check=True)

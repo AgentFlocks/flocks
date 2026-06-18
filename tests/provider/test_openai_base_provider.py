@@ -50,6 +50,15 @@ class MockProviderWithoutCatalog(OpenAIBaseProvider):
 
 class TestOpenAIBaseProviderGetModels:
     """Test suite for get_models() method."""
+
+    def test_default_http_timeout_values(self):
+        """OpenAI-style providers share fail-fast read and long write timeouts."""
+        timeout = openai_base_module.DEFAULT_HTTP_TIMEOUT
+
+        assert timeout.connect == 30.0
+        assert timeout.read == 180.0
+        assert timeout.write == 1800.0
+        assert timeout.pool == 60.0
     
     def test_get_models_with_catalog_success(self):
         """Test get_models() returns configured models."""
@@ -371,10 +380,10 @@ class TestOpenAIBaseProviderConfiguration:
         timeout_arg = kwargs["timeout"]
         # Either an httpx.Timeout instance or compatible object: assert the
         # connect/read/write components rather than equality so future tweaks
-        # to non-essential pool/write durations don't break the test.
+        # to non-essential pool durations don't break the test.
         assert getattr(timeout_arg, "connect", None) == 30.0
-        assert getattr(timeout_arg, "read", None) == 600.0
-        assert getattr(timeout_arg, "write", None) == 600.0
+        assert getattr(timeout_arg, "read", None) == 180.0
+        assert getattr(timeout_arg, "write", None) == 1800.0
 
         mock_async_openai.assert_called_once_with(
             api_key="test-api-key",

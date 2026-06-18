@@ -357,8 +357,9 @@ class TestEngineDedup:
             wf,
             runtime=PythonExecRuntime(),
             stop_on_error=False,
+            history_mode="full",
         )
-        result = engine.run(initial_inputs={})
+        result = engine.run(initial_inputs={}, retain_history=True)
 
         # a -> d (inputs: {x: 1}), b -> d (inputs: {x: 2})
         # Different inputs -> both should execute
@@ -386,8 +387,9 @@ class TestEngineDedup:
             wf,
             runtime=PythonExecRuntime(),
             stop_on_error=False,
+            history_mode="full",
         )
-        result = engine.run(initial_inputs={})
+        result = engine.run(initial_inputs={}, retain_history=True)
 
         # a executes once. b enqueued twice with identical inputs (x=1).
         # Dedup should skip the second execution of b.

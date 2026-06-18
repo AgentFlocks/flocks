@@ -361,6 +361,30 @@ def test_port_is_in_use_falls_back_to_bind_when_pid_lookup_unavailable(monkeypat
         assert service_manager.port_is_in_use(5173) is True
 
 
+def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch) -> None:
+    binds: list[tuple[str, int]] = []
+    sockopts: list[tuple[object, ...]] = []
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def setsockopt(self, *args) -> None:
+            sockopts.append(args)
+
+        def bind(self, address: tuple[str, int]) -> None:
+            binds.append(address)
+
+    monkeypatch.setattr(service_manager.socket, "socket", lambda *_args, **_kwargs: FakeSocket())
+
+    assert service_manager._bind_port_available(8000) is True
+    assert binds == [("0.0.0.0", 8000)]
+    assert sockopts == []
+
+
 def test_wait_for_http_rejects_unreachable_responses(monkeypatch) -> None:
     responses = iter([
         httpx.Response(503, json={"detail": "not found"}),
@@ -1355,6 +1379,25 @@ def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Pa
     assert captured["kwargs"]["creationflags"] == 0
     assert captured["kwargs"]["start_new_session"] is True
     assert "startupinfo" not in captured["kwargs"]
+
+
+def test_spawn_process_appends_without_rotated_suffix(monkeypatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("x" * 20, encoding="utf-8")
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write("new\n")
+        kwargs["stdout"].flush()
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert log_path.read_text(encoding="utf-8") == "x" * 20 + "new\n"
+    assert not (tmp_path / "logs" / "backend.log.1").exists()
 
 
 def test_spawn_process_passes_custom_environment(monkeypatch, tmp_path: Path) -> None:

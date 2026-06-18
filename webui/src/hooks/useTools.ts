@@ -5,7 +5,6 @@ export function useTools() {
   const [tools, setTools] = useState<Tool[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const lastRefreshRef = useRef(0);
   const initializedRef = useRef(false);
 
   const fetchTools = useCallback(async (showLoading = false) => {
@@ -22,10 +21,7 @@ export function useTools() {
     }
   }, []);
 
-  const refreshAndFetch = useCallback(async (force = false) => {
-    const now = Date.now();
-    if (!force && now - lastRefreshRef.current < 5000) return;
-    lastRefreshRef.current = now;
+  const refreshAndFetch = useCallback(async () => {
     try {
       await toolAPI.refresh();
     } catch { /* ignore */ }
@@ -38,24 +34,17 @@ export function useTools() {
     const init = async () => {
       await fetchTools(true);
       if (cancelled) return;
-
-      try {
-        await refreshAndFetch(true);
-        if (cancelled) return;
-      } catch {
-        /* ignore */
-      }
     };
 
     void init();
 
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void refreshAndFetch(false);
+        void fetchTools(false);
       }
     };
     const onFocus = () => {
-      void refreshAndFetch(false);
+      void fetchTools(false);
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onFocus);
@@ -64,12 +53,12 @@ export function useTools() {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onFocus);
     };
-  }, [fetchTools, refreshAndFetch]);
+  }, [fetchTools]);
 
   return {
     tools,
     loading,
     error,
-    refetch: () => refreshAndFetch(true),
+    refetch: refreshAndFetch,
   };
 }

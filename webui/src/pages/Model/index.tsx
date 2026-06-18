@@ -31,6 +31,7 @@ import {
 import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
+  CustomModelCreate,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -54,6 +55,10 @@ function providerAllowsEmptyApiKey(providerId: string): boolean {
     providerId === 'openai-compatible' ||
     providerId.startsWith('custom-')
   );
+}
+
+function isCatalogBaseUrlRequired(providerId: string): boolean {
+  return providerId === 'openai-compatible';
 }
 
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
@@ -1243,6 +1248,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       toast.warning('Please enter Provider Name');
       return;
     }
+    if (isCatalogBaseUrlRequired(selectedCatalogId) && !baseUrl.trim()) {
+      toast.warning(t('form.baseUrlRequired'));
+      return;
+    }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
       toast.warning('Please enter API Key');
       return;
@@ -1356,7 +1365,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     setModelTesting(false);
   };
 
-  const canSave = !!selectedCatalogId && (selectedCatalogId !== 'openai-compatible' || !!providerName.trim());
+  const canSave = !!selectedCatalogId && (
+    selectedCatalogId !== 'openai-compatible' ||
+    (!!providerName.trim() && !!baseUrl.trim())
+  );
   const canTest = !!selectedCatalogId && selectedCatalogId !== 'openai-compatible';
 
   // Dynamic EntitySheet props based on wizard step
@@ -1576,7 +1588,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       <div className="col-span-2">
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           Base URL
-                          <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          {isCatalogBaseUrlRequired(selectedCatalogId) ? (
+                            <span className="text-slate-500 ml-1">*</span>
+                          ) : (
+                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          )}
                         </label>
                         <input
                           type="text"
@@ -1813,37 +1829,46 @@ function CatalogModelBadges({ model }: { model: CatalogModel }) {
 function useModelForm() {
   const [modelId, setModelId] = useState('');
   const [name, setName] = useState('');
-  const [contextWindow, setContextWindow] = useState('128000');
-  const [maxOutput, setMaxOutput] = useState('128000');
+  const [contextWindow, setContextWindow] = useState('');
+  const [maxOutput, setMaxOutput] = useState('');
   const [supportsVision, setSupportsVision] = useState(false);
   const [supportsTools, setSupportsTools] = useState(true);
   const [supportsStreaming, setSupportsStreaming] = useState(true);
-  const [supportsReasoning, setSupportsReasoning] = useState(false);
+  const [supportsReasoning, setSupportsReasoning] = useState(true);
   const [inputPrice, setInputPrice] = useState('0');
   const [outputPrice, setOutputPrice] = useState('0');
   const [currency, setCurrency] = useState('USD');
 
   const reset = useCallback(() => {
     setModelId(''); setName('');
-    setContextWindow('128000'); setMaxOutput('128000');
+    setContextWindow(''); setMaxOutput('');
     setSupportsVision(false); setSupportsTools(true);
-    setSupportsStreaming(true); setSupportsReasoning(false);
+    setSupportsStreaming(true); setSupportsReasoning(true);
     setInputPrice('0'); setOutputPrice('0'); setCurrency('USD');
   }, []);
 
-  const toPayload = useCallback(() => ({
-    model_id: modelId.trim(),
-    name: name.trim(),
-    context_window: parseInt(contextWindow) || 128000,
-    max_output_tokens: parseInt(maxOutput) || 4096,
-    supports_vision: supportsVision,
-    supports_tools: supportsTools,
-    supports_streaming: supportsStreaming,
-    supports_reasoning: supportsReasoning,
-    input_price: parseFloat(inputPrice) || 0,
-    output_price: parseFloat(outputPrice) || 0,
-    currency,
-  }), [modelId, name, contextWindow, maxOutput, supportsVision, supportsTools, supportsStreaming, supportsReasoning, inputPrice, outputPrice, currency]);
+  const toPayload = useCallback(() => {
+    const payload: CustomModelCreate = {
+      model_id: modelId.trim(),
+      name: name.trim(),
+      supports_vision: supportsVision,
+      supports_tools: supportsTools,
+      supports_streaming: supportsStreaming,
+      supports_reasoning: supportsReasoning,
+      input_price: parseFloat(inputPrice) || 0,
+      output_price: parseFloat(outputPrice) || 0,
+      currency,
+    };
+    const parsedContextWindow = parseInt(contextWindow);
+    if (Number.isFinite(parsedContextWindow) && parsedContextWindow > 0) {
+      payload.context_window = parsedContextWindow;
+    }
+    const parsedMaxOutput = parseInt(maxOutput);
+    if (Number.isFinite(parsedMaxOutput) && parsedMaxOutput > 0) {
+      payload.max_output_tokens = parsedMaxOutput;
+    }
+    return payload;
+  }, [modelId, name, contextWindow, maxOutput, supportsVision, supportsTools, supportsStreaming, supportsReasoning, inputPrice, outputPrice, currency]);
 
   const isValid = modelId.trim() !== '' && name.trim() !== '';
 
@@ -1878,7 +1903,7 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
             value={form.modelId}
             onChange={e => form.setModelId(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            placeholder={modelIdPlaceholder || 'gpt-4o-custom'}
+            placeholder={modelIdPlaceholder || 'model-id'}
           />
           {modelIdHint && <p className="mt-1 text-xs text-gray-500">{modelIdHint}</p>}
         </div>
@@ -1891,7 +1916,7 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
             value={form.name}
             onChange={e => form.setName(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            placeholder="GPT-4o Custom"
+            placeholder="model-name"
           />
         </div>
       </div>
@@ -1904,6 +1929,7 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
             value={form.contextWindow}
             onChange={e => form.setContextWindow(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            placeholder="Auto"
           />
         </div>
         <div>
@@ -1913,6 +1939,7 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
             value={form.maxOutput}
             onChange={e => form.setMaxOutput(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            placeholder="Auto"
           />
         </div>
       </div>
@@ -2145,10 +2172,9 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
 
   if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
     if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
-    if (lowered.includes('kimi-k2.5') || lowered.includes('kimi-k2.6')) return false;
   }
 
-  return false;
+  return true;
 }
 
 function allowsBuiltInVisionToggle(modelId: string): boolean {

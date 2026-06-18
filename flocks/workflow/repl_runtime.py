@@ -14,7 +14,7 @@ import traceback
 import uuid
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, TextIO, Tuple
+from typing import Any, Callable, ClassVar, Dict, Optional, TextIO, Tuple
 
 from .errors import NodeExecutionError, RunCancelledError
 from .llm import get_lazy_llm
@@ -81,6 +81,20 @@ class PythonExecRuntime(Runtime):
     globals: Dict[str, Any] = field(default_factory=dict)
     tool_registry: Optional[Any] = None  # FlocksToolAdapter or compatible
     cancel_checker: Optional[Callable[[], bool]] = None
+    cleanup_globals_after_execute: bool = False
+
+    _RUNTIME_GLOBAL_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "__builtins__",
+            "inputs",
+            "outputs",
+            "cancelled",
+            "is_cancelled",
+            "llm",
+            "tool",
+            "get_path",
+        }
+    )
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
@@ -108,7 +122,7 @@ class PythonExecRuntime(Runtime):
         # a line tracer so simple Python loops can be interrupted by UI stop.
         g["cancelled"] = _cancel_requested
         g["is_cancelled"] = _cancel_requested
-        g.setdefault("llm", get_lazy_llm())
+        g["llm"] = get_lazy_llm(cancel_checker=self.cancel_checker)
         reg = self.tool_registry or get_tool_registry()
         if hasattr(reg, "cancel_checker"):
             try:
@@ -222,6 +236,10 @@ class PythonExecRuntime(Runtime):
             out_obj = {}
         if not isinstance(out_obj, dict):
             raise NodeExecutionError(node_id="<runtime>", message="`outputs` must be a dict")
+        if self.cleanup_globals_after_execute:
+            for key in list(g.keys()):
+                if key not in self._RUNTIME_GLOBAL_KEYS:
+                    g.pop(key, None)
         return out_obj, buf.getvalue()
 
     def reset(self) -> None:
@@ -234,6 +252,7 @@ class SandboxPythonExecRuntime(Runtime):
 
     sandbox: Dict[str, Any]
     tool_registry: Optional[Any] = None
+    cancel_checker: Optional[Callable[[], bool]] = None
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
@@ -611,7 +630,7 @@ sys.stdout.flush()
                     retry_delay_s = float(retry_delay_raw)
                 except Exception as exc:
                     raise RuntimeError("LLM retry_delay_s must be a number when provided") from exc
-                output = get_lazy_llm().ask(
+                output = get_lazy_llm(cancel_checker=self.cancel_checker).ask(
                     prompt,
                     temperature=temperature,
                     model=model,

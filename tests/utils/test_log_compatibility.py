@@ -6,6 +6,8 @@ import pytest
 import time
 import tempfile
 from pathlib import Path
+from datetime import datetime, timedelta
+import flocks.utils.log as log_module
 from flocks.utils.log import Log, Logger, LogLevel
 
 
@@ -225,7 +227,26 @@ class TestLoggerCompatibility:
             assert 'data={"nested": "value"}' in output or 'data={"nested":"value"}' in output
         finally:
             Log._writer = old_stderr
-    
+
+    def test_large_object_values_are_truncated(self, monkeypatch):
+        """Test large objects are bounded before being written to logs."""
+        logger = Log.create(service="test")
+
+        import io
+        old_stderr = Log._writer
+        Log._writer = io.StringIO()
+        monkeypatch.setenv("FLOCKS_LOG_VALUE_MAX_CHARS", "20")
+
+        try:
+            logger.info("message", {"data": {"payload": "x" * 100}})
+            output = Log._writer.getvalue()
+
+            assert "data=" in output
+            assert "<truncated" in output
+            assert len(output) < 200
+        finally:
+            Log._writer = old_stderr
+
     def test_time_diff_calculation(self):
         """Test time difference calculation between logs"""
         logger = Log.create(service="test")
@@ -233,6 +254,7 @@ class TestLoggerCompatibility:
         import io
         old_stderr = Log._writer
         Log._writer = io.StringIO()
+        Log._last_time = int(time.time() * 1000)
         
         try:
             logger.info("first")
@@ -290,14 +312,84 @@ class TestLogInitialization:
                 log_dir = Path(tmpdir) / ".flocks" / "logs"
                 assert log_dir.exists()
                 
-                dev_log = log_dir / "dev.log"
-                assert dev_log.exists()
+                today_dir = log_dir / datetime.now().date().isoformat()
+                assert (today_dir / "flocks.log").exists()
+                assert (today_dir / "errors.log").exists()
+                assert not (log_dir / "dev.log").exists()
             finally:
                 # Restore
                 os.environ["HOME"] = str(old_home)
                 if Log._writer:
                     Log._writer.close()
                     Log._writer = None
+                if Log._error_writer:
+                    Log._error_writer.close()
+                    Log._error_writer = None
+
+    async def test_init_uses_stable_main_log_file(self):
+        """Test production logging appends to the daily flocks.log."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_home = Path.home()
+            import os
+            os.environ["HOME"] = tmpdir
+
+            try:
+                await Log.init(print=False, dev=False, level=LogLevel.INFO)
+                Log.Default.info("first")
+                first_file = Path(Log.file())
+                await Log.init(print=False, dev=False, level=LogLevel.INFO)
+                Log.Default.info("second")
+
+                log_dir = Path(tmpdir) / ".flocks" / "logs"
+                today_dir = log_dir / datetime.now().date().isoformat()
+                assert first_file == today_dir / "flocks.log"
+                assert Path(Log.file()) == first_file
+                assert not list(log_dir.glob("????-??-??T??????.log"))
+                assert not list(log_dir.glob("*.log.1"))
+                content = first_file.read_text(encoding="utf-8")
+                assert "first" in content
+                assert "second" in content
+            finally:
+                os.environ["HOME"] = str(old_home)
+                if Log._writer:
+                    Log._writer.close()
+                    Log._writer = None
+                if Log._error_writer:
+                    Log._error_writer.close()
+                    Log._error_writer = None
+
+    async def test_warn_and_error_are_copied_to_errors_log(self):
+        """Test warning and error lines are available in errors.log for quick triage."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_home = Path.home()
+            import os
+            os.environ["HOME"] = tmpdir
+
+            try:
+                await Log.init(print=False, dev=False, level=LogLevel.INFO)
+                logger = Log.create(service="error-copy")
+                logger.info("info")
+                logger.warn("warn")
+                logger.error("error")
+
+                log_dir = Path(tmpdir) / ".flocks" / "logs"
+                today_dir = log_dir / datetime.now().date().isoformat()
+                main_content = (today_dir / "flocks.log").read_text(encoding="utf-8")
+                error_content = (today_dir / "errors.log").read_text(encoding="utf-8")
+                assert "info" in main_content
+                assert "warn" in main_content
+                assert "error" in main_content
+                assert "info" not in error_content
+                assert "warn" in error_content
+                assert "error" in error_content
+            finally:
+                os.environ["HOME"] = str(old_home)
+                if Log._writer:
+                    Log._writer.close()
+                    Log._writer = None
+                if Log._error_writer:
+                    Log._error_writer.close()
+                    Log._error_writer = None
     
     async def test_init_print_mode(self):
         """Test that init with print=True uses stderr"""
@@ -305,11 +397,90 @@ class TestLogInitialization:
         
         # Should not create a file writer
         assert Log._writer is None
+        assert Log._error_writer is None
     
     async def test_log_file_path(self):
         """Test log file path method"""
         file_path = Log.file()
         assert file_path.endswith("flocks.log") or "flocks" in file_path
+
+    async def test_cleanup_removes_rotated_siblings_for_old_timestamp_logs(self, tmp_path: Path):
+        """Test cleanup deletes legacy timestamp logs by age, not by file count."""
+        old_stamp = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%dT%H%M%S")
+        recent_stamp = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H%M%S")
+        old_base = tmp_path / f"{old_stamp}.log"
+        recent_base = tmp_path / f"{recent_stamp}.log"
+        old_base.write_text("old", encoding="utf-8")
+        (tmp_path / f"{old_base.name}.1").write_text("old rotated", encoding="utf-8")
+        recent_base.write_text("recent", encoding="utf-8")
+        (tmp_path / f"{recent_base.name}.1").write_text("recent rotated", encoding="utf-8")
+
+        await Log._cleanup(tmp_path, retention_days=30)
+
+        assert not old_base.exists()
+        assert not (tmp_path / f"{old_base.name}.1").exists()
+        assert recent_base.exists()
+        assert (tmp_path / f"{recent_base.name}.1").exists()
+
+    async def test_cleanup_removes_old_date_directories(self, tmp_path: Path):
+        old_day = (datetime.now() - timedelta(days=31)).date().isoformat()
+        recent_day = (datetime.now() - timedelta(days=1)).date().isoformat()
+        old_dir = tmp_path / old_day
+        recent_dir = tmp_path / recent_day
+        old_dir.mkdir()
+        recent_dir.mkdir()
+        (old_dir / "flocks.log").write_text("old", encoding="utf-8")
+        (recent_dir / "flocks.log").write_text("recent", encoding="utf-8")
+
+        await Log._cleanup(tmp_path, retention_days=30)
+
+        assert not old_dir.exists()
+        assert recent_dir.exists()
+
+    async def test_day_rollover_switches_writer_and_runs_cleanup(self, tmp_path: Path, monkeypatch):
+        """Test long-running processes move to the new daily log and clean old days."""
+        old_day = (datetime.now() - timedelta(days=31)).date().isoformat()
+        first_day = (datetime.now() - timedelta(days=1)).date()
+        second_day = datetime.now().date()
+        old_dir = tmp_path / old_day
+        old_dir.mkdir()
+        (old_dir / "flocks.log").write_text("old", encoding="utf-8")
+
+        class FakeDate:
+            current = first_day
+
+            @classmethod
+            def today(cls):
+                return cls.current
+
+        monkeypatch.setenv("FLOCKS_LOG_DIR", str(tmp_path))
+        monkeypatch.setattr(log_module, "date", FakeDate)
+
+        try:
+            await Log.init(print=False, dev=False, level=LogLevel.INFO)
+            Log.Default.info("first day")
+            first_file = Path(Log.file())
+
+            FakeDate.current = second_day
+            Log.Default.warn("second day")
+            second_file = Path(Log.file())
+
+            assert first_file == tmp_path / first_day.isoformat() / "flocks.log"
+            assert second_file == tmp_path / second_day.isoformat() / "flocks.log"
+            assert "first day" in first_file.read_text(encoding="utf-8")
+            assert "second day" in second_file.read_text(encoding="utf-8")
+            assert "second day" in (tmp_path / second_day.isoformat() / "errors.log").read_text(encoding="utf-8")
+            assert not old_dir.exists()
+        finally:
+            if Log._writer:
+                Log._writer.close()
+                Log._writer = None
+            if Log._error_writer:
+                Log._error_writer.close()
+                Log._error_writer = None
+            Log._log_file = None
+            Log._log_dir_path = None
+            Log._log_date = None
 
 
 if __name__ == "__main__":

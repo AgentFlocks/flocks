@@ -57,6 +57,7 @@ log = Log.create(service="workspace.routes")
 # Upload size limit read at request time so env-var changes take effect
 # without restarting the process.
 _DEFAULT_MAX_UPLOAD_MB = 100
+_DEFAULT_MAX_READ_BYTES = 2 * 1024 * 1024
 _ALLOWED_UPLOAD_EXTENSIONS = {
     ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".csv",
     ".pdf", ".doc", ".docx", ".html", ".htm", ".ppt", ".pptx", ".xls", ".xlsx",
@@ -66,6 +67,10 @@ _ALLOWED_UPLOAD_LABEL = (
 )
 def _max_upload_bytes() -> int:
     return int(os.getenv("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))) * 1024 * 1024
+
+
+def _max_read_bytes() -> int:
+    return int(os.getenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", str(_DEFAULT_MAX_READ_BYTES)))
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -142,6 +147,16 @@ def _dir_stats_sync(root: Path):
         elif item.is_dir():
             dir_count += 1
     return file_count, dir_count, total_size
+
+
+def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
+    """Read at most ``max_bytes`` from a text file for safe preview."""
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="replace"), truncated
 
 
 # ─── directory operations ───────────────────────────────────────────────────
@@ -314,11 +329,22 @@ async def read_file(
             status_code=400,
             detail="Binary file — use /download endpoint instead",
         )
+    max_read_bytes = _max_read_bytes()
     try:
-        content = target.read_text(encoding="utf-8", errors="replace")
+        content, truncated = await asyncio.to_thread(
+            _read_text_preview_sync,
+            target,
+            max_read_bytes,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"path": path, "content": content}
+    return {
+        "path": path,
+        "content": content,
+        "truncated": truncated,
+        "size": target.stat().st_size,
+        "preview_limit_bytes": max_read_bytes,
+    }
 
 
 class FileWriteRequest(BaseModel):
@@ -470,11 +496,22 @@ async def read_memory_file(
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    max_read_bytes = _max_read_bytes()
     try:
-        content = target.read_text(encoding="utf-8", errors="replace")
+        content, truncated = await asyncio.to_thread(
+            _read_text_preview_sync,
+            target,
+            max_read_bytes,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"path": path, "content": content}
+    return {
+        "path": path,
+        "content": content,
+        "truncated": truncated,
+        "size": target.stat().st_size,
+        "preview_limit_bytes": max_read_bytes,
+    }
 
 
 # ─── stats ──────────────────────────────────────────────────────────────────

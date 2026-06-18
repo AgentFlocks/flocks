@@ -1,0 +1,85 @@
+name: 360_fw_vpn_bgp
+description: >
+  360 FW v5.5 VPN、隧道状态与 BGP 工具。BGP 子接口需要先满足 bgp_info
+  节点前置条件；现有生产 BGP 节点不应作为临时写入对象。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: VPN/BGP 操作名称。
+      enum:
+        - fw_autoike_list
+        - fw_autoike_create
+        - fw_autoike_delete
+        - fw_phase2ike_create
+        - fw_phase2ike_delete
+        - fw_ipsec_policy_list
+        - fw_ipsec_policy_create
+        - fw_ipsec_policy_delete
+        - fw_ikesa_list
+        - fw_ipsecsa_list
+        - fw_tunnel_status_table
+        - fw_tunnel_status_line
+        - fw_bgp_info_get
+        - fw_bgp_info_create
+        - fw_bgp_info_delete
+        - fw_bgp_network_list
+        - fw_bgp_network_create
+        - fw_bgp_network_delete
+        - fw_bgp_peer_group_list
+        - fw_bgp_peer_group_create
+        - fw_bgp_peer_group_delete
+        - fw_bgp_neighbors_list
+        - fw_bgp_neighbors_create
+        - fw_bgp_neighbors_delete
+        - fw_bgp_access_list_list
+        - fw_bgp_access_list_create
+        - fw_bgp_access_list_delete
+        - fw_bgp_filter_list_list
+        - fw_bgp_filter_list_create
+        - fw_bgp_filter_list_delete
+        - fw_bgp_route_map_list
+        - fw_bgp_route_map_create
+        - fw_bgp_route_map_delete
+        - fw_bgp_map_list_list
+        - fw_bgp_map_list_create
+        - fw_bgp_map_list_delete
+        - fw_bgp_prefix_list_list
+        - fw_bgp_prefix_list_create
+        - fw_bgp_prefix_list_delete
+        - fw_bgp_prefix_policy_list
+        - fw_bgp_prefix_policy_create
+        - fw_bgp_prefix_policy_delete
+        - fw_bgp_import_check_update
+        - fw_bgp_reflector_switch_update
+        - fw_bgp_timer_update
+        - fw_bgp_route_reflector_create
+        - fw_bgp_route_reflector_delete
+        - fw_vpn_bgp_call
+        - test
+    name:
+      type: string
+    ip_vrf_name:
+      type: string
+      description: 虚拟路由器名称，默认 default。
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE]
+    path:
+      type: string
+    query:
+      type: object
+    body:
+      type: string
+      description: 完整 JSON payload 字符串。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: vpn_bgp

@@ -1,0 +1,71 @@
+name: huaweicloud_waf
+vendor: huaweicloud
+service_id: huaweicloud_waf_api
+version: "39"
+integration_type: device
+description: >
+  Huawei Cloud Web Application Firewall (WAF) API service. Configure
+  Access Key (AK), Secret Key (SK), Region, and Project ID in the credentials
+  form. The API endpoint is constructed as
+  `https://waf.{region}.myhuaweicloud.com`.
+description_cn: >
+  华为云 Web 应用防火墙（WAF）API 服务。在配置页填写 Access Key（AK）、
+  Secret Key（SK）、Region（地域，如 `cn-north-4`）和 Project ID（项目 ID）。
+  接口基础地址自动构建为 `https://waf.{region}.myhuaweicloud.com`。
+  也支持直接配置 Token（X-Auth-Token）方式认证。
+auth:
+  type: custom
+  secret: huaweicloud_waf_ak
+  secret_secret: huaweicloud_waf_sk
+credential_fields:
+  - key: ak
+    label: Access Key (AK)
+    storage: secret
+    config_key: ak
+    secret_id: huaweicloud_waf_ak
+    input_type: password
+    required: false
+  - key: sk
+    label: Secret Key (SK)
+    storage: secret
+    config_key: sk
+    secret_id: huaweicloud_waf_sk
+    input_type: password
+    required: false
+  - key: token
+    label: X-Auth-Token（与 AK/SK 二选一）
+    storage: secret
+    config_key: token
+    secret_id: huaweicloud_waf_token
+    input_type: password
+    required: false
+  - key: region
+    label: Region
+    storage: config
+    config_key: region
+    input_type: text
+    default: "cn-north-4"
+  - key: project_id
+    label: Project ID
+    storage: config
+    config_key: project_id
+    input_type: text
+    required: true
+  - key: enterprise_project_id
+    label: Enterprise Project ID（可选）
+    storage: config
+    config_key: enterprise_project_id
+    input_type: text
+    required: false
+defaults:
+  region: "cn-north-4"
+  timeout: 60
+  category: custom
+  product_version: "39"
+notes: |
+  华为云 WAF API 支持两种认证方式：
+  1. AK/SK 签名认证（推荐）：使用 SDK-HMAC-SHA256 签名，
+     配置 ak / sk 字段即可。
+  2. Token 认证：直接填写有效的 X-Auth-Token，Token 有效期 24 小时。
+  AK/SK 认证优先级高于 Token；若两者均未配置则报错。
+  project_id 为必填项，可在控制台"我的凭证 → 项目列表"中获取。

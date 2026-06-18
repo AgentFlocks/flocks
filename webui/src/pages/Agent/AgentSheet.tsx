@@ -5,23 +5,27 @@
  * 合并为单一的 EntitySheet 封装，支持：
  * - 表单模式（直接填写字段：名称、描述、System Prompt、模型、温度、Tools、Skills）
  * - Rex 对话模式（自然语言描述 → 一键提取配置到表单）
- * - 测试模式（在编辑时直接向 Agent 发消息验证效果）
+ * - 工作台模式（通过引导卡片让 Rex 协助创建、编辑和验证配置）
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Bot, Sparkles, Lock } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import EntitySheet, { useEntitySheet } from '@/components/common/EntitySheet';
+import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
+import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import PillGroup from '@/components/common/PillGroup';
-import { providerAPI, defaultModelAPI } from '@/api/provider';
+import { providerAPI, defaultModelAPI, modelV2API } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
+import type { ModelDefinitionV2 } from '@/types';
 
 interface AvailableModel {
   providerID: string;
+  providerName: string;
   modelID: string;
   label: string;
 }
@@ -30,6 +34,7 @@ interface AvailableModel {
 
 interface AgentFormData {
   name: string;
+  nameCn: string;
   description: string;
   descriptionCn: string;
   prompt: string;
@@ -52,11 +57,13 @@ interface AgentSheetProps {
 }
 
 export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps) {
-  const { t } = useTranslation('agent');
+  const { t } = useTranslation(['agent', 'common']);
   const isEdit = !!agent;
+  const isNative = !!agent?.native;
 
   const [formData, setFormData] = useState<AgentFormData>({
     name: agent?.name ?? '',
+    nameCn: agent?.nameCn ?? '',
     description: agent?.description ?? '',
     descriptionCn: agent?.descriptionCn ?? '',
     prompt: agent?.prompt ?? '',
@@ -68,27 +75,69 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   });
   const [loading, setLoading] = useState(false);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [defaultModel, setDefaultModel] = useState<{ providerID: string; modelID: string } | null>(null);
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [toolsLoading, setToolsLoading] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(true);
+  const createGuideGroups = useMemo(() => buildGuidedCreateGroups([
+    { title: t('create.guideSectionTitle'), actions: t('create.guideActions', { returnObjects: true }) },
+    { title: t('create.caseSectionTitle'), actions: t('create.caseActions', { returnObjects: true }) },
+  ]), [t]);
+  const editGuideGroups = useMemo(() => {
+    const guideActionKey = isNative ? 'edit.nativeGuideActions' : 'edit.guideActions';
+    const caseActionKey = isNative ? 'edit.nativeCaseActions' : 'edit.caseActions';
+    const name = formData.name || agent?.name || 'Agent';
+
+    return buildGuidedCreateGroups([
+      {
+        title: t('edit.guideSectionTitle'),
+        actions: t(guideActionKey, {
+          returnObjects: true,
+          name,
+        }),
+      },
+      {
+        title: t('edit.caseSectionTitle'),
+        actions: t(caseActionKey, {
+          returnObjects: true,
+          name,
+        }),
+      },
+    ]);
+  }, [agent?.name, formData.name, isNative, t]);
+  const guideGroups = isEdit ? editGuideGroups : createGuideGroups;
+  const rexComposerControls = useRexComposerControls();
 
   // isPrimary derives from formData.mode so it reacts to mode changes in create mode
   const isPrimary = formData.mode === 'primary';
 
   useEffect(() => {
-    providerAPI.list().then((r) => {
-      const connectedSet = new Set<string>(r.data.connected ?? []);
-      const list: AvailableModel[] = [];
-      for (const provider of r.data.all) {
-        if (!connectedSet.has(provider.id)) continue;
-        for (const [modelId, modelInfo] of Object.entries(provider.models ?? {})) {
-          list.push({ providerID: provider.id, modelID: modelId, label: (modelInfo as any).name || modelId });
-        }
-      }
+    Promise.all([
+      providerAPI.list(),
+      modelV2API.listDefinitions({ enabled_only: true }),
+    ]).then(([providersRes, modelsRes]) => {
+      const connectedSet = new Set<string>(providersRes.data.connected ?? []);
+      const providerById = new Map(
+        providersRes.data.all
+          .filter((provider) => connectedSet.has(provider.id))
+          .map((provider) => [provider.id, provider]),
+      );
+      const enabledModels = (modelsRes.data.models ?? []) as ModelDefinitionV2[];
+      const list: AvailableModel[] = enabledModels.flatMap((model) => {
+        const provider = providerById.get(model.provider_id);
+        if (!provider) return [];
+        return [{
+          providerID: provider.id,
+          providerName: provider.name || provider.id,
+          modelID: model.id,
+          label: model.name || model.id,
+        }];
+      });
       setAvailableModels(list);
-    }).catch(() => {});
+    }).catch(() => setAvailableModels([]))
+      .finally(() => setModelsLoaded(true));
 
     defaultModelAPI.getResolved().then((r) => {
       const d = r.data;
@@ -113,7 +162,16 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     }).catch(() => {}).finally(() => setSkillsLoading(false));
   }, []);
 
-  const isNative = !!agent?.native;
+  useEffect(() => {
+    if (!modelsLoaded || !formData.modelKey) return;
+    const selectedStillAvailable = availableModels.some(
+      (model) => `${model.providerID}::${model.modelID}` === formData.modelKey,
+    );
+    if (!selectedStillAvailable) {
+      setFormData((prev) => ({ ...prev, modelKey: '' }));
+    }
+  }, [availableModels, formData.modelKey, modelsLoaded]);
+
   const submitDisabled = false;
 
   const handleSubmit = async () => {
@@ -137,6 +195,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
         await agentAPI.updateModel(agent!.name, model ?? null, formData.temperature);
       } else {
         await agentAPI.update(agent!.name, {
+          nameCn: formData.nameCn,
           description: formData.description || undefined,
           descriptionCn: formData.descriptionCn || undefined,
           prompt: formData.prompt,
@@ -155,25 +214,36 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     }
   };
 
-  // ── Test: run agent with a prompt ─────────────────────────────────────────
-
-  const handleRunTest = async (prompt: string): Promise<string> => {
-    const res = await agentAPI.test(agent!.name, prompt);
-    return res.data.sessionId;
-  };
-
   // ── Rex: extract config from conversation ─────────────────────────────────
 
   const handleExtractFromRex = async (sessionId: string) => {
-    const extractPrompt = `请将以上讨论的 Agent 配置整理输出为 JSON，只输出 JSON 对象，不要有任何其他文字：
+    const extractPrompt = isNative
+      ? `请将以上讨论的内置 Agent 可保存配置整理输出为 JSON，只输出 JSON 对象，不要有任何其他文字。内置 Agent 只支持保存模型和温度，不要输出 description、prompt、tools、skills 等不可保存字段：
+\`\`\`json
+{
+  "model": {
+    "providerID": "模型 Provider ID（可选）",
+    "modelID": "模型 ID（可选）"
+  },
+  "temperature": 0.7
+}
+\`\`\``
+      : `请将以上讨论的 Agent 配置整理输出为 JSON，只输出 JSON 对象，不要有任何其他文字：
 \`\`\`json
 {
   "name": "agent-名称（小写字母、数字和连字符）",
+  "name_cn": "中文名称（可选）",
   "description": "简短英文描述（用于委派）",
   "description_cn": "中文界面展示（可选）",
   "prompt": "完整的 System Prompt 内容",
+  "model": {
+    "providerID": "模型 Provider ID（可选）",
+    "modelID": "模型 ID（可选）"
+  },
   "temperature": 0.7,
-  "mode": "primary 或 subagent"
+  "mode": "primary 或 subagent",
+  "tools": ["工具名称（可选）"],
+  "skills": ["Skill 名称（可选）"]
 }
 \`\`\``;
 
@@ -201,24 +271,49 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
 
           const config = parseJsonFromText(text);
           if (config) {
-            setFormData((prev) => ({
-              ...prev,  // preserve tools, skills, modelKey
-              name: config.name || prev.name,
-              description: config.description ?? prev.description,
-              descriptionCn:
-                (typeof config.description_cn === 'string'
-                  ? config.description_cn
-                  : typeof config.descriptionCn === 'string'
-                    ? config.descriptionCn
-                    : prev.descriptionCn),
-              prompt: config.prompt || prev.prompt,
-              temperature:
-                typeof config.temperature === 'number' ? config.temperature : prev.temperature,
-              mode:
-                config.mode === 'primary' || config.mode === 'subagent'
-                  ? config.mode
-                  : prev.mode,
-            }));
+            setFormData((prev) => {
+              const modelKey = getModelKeyFromConfig(config, prev.modelKey);
+              const temperature = typeof config.temperature === 'number' ? config.temperature : prev.temperature;
+
+              if (isNative) {
+                return {
+                  ...prev,
+                  modelKey,
+                  temperature,
+                };
+              }
+
+              return {
+                ...prev,
+                name: config.name || prev.name,
+                nameCn:
+                  (typeof config.name_cn === 'string'
+                    ? config.name_cn
+                    : typeof config.nameCn === 'string'
+                      ? config.nameCn
+                      : prev.nameCn),
+                description: config.description ?? prev.description,
+                descriptionCn:
+                  (typeof config.description_cn === 'string'
+                    ? config.description_cn
+                    : typeof config.descriptionCn === 'string'
+                      ? config.descriptionCn
+                      : prev.descriptionCn),
+                prompt: config.prompt || prev.prompt,
+                modelKey,
+                temperature,
+                mode:
+                  config.mode === 'primary' || config.mode === 'subagent'
+                    ? config.mode
+                    : prev.mode,
+                tools: Array.isArray(config.tools)
+                  ? config.tools.filter((tool: unknown): tool is string => typeof tool === 'string')
+                  : prev.tools,
+                skills: Array.isArray(config.skills)
+                  ? config.skills.filter((skill: unknown): skill is string => typeof skill === 'string')
+                  : prev.skills,
+              };
+            });
             return;
           }
         }
@@ -235,8 +330,18 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       entityType="Agent"
       entityName={agent?.name}
       icon={<Bot className="w-5 h-5" />}
-      rexSystemContext={buildRexContext(formData, isEdit)}
-      rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name)}
+      rexSystemContext={buildRexContext(formData, isEdit, isNative)}
+      rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name, isNative)}
+      rexGuideGroups={guideGroups}
+      rexGuidePanelTitle={isEdit ? t('edit.guidePanelTitle') : t('create.guidePanelTitle')}
+      rexGuidePanelDesc={isEdit
+        ? t(isNative ? 'edit.nativeGuidePanelDesc' : 'edit.guidePanelDesc', { name: agent?.name ?? formData.name })
+        : t('create.guidePanelDesc')}
+      rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
+      rexGuideIcon={<Bot className="h-5 w-5" />}
+      initialTab={isEdit ? 'rex' : undefined}
+      rexSessionStorageKey={isEdit && agent?.name ? `agent-edit:${agent.name}` : undefined}
+      {...rexComposerControls}
       submitDisabled={submitDisabled}
       submitLoading={loading}
       submitLabel={isEdit ? undefined : t('sheet.done')}
@@ -244,8 +349,6 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={isEdit ? handleExtractFromRex : undefined}
-      onRunTest={isEdit ? handleRunTest : undefined}
-      defaultTestPrompt="你好，请介绍一下你自己以及你的主要功能。"
     >
       <AgentFormContent
         formData={formData}
@@ -303,6 +406,10 @@ function AgentFormContent({
     acc[m.providerID].push(m);
     return acc;
   }, {});
+  const providerLabelById = availableModels.reduce<Record<string, string>>((acc, m) => {
+    acc[m.providerID] = m.providerName;
+    return acc;
+  }, {});
 
   const defaultModelLabel = defaultModel
     ? `${defaultModel.modelID} (${defaultModel.providerID})`
@@ -335,7 +442,7 @@ function AgentFormContent({
       {nativeReadOnly && (
         <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
           <Lock className="w-3.5 h-3.5 shrink-0" />
-          {t('form.nativeReadOnlyPrefix')}<span className="font-semibold">{t('form.model')}</span>{t('form.nativeReadOnlyAnd')}<span className="font-semibold">{t('form.temperature')}</span>{t('form.nativeReadOnlySuffix')}
+          {t('form.nativeReadOnlyMessage')}
         </div>
       )}
 
@@ -357,6 +464,25 @@ function AgentFormContent({
             {formData.name}
           </div>
         )}
+      </div>
+
+      {/* Chinese display name */}
+      <div>
+        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
+          {t('form.nameCn')}
+        </label>
+        <input
+          type="text"
+          value={formData.nameCn}
+          onChange={(e) => update({ nameCn: e.target.value })}
+          disabled={nativeReadOnly}
+          className={`w-full px-4 py-2 border rounded-lg text-sm ${
+            nativeReadOnly
+              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
+              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+          }`}
+          placeholder={t('form.nameCnPlaceholder')}
+        />
       </div>
 
       {/* Description (English) + Chinese UI */}
@@ -449,7 +575,7 @@ function AgentFormContent({
           >
             <option value="">— {defaultModelLabel} —</option>
             {Object.entries(modelsByProvider).map(([pID, pModels]) => (
-              <optgroup key={pID} label={pID}>
+              <optgroup key={pID} label={providerLabelById[pID] || pID}>
                 {pModels.map((m) => (
                   <option key={`${m.providerID}::${m.modelID}`} value={`${m.providerID}::${m.modelID}`}>
                     {m.label}
@@ -472,6 +598,7 @@ function AgentFormContent({
             className="w-28 px-3 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
           />
         </div>
+
       </div>
 
       {/* Tools */}
@@ -638,21 +765,24 @@ function AgentFormContent({
 
 // ─── Rex context builders ─────────────────────────────────────────────────────
 
-function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
+function buildRexContext(formData: AgentFormData, isEdit: boolean, isNative = false): string {
   if (!isEdit) {
     return `你是 Agent 创建助手。用户希望通过对话来创建一个新的子 Agent。
 
-请使用 agent-builder skill 根据用户的需求生成子 Agent 配置文件（YAML + prompt 文件），保存到 ~/.flocks/plugins/agents/ 目录。
+请先加载并遵守项目内 .flocks/plugins/skills/agent-builder（agent-builder skill），再根据用户需求生成子 Agent 配置文件（agent.yaml + prompt.md），保存到 ~/.flocks/plugins/agents/<name>/ 目录。
 
 **创建流程：**
 1. 先确认用户需求：Agent 名称、职责、能力边界、执行模式
-2. 生成 prompt 文件（.prompt.md）和配置文件（.yaml）
-3. 验证文件正确性
+2. 生成 prompt.md 和 agent.yaml，目录名必须与 Agent name 一致
+3. 验证 YAML、目录结构、名称唯一性和工具名
 
 **重要约束：**
+- 必须先加载 .flocks/plugins/skills/agent-builder
 - Agent 名称必须是 kebab-case 格式
+- 如果用户提供中文名称，请写入 name_cn 字段
 - mode 固定为 subagent
-- 文件必须写入 ~/.flocks/plugins/agents/
+- 文件必须写入 ~/.flocks/plugins/agents/<name>/，禁止创建 agents/<name>.yaml 这类扁平文件
+- 新 Agent 优先使用 tools: allowlist，不要随意使用 permission 通配规则
 - 不要与内置 Agent 名称冲突
 
 请先引导用户描述需求，如果信息不够清晰可适当追问，然后一次性生成所有文件。`;
@@ -662,41 +792,81 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
     formData.prompt.length > 200
       ? formData.prompt.slice(0, 200) + '...'
       : formData.prompt;
+  const toolsSummary = formData.tools.length > 0 ? formData.tools.join(', ') : '（未配置）';
+  const skillsSummary = formData.skills.length > 0 ? formData.skills.join(', ') : '（未配置）';
+  const modelSummary = formData.modelKey || '（系统默认）';
+  const editableFieldLines = isNative
+    ? [
+        `**可保存字段说明：**`,
+        `- **模型**：可建议切换到更适合当前职责的模型，但需要给出 Provider ID 和 Model ID 才能自动提取。`,
+        `- **温度**：0-2，值越低越精准保守（安全分析推荐 0.2-0.5），越高越有创意。`,
+        `- **验证建议**：可以设计测试输入、预期输出和失败判据，帮助用户保存后验证效果。`,
+        `- 内置 Agent 的描述、System Prompt、Tools、Skills 由系统维护，不要建议提取或覆盖这些字段。`,
+      ]
+    : [
+        `**可编辑字段说明：**`,
+        `- **描述**：简短说明 Agent 的用途，英文描述用于委派和模型上下文。`,
+        `- **System Prompt**：Agent 的核心指令，决定其行为、能力边界、输出格式和风格。`,
+        `- **模型 / 温度**：模型决定能力边界；温度 0-2，值越低越精准保守，越高越有创意。`,
+        `- **Tools / Skills**：只保留任务确实需要的能力，优先使用最小权限。`,
+        `- **模式**：仅展示当前类型；编辑时不要建议修改 primary/subagent 模式。`,
+      ];
 
   return [
-    `你是一个 Agent 配置专家，正在帮助用户修改一个 AI Agent。`,
+    `你是一个 Agent 编辑引导助手，正在帮助用户修改一个已有 AI Agent。`,
+    `你的目标不是直接大改配置，而是先理解当前配置、追问修改意图，再给出可应用到表单的修改方案。`,
+    isNative
+      ? `这是内置 Agent：只能保存模型和温度。若用户要求修改职责、Prompt、Tools 或 Skills，请明确说明这些字段当前不可保存，只能给出验证建议或外部配置建议。`
+      : `如果用户希望改动 Agent 文件或重新生成 prompt.md/agent.yaml，请先加载并遵守项目内 .flocks/plugins/skills/agent-builder（agent-builder skill）。`,
     ``,
     `**当前配置状态：**`,
     `- 名称：${formData.name || '（未填写）'}`,
     `- 描述（英文）：${formData.description || '（未填写）'}`,
     `- 描述（中文）：${formData.descriptionCn || '（未填写）'}`,
     `- System Prompt：${promptPreview || '（未填写）'}`,
+    `- 模型：${modelSummary}`,
     `- 温度：${formData.temperature}`,
     `- 模式：${formData.mode === 'primary' ? 'Primary（主 Agent）' : 'Subagent（子 Agent）'}`,
+    `- Tools：${toolsSummary}`,
+    `- Skills：${skillsSummary}`,
+    `- 是否内置 Agent：${isNative ? '是。内置 Agent 仅支持修改模型和温度，其他配置由系统维护。' : '否，可修改描述、Prompt、温度、Tools 和 Skills。'}`,
     ``,
-    `**Agent 字段说明：**`,
-    `- **名称**：小写字母、数字和连字符，是 Agent 的唯一标识符`,
-    `- **描述**：简短说明 Agent 的用途（30字以内）`,
-    `- **System Prompt**：Agent 的核心指令，决定其行为、能力和风格`,
-    `- **温度**：0-2，值越低越精准保守（安全分析推荐 0.2-0.5），越高越有创意`,
-    `- **模式**：primary 直接与用户交互；subagent 由主 Agent 调用`,
+    `**编辑流程：**`,
+    `1. 先确认用户想解决的问题：职责变更、行为风格、工具权限、输出格式或模型参数。`,
+    `2. 对照当前配置说明建议修改哪些字段，并指出不建议修改的边界。`,
+    `3. 必要时一次只问一个关键问题，避免一开始就输出大段配置。`,
+    `4. 用户确认后，输出可被「从 Rex 提取配置」解析的 JSON 配置摘要。`,
     ``,
-    `请根据用户的描述帮助他们修改 Agent 配置。`,
-    `配置完成后，用户可以点击「从 Rex 提取配置」按钮，将配置自动填入表单。`,
-    `届时你会被要求以 JSON 格式输出配置摘要，请确保 JSON 格式正确。`,
+    ...editableFieldLines,
+    ``,
+    `配置完成后，用户会点击引导按钮「从 Rex 提取配置」，将配置自动填入表单。届时你会被要求只输出 JSON，请确保 JSON 格式正确。`,
   ].join('\n');
 }
 
-function buildRexWelcome(isEdit: boolean, agentName?: string): string {
+function buildRexWelcome(isEdit: boolean, agentName?: string, isNative = false): string {
   if (isEdit) {
+    if (isNative) {
+      return `你好！我来帮你修改内置 Agent **${agentName}** 的可保存配置。
+
+你可以从下方选择一个编辑入口，也可以直接描述你想调整的地方，比如：
+
+- 检查当前模型是否适合这个 Agent
+- 调低温度，让输出更稳定保守
+- 设计测试输入和验收标准
+
+注意：这是内置 Agent，当前只支持保存模型和温度。`;
+    }
+
     return `你好！我来帮你修改 Agent **${agentName}** 的配置。
 
-你可以告诉我：
-- 想调整 System Prompt 的哪些部分？
-- 需要改变 Agent 的行为风格？
-- 温度或其他参数需要调整？
+你可以从下方选择一个编辑入口，也可以直接描述你想改的地方，比如：
 
-描述你的需求，我来帮你完善配置。配置好后，点击底部「从 Rex 提取配置」即可自动填入表单。`;
+- 调整职责边界或委派触发条件
+- 优化 System Prompt 和输出格式
+- 收敛工具 / Skill 权限
+- 调整温度并验证效果
+
+配置好后，点击引导按钮「从 Rex 提取配置」即可自动填入表单。`;
   }
   return `你好！我来帮你创建一个新的子 Agent。
 
@@ -728,4 +898,29 @@ function parseJsonFromText(text: string): Record<string, any> | null {
   }
 
   return null;
+}
+
+function getModelKeyFromConfig(config: Record<string, any>, fallback: string): string {
+  if (typeof config.modelKey === 'string' && config.modelKey.includes('::')) {
+    return config.modelKey;
+  }
+
+  const model = config.model;
+  if (!model || typeof model !== 'object') {
+    return fallback;
+  }
+
+  const raw = model as Record<string, unknown>;
+  const providerID = typeof raw.providerID === 'string'
+    ? raw.providerID
+    : typeof raw.provider_id === 'string'
+      ? raw.provider_id
+      : '';
+  const modelID = typeof raw.modelID === 'string'
+    ? raw.modelID
+    : typeof raw.model_id === 'string'
+      ? raw.model_id
+      : '';
+
+  return providerID && modelID ? `${providerID}::${modelID}` : fallback;
 }

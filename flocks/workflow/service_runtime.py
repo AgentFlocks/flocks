@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -19,6 +21,7 @@ from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.tool_context import build_workflow_tool_context
 
 log = Log.create(service="workflow.service_runtime")
+_SERVICE_API_KEY_ENV = "FLOCKS_WORKFLOW_SERVICE_API_KEY"
 
 
 class InvokeRequest(BaseModel):
@@ -36,6 +39,7 @@ def create_service_app(
     workflow_json: Dict[str, Any],
     workflow_id: str,
     release_id: str,
+    api_key: Optional[str] = None,
 ) -> FastAPI:
     """Build service app bound to one workflow snapshot."""
     @asynccontextmanager
@@ -61,6 +65,7 @@ def create_service_app(
     app.state.workflow_json = workflow_json
     app.state.workflow_id = workflow_id
     app.state.release_id = release_id
+    app.state.api_key = api_key
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -76,8 +81,17 @@ def create_service_app(
         return JSONResponse(status_code=503, content=payload)
 
     @app.post("/invoke")
-    async def invoke(req: InvokeRequest) -> Dict[str, Any]:
+    async def invoke(
+        req: InvokeRequest,
+        x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+    ) -> Dict[str, Any]:
         started = time.time()
+        expected_api_key = app.state.api_key
+        if expected_api_key and (
+            not x_api_key or not hmac.compare_digest(str(x_api_key), str(expected_api_key))
+        ):
+            raise HTTPException(status_code=401, detail="Invalid API key")
+
         if not app.state.mcp_ready:
             raise HTTPException(
                 status_code=503,
@@ -150,6 +164,7 @@ def main() -> None:
         workflow_json=workflow_json,
         workflow_id=args.workflow_id,
         release_id=args.release_id,
+        api_key=os.getenv(_SERVICE_API_KEY_ENV),
     )
 
     import uvicorn

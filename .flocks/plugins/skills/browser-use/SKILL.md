@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: 统一处理浏览器使用任务，支持 CDP 直连/无头模式 使用用户本机 Chromium 系浏览器。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, access internal/login-only pages, handle access-restricted content, when websearch/webfetch are unavailable, or automate browser actions.
+description: 统一处理浏览器使用任务，支持可见浏览器 CDP 直连、专用 headless CDP、agent-browser。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, work with an already-open browser/sidebar browser, access login-only/internal/dynamic pages, or automate browser actions.
 ---
 
 # Browser Use
@@ -22,71 +22,56 @@ description: 统一处理浏览器使用任务，支持 CDP 直连/无头模式 
 | `cdp-direct` | 复用本机 Chromium 系浏览器的 CDP 直连模式 | 用户明确说用 CDP 模式|
 | `cdp-headless` | 通过 `BU_CDP_WS` / `BU_CDP_URL` 连接独立 headless Chromium 实例 | 只有用户明确要求 headless，或任务本身是后台任务/定时任务，或系统不支持可视化 |
 
- - 用户明确指出模式后，直接阅读执行规则部分
- - 当用户没有明确指出使用模式时，进入下一步自动判定
- - 不要默认切到 `cdp-headless`；能用用户正常浏览器完成的任务，优先保持可见浏览器流程
+- 用户明确指出模式后，直接阅读执行规则部分
+- 当用户没有明确指出使用模式时，进入下一步自动判定
 
-## 自动判定模式
+## 自动判定与失败处理
 
-当用户没有明确指出使用模式时，按下面两步自动判定：
+当用户没有明确指出使用模式时,按以下 4 步自动判定 + 失败处理:
 
-1. 先判断本次 `cdp-direct` 是否需要 headless 浏览器实例
-   满足以下任一条件时，判定为“使用 headless 浏览器实例的 `cdp-direct` 流程”：
-   - 任务天然是后台执行
-   - 任务属于定时任务、`CI` / `cron`
-   - 用户明确要求本次使用 headless 浏览器
-   - 系统不支持可视化，如服务器
+### Step 1: 是否需要 headless
 
-2. 如果判定需要 headless，则按以下顺序执行
-   - 先读取 `references/cdp-headless.md`
-   - 优先使用显式提供的 `BU_CDP_WS` / `BU_CDP_URL`
-   - 不要引导用户去操作日常浏览器 profile 的 inspect 授权页
-   - 如果没有显式 CDP endpoint，再按 `references/cdp-headless.md` 中当前平台对应的后台启动方式启动专用 Chromium 实例；必须让浏览器进程脱离当前 shell 独立存活，并为它分配未被占用的专用 remote debugging 端口，优先复用安装脚本设置的 `AGENT_BROWSER_EXECUTABLE_PATH`
-   - 连通后读取 `references/cdp-direct.md`，后续页面操作统一按 `cdp-direct` 工作流执行
+满足以下任一条件时,判定为“使用 headless 浏览器实例的 `cdp-direct` 流程”:
 
-### 第一步：跑 CDP 可用性检测
+- 任务天然是后台执行
+- 任务属于定时任务 / `CI` / `cron`
+- 用户明确要求本次使用 headless 浏览器
+- 系统不支持可视化,如服务器
 
-先执行：
+如果判定需要 headless,则按以下顺序执行:
+
+- 先读取 `references/cdp-headless.md`
+- 优先使用显式提供的 `BU_CDP_WS` / `BU_CDP_URL`
+- 不要引导用户去操作日常浏览器 profile 的 inspect 授权页
+- 如果没有显式 CDP endpoint,再按 `references/cdp-headless.md` 中当前平台对应的后台启动方式启动专用 Chromium 实例;必须让浏览器进程脱离当前 shell 独立存活,并为它分配未被占用的专用 remote debugging 端口,优先复用安装脚本设置的 `AGENT_BROWSER_EXECUTABLE_PATH`
+- 连通后读取 `references/cdp-direct.md`,后续页面操作统一按 `cdp-direct` 工作流执行
+
+### Step 2: 跑 CDP 可用性检测
+
+先执行:
 
 ```bash
 flocks browser --doctor
 ```
 
-该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Chromium/Edge 是否运行，以及当前是否有可用的浏览器连接。
+该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Chromium/Edge 是否运行,以及当前是否有可用的浏览器连接。不要只看命令退出码；必须优先读取 `next action` 行，再结合 `browser running` / `daemon alive` / `active browser connections` 三行判断。
 
-### 第二步：根据检测结果决定模式
+### Step 3: 根据 doctor 输出决定模式
 
-#### 结果 A：doctor 通过
+| 结果 | 触发条件 | 一线修复 | 仍失败兜底 |
+|---|---|---|---|
+| **A** | `next action` 以 `ready` 开头 | 立即确定 `CDP 直连`,阅读 `references/cdp-direct.md`,之后不再切到 `agent-browser` | — |
+| **B** | `next action` 以 `attach` 开头 | 不要先反复 `--setup`；按输出执行 `flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'` 触发一次实际连接/观察 | 如果 `-c` 失败或仍无连接，执行 `flocks browser --reload` 清理旧 daemon，再执行 `flocks browser --setup`；setup 可能需要多次，直到用户完成浏览器 Allow/inspect 授权或错误信息稳定 |
+| **C** | `next action` 以 `setup` 开头 | 先执行 `flocks browser --setup`（不包短超时），再运行 `--doctor` 确认 | 如提示 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake 或 not live yet，再提示用户打开对应 inspect 页面并 Allow；用户确认后可多次 `--setup` |
+| **D** | `next action` 提示启动浏览器或提供 endpoint | 明确告知需要先启动 Chrome/Chromium/Edge 或提供 CDP endpoint | **不**擅自降级到 curl/webfetch；坚持告知 skill 边界 |
 
-这时立即确定使用 `CDP 直连`，然后马上阅读：
+### Step 4: 跨模式通用失败
 
-- `references/cdp-direct.md`
+| 触发条件 | 一线修复 | 仍失败兜底 |
+|---|---|---|
+| `cdp-headless` 启动了专用 Chromium 实例 | 记 PID + 日志 + 专用 profile 路径 | 任务结束或明确放弃才清理;**不**关闭用户提供的远程浏览器 |
+| 模式已确定后用户改主意 | 重新跑 `--doctor` 走 Result A/B/C 判定 | 避免同时加载 `cdp-direct.md` + `agent-browser.md` |
 
-之后只按 CDP 流程执行，不再切到 `agent-browser`。
-
-#### 结果 B：浏览器已运行，但 daemon 或 active browser connection 不可用
-
-必须直接提示用户：
-
-```text
-browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后访问对应浏览器的 inspect 页面（例如 chrome://inspect/#remote-debugging 或 edge://inspect/#remote-debugging）并勾选 Allow remote debugging
-```
-
-然后等待用户进一步指示，不要直接操作。
-
-当用户确认已开启remote-debugging后:
-1. 执行 `flocks browser --setup` 触发交互式 attach，不要用短超时包装该命令
-2. 再运行 `flocks browser --doctor` 做只读确认。
-3. 如果还失败，先执行 `flocks browser --reload` 清理旧 daemon，再重新执行 `flocks browser --setup`，避免因为残留 daemon 造成干扰。
-
-如果用户在 `Windows PowerShell` 中执行 `flocks browser -c`，优先使用单行代码并用分号分隔；多行单引号字符串容易因为换行/转义处理差异而触发假失败。
-
-- 如果 `--setup` 成功，随后 `--doctor` 通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
-
-#### 结果 C：`flocks browser --doctor` 失败，或当前机器没有可用 Chrome/Chromium/Edge
-
-说明当前环境不适合 `CDP 直连`。此时要：
-- 明确告诉用户是哪一项不满足，提示需要做什么操作才能达到要求
 
 ## 执行规则
 
@@ -94,7 +79,8 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 2. `cdp-headless` 是唯一例外：先读取 `references/cdp-headless.md` 完成浏览器启动与连接，再读取 `references/cdp-direct.md` 执行通用页面操作。
 3. 在 `cdp-headless` 中，如果当前任务自己启动了专用浏览器实例，必须记录 PID / 日志 / 专用 profile，并只在任务结束或明确放弃后清理自己启动的实例；不要关闭用户提供的远程浏览器。
 4. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
-5. `flocks browser` 的 daemon 文件固定放在 `~/.flocks/browser/`，例如 `bu.sock`、`bu.log`、`bu.pid`、`bu.port`。
+5. `flocks browser` 的 daemon 文件固定放在 `~/.flocks/browser/`,例如 `bu.sock`、`bu.log`、`bu.pid`、`bu.port`。
+6. 基础操作能力（打开、观察、点击、输入、滚动、截图、提取、等待、关闭）优先按 `references/cdp-direct.md` 的“基础操作速查”执行
 
 ## 产品经验Skill
 

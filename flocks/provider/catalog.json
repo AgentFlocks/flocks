@@ -52,6 +52,31 @@
       "THREATBOOK_CN_LLM_API_KEY"
     ],
     "models": {
+      "minimax-m3": {
+        "name": "minimax-m3",
+        "family": "minimax",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 128000
+        },
+        "pricing": {
+          "input": 4.2,
+          "output": 16.8,
+          "currency": "CNY",
+          "note": "≤512k input: ¥4.20/M tokens output: ¥16.80/M tokens; >512k input: ¥8.40/M tokens output: ¥33.60/M tokens"
+        }
+      },
       "minimax-m2.7": {
         "name": "minimax-m2.7",
         "family": "minimax",
@@ -203,8 +228,8 @@
           "supports_streaming": true
         },
         "limits": {
-          "context_window": 200000,
-          "max_output_tokens": 128000
+          "context_window": 1000000,
+          "max_output_tokens": 384000
         },
         "pricing": {
           "input": 1.0,
@@ -237,6 +262,30 @@
       "THREATBOOK_IO_LLM_API_KEY"
     ],
     "models": {
+      "minimax-m3": {
+        "name": "minimax-m3",
+        "family": "minimax",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 128000
+        },
+        "pricing": {
+          "input": 4.2,
+          "output": 16.8,
+          "currency": "CNY",
+          "note": "≤512k input: ¥4.20/M tokens output: ¥16.80/M tokens; >512k input: ¥8.40/M tokens output: ¥33.60/M tokens"
+        }
+      },
       "minimax-m2.7": {
         "name": "minimax-m2.7",
         "family": "minimax",
@@ -361,8 +410,8 @@
           "supports_streaming": true
         },
         "limits": {
-          "context_window": 200000,
-          "max_output_tokens": 128000
+          "context_window": 1000000,
+          "max_output_tokens": 384000
         },
         "pricing": {
           "input": 1.0,
@@ -1007,6 +1056,54 @@
           "output": 16.0,
           "currency": "CNY"
         }
+      },
+      "deepseek-v4-flash": {
+        "name": "DeepSeek V4 Flash",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 1.0,
+          "output": 2.0,
+          "currency": "CNY"
+        }
+      },
+      "deepseek-v4-pro": {
+        "name": "DeepSeek V4 Pro",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 3.0,
+          "output": 9.0,
+          "currency": "CNY"
+        }
       }
     }
   },
@@ -1344,6 +1441,30 @@
       "MINIMAX_API_KEY"
     ],
     "models": {
+      "minimax-m3": {
+        "name": "MiniMax M3",
+        "family": "minimax",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 128000
+        },
+        "pricing": {
+          "input": 4.2,
+          "output": 16.8,
+          "currency": "CNY",
+          "note": "≤512k input: ¥4.20/M tokens, output: ¥16.80/M tokens; >512k input: ¥8.40/M tokens, output: ¥33.60/M tokens"
+        }
+      },
       "minimax-m2.7": {
         "name": "MiniMax M2.7",
         "family": "minimax-m2",

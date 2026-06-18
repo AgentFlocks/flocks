@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -251,6 +252,64 @@ class TestUpdateTool:
         assert body["enabled"] is False
         assert enabled_tool.info.enabled is False
         assert _read_settings() == {enabled_tool.info.name: {"enabled": False}}
+
+    def test_device_enable_clears_override_and_enables_global_tool(
+        self, tool_client, monkeypatch: pytest.MonkeyPatch
+    ):
+        client, _, disabled_tool = tool_client
+        _set_service(enabled=True)
+        delete_override = AsyncMock(return_value=True)
+        set_override = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.tool.device.store.delete_device_tool_setting",
+            delete_override,
+        )
+        monkeypatch.setattr(
+            "flocks.tool.device.store.set_device_tool_enabled",
+            set_override,
+        )
+
+        res = client.patch(
+            f"/api/tools/{disabled_tool.info.name}?device_id=dev-a",
+            json={"enabled": True},
+        )
+
+        body = res.json()
+        assert res.status_code == 200
+        assert body["enabled"] is True
+        assert disabled_tool.info.enabled is True
+        assert _read_settings() == {disabled_tool.info.name: {"enabled": True}}
+        delete_override.assert_awaited_once_with("dev-a", disabled_tool.info.name)
+        set_override.assert_not_awaited()
+
+    def test_device_disable_writes_false_override_only(
+        self, tool_client, monkeypatch: pytest.MonkeyPatch
+    ):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        delete_override = AsyncMock()
+        set_override = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.tool.device.store.delete_device_tool_setting",
+            delete_override,
+        )
+        monkeypatch.setattr(
+            "flocks.tool.device.store.set_device_tool_enabled",
+            set_override,
+        )
+
+        res = client.patch(
+            f"/api/tools/{enabled_tool.info.name}?device_id=dev-a",
+            json={"enabled": False},
+        )
+
+        body = res.json()
+        assert res.status_code == 200
+        assert body["enabled"] is True
+        assert enabled_tool.info.enabled is True
+        assert _read_settings() == {}
+        set_override.assert_awaited_once_with("dev-a", enabled_tool.info.name, False)
+        delete_override.assert_not_awaited()
 
 
 class TestResetToolSetting:

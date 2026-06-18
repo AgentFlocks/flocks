@@ -42,6 +42,9 @@ class OutputSink(ABC):
     async def clear_screen(self) -> None:
         return None
 
+    async def clear_history(self) -> None:
+        return None
+
 
 class CallbackOutputSink(OutputSink):
     """Simple sink backed by async callbacks from each surface adapter."""
@@ -54,12 +57,14 @@ class CallbackOutputSink(OutputSink):
         run_llm: RunLlmCallback,
         session_control: Optional[SessionControlCallback] = None,
         clear_screen: Optional[SideEffectCallback] = None,
+        clear_history: Optional[SideEffectCallback] = None,
     ) -> None:
         super().__init__(surface)
         self._direct_response = direct_response
         self._run_llm = run_llm
         self._session_control = session_control
         self._clear_screen = clear_screen
+        self._clear_history = clear_history
 
     async def publish_direct_response(self, event: UserInputEvent, text: str) -> None:
         await self._direct_response(event, text)
@@ -84,6 +89,10 @@ class CallbackOutputSink(OutputSink):
     async def clear_screen(self) -> None:
         if self._clear_screen is not None:
             await self._clear_screen()
+
+    async def clear_history(self) -> None:
+        if self._clear_history is not None:
+            await self._clear_history()
 
 
 class SSEOutputSink(CallbackOutputSink):

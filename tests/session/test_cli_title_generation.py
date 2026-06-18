@@ -81,6 +81,48 @@ class TestGenerateTitleAfterFirstMessage:
         mock_update.assert_awaited_once_with("proj-1", "sess-1", title="Debug Python")
 
     @pytest.mark.asyncio
+    async def test_rejects_tool_call_payload_title_and_falls_back(self):
+        """Tool-call payloads from the title model are not persisted as titles."""
+        from flocks.session.lifecycle.title import SessionTitle
+
+        question = (
+            "based on ThreatBook Threat Intelligence, please give me reports for "
+            "cyber news related to Hong Kong for the past 7 days"
+        )
+        mock_session = _make_session()
+        msg, part = _make_user_msg(question)
+        mock_provider = MagicMock()
+
+        async def fake_stream(*args, **kwargs):
+            yield MagicMock(delta='[TOOL_CALL]\n{tool => "news", args => {\n  --query: "Hong Kong"\n}}')
+
+        mock_provider.chat_stream = fake_stream
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="minimax-m2.7",
+                provider_id="threatbook-cn-llm",
+            )
+
+        expected = SessionTitle._generate_simple_title(question)
+        assert title == expected
+        assert "TOOL_CALL" not in title
+        mock_update.assert_awaited_once_with("proj-1", "sess-1", title=expected)
+
+    def test_rejects_json_function_call_title_candidate(self):
+        """Structured function-call shaped JSON is invalid as a thread title."""
+        from flocks.session.lifecycle.title import SessionTitle
+
+        title = SessionTitle._sanitize_generated_title(
+            '{"name": "news", "arguments": {"query": "Hong Kong"}}'
+        )
+
+        assert title == ""
+
+    @pytest.mark.asyncio
     async def test_skips_when_more_than_one_user_message(self):
         """Returns None when there are 2+ user messages (not the first turn)."""
         from flocks.session.lifecycle.title import SessionTitle

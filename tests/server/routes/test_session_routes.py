@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -19,6 +20,15 @@ import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 from flocks.auth.context import AuthUser
+from flocks.session.core.status import SessionStatus, SessionStatusBusy
+from flocks.session.message import (
+    Message,
+    MessageRole,
+    ToolPart,
+    ToolStateError,
+    ToolStateRunning,
+)
+from flocks.session.orphan_tools import INTERRUPTED_TOOL_ERROR
 from flocks.session.session import Session
 
 # ===========================================================================
@@ -54,6 +64,24 @@ class TestSessionCRUD:
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["category"] == "workflow"
+
+    @pytest.mark.asyncio
+    async def test_get_session_includes_persisted_goal(self, client: AsyncClient):
+        """GET /api/session/{id} hydrates persisted goal state for the WebUI."""
+        from flocks.session.goal import GoalManager
+
+        create_resp = await client.post("/api/session", json={"title": "Goal Session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        await GoalManager.set_goal(session_id, "List built-in tools")
+
+        resp = await client.get(f"/api/session/{session_id}")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["goal"] == {
+            "status": "active",
+            "objective": "List built-in tools",
+            "reason": None,
+        }
 
     @pytest.mark.asyncio
     async def test_list_sessions_empty(self, client: AsyncClient):
@@ -92,6 +120,60 @@ class TestSessionCRUD:
         ids = {item["id"] for item in data}
         assert parent_id in ids
         assert child_id not in ids
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_light_manager_filters_and_omits_heavy_fields(self, client: AsyncClient):
+        """Lightweight manager list returns only sidebar metadata."""
+        from flocks.session.goal import GoalManager
+
+        user_resp = await client.post("/api/session", json={"title": "User"})
+        user_id = user_resp.json()["id"]
+        workflow_resp = await client.post(
+            "/api/session",
+            json={"title": "Workflow", "category": "workflow"},
+        )
+        workflow_id = workflow_resp.json()["id"]
+        task_resp = await client.post(
+            "/api/session",
+            json={"title": "Task", "category": "task"},
+        )
+        task_id = task_resp.json()["id"]
+        child_resp = await client.post(
+            "/api/session",
+            json={"title": "Child", "parentID": user_id},
+        )
+        child_id = child_resp.json()["id"]
+        await GoalManager.set_goal(user_id, "Do not hydrate in list mode")
+
+        resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        ids = {item["id"] for item in data}
+        assert user_id in ids
+        assert workflow_id in ids
+        assert task_id not in ids
+        assert child_id not in ids
+
+        row = next(item for item in data if item["id"] == user_id)
+        assert set(row) == {
+            "id",
+            "title",
+            "time",
+            "category",
+            "parentID",
+            "provider",
+            "model",
+            "model_pinned",
+            "canWrite",
+            "canDelete",
+            "isShared",
+        }
+        assert "goal" not in row
+        assert "summary" not in row
 
     @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):
@@ -177,6 +259,125 @@ class TestSessionMessages:
             for m in messages
         )
 
+    @pytest.mark.asyncio
+    async def test_list_messages_keeps_running_tool_when_session_busy(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_busy_running",
+            sessionID=session_id,
+            messageID=msg.id,
+            callID="call_busy_running",
+            tool="bash",
+            state=ToolStateRunning(
+                input={"cmd": "sleep 60"},
+                time={"start": 1000},
+            ),
+        )
+        await Message.store_part(session_id, msg.id, part)
+
+        SessionStatus.set(session_id, SessionStatusBusy())
+        try:
+            resp = await client.get(f"/api/session/{session_id}/message")
+        finally:
+            SessionStatus.clear(session_id)
+
+        assert resp.status_code == status.HTTP_200_OK
+        parts = await Message.parts(msg.id, session_id)
+        running_part = next(p for p in parts if p.id == "part_busy_running")
+        assert running_part.state.status == "running"
+
+    @pytest.mark.asyncio
+    async def test_list_messages_recovers_orphan_running_tool_when_session_idle(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_idle_running",
+            sessionID=session_id,
+            messageID=msg.id,
+            callID="call_idle_running",
+            tool="bash",
+            state=ToolStateRunning(
+                input={"cmd": "sleep 60"},
+                metadata={"sessionId": "ses_child"},
+                time={"start": 1000},
+            ),
+        )
+        await Message.store_part(session_id, msg.id, part)
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        parts = await Message.parts(msg.id, session_id)
+        repaired_part = next(p for p in parts if p.id == "part_idle_running")
+        assert isinstance(repaired_part.state, ToolStateError)
+        assert repaired_part.state.status == "error"
+        assert repaired_part.state.error == INTERRUPTED_TOOL_ERROR
+        assert repaired_part.state.metadata == {"sessionId": "ses_child"}
+        assert repaired_part.state.time["start"] == 1000
+        assert repaired_part.state.time["end"] >= 1000
+
+    @pytest.mark.asyncio
+    async def test_list_messages_uses_preloaded_orphan_recovery_path(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session import orphan_tools
+
+        preloaded_recovery = AsyncMock(return_value=0)
+        legacy_recovery = AsyncMock(side_effect=AssertionError("legacy recovery should not be called"))
+        monkeypatch.setattr(orphan_tools, "abort_orphan_running_parts_in_messages", preloaded_recovery)
+        monkeypatch.setattr(orphan_tools, "abort_orphan_running_parts", legacy_recovery)
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        preloaded_recovery.assert_awaited_once()
+        legacy_recovery.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_list_messages_page_uses_lazy_recent_path(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        old_msg = await Message.create(session_id, MessageRole.USER, "old")
+        mid_msg = await Message.create(session_id, MessageRole.USER, "middle")
+        new_msg = await Message.create(session_id, MessageRole.ASSISTANT, "new")
+
+        async def _fail_full_list(*args, **kwargs):
+            raise AssertionError("full list_with_parts should not be used for paged reads")
+
+        monkeypatch.setattr(Message, "list_with_parts", _fail_full_list)
+
+        first_resp = await client.get(
+            f"/api/session/{session_id}/message",
+            params={"page": "true", "limit": "2"},
+        )
+
+        assert first_resp.status_code == status.HTTP_200_OK
+        first_page = first_resp.json()
+        assert [item["info"]["id"] for item in first_page["items"]] == [mid_msg.id, new_msg.id]
+        assert first_page["hasMore"] is True
+        assert first_page["nextBefore"] == mid_msg.id
+
+        older_resp = await client.get(
+            f"/api/session/{session_id}/message",
+            params={"page": "true", "limit": "2", "before": first_page["nextBefore"]},
+        )
+        assert older_resp.status_code == status.HTTP_200_OK
+        older_page = older_resp.json()
+        assert [item["info"]["id"] for item in older_page["items"]] == [old_msg.id]
+        assert older_page["hasMore"] is False
 
 # ===========================================================================
 # Delete permissions (single-admin model)
@@ -273,6 +474,42 @@ class TestSessionLocalSharing:
 
 
 class TestSessionMessagesRemaining:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path_suffix", "payload"),
+        [
+            ("/message", {"parts": [{"type": "text", "text": "blocked"}], "agent": "disabled-agent"}),
+            ("/prompt_async", {"parts": [{"type": "text", "text": "blocked"}], "agent": "disabled-agent"}),
+            ("/prompt_queue", {"parts": [{"type": "text", "text": "blocked"}], "agent": "disabled-agent"}),
+            ("/command", {"command": "help", "agent": "disabled-agent"}),
+        ],
+    )
+    async def test_input_routes_reject_disabled_agents(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+        path_suffix: str,
+        payload: dict,
+    ):
+        """Disabled subagents cannot be used through direct session input APIs."""
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(
+                name="disabled-agent",
+                mode="subagent",
+                delegatable=False,
+                hidden=False,
+                tags=[],
+                model=None,
+            )),
+        )
+
+        resp = await client.post(f"/api/session/{session_id}{path_suffix}", json=payload)
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json()["message"] == 'Agent "disabled-agent" is disabled'
+
     @pytest.mark.asyncio
     async def test_send_message_empty_parts_returns_success(
         self, client: AsyncClient, session_id: str
@@ -849,15 +1086,107 @@ class TestSessionUtilities:
     @pytest.mark.asyncio
     async def test_clear_session(self, client: AsyncClient, session_id: str):
         """POST /api/session/{id}/clear removes messages."""
+        from flocks.session.goal import GoalManager
+
         # Add a message first
         await client.post(
             f"/api/session/{session_id}/message",
             json={"parts": [{"type": "text", "text": "msg"}], "noReply": True},
         )
+        await GoalManager.set_goal(session_id, "List built-in tools")
         clear_resp = await client.post(f"/api/session/{session_id}/clear")
         assert clear_resp.status_code == status.HTTP_200_OK
 
         # Messages should be gone
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        assert list_resp.json() == []
+        assert await GoalManager.get(session_id) is None
+
+        session_resp = await client.get(f"/api/session/{session_id}")
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json()["goal"] is None
+
+    @pytest.mark.asyncio
+    async def test_clear_session_clears_prompt_queue(self, client: AsyncClient, session_id: str):
+        """POST /api/session/{id}/clear also drops queued prompts."""
+        from flocks.session.interaction_queue import InteractionQueue
+
+        await InteractionQueue.clear(session_id)
+        await InteractionQueue.enqueue(
+            session_id,
+            parts=[{"type": "text", "text": "queued after current reply"}],
+        )
+
+        clear_resp = await client.post(f"/api/session/{session_id}/clear")
+
+        assert clear_resp.status_code == status.HTTP_200_OK
+        assert await InteractionQueue.list(session_id) == []
+
+    @pytest.mark.asyncio
+    async def test_clear_session_waits_for_idle_before_clearing_messages(self, monkeypatch):
+        """History is cleared only after abort drains the active session loop."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.interaction_queue import InteractionQueue
+
+        session_id = "ses_clear_waits_for_idle"
+        await InteractionQueue.clear(session_id)
+        await InteractionQueue.enqueue(
+            session_id,
+            parts=[{"type": "text", "text": "queued prompt"}],
+        )
+        order: list[str] = []
+
+        async def fake_abort_session(_session_id: str) -> bool:
+            order.append("abort")
+            return True
+
+        async def fake_wait_for_session_idle(_session_id: str) -> None:
+            order.append("wait")
+            assert await InteractionQueue.list(session_id) == []
+
+        async def fake_message_clear(_session_id: str) -> int:
+            order.append("message_clear")
+            return 2
+
+        async def fake_publish_event(_event: str, _payload: dict) -> None:
+            return None
+
+        monkeypatch.setattr(
+            session_routes.Session,
+            "get_by_id",
+            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+        )
+        monkeypatch.setattr(session_routes, "abort_session", fake_abort_session)
+        monkeypatch.setattr(session_routes, "_wait_for_session_idle", fake_wait_for_session_idle)
+        monkeypatch.setattr("flocks.session.message.Message.clear", fake_message_clear)
+        monkeypatch.setattr("flocks.server.routes.event.publish_event", fake_publish_event)
+
+        deleted = await session_routes._clear_session_history(session_id)
+
+        assert deleted == 2
+        assert order == ["abort", "wait", "message_clear"]
+        assert await InteractionQueue.list(session_id) == []
+
+    @pytest.mark.asyncio
+    async def test_clear_command_removes_messages(self, client: AsyncClient, session_id: str):
+        """Command route /clear removes messages via the dispatcher task."""
+        from flocks.server.routes import session as session_routes
+
+        await client.post(
+            f"/api/session/{session_id}/message",
+            json={"parts": [{"type": "text", "text": "msg"}], "noReply": True},
+        )
+
+        clear_resp = await session_routes.send_session_command(
+            session_id,
+            session_routes.CommandRequest(command="clear"),
+        )
+        assert clear_resp["status"] == "accepted"
+
+        pending = list(getattr(session_routes.router, "_pending_tasks", set()))
+        assert pending
+        await asyncio.gather(*pending)
+
         list_resp = await client.get(f"/api/session/{session_id}/message")
         assert list_resp.json() == []
 
@@ -866,6 +1195,26 @@ class TestSessionUtilities:
         """POST /api/session/{id}/abort returns 200 (no active generation needed)."""
         resp = await client.post(f"/api/session/{session_id}/abort")
         assert resp.status_code == status.HTTP_200_OK
+
+    @pytest.mark.asyncio
+    async def test_session_statistics(self, client: AsyncClient, session_id: str):
+        """GET /api/session/{id}/statistics reports stored session messages."""
+        payload = {
+            "parts": [{"type": "text", "text": "Hello from statistics"}],
+            "noReply": True,
+        }
+        message_resp = await client.post(f"/api/session/{session_id}/message", json=payload)
+        assert message_resp.status_code == status.HTTP_200_OK
+
+        resp = await client.get(f"/api/session/{session_id}/statistics")
+        assert resp.status_code == status.HTTP_200_OK
+
+        data = resp.json()
+        assert data["sessionID"] == session_id
+        assert data["messageCount"] == 1
+        assert data["tokenCount"] >= 3
+        assert data["toolCallCount"] == 0
+        assert data["durationSeconds"] >= 0
 
     @pytest.mark.asyncio
     async def test_session_status(self, client: AsyncClient):

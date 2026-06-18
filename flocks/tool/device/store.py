@@ -390,6 +390,109 @@ async def ensure_default_group() -> None:
 # Public helper for downstream callers (Agent tools, etc.)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Per-device tool settings (device_tool_settings table)
+# ---------------------------------------------------------------------------
+
+async def get_device_tool_enabled(device_id: str, tool_name: str) -> Optional[bool]:
+    """Return the per-device enabled override for *tool_name*, or None if not set.
+
+    None  → no per-device override; fall back to global tool_settings / factory default.
+    True  → explicitly enabled for this device.
+    False → explicitly disabled for this device.
+    """
+    async with Storage.connect(Storage.get_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT enabled FROM device_tool_settings WHERE device_id = ? AND tool_name = ?",
+            (device_id, tool_name),
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return bool(row["enabled"])
+
+
+async def set_device_tool_enabled(
+    device_id: str, tool_name: str, enabled: bool
+) -> None:
+    """Upsert the per-device tool override for *tool_name*.
+
+    Bumps the device revision so the session runner's system-prompt cache
+    invalidates and rebuilds the DeviceAssetContext section — otherwise the
+    Agent would keep seeing the pre-toggle tool list until the cache TTL.
+    """
+    now = _now_ms()
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO device_tool_settings (device_id, tool_name, enabled, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(device_id, tool_name) DO UPDATE SET
+                enabled    = excluded.enabled,
+                updated_at = excluded.updated_at
+            """,
+            (device_id, tool_name, int(enabled), now),
+        )
+        await db.commit()
+    _bump_revision()
+    log.info("tool.device.tool_setting.set", {
+        "device_id": device_id, "tool": tool_name, "enabled": enabled,
+    })
+
+
+async def delete_device_tool_setting(device_id: str, tool_name: str) -> bool:
+    """Remove the per-device override for *tool_name*.
+
+    Returns True if a row existed and was deleted.  Bumps the device
+    revision on actual deletion so cached prompts get rebuilt.
+    """
+    async with Storage.connect(Storage.get_db_path()) as db:
+        cur = await db.execute(
+            "DELETE FROM device_tool_settings WHERE device_id = ? AND tool_name = ?",
+            (device_id, tool_name),
+        )
+        await db.commit()
+    removed = cur.rowcount > 0
+    if removed:
+        _bump_revision()
+        log.info("tool.device.tool_setting.removed", {
+            "device_id": device_id, "tool": tool_name,
+        })
+    return removed
+
+
+async def list_device_tool_settings(
+    device_id: str,
+) -> Dict[str, bool]:
+    """Return {tool_name: enabled} for all per-device overrides of *device_id*."""
+    async with Storage.connect(Storage.get_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT tool_name, enabled FROM device_tool_settings WHERE device_id = ?",
+            (device_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {row["tool_name"]: bool(row["enabled"]) for row in rows}
+
+
+async def list_all_device_tool_settings() -> Dict[str, Dict[str, bool]]:
+    """Return {device_id: {tool_name: enabled}} for ALL devices in one query.
+
+    Avoids the N+1 pattern when building artefacts (e.g. the DeviceAssetContext
+    prompt section) that need per-device overrides for many devices at once.
+    """
+    result: Dict[str, Dict[str, bool]] = {}
+    async with Storage.connect(Storage.get_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT device_id, tool_name, enabled FROM device_tool_settings"
+        ) as cur:
+            async for row in cur:
+                result.setdefault(row["device_id"], {})[row["tool_name"]] = bool(row["enabled"])
+    return result
+
+
 async def get_device_credentials(device_id: str) -> Optional[Dict[str, Any]]:
     """Return plaintext credentials for *device_id*, or None if not found / disabled.
 

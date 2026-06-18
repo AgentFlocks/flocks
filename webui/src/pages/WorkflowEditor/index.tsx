@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useContext, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -32,7 +32,15 @@ import {
   Trash2,
 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import { ThemeContext } from '@/contexts/ThemeContext';
 import { extractErrorMessage } from '@/utils/error';
+import {
+  buildWorkflowGraphLayout,
+  workflowGraphEdgeId,
+  type WorkflowGraphEdgeRoute,
+  type WorkflowGraphOutputHandle,
+} from '@/utils/workflowGraphLayout';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 // 自定义节点组件
 import PythonNode from './nodes/PythonNode';
@@ -46,6 +54,7 @@ import SubworkflowNode from './nodes/SubworkflowNode';
 
 // 交互组件
 import PropertyPanel from './components/PropertyPanel';
+import EdgePropertyPanel from './components/EdgePropertyPanel';
 import NodeToolbar from './components/NodeToolbar';
 import ExecutionPanel from './components/ExecutionPanel';
 import ExecuteDialog from './components/ExecuteDialog';
@@ -63,22 +72,138 @@ const nodeTypes = {
 
 // 节点类型颜色配置
 const nodeColors: Record<string, { bg: string; border: string; text: string }> = {
-  python: { bg: 'bg-red-50', border: 'border-red-500', text: 'text-red-700' },
-  logic: { bg: 'bg-green-50', border: 'border-green-500', text: 'text-green-700' },
-  branch: { bg: 'bg-yellow-50', border: 'border-yellow-500', text: 'text-yellow-700' },
-  loop: { bg: 'bg-purple-50', border: 'border-purple-500', text: 'text-purple-700' },
-  tool: { bg: 'bg-violet-50', border: 'border-violet-500', text: 'text-violet-700' },
-  llm: { bg: 'bg-pink-50', border: 'border-pink-500', text: 'text-pink-700' },
-  http_request: { bg: 'bg-teal-50', border: 'border-teal-500', text: 'text-teal-700' },
-  subworkflow: { bg: 'bg-orange-50', border: 'border-orange-400', text: 'text-orange-700' },
+  python: { bg: 'bg-white', border: 'border-red-300', text: 'text-red-600' },
+  logic: { bg: 'bg-white', border: 'border-emerald-300', text: 'text-emerald-600' },
+  branch: { bg: 'bg-white', border: 'border-amber-300', text: 'text-amber-600' },
+  loop: { bg: 'bg-white', border: 'border-purple-300', text: 'text-purple-600' },
+  tool: { bg: 'bg-white', border: 'border-violet-300', text: 'text-violet-600' },
+  llm: { bg: 'bg-white', border: 'border-pink-300', text: 'text-pink-600' },
+  http_request: { bg: 'bg-white', border: 'border-teal-300', text: 'text-teal-600' },
+  subworkflow: { bg: 'bg-white', border: 'border-orange-300', text: 'text-orange-600' },
 };
 
+const nodeMiniMapColors: Record<string, string> = {
+  python: '#f87171',
+  logic: '#34d399',
+  branch: '#f59e0b',
+  loop: '#a78bfa',
+  tool: '#8b5cf6',
+  llm: '#f472b6',
+  http_request: '#2dd4bf',
+  subworkflow: '#fb923c',
+};
+
+type EdgeTheme = Record<WorkflowGraphEdgeRoute['kind'], {
+  stroke: string;
+  label: string;
+  labelBg: string;
+  strokeWidth: number;
+  strokeDasharray?: string;
+}>;
+
+const LIGHT_EDGE_THEME: EdgeTheme = {
+  default: {
+    stroke: '#94a3b8',
+    label: '#64748b',
+    labelBg: '#f8fafc',
+    strokeWidth: 1.8,
+  },
+  branch: {
+    stroke: '#d97706',
+    label: '#92400e',
+    labelBg: '#fffbeb',
+    strokeWidth: 2.2,
+  },
+  loop: {
+    stroke: '#8b5cf6',
+    label: '#6d28d9',
+    labelBg: '#f5f3ff',
+    strokeWidth: 2,
+  },
+  back: {
+    stroke: '#64748b',
+    label: '#475569',
+    labelBg: '#f8fafc',
+    strokeWidth: 1.8,
+    strokeDasharray: '6 5',
+  },
+};
+
+const DARK_EDGE_THEME: EdgeTheme = {
+  default: {
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
+    strokeWidth: 1.8,
+  },
+  branch: {
+    stroke: '#f59e0b',
+    label: '#fbbf24',
+    labelBg: '#3d3424',
+    strokeWidth: 2.2,
+  },
+  loop: {
+    stroke: '#a78bfa',
+    label: '#c4b5fd',
+    labelBg: '#363047',
+    strokeWidth: 2,
+  },
+  back: {
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
+    strokeWidth: 1.8,
+    strokeDasharray: '6 5',
+  },
+};
+
+function buildReactFlowEdge(
+  edge: WorkflowJSON['edges'][number],
+  index: number,
+  route: WorkflowGraphEdgeRoute = { kind: 'default' },
+  edgeTheme: EdgeTheme = LIGHT_EDGE_THEME
+): Edge {
+  const theme = edgeTheme[route.kind];
+
+  return {
+    id: workflowGraphEdgeId(edge, index),
+    source: edge.from,
+    target: edge.to,
+    sourceHandle: route.sourceHandle,
+    label: route.label ?? edge.label,
+    type: 'smoothstep',
+    animated: false,
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 18,
+      height: 18,
+      color: theme.stroke,
+    },
+    style: {
+      stroke: theme.stroke,
+      strokeWidth: theme.strokeWidth,
+      strokeDasharray: theme.strokeDasharray,
+    },
+    labelStyle: { fontSize: 11, fontWeight: 600, fill: theme.label },
+    labelBgStyle: { fill: theme.labelBg, fillOpacity: 0.96 },
+    labelBgPadding: [8, 4],
+    labelBgBorderRadius: 8,
+    data: {
+      label: edge.label,
+      order: edge.order,
+      mapping: edge.mapping,
+      const: edge.const,
+    },
+  };
+}
+
 // 将后端数据转换为 ReactFlow 格式
-function convertToReactFlowFormat(workflowJson: WorkflowJSON): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = workflowJson.nodes.map((node, index) => ({
+function convertToReactFlowFormat(workflowJson: WorkflowJSON, edgeTheme: EdgeTheme = LIGHT_EDGE_THEME): { nodes: Node[]; edges: Edge[] } {
+  const diagram = buildWorkflowGraphLayout(workflowJson);
+  const nodes: Node[] = workflowJson.nodes.map((node) => ({
     id: node.id,
     type: node.type,
-    position: { x: 100 + (index % 3) * 250, y: 100 + Math.floor(index / 3) * 150 },
+    position: diagram.positions[node.id] ?? { x: 0, y: 0 },
     data: {
       label: node.id,
       description: node.description,
@@ -86,6 +211,8 @@ function convertToReactFlowFormat(workflowJson: WorkflowJSON): { nodes: Node[]; 
       select_key: node.select_key,
       join: node.join,
       join_mode: node.join_mode,
+      join_conflict: node.join_conflict,
+      join_namespace_key: node.join_namespace_key,
       // tool
       tool_name: node.tool_name,
       tool_args: node.tool_args,
@@ -103,28 +230,14 @@ function convertToReactFlowFormat(workflowJson: WorkflowJSON): { nodes: Node[]; 
       workflow_id: node.workflow_id,
       inputs_mapping: node.inputs_mapping,
       inputs_const: node.inputs_const,
+      outputHandles: diagram.outputHandles[node.id],
       ...(nodeColors[node.type] ?? nodeColors.python),
     },
   }));
 
-  const edges: Edge[] = workflowJson.edges.map((edge, index) => ({
-    id: `e-${edge.from}-${edge.to}-${index}`,
-    source: edge.from,
-    target: edge.to,
-    label: edge.label,
-    type: 'smoothstep',
-    animated: true,
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      width: 20,
-      height: 20,
-    },
-    data: {
-      order: edge.order,
-      mapping: edge.mapping,
-      const: edge.const,
-    },
-  }));
+  const edges: Edge[] = workflowJson.edges.map((edge, index) =>
+    buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)], edgeTheme)
+  );
 
   return { nodes, edges };
 }
@@ -137,6 +250,8 @@ interface NodeData {
   select_key?: string;
   join?: boolean;
   join_mode?: string;
+  join_conflict?: string;
+  join_namespace_key?: string;
   bg?: string;
   border?: string;
   text?: string;
@@ -157,13 +272,32 @@ interface NodeData {
   workflow_id?: string;
   inputs_mapping?: Record<string, string>;
   inputs_const?: Record<string, unknown>;
+  outputHandles?: WorkflowGraphOutputHandle[];
 }
 
 // 定义边数据类型
 interface EdgeData {
+  label?: string;
   order?: number;
   mapping?: Record<string, string>;
   const?: Record<string, any>;
+}
+
+function applyGraphSemantics(nodes: Node[], edges: Edge[], workflow: Workflow, edgeTheme: EdgeTheme = LIGHT_EDGE_THEME): { nodes: Node[]; edges: Edge[] } {
+  const workflowJson = convertToWorkflowJSON(nodes, edges, workflow);
+  const diagram = buildWorkflowGraphLayout(workflowJson);
+  const updatedNodes = nodes.map((node) => ({
+    ...node,
+    data: {
+      ...node.data,
+      outputHandles: diagram.outputHandles[node.id],
+    },
+  }));
+  const updatedEdges = workflowJson.edges.map((edge, index) =>
+    buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)], edgeTheme)
+  );
+
+  return { nodes: updatedNodes, edges: updatedEdges };
 }
 
 // 将 ReactFlow 格式转换回后端数据
@@ -178,6 +312,8 @@ function convertToWorkflowJSON(nodes: Node[], edges: Edge[], workflow: Workflow)
       select_key: data.select_key,
       join: data.join,
       join_mode: data.join_mode as any,
+      join_conflict: data.join_conflict as any,
+      join_namespace_key: data.join_namespace_key,
       // tool
       tool_name: data.tool_name,
       tool_args: data.tool_args,
@@ -204,7 +340,7 @@ function convertToWorkflowJSON(nodes: Node[], edges: Edge[], workflow: Workflow)
       from: edge.source,
       to: edge.target,
       order: data?.order || 0,
-      label: edge.label as string,
+      label: data && Object.prototype.hasOwnProperty.call(data, 'label') ? data.label : edge.label as string,
       mapping: data?.mapping,
       const: data?.const,
     };
@@ -216,23 +352,29 @@ function convertToWorkflowJSON(nodes: Node[], edges: Edge[], workflow: Workflow)
     start: workflow.workflowJson.start,
     nodes: apiNodes,
     edges: apiEdges,
+    triggers: workflow.workflowJson.triggers,
     metadata: workflow.workflowJson.metadata,
   };
 }
 
 export default function WorkflowEditor() {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
+  const { theme } = useContext(ThemeContext);
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const isDark = theme === 'dark';
+  const edgeTheme = useMemo(() => (isDark ? DARK_EDGE_THEME : LIGHT_EDGE_THEME), [isDark]);
 
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [edges, setEdges] = useEdgesState<Edge>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [validationResult, setValidationResult] = useState<{ valid: boolean; issues: any[] } | null>(null);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
   const [showPropertyPanel, setShowPropertyPanel] = useState(false);
+  const [showEdgePropertyPanel, setShowEdgePropertyPanel] = useState(false);
   const [showNodeToolbar, setShowNodeToolbar] = useState(true);
   const [showExecuteDialog, setShowExecuteDialog] = useState(false);
   const [currentExecution, setCurrentExecution] = useState<WorkflowExecution | null>(null);
@@ -251,6 +393,13 @@ export default function WorkflowEditor() {
       setExecutionStopping(false);
     }
   }, [currentExecution]);
+
+  useEffect(() => {
+    if (!workflow) return;
+    const refreshed = applyGraphSemantics(nodes, edges, workflow, edgeTheme);
+    setNodes(refreshed.nodes);
+    setEdges(refreshed.edges);
+  }, [edgeTheme]);
 
   useEffect(() => {
     if (!id || !showExecutionPanel || !currentExecution?.id || currentExecution.status !== 'running') {
@@ -290,7 +439,7 @@ export default function WorkflowEditor() {
       const response = await workflowAPI.get(id!);
       setWorkflow(response.data);
       
-      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(response.data.workflowJson);
+      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(response.data.workflowJson, edgeTheme);
       setNodes(flowNodes);
       setEdges(flowEdges);
     } catch (error: any) {
@@ -304,30 +453,81 @@ export default function WorkflowEditor() {
   // 连接节点
   const onConnect = useCallback(
     (params: Connection) => {
+      const sourceType = nodes.find((node) => node.id === params.source)?.type;
+      const route: WorkflowGraphEdgeRoute =
+        sourceType === 'branch'
+          ? { kind: 'branch', sourceHandle: params.sourceHandle ?? undefined }
+          : sourceType === 'loop'
+            ? { kind: 'loop', sourceHandle: params.sourceHandle ?? undefined }
+            : sourceType === 'logic'
+              ? { kind: 'branch', sourceHandle: params.sourceHandle ?? undefined }
+              : { kind: 'default', sourceHandle: params.sourceHandle ?? undefined };
+
       setEdges((eds) =>
-        addEdge(
+        {
+          const nextEdges = addEdge(
           {
             ...params,
             type: 'smoothstep',
-            animated: true,
+            animated: false,
             markerEnd: {
               type: MarkerType.ArrowClosed,
-              width: 20,
-              height: 20,
+              width: 18,
+              height: 18,
+              color: edgeTheme[route.kind].stroke,
             },
+            style: {
+              stroke: edgeTheme[route.kind].stroke,
+              strokeWidth: edgeTheme[route.kind].strokeWidth,
+            },
+            labelStyle: {
+              fontSize: 11,
+              fontWeight: 600,
+              fill: edgeTheme[route.kind].label,
+            },
+            labelBgStyle: { fill: edgeTheme[route.kind].labelBg, fillOpacity: 0.96 },
+            labelBgPadding: [8, 4],
+            labelBgBorderRadius: 8,
+            data: { label: undefined, order: 0 },
           },
           eds
-        )
+          );
+
+          if (!workflow) return nextEdges;
+          const refreshed = applyGraphSemantics(nodes, nextEdges, workflow, edgeTheme);
+          setNodes(refreshed.nodes);
+          return refreshed.edges;
+        }
       );
     },
-    [setEdges]
+    [edgeTheme, nodes, setEdges, setNodes, workflow]
   );
 
   // 节点点击事件 - 显示属性面板
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
+    setSelectedEdge(null);
     setShowPropertyPanel(true);
+    setShowEdgePropertyPanel(false);
   }, []);
+
+  const onEdgeClick = useCallback((_event: React.MouseEvent, edge: Edge) => {
+    setSelectedEdge(edge);
+    setSelectedNode(null);
+    setShowEdgePropertyPanel(true);
+    setShowPropertyPanel(false);
+  }, []);
+
+  const handleEdgesChange = useCallback((changes: EdgeChange<Edge>[]) => {
+    setEdges((eds) => {
+      const nextEdges = applyEdgeChanges(changes, eds);
+      if (!workflow) return nextEdges;
+
+      const refreshed = applyGraphSemantics(nodes, nextEdges, workflow, edgeTheme);
+      setNodes(refreshed.nodes);
+      return refreshed.edges;
+    });
+  }, [edgeTheme, nodes, setEdges, setNodes, workflow]);
 
   // 添加新节点
   const handleAddNode = useCallback((type: string) => {
@@ -366,6 +566,37 @@ export default function WorkflowEditor() {
     setSelectedNode(null);
   }, [setNodes]);
 
+  const handleUpdateEdge = useCallback((edgeId: string, updates: {
+    label?: string;
+    order: number;
+    mapping?: Record<string, string>;
+    const?: Record<string, unknown>;
+  }) => {
+    setEdges((eds) => {
+      const updatedEdges = eds.map((edge) => {
+        if (edge.id !== edgeId) return edge;
+        return {
+          ...edge,
+          label: updates.label,
+          data: {
+            ...(edge.data ?? {}),
+            label: updates.label,
+            order: updates.order,
+            mapping: updates.mapping,
+            const: updates.const,
+          },
+        };
+      });
+
+      if (!workflow) return updatedEdges;
+      const refreshed = applyGraphSemantics(nodes, updatedEdges, workflow, edgeTheme);
+      setNodes(refreshed.nodes);
+      return refreshed.edges;
+    });
+    setShowEdgePropertyPanel(false);
+    setSelectedEdge(null);
+  }, [edgeTheme, nodes, setEdges, setNodes, workflow]);
+
   // 删除选中的节点或边（键盘事件）
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -381,7 +612,16 @@ export default function WorkflowEditor() {
         // 删除选中的边
         const selectedEdges = edges.filter((edge) => edge.selected);
         if (selectedEdges.length > 0) {
-          setEdges((eds) => eds.filter((edge) => !edge.selected));
+          setEdges((eds) => {
+            const nextEdges = eds.filter((edge) => !edge.selected);
+            if (!workflow) return nextEdges;
+
+            const refreshed = applyGraphSemantics(nodes, nextEdges, workflow, edgeTheme);
+            setNodes(refreshed.nodes);
+            return refreshed.edges;
+          });
+          setShowEdgePropertyPanel(false);
+          setSelectedEdge(null);
         }
       }
 
@@ -389,6 +629,8 @@ export default function WorkflowEditor() {
       if (event.key === 'Escape') {
         setShowPropertyPanel(false);
         setSelectedNode(null);
+        setShowEdgePropertyPanel(false);
+        setSelectedEdge(null);
       }
     };
 
@@ -396,19 +638,29 @@ export default function WorkflowEditor() {
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [nodes, edges, setNodes, setEdges]);
+  }, [edgeTheme, nodes, edges, setNodes, setEdges, workflow]);
 
   // 自动布局
   const handleAutoLayout = () => {
-    // 简单的网格布局
-    const updatedNodes = nodes.map((node, index) => ({
+    if (!workflow) return;
+
+    const workflowJson = convertToWorkflowJSON(nodes, edges, workflow);
+    const diagram = buildWorkflowGraphLayout(workflowJson);
+    const updatedNodes = nodes.map((node) => ({
       ...node,
-      position: {
-        x: 100 + (index % 3) * 300,
-        y: 100 + Math.floor(index / 3) * 200,
+      position: diagram.positions[node.id] ?? node.position,
+      data: {
+        ...node.data,
+        outputHandles: diagram.outputHandles[node.id],
       },
     }));
+
+    const updatedEdges = workflowJson.edges.map((edge, index) =>
+      buildReactFlowEdge(edge, index, diagram.edgeRoutes[workflowGraphEdgeId(edge, index)], edgeTheme)
+    );
+
     setNodes(updatedNodes);
+    setEdges(updatedEdges);
   };
 
   // 保存工作流
@@ -417,8 +669,23 @@ export default function WorkflowEditor() {
 
     try {
       setSaving(true);
-      const workflowJson = convertToWorkflowJSON(nodes, edges, workflow);
+      const latestWorkflow = (await workflowAPI.get(id!)).data;
+      const workflowForSave: Workflow = {
+        ...workflow,
+        name: latestWorkflow.name,
+        workflowJson: {
+          ...workflow.workflowJson,
+          triggers: latestWorkflow.workflowJson.triggers,
+          metadata: latestWorkflow.workflowJson.metadata,
+          version: latestWorkflow.workflowJson.version,
+        },
+      };
+      const workflowJson = convertToWorkflowJSON(nodes, edges, workflowForSave);
       await workflowAPI.update(id!, { workflowJson });
+      setWorkflow({
+        ...latestWorkflow,
+        workflowJson,
+      });
       alert(t('editor.saveSuccess'));
     } catch (error: any) {
       console.error('Failed to save workflow:', error);
@@ -535,19 +802,19 @@ export default function WorkflowEditor() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
+    <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950">
       {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950">
         <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/workflows')}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
-            <h1 className="text-xl font-semibold text-gray-900">{workflow.name}</h1>
-            <p className="text-sm text-gray-500">{workflow.description || t('editor.noDescription')}</p>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
+            <p className="text-sm text-gray-500 dark:text-zinc-400">{workflow.description || t('editor.noDescription')}</p>
           </div>
           {validationResult && (
             <div className="flex items-center gap-2">
@@ -567,7 +834,7 @@ export default function WorkflowEditor() {
           <button
             onClick={() => setShowNodeToolbar(!showNodeToolbar)}
             className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
-              showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500' : 'text-gray-700 bg-white hover:bg-gray-50'
+              showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500 dark:bg-red-950/30 dark:text-red-200 dark:border-red-500/40' : 'text-gray-700 bg-white hover:bg-gray-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
             }`}
           >
             <Trash2 className="w-4 h-4" />
@@ -575,21 +842,21 @@ export default function WorkflowEditor() {
           </button>
           <button
             onClick={handleAutoLayout}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <Layout className="w-4 h-4" />
             {t('editor.autoLayout')}
           </button>
           <button
             onClick={handleValidate}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <CheckCircle className="w-4 h-4" />
             {t('editor.validate')}
           </button>
           <button
             onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <FileJson className="w-4 h-4" />
             {t('editor.export')}
@@ -630,6 +897,18 @@ export default function WorkflowEditor() {
           />
         )}
 
+        {/* 边属性面板 */}
+        {showEdgePropertyPanel && selectedEdge && (
+          <EdgePropertyPanel
+            selectedEdge={selectedEdge}
+            onClose={() => {
+              setShowEdgePropertyPanel(false);
+              setSelectedEdge(null);
+            }}
+            onUpdate={handleUpdateEdge}
+          />
+        )}
+
         {/* 执行对话框 */}
         {showExecuteDialog && (
           <ExecuteDialog
@@ -661,41 +940,42 @@ export default function WorkflowEditor() {
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
+          onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
           onNodeClick={onNodeClick}
+          onEdgeClick={onEdgeClick}
           nodeTypes={nodeTypes}
           fitView
           attributionPosition="bottom-left"
           deleteKeyCode={null}
         >
-          <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
+          <Background variant={BackgroundVariant.Dots} gap={12} size={1} color={isDark ? '#5a6573' : '#e2e8f0'} />
           <Controls />
           <MiniMap
             nodeColor={(node) => {
-              const colors = nodeColors[node.type as keyof typeof nodeColors];
-              return colors ? colors.border.replace('border-', '#') : '#gray';
+              return nodeMiniMapColors[node.type as keyof typeof nodeMiniMapColors] ?? '#94a3b8';
             }}
-            style={{ backgroundColor: '#f9fafb' }}
+            maskColor={isDark ? 'rgba(34, 39, 46, 0.72)' : 'rgba(241, 245, 249, 0.68)'}
+            style={{ backgroundColor: isDark ? '#303842' : '#f9fafb' }}
           />
           
           {/* 图例 */}
-          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('editor.nodeTypesLabel')}</h3>
+          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
             <div className="space-y-2">
               {Object.entries(nodeColors).map(([type, colors]) => (
                 <div key={type} className="flex items-center gap-2">
                   <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
-                  <span className="text-xs text-gray-700 capitalize">{type}</span>
+                  <span className="text-xs text-gray-700 capitalize dark:text-zinc-300">{type}</span>
                 </div>
               ))}
             </div>
           </Panel>
 
           {/* 统计信息 */}
-          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('editor.statsLabel')}</h3>
-            <div className="space-y-2 text-xs text-gray-600">
+          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.statsLabel')}</h3>
+            <div className="space-y-2 text-xs text-gray-600 dark:text-zinc-300">
               <div className="flex justify-between gap-4">
                 <span>{t('editor.nodeCountLabel')}</span>
                 <span className="font-medium">{nodes.length}</span>

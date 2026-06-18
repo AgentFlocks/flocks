@@ -1,0 +1,148 @@
+name: hw_waf_host
+description: >
+  Huawei Cloud WAF protected domain management tool. Use the `action`
+  parameter to query, create, update, or delete cloud mode and dedicated
+  mode protected domains.
+description_cn: >
+  华为云 WAF 防护域名管理工具。通过 `action` 参数调用云模式和独享模式防护域名
+  的查询、创建、更新和删除等接口。
+  请在 WAF 服务配置中填写 AK/SK（或 Token）、Region 和 Project ID。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: huaweicloud_waf_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        防护域名管理动作名，可选值：
+        - host_list
+          用途: 查询云模式防护域名列表
+          必填: 无
+          常用: `page`、`pagesize`、`hostname`、`policyname`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - host_show
+          用途: 根据域名 ID 查询云模式防护域名详情
+          必填: `instance_id`
+          常用: `instance_id`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - host_create
+          用途: 创建云模式防护域名
+          必填: `hostname`、`proxy`、`server`
+          常用: `hostname`、`proxy`、`server`、`certificateid`
+          风险提示: 写操作；会新增防护域名接入
+          是否任务型: 否
+        - host_update
+          用途: 更新云模式防护域名配置
+          必填: `instance_id`
+          常用: `instance_id`、`proxy`、`server`、`certificateid`、`protect_status`
+          风险提示: 写操作；会修改域名防护配置
+          是否任务型: 否
+        - host_delete
+          用途: 删除云模式防护域名
+          必填: `instance_id`
+          常用: `instance_id`
+          风险提示: 高风险写操作；删除后防护立即失效
+          是否任务型: 否
+        - host_update_protect_status
+          用途: 修改域名防护状态（开启/关闭/观察）
+          必填: `instance_id`、`protect_status`
+          常用: `instance_id`、`protect_status`
+          风险提示: 写操作；会影响域名流量防护状态
+          是否任务型: 否
+        - premium_host_list
+          用途: 查询独享模式防护域名列表
+          必填: 无
+          常用: `page`、`pagesize`、`hostname`、`policyname`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - premium_host_show
+          用途: 查看独享模式域名配置详情
+          必填: `instance_id`
+          常用: `instance_id`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - premium_host_create
+          用途: 创建独享模式防护域名
+          必填: `hostname`、`proxy`、`server`、`web_tag`
+          常用: `hostname`、`proxy`、`server`、`web_tag`、`certificateid`
+          风险提示: 写操作；会新增独享模式域名接入
+          是否任务型: 否
+        - premium_host_update
+          用途: 修改独享模式域名配置
+          必填: `instance_id`
+          常用: `instance_id`、`proxy`、`server`、`protect_status`
+          风险提示: 写操作；会修改独享域名防护配置
+          是否任务型: 否
+        - premium_host_delete
+          用途: 删除独享模式防护域名
+          必填: `instance_id`
+          常用: `instance_id`
+          风险提示: 高风险写操作；删除后防护立即失效
+          是否任务型: 否
+        - composite_host_list
+          用途: 查询全部（云模式+独享模式）防护域名列表
+          必填: 无
+          常用: `page`、`pagesize`、`hostname`
+          风险提示: 只读查询接口
+          是否任务型: 否
+      enum:
+        - host_list
+        - host_show
+        - host_create
+        - host_update
+        - host_delete
+        - host_update_protect_status
+        - premium_host_list
+        - premium_host_show
+        - premium_host_create
+        - premium_host_update
+        - premium_host_delete
+        - composite_host_list
+    instance_id:
+      type: string
+      description: 防护域名 ID
+    hostname:
+      type: string
+      description: 域名（查询时为模糊匹配关键词，创建时为精确域名）
+    policyname:
+      type: string
+      description: 防护策略名称（查询过滤用）
+    proxy:
+      type: boolean
+      description: 是否使用代理（true/false）
+    server:
+      type: array
+      items:
+        type: object
+      description: 源站服务器配置列表，每项含 `address`、`port`、`type`、`weight` 等字段
+    certificateid:
+      type: string
+      description: 证书 ID（HTTPS 域名必填）
+    protect_status:
+      type: integer
+      description: 防护状态，`0` 关闭防护、`1` 开启防护、`-1` 观察模式
+    web_tag:
+      type: string
+      description: 独享模式域名标签（创建独享域名时必填）
+    page:
+      type: integer
+      description: 页码，从 1 开始
+      default: 1
+    pagesize:
+      type: integer
+      description: 每页数量
+      default: 10
+    enterprise_project_id:
+      type: string
+      description: 企业项目 ID（可选，覆盖配置中的默认值）
+  required:
+    - action
+handler:
+  type: script
+  script_file: hw_waf.handler.py
+  function: host

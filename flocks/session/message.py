@@ -439,6 +439,7 @@ class Message:
     _parts_storage_format: Dict[str, Literal["legacy", "per_message"]] = {}
     _parts_persisted_mids: Dict[str, set[str]] = {}
     _parts_flush_tasks: Dict[str, asyncio.Task] = {}
+    _parts_fully_loaded: set[str] = set()
     _lru: OrderedDict[str, bool] = OrderedDict()  # LRU tracker: move_to_end() is O(1)
     
     # Maximum number of sessions to keep in cache before evicting oldest
@@ -565,21 +566,49 @@ class Message:
     
     @classmethod
     async def _ensure_cache(cls, session_id: str) -> None:
-        """Ensure messages for a session are loaded into cache from storage.
+        """Ensure messages and all parts for a session are loaded into cache.
 
         Uses a per-session lock so operations on different sessions are
         fully concurrent.
         """
+        await cls._ensure_message_cache(session_id)
+        if session_id in cls._parts_fully_loaded:
+            cls._lru.move_to_end(session_id)
+            return
+
+        lock = _session_locks.get(session_id)
+        async with lock:
+            if session_id in cls._parts_fully_loaded:
+                cls._lru.move_to_end(session_id)
+                return
+
+            message_times = {
+                message.id: message.time
+                for message in cls._messages_cache.get(session_id, [])
+            }
+            await cls._load_all_parts_locked(session_id, message_times=message_times)
+            cls._parts_fully_loaded.add(session_id)
+            cls._lru.move_to_end(session_id)
+            log.debug("message.cache.loaded", {"session_id": session_id, "parts": "all"})
+
+    @classmethod
+    async def _ensure_message_cache(cls, session_id: str) -> None:
+        """Ensure message metadata is cached without loading every part.
+
+        The session page only needs recent messages initially. Loading all
+        parts here would deserialize large tool outputs even when only the
+        newest page is requested.
+        """
         if session_id in cls._lru:
             cls._lru.move_to_end(session_id)
             return
-        
+
         lock = _session_locks.get(session_id)
         async with lock:
             if session_id in cls._lru:
                 cls._lru.move_to_end(session_id)
                 return
-            
+
             while len(cls._lru) >= cls._MAX_CACHED_SESSIONS:
                 evict_id, _ = cls._lru.popitem(last=False)
                 cls._cancel_parts_flush_task(evict_id)
@@ -590,71 +619,147 @@ class Message:
                 cls._parts_serialized_cache.pop(evict_id, None)
                 cls._parts_storage_format.pop(evict_id, None)
                 cls._parts_persisted_mids.pop(evict_id, None)
+                cls._parts_fully_loaded.discard(evict_id)
                 _session_locks.discard(evict_id)
                 log.debug("message.cache.evicted", {"session_id": evict_id})
-            
+
             storage_key = f"{cls._MESSAGE_PREFIX}:{session_id}"
             stored_data = await Storage.get(storage_key)
-            
-            if stored_data:
+
+            if isinstance(stored_data, list):
                 messages = []
                 for msg_data in stored_data:
-                    role = msg_data.get('role', 'assistant')
-                    if role == 'user':
-                        messages.append(UserMessageInfo.model_validate(msg_data))
-                    else:
-                        messages.append(AssistantMessageInfo.model_validate(msg_data))
+                    if not isinstance(msg_data, dict):
+                        log.warn("message.cache.skipped_non_dict", {
+                            "session_id": session_id,
+                            "raw_type": type(msg_data).__name__,
+                        })
+                        continue
+
+                    normalized = cls._normalize_stored_message(msg_data, session_id)
+                    role = normalized.get("role", "assistant")
+                    try:
+                        if role == "user":
+                            message = UserMessageInfo.model_validate(normalized)
+                        else:
+                            message = AssistantMessageInfo.model_validate(normalized)
+                    except Exception as exc:
+                        log.warn("message.cache.skipped_invalid", {
+                            "session_id": session_id,
+                            "message_id": normalized.get("id"),
+                            "role": role,
+                            "error": str(exc),
+                        })
+                        continue
+
+                    messages.append(message)
                 cls._messages_cache[session_id] = messages
             else:
                 cls._messages_cache[session_id] = []
-            
-            item_entries = await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
-            stored_parts: Dict[str, List[Dict[str, Any]]] = {}
-            persisted_mids: set[str] = set()
 
-            for key, value in item_entries:
-                if not cls._is_parts_item_key(key, session_id):
-                    continue
-                if not isinstance(value, list):
-                    continue
-                msg_id = key.rsplit(":", 1)[1]
-                stored_parts[msg_id] = value
-                persisted_mids.add(msg_id)
-
-            if stored_parts:
-                cls._parts_storage_format[session_id] = "per_message"
-            else:
-                legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
-                if isinstance(legacy_parts, dict):
-                    stored_parts = legacy_parts
-                    persisted_mids = set(legacy_parts.keys())
-                    cls._parts_storage_format[session_id] = "legacy"
-                else:
-                    cls._parts_storage_format[session_id] = "per_message"
-            
-            if stored_parts:
-                cls._parts_cache[session_id] = {}
-                cls._parts_revision_cache[session_id] = {}
-                for msg_id, parts_data in stored_parts.items():
-                    if not isinstance(parts_data, list):
-                        continue
-                    cls._parts_cache[session_id][msg_id] = [
-                        cls.deserialize_part(p) for p in parts_data
-                    ]
-                    cls._parts_revision_cache[session_id][msg_id] = 0
-                cls._parts_serialized_cache[session_id] = {
-                    msg_id: list(parts_data)
-                    for msg_id, parts_data in stored_parts.items()
-                }
-            else:
-                cls._parts_cache[session_id] = {}
-                cls._parts_revision_cache[session_id] = {}
-                cls._parts_serialized_cache[session_id] = {}
-            cls._parts_persisted_mids[session_id] = persisted_mids
-            
+            cls._parts_cache.setdefault(session_id, {})
+            cls._parts_revision_cache.setdefault(session_id, {})
+            cls._parts_serialized_cache.setdefault(session_id, {})
+            cls._parts_storage_format.setdefault(session_id, "per_message")
+            cls._parts_persisted_mids.setdefault(session_id, set())
+            cls._parts_fully_loaded.discard(session_id)
             cls._rebuild_id_index(session_id)
             cls._lru[session_id] = True
-            log.debug("message.cache.loaded", {"session_id": session_id})
+            log.debug("message.cache.loaded", {"session_id": session_id, "parts": "lazy"})
+
+    @classmethod
+    async def _load_all_parts_locked(
+        cls,
+        session_id: str,
+        *,
+        message_times: Dict[str, Dict[str, int]],
+    ) -> None:
+        """Load all stored parts for a session. Caller must hold session lock."""
+        item_entries = await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
+        stored_parts: Dict[str, List[Dict[str, Any]]] = {}
+        persisted_mids: set[str] = set()
+
+        for key, value in item_entries:
+            if not cls._is_parts_item_key(key, session_id):
+                continue
+            if not isinstance(value, list):
+                continue
+            msg_id = key.rsplit(":", 1)[1]
+            stored_parts[msg_id] = value
+            persisted_mids.add(msg_id)
+
+        if stored_parts:
+            cls._parts_storage_format[session_id] = "per_message"
+        else:
+            legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+            if isinstance(legacy_parts, dict):
+                stored_parts = legacy_parts
+                persisted_mids = set(legacy_parts.keys())
+                cls._parts_storage_format[session_id] = "legacy"
+            else:
+                cls._parts_storage_format[session_id] = "per_message"
+
+        cls._parts_cache[session_id] = {}
+        cls._parts_revision_cache[session_id] = {}
+        cls._parts_serialized_cache[session_id] = {}
+        for msg_id, parts_data in stored_parts.items():
+            if not isinstance(parts_data, list):
+                continue
+            cls._parts_cache[session_id][msg_id] = cls._deserialize_parts_list(
+                session_id,
+                msg_id,
+                parts_data,
+                message_time=message_times.get(msg_id),
+            )
+            cls._parts_revision_cache[session_id][msg_id] = 0
+            cls._parts_serialized_cache[session_id][msg_id] = list(parts_data)
+        cls._parts_persisted_mids[session_id] = persisted_mids
+
+    @classmethod
+    async def _load_parts_for_message(
+        cls,
+        session_id: str,
+        message_id: str,
+        *,
+        legacy_parts_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[PartType]:
+        """Load one message's parts without hydrating every part in the session."""
+        await cls._ensure_message_cache(session_id)
+        cached = cls._parts_cache.setdefault(session_id, {}).get(message_id)
+        if cached is not None:
+            return list(cached)
+
+        message_times = {
+            message.id: message.time
+            for message in cls._messages_cache.get(session_id, [])
+        }
+        parts_data = await Storage.get(cls._parts_item_key(session_id, message_id))
+        if not isinstance(parts_data, list):
+            legacy_parts = legacy_parts_cache
+            if legacy_parts is None:
+                stored_legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                legacy_parts = stored_legacy_parts if isinstance(stored_legacy_parts, dict) else None
+            if isinstance(legacy_parts, dict):
+                cls._parts_storage_format[session_id] = "legacy"
+                parts_data = legacy_parts.get(message_id, [])
+                cls._parts_persisted_mids.setdefault(session_id, set()).update(legacy_parts.keys())
+            else:
+                cls._parts_storage_format.setdefault(session_id, "per_message")
+                parts_data = []
+        else:
+            cls._parts_storage_format[session_id] = "per_message"
+            cls._parts_persisted_mids.setdefault(session_id, set()).add(message_id)
+
+        parts = cls._deserialize_parts_list(
+            session_id,
+            message_id,
+            parts_data,
+            message_time=message_times.get(message_id),
+        )
+        cls._parts_cache.setdefault(session_id, {})[message_id] = parts
+        cls._parts_revision_cache.setdefault(session_id, {})[message_id] = 0
+        cls._parts_serialized_cache.setdefault(session_id, {})[message_id] = list(parts_data)
+        return list(parts)
     
     @classmethod
     def _rebuild_id_index(cls, session_id: str) -> None:
@@ -663,8 +768,347 @@ class Message:
         cls._msg_id_index[session_id] = {m.id: i for i, m in enumerate(messages)}
 
     @classmethod
-    def deserialize_part(cls, part_data: Dict[str, Any]) -> PartType:
+    def _first_non_none(cls, *values: Any) -> Any:
+        """Return the first value that is not None, preserving 0-like sentinels."""
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _default_message_time(cls, raw_time: Any) -> Dict[str, int]:
+        """Normalize stored message timestamps to the current schema."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        if isinstance(raw_time, dict):
+            normalized = dict(raw_time)
+            created = cls._first_non_none(
+                normalized.get("created"),
+                normalized.get("start"),
+            )
+            normalized["created"] = int(created) if created is not None else now_ms
+            if "completed" not in normalized and normalized.get("end") is not None:
+                normalized["completed"] = int(normalized["end"])
+            return normalized
+        return {"created": now_ms}
+
+    @classmethod
+    def _default_message_path(cls, raw_path: Any) -> Dict[str, str]:
+        """Return a safe message path payload for assistant messages."""
+        if isinstance(raw_path, MessagePath):
+            return raw_path.model_dump()
+        if isinstance(raw_path, dict):
+            return {
+                "cwd": str(raw_path.get("cwd") or "./"),
+                "root": str(raw_path.get("root") or ""),
+            }
+        return MessagePath(cwd="./").model_dump()
+
+    @classmethod
+    def _default_token_usage(cls, raw_tokens: Any = None) -> Dict[str, Any]:
+        """Return a safe token payload for assistant messages."""
+        defaults = TokenUsage().model_dump()
+        if isinstance(raw_tokens, TokenUsage):
+            return raw_tokens.model_dump()
+        if isinstance(raw_tokens, dict):
+            normalized = dict(defaults)
+            for key in ("input", "output", "reasoning"):
+                value = raw_tokens.get(key)
+                if value is not None:
+                    normalized[key] = value
+            cache_raw = raw_tokens.get("cache")
+            if isinstance(cache_raw, dict):
+                normalized["cache"] = {
+                    "read": cache_raw.get("read", 0),
+                    "write": cache_raw.get("write", 0),
+                }
+            return normalized
+        return defaults
+
+    @classmethod
+    def _normalize_stored_message(
+        cls,
+        msg_data: Dict[str, Any],
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """Backfill missing fields for legacy or partially-written messages."""
+        normalized = dict(msg_data)
+        role = normalized.get("role", "assistant")
+        normalized["sessionID"] = normalized.get("sessionID") or session_id
+        normalized["time"] = cls._default_message_time(normalized.get("time"))
+
+        if role == "user":
+            model_raw = normalized.get("model")
+            if not isinstance(model_raw, dict):
+                model_raw = {}
+            normalized["agent"] = normalized.get("agent") or "rex"
+            normalized["model"] = {
+                "providerID": model_raw.get("providerID")
+                or normalized.get("providerID")
+                or "",
+                "modelID": model_raw.get("modelID")
+                or normalized.get("modelID")
+                or "",
+            }
+            return normalized
+
+        model_raw = normalized.get("model")
+        if not isinstance(model_raw, dict):
+            model_raw = {}
+        normalized["parentID"] = (
+            normalized.get("parentID")
+            or normalized.get("parent_id")
+            or ""
+        )
+        normalized["modelID"] = (
+            normalized.get("modelID")
+            or normalized.get("model_id")
+            or model_raw.get("modelID")
+            or ""
+        )
+        normalized["providerID"] = (
+            normalized.get("providerID")
+            or normalized.get("provider_id")
+            or model_raw.get("providerID")
+            or ""
+        )
+        normalized["agent"] = normalized.get("agent") or "rex"
+        normalized["mode"] = normalized.get("mode") or normalized["agent"] or "standard"
+        normalized["path"] = cls._default_message_path(normalized.get("path"))
+        normalized["tokens"] = cls._default_token_usage(normalized.get("tokens"))
+        return normalized
+
+    @classmethod
+    def _default_part_time(
+        cls,
+        raw_time: Any = None,
+        *,
+        message_time: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Optional[int]]:
+        """Provide best-effort timestamps for legacy stored parts."""
+        time_info = raw_time if isinstance(raw_time, dict) else {}
+        fallback_time = message_time if isinstance(message_time, dict) else {}
+        start = cls._first_non_none(
+            time_info.get("start"),
+            time_info.get("created"),
+            fallback_time.get("start"),
+            fallback_time.get("created"),
+            0,
+        )
+        end = cls._first_non_none(
+            time_info.get("end"),
+            time_info.get("updated"),
+            time_info.get("completed"),
+            fallback_time.get("end"),
+            fallback_time.get("updated"),
+            fallback_time.get("completed"),
+        )
+        if end is None and start is not None:
+            end = start
+        return {"start": int(start), "end": int(end) if end is not None else None}
+
+    @classmethod
+    def _normalize_tool_state(
+        cls,
+        raw_state: Any,
+        *,
+        message_time: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Convert legacy tool state payloads to the current shape."""
+        fallback_time = cls._default_part_time(message_time=message_time)
+        if isinstance(raw_state, dict):
+            normalized = dict(raw_state)
+        else:
+            normalized = {}
+            if isinstance(raw_state, str):
+                normalized["status"] = raw_state
+
+        status = normalized.get("status")
+        if status not in {"pending", "running", "completed", "error"}:
+            if "output" in normalized:
+                status = "completed"
+            elif "error" in normalized:
+                status = "error"
+            elif "time" in normalized:
+                status = "running"
+            else:
+                status = "pending"
+        normalized["status"] = status
+
+        if status == "pending":
+            normalized.setdefault("input", {})
+            normalized.setdefault("raw", "")
+        elif status == "running":
+            normalized.setdefault("input", {})
+            raw_time = normalized.get("time")
+            normalized["time"] = (
+                cls._default_part_time(raw_time, message_time=message_time)
+                if isinstance(raw_time, dict)
+                else fallback_time
+            )
+        elif status == "completed":
+            normalized.setdefault("input", {})
+            normalized.setdefault("output", "")
+            normalized.setdefault("title", "")
+            normalized.setdefault("metadata", {})
+            raw_time = normalized.get("time")
+            normalized["time"] = (
+                cls._default_part_time(raw_time, message_time=message_time)
+                if isinstance(raw_time, dict)
+                else fallback_time
+            )
+        elif status == "error":
+            normalized.setdefault("input", {})
+            normalized.setdefault("error", "")
+            raw_time = normalized.get("time")
+            normalized["time"] = (
+                cls._default_part_time(raw_time, message_time=message_time)
+                if isinstance(raw_time, dict)
+                else fallback_time
+            )
+
+        return normalized
+
+    @classmethod
+    def _normalize_part_data(
+        cls,
+        part_data: Dict[str, Any],
+        *,
+        session_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        message_time: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Normalize legacy/exported part payloads before validation."""
+        normalized = dict(part_data)
+        if session_id and not normalized.get("sessionID"):
+            normalized["sessionID"] = session_id
+        if message_id and not normalized.get("messageID"):
+            normalized["messageID"] = message_id
+
+        part_type = normalized.get("type", "text")
+        metadata = normalized.get("metadata")
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+
+        if "content" in normalized and "text" not in normalized:
+            normalized["text"] = normalized.get("content", "")
+
+        raw_time = normalized.get("time")
+        if part_type == "text":
+            normalized.setdefault("text", "")
+            if isinstance(raw_time, dict):
+                if "start" not in raw_time and any(
+                    key in raw_time for key in ("created", "updated", "completed", "end")
+                ):
+                    normalized["time"] = cls._default_part_time(
+                        raw_time,
+                        message_time=message_time,
+                    )
+            elif raw_time is not None:
+                normalized.pop("time", None)
+            if metadata is not None and not isinstance(metadata, dict):
+                normalized["metadata"] = None
+        elif part_type == "reasoning":
+            normalized.setdefault("text", normalized.get("content", ""))
+            normalized.setdefault("metadata", metadata_dict or None)
+            normalized["time"] = cls._default_part_time(
+                raw_time,
+                message_time=message_time,
+            )
+        elif part_type == "tool":
+            normalized.setdefault("callID", metadata_dict.get("callID") or normalized.get("id", ""))
+            normalized.setdefault("tool", metadata_dict.get("tool") or normalized.get("tool", "unknown"))
+            raw_state = normalized.get("state")
+            if raw_state is None and metadata_dict:
+                raw_state = metadata_dict.get("state")
+            normalized["state"] = cls._normalize_tool_state(
+                raw_state,
+                message_time=message_time,
+            )
+            normalized.setdefault("metadata", metadata_dict or None)
+        elif part_type == "file":
+            normalized.setdefault("mime", metadata_dict.get("mime") or "application/octet-stream")
+            normalized.setdefault("filename", metadata_dict.get("filename"))
+            normalized.setdefault("url", metadata_dict.get("url") or normalized.get("content", ""))
+        elif part_type == "snapshot":
+            normalized.setdefault("snapshot", metadata_dict.get("snapshot") or normalized.get("content", ""))
+        elif part_type == "patch":
+            normalized.setdefault("hash", metadata_dict.get("hash") or "")
+            normalized.setdefault("files", metadata_dict.get("files") or [])
+        elif part_type == "step-finish":
+            normalized.setdefault("reason", metadata_dict.get("reason") or "completed")
+            normalized.setdefault("snapshot", metadata_dict.get("snapshot"))
+            normalized.setdefault("cost", metadata_dict.get("cost") or 0.0)
+            normalized.setdefault("tokens", metadata_dict.get("tokens") or cls._default_token_usage())
+        elif part_type == "agent":
+            normalized.setdefault("name", metadata_dict.get("name") or normalized.get("content") or "agent")
+        elif part_type == "subtask":
+            normalized.setdefault("prompt", metadata_dict.get("prompt") or normalized.get("content", ""))
+            normalized.setdefault("description", metadata_dict.get("description") or "")
+            normalized.setdefault("agent", metadata_dict.get("agent") or "agent")
+        elif part_type == "retry":
+            normalized.setdefault("attempt", metadata_dict.get("attempt") or 1)
+            normalized.setdefault("error", metadata_dict.get("error") or {})
+            normalized["time"] = cls._default_part_time(
+                metadata_dict.get("time") or raw_time,
+                message_time=message_time,
+            )
+        elif part_type == "compaction":
+            normalized.setdefault("auto", bool(metadata_dict.get("auto", False)))
+
+        return normalized
+
+    @classmethod
+    def _deserialize_parts_list(
+        cls,
+        session_id: str,
+        message_id: str,
+        parts_data: List[Dict[str, Any]],
+        *,
+        message_time: Optional[Dict[str, Any]] = None,
+    ) -> List[PartType]:
+        """Best-effort deserialize a stored parts list without dropping the session."""
+        parts: List[PartType] = []
+        for raw_part in parts_data:
+            if not isinstance(raw_part, dict):
+                log.warn("message.part.skipped_non_dict", {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "raw_type": type(raw_part).__name__,
+                })
+                continue
+            try:
+                parts.append(
+                    cls.deserialize_part(
+                        raw_part,
+                        session_id=session_id,
+                        message_id=message_id,
+                        message_time=message_time,
+                    )
+                )
+            except Exception as exc:
+                log.warn("message.part.skipped_invalid", {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "part_id": raw_part.get("id"),
+                    "error": str(exc),
+                })
+        return parts
+
+    @classmethod
+    def deserialize_part(
+        cls,
+        part_data: Dict[str, Any],
+        *,
+        session_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        message_time: Optional[Dict[str, Any]] = None,
+    ) -> PartType:
         """Deserialize a part from storage format"""
+        part_data = cls._normalize_part_data(
+            part_data,
+            session_id=session_id,
+            message_id=message_id,
+            message_time=message_time,
+        )
         part_type = part_data.get('type', 'text')
         
         type_map = {
@@ -692,10 +1136,14 @@ class Message:
             return message
 
         updates: Dict[str, Any] = {}
-        if isinstance(message.tokens, dict):
-            updates["tokens"] = TokenUsage.model_validate(message.tokens)
-        if isinstance(message.path, dict):
-            updates["path"] = MessagePath.model_validate(message.path)
+        if not isinstance(message.tokens, TokenUsage):
+            updates["tokens"] = TokenUsage.model_validate(
+                Message._default_token_usage(message.tokens)
+            )
+        if not isinstance(message.path, MessagePath):
+            updates["path"] = MessagePath.model_validate(
+                Message._default_message_path(message.path)
+            )
 
         if not updates:
             return message
@@ -928,7 +1376,7 @@ class Message:
         Returns:
             List of messages
         """
-        await cls._ensure_cache(session_id)
+        await cls._ensure_message_cache(session_id)
         messages = cls._messages_cache.get(session_id, [])
         if not include_archived:
             messages = [m for m in messages if not getattr(m, 'compacted', None)]
@@ -937,7 +1385,7 @@ class Message:
     @classmethod
     async def get(cls, session_id: str, message_id: str) -> Optional[MessageInfo]:
         """Get a specific message by ID (O(1) via index)."""
-        await cls._ensure_cache(session_id)
+        await cls._ensure_message_cache(session_id)
         idx = cls._msg_id_index.get(session_id, {}).get(message_id)
         if idx is not None:
             messages = cls._messages_cache.get(session_id, [])
@@ -1227,6 +1675,72 @@ class Message:
             parts = cls._parts_cache.get(session_id, {}).get(message.id, [])
             result.append(MessageWithParts(info=message, parts=parts))
         return result
+
+    @classmethod
+    async def list_recent_with_parts(
+        cls,
+        session_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[str] = None,
+        include_archived: bool = True,
+    ) -> tuple[List[MessageWithParts], bool, Optional[str]]:
+        """List one recent page of messages and lazily load only their parts.
+
+        ``before`` is a message id cursor. The returned page preserves
+        chronological order and ``next_before`` is the first message id in the
+        page, suitable for loading older messages.
+        """
+        safe_limit = max(int(limit), 1)
+        messages = await cls.list(session_id, include_archived=include_archived)
+        if before:
+            before_index = next(
+                (idx for idx, message in enumerate(messages) if message.id == before),
+                len(messages),
+            )
+            candidate_messages = messages[:before_index]
+        else:
+            candidate_messages = messages
+
+        has_more = len(candidate_messages) > safe_limit
+        page_messages = candidate_messages[-safe_limit:]
+        legacy_parts_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None
+        missing_message_ids = [
+            message.id
+            for message in page_messages
+            if message.id not in cls._parts_cache.setdefault(session_id, {})
+        ]
+        if missing_message_ids:
+            has_per_message_parts = False
+            for message_id in missing_message_ids:
+                parts_data = await Storage.get(cls._parts_item_key(session_id, message_id))
+                if isinstance(parts_data, list):
+                    has_per_message_parts = True
+                    break
+            if not has_per_message_parts:
+                stored_legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                if isinstance(stored_legacy_parts, dict):
+                    legacy_parts_cache = stored_legacy_parts
+
+        result = []
+        for message in page_messages:
+            parts = await cls._load_parts_for_message(
+                session_id,
+                message.id,
+                legacy_parts_cache=legacy_parts_cache,
+            )
+            result.append(MessageWithParts(info=message, parts=parts))
+        next_before = page_messages[0].id if has_more and page_messages else None
+        return result, has_more, next_before
+
+    @classmethod
+    async def get_with_parts_lazy(cls, session_id: str, message_id: str) -> Optional[MessageWithParts]:
+        """Get one message with parts without hydrating all session parts."""
+        message = await cls.get(session_id, message_id)
+        if not message:
+            return None
+        parts = await cls._load_parts_for_message(session_id, message_id)
+        return MessageWithParts(info=message, parts=parts)
     
     @classmethod
     async def delete(cls, session_id: str, message_id: str) -> bool:
@@ -1318,6 +1832,7 @@ class Message:
             cls._parts_serialized_cache[session_id] = {}
             cls._parts_persisted_mids[session_id] = set()
             cls._parts_storage_format[session_id] = "per_message"
+            cls._parts_fully_loaded.add(session_id)
             cls._cancel_parts_flush_task(session_id)
             
             # Persist changes
@@ -1350,6 +1865,7 @@ class Message:
             cls._parts_serialized_cache.pop(session_id, None)
             cls._parts_storage_format.pop(session_id, None)
             cls._parts_persisted_mids.pop(session_id, None)
+            cls._parts_fully_loaded.discard(session_id)
             _session_locks.discard(session_id)
         else:
             for sid in list(cls._parts_flush_tasks):
@@ -1362,6 +1878,7 @@ class Message:
             cls._parts_serialized_cache.clear()
             cls._parts_storage_format.clear()
             cls._parts_persisted_mids.clear()
+            cls._parts_fully_loaded.clear()
             _session_locks.clear()
         log.debug("message.cache.invalidated", {"session_id": session_id})
     
@@ -1903,5 +2420,3 @@ class MessageSync:
     def remove_part(cls, session_id: str, message_id: str, part_id: str) -> bool:
         """Sync version"""
         return cls._run_async(Message.remove_part(session_id, message_id, part_id))
-
-

@@ -20,6 +20,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { skillAPI, Skill } from '@/api/skill';
+import { EnabledBadge } from '@/pages/Tool/components/badges';
 import SkillSheet from './SkillSheet';
 import SkillInstallDialog from './SkillInstallDialog';
 
@@ -93,12 +94,12 @@ export default function SkillPage() {
     void fetchSkills();
   }, [fetchSkills]);
 
-  // Skills visible to this page: everything except the internal "system"
-  // category.  Counter chips operate on this set so the totals reflect
-  // what the user can actually see — search and statusFilter both narrow
-  // it further into ``filteredSkills``.
+  // Skills visible to this page: hide skills explicitly marked UI-hidden and
+  // the legacy "system" category. Counter chips operate on this set so the
+  // totals reflect what the user can actually see — search and statusFilter
+  // both narrow it further into ``filteredSkills``.
   const visibleSkills = useMemo(
-    () => skills.filter(s => s.category !== 'system'),
+    () => skills.filter(s => !s.ui_hidden && s.category !== 'system'),
     [skills],
   );
 
@@ -605,8 +606,8 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
   return (
     <tr
       className={`transition-colors ${
-        skill.disabled ? 'opacity-50' : 'hover:bg-gray-50'
-      } ${isSelected ? 'bg-slate-50' : ''}`}
+        skill.disabled ? 'bg-gray-50/40 dark:bg-zinc-900/30' : 'hover:bg-gray-50 dark:hover:bg-zinc-900/60'
+      } ${isSelected ? 'bg-slate-50 dark:bg-zinc-900/80' : ''}`}
     >
       {/* 类型列 */}
       <td className="px-4 py-3">
@@ -664,7 +665,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
 
       {/* 启用开关列：控制 skill 是否注入 Agent System Prompt */}
       <td className="px-4 py-3">
-        <ToggleSwitch
+        <SkillEnabledControl
           enabled={enabled}
           loading={toggling}
           title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
@@ -709,7 +710,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function ToggleSwitch({ enabled, loading, title, onChange }: {
+function SkillEnabledControl({ enabled, loading, title, onChange }: {
   enabled: boolean;
   loading: boolean;
   title?: string;
@@ -720,22 +721,18 @@ function ToggleSwitch({ enabled, loading, title, onChange }: {
       type="button"
       role="switch"
       aria-checked={enabled}
+      aria-label={title}
       onClick={onChange}
       disabled={loading}
       title={title}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent
-        transition-colors duration-150 focus:outline-none disabled:cursor-wait
-        ${enabled ? 'bg-slate-700' : 'bg-gray-200'}`}
+      className="relative inline-flex rounded-full transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-75"
     >
-      {loading
-        ? <Loader2 className="absolute inset-0 m-auto w-3 h-3 text-white animate-spin" />
-        : (
-          <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow
-            transform transition-transform duration-150
-            ${enabled ? 'translate-x-4' : 'translate-x-0'}`}
-          />
-        )
-      }
+      <EnabledBadge enabled={enabled} />
+      {loading && (
+        <span className="absolute inset-0 inline-flex items-center justify-center rounded-full bg-white/70 dark:bg-zinc-900/70">
+          <Loader2 className="w-3 h-3 animate-spin text-gray-500 dark:text-zinc-300" />
+        </span>
+      )}
     </button>
   );
 }

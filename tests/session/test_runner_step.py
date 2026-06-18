@@ -251,6 +251,14 @@ class TestExceptionToErrorDict:
         result = runner._exception_to_error_dict(exc)
         assert result["data"]["isRetryable"] is True
 
+    def test_connection_error_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Connection error.")
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
     def test_exception_with_status_code_429(self):
         runner = _make_runner()
         exc = Exception("Rate limited")
@@ -1967,6 +1975,118 @@ async def test_to_chat_messages_keeps_reasoning_only_assistant_message(monkeypat
     assert chat_messages[0].reasoning_source == "promoted_reasoning"
 
 
+def test_get_queued_user_message_ids_only_marks_newly_queued_turns():
+    runner = _make_runner("ses_runner_queued_users")
+    runner._step = 3
+
+    queued_user_ids = runner._get_queued_user_message_ids([
+        SimpleNamespace(id="msg_100", role="assistant", finish="stop"),
+        SimpleNamespace(id="msg_200", role="user"),
+        SimpleNamespace(id="msg_300", role="user"),
+        SimpleNamespace(id="msg_400", role="user"),
+    ])
+
+    assert queued_user_ids == {"msg_300", "msg_400"}
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_wraps_only_queued_user_messages():
+    session = await Session.create(
+        project_id="test_runner_queued_wrap",
+        directory="/tmp/runner-queued-wrap",
+    )
+    finished_assistant = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Initial answer",
+    )
+    root_user = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content="Continue fixing the bug",
+    )
+    queued_user = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content="What version is installed?",
+    )
+
+    runner = SessionRunner(session=session, static_cache={})
+    runner._step = 3
+    runner._queued_user_message_ids = {queued_user.id}
+
+    chat_messages = await runner._to_chat_messages(
+        [
+            SimpleNamespace(
+                id=finished_assistant.id,
+                role=MessageRole.ASSISTANT,
+                finish="stop",
+                error=None,
+                compacted=False,
+            ),
+            root_user,
+            queued_user,
+        ],
+        [],
+    )
+
+    user_messages = [message for message in chat_messages if message.role == "user"]
+    assert len(user_messages) == 2
+    assert user_messages[0].content == "Continue fixing the bug"
+    assert isinstance(user_messages[1].content, str)
+    assert user_messages[1].content.startswith("<system-reminder>")
+    assert "What version is installed?" in user_messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypatch):
+    runner = _make_runner("ses_runner_aborted_reasoning_only")
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3-max"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod.Message,
+        "parts",
+        AsyncMock(return_value=[
+            ReasoningPart(
+                sessionID=runner.session.id,
+                messageID="msg_aborted_reasoning_only",
+                text="This should not leak into replay history.",
+                time=PartTime(start=1),
+            )
+        ]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_parts_revision", lambda *_args: 1)
+
+    chat_messages = await runner._to_chat_messages(
+        [
+            SimpleNamespace(
+                id="msg_aborted_reasoning_only",
+                role=MessageRole.ASSISTANT,
+                finish="error",
+                error={"name": "MessageAbortedError"},
+                compacted=False,
+            )
+        ],
+        [],
+    )
+
+    assert chat_messages == []
+
+
 def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
     runner = _make_runner("ses_runner_interleaved_capability_key")
     runner.provider_id = "deepseek"
@@ -2039,6 +2159,182 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
 
     assert captured_kwargs["model_id"] == runner.model_id
     assert captured_kwargs["provider_id"] == runner.provider_id
+
+
+@pytest.mark.asyncio
+async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypatch):
+    runner = _make_runner("ses_runner_queued_cache_invalidation")
+    runner._step = 3
+    runner._static_cache["chat_context_cache"] = {
+        "latest": {
+            "system_cache_key": "cached",
+            "message_signatures": [],
+            "chat_messages": [{"role": "user", "content": "stale"}],
+        }
+    }
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    root_user = SimpleNamespace(id="msg_200", role="user")
+    last_user = UserMessageInfo(
+        id="msg_300",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    messages = [
+        SimpleNamespace(id="msg_100", role="assistant", finish="stop"),
+        root_user,
+        last_user,
+    ]
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_queued_cache")
+
+    async def fake_to_chat_messages(_messages, _system_prompts):  # noqa: ANN001
+        assert "chat_context_cache" not in runner._static_cache
+        assert runner._queued_user_message_ids == {last_user.id}
+        return [SimpleNamespace(role="user", content="queued")]
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_to_chat_messages", fake_to_chat_messages)
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="queued"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done")),
+    )
+
+    result = await runner._process_step(messages, last_user)
+
+    assert result.action == "stop"
+    assert result.content == "done"
+
+
+@pytest.mark.asyncio
+async def test_process_step_limits_connection_error_retries(monkeypatch):
+    runner = _make_runner("ses_runner_connection_error")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_connection_error",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "bailian", "modelID": "deepseek-v4-flash"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_connection_error")
+    update_mock = AsyncMock(return_value=None)
+    call_count = 0
+
+    async def fake_call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise Exception("Connection error.")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 4
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
+
+    final_update = update_mock.await_args_list[-1].kwargs
+    assert final_update["finish"] == "error"
+    assert final_update["error"]["data"]["message"] == "Connection error."
+    assert final_update["error"]["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_process_step_marks_aborted_llm_message_as_error(monkeypatch):
+    runner = _make_runner("ses_runner_aborted_result")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_aborted_result",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_aborted_result")
+    update_mock = AsyncMock(return_value=None)
+    record_usage_mock = AsyncMock(return_value=None)
+    usage = {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+
+    async def fake_call_llm(*_args, **_kwargs):
+        runner._llm_call_aborted = True
+        return StepResult(
+            action="continue",
+            content="partial answer",
+            tool_calls=[ToolCall(id="call_1", name="read", arguments={})],
+            usage=usage,
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner, "_record_usage_if_available", record_usage_mock)
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert result.content == "partial answer"
+    assert any(
+        call.args[1] == assistant_msg.id
+        and call.kwargs.get("finish") == "error"
+        and call.kwargs.get("error", {}).get("name") == "MessageAbortedError"
+        for call in update_mock.await_args_list
+    )
+    assert not any(
+        call.args[1] == assistant_msg.id and call.kwargs.get("finish") in {"stop", "tool-calls"}
+        for call in update_mock.await_args_list
+    )
+    record_usage_mock.assert_awaited_once_with(usage, message_id=assistant_msg.id)
 
 
 @pytest.mark.asyncio

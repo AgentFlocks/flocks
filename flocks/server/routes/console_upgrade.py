@@ -478,7 +478,7 @@ async def _report_pro_bundle_installation(
         return
     marker = _read_pro_bundle_install_marker()
     payload = {
-        "license_id": record.get("activate_key"),
+        "license_id": _record_license_id(record),
         "fingerprint": console_session.get("fingerprint"),
         "install_id": console_session.get("install_id"),
         "installed_version": marker.get("installed_version") or details.get("auto_install_target") or details.get("auto_install_version") or "",
@@ -896,13 +896,18 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
                     raw["updated_at"] = datetime.now(UTC).isoformat()
                     await Storage.set(_request_key(request_id), raw, "json")
                     await _report_pro_bundle_installation(raw, install_result="failed", error_message=progress.message)
-                elif progress.stage in {"done", "restarting"}:
+                elif progress.stage == "restarting":
+                    details["auto_install_result"] = "restarting"
+                    details["auto_install_message"] = progress.message
+                    raw["updated_at"] = datetime.now(UTC).isoformat()
+                    await Storage.set(_request_key(request_id), raw, "json")
+                elif progress.stage == "done":
                     marker = _read_pro_bundle_install_marker()
                     await _maybe_activate_pro_license(raw)
                     await _maybe_refresh_pro_license(raw)
                     capability = _record_pro_capability(details)
                     if capability.get("pro_enabled"):
-                        details["auto_install_result"] = "restarting" if progress.stage == "restarting" else "done"
+                        details["auto_install_result"] = "done"
                     else:
                         details["auto_install_result"] = "license_inactive"
                     details["auto_install_version"] = marker.get("installed_version")
@@ -1008,4 +1013,3 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
         raw["updated_at"] = datetime.now(UTC).isoformat()
     await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**raw)
-

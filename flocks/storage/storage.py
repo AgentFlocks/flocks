@@ -977,7 +977,82 @@ class Storage:
                 value = json.loads(value_str)
             entries.append((key, value))
         return entries
-    
+
+    @classmethod
+    async def list_entries_page(
+        cls,
+        prefix: str,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        model: Optional[Type[T]] = None,
+    ) -> tuple[List[Tuple[str, T | Any]], int]:
+        """List one page of entries for a prefix, plus total matching rows."""
+        await cls._ensure_init()
+
+        safe_offset = max(int(offset), 0)
+        safe_limit = max(int(limit), 0)
+        params = (f"{prefix}%",)
+
+        async with cls.connect(cls._db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM storage WHERE key LIKE ?",
+                params,
+            ) as cursor:
+                row = await cursor.fetchone()
+                total = int(row[0]) if row else 0
+
+            if safe_limit == 0:
+                return [], total
+
+            async with db.execute(
+                """
+                SELECT key, value FROM storage
+                WHERE key LIKE ?
+                ORDER BY key
+                LIMIT ? OFFSET ?
+                """,
+                (f"{prefix}%", safe_limit, safe_offset),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        entries: List[Tuple[str, T | Any]] = []
+        for key, value_str in rows:
+            if model is not None and hasattr(model, "model_validate_json"):
+                value = model.model_validate_json(value_str)
+            else:
+                value = json.loads(value_str)
+            entries.append((key, value))
+        return entries, total
+
+    @classmethod
+    async def list_raw(
+        cls,
+        prefix: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        """List ``(key, raw_value_str)`` pairs without Python-side JSON parsing.
+
+        Unlike :meth:`list_entries`, the value is returned as a plain string
+        so callers can apply lightweight extraction (e.g. regex) instead of
+        full ``json.loads``.  This is critical for hot trim paths that only
+        need a couple of scalar fields from otherwise large JSON blobs.
+        Compatible with all SQLite versions (no ``json_extract`` required).
+        """
+        await cls._ensure_init()
+
+        if prefix:
+            query = "SELECT key, value FROM storage WHERE key LIKE ?"
+            params: tuple = (f"{prefix}%",)
+        else:
+            query = "SELECT key, value FROM storage"
+            params = ()
+
+        async with cls.connect(cls._db_path) as db:
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+
+        return [(row[0], row[1]) for row in rows]
+
     @classmethod
     async def exists(cls, key: str) -> bool:
         """

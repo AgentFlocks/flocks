@@ -131,7 +131,7 @@
     "filterRunning": "运行中",
     "filterStopped": "已停止",
     "emptyTitle": "暂无 API 服务",
-    "emptyDescription": "在工作流详情页「运行」标签中发布工作流为 API 服务",
+    "emptyDescription": "在工作流详情页「发布」标签中发布工作流为 API 服务",
     "publishedAt": "{{date}} 发布",
     "serviceDriver": "服务驱动",
     "driverLocal": "Local",

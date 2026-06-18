@@ -24,6 +24,7 @@ log = Log.create(service="update-routes")
     summary="Check for new version",
 )
 async def check_version(
+    request: Request,
     locale: str | None = Query(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
@@ -33,6 +34,8 @@ async def check_version(
         description="Version channel to check. flockspro checks the Console Pro bundle manifest.",
     ),
 ) -> VersionInfo:
+    if edition == "flockspro":
+        require_admin(request)
     return await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
 
 

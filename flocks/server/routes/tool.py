@@ -5,7 +5,7 @@ Tool routes - API endpoints for tool management and execution
 import asyncio
 import time
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from flocks.server.auth import require_admin
@@ -423,6 +423,37 @@ def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
     return tool_info.enabled and _get_api_service_enabled(source_name)
 
 
+def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
+    """Persist and apply the global enabled state for a registry tool."""
+    default = _get_default_enabled(tool.info)
+    # Service gate: only matters when the user is trying to enable.
+    # Disabling is always honoured.
+    service_ok = _service_allows_enable(tool.info)
+    new_enabled = desired and service_ok
+
+    if desired == default:
+        removed = ConfigWriter.delete_tool_setting(tool.info.name)
+        log.info("tool.updated.reset_to_default", {
+            "name": tool.info.name,
+            "enabled": new_enabled,
+            "default": default,
+            "removed_overlay": removed,
+        })
+    else:
+        ConfigWriter.set_tool_setting(tool.info.name, {"enabled": desired})
+        log.info("tool.updated", {
+            "name": tool.info.name,
+            "enabled": new_enabled,
+            "requested": desired,
+            "blocked_by_service": desired and not service_ok,
+            "native": tool.info.native,
+            "store": "overlay",
+        })
+
+    tool.info.enabled = new_enabled
+    return new_enabled
+
+
 # Routes
 
 @router.get(
@@ -506,18 +537,36 @@ async def get_tool(tool_name: str):
     response_model=ToolInfoResponse,
     summary="Update tool settings",
 )
-async def update_tool(tool_name: str, request: ToolUpdateRequest, _admin: object = Depends(require_admin)):
+async def update_tool(
+    tool_name: str,
+    request: ToolUpdateRequest,
+    device_id: Optional[str] = Query(
+        None,
+        description=(
+            "设备实例 UUID。提供时仅修改该设备的工具开关（per-device 覆盖），"
+            "不影响其他同版本设备；省略时修改全局 tool_settings（影响所有设备）。"
+        ),
+    ),
+    _admin: object = Depends(require_admin),
+):
     """
     Update tool settings (e.g., enable or disable).
 
-    The ``enabled`` flag is persisted to the user-level overlay in
-    ``flocks.json`` (``tool_settings.<tool_name>.enabled``) instead of
-    mutating the YAML plugin file.  This keeps project-level YAML files
-    (which may be tracked by git and overwritten on upgrade) clean and
-    treats the YAML's ``enabled:`` field as the factory default that the
-    overlay can selectively customise.
+    **Global mode** (``device_id`` omitted):
+    Persists to ``flocks.json`` → ``tool_settings.<tool_name>.enabled``.
+    Affects all device instances that share this tool.
 
-    Two behaviours of note:
+    **Per-device mode** (``device_id`` provided):
+    Persists to the SQLite ``device_tool_settings`` table (one row per
+    device_id × tool_name).  Only affects tool execution when ``device_id``
+    is explicitly targeted, allowing Device A and Device B (same plugin
+    version, different names) to carry independent disabled overrides.
+    ``enabled=true`` clears the per-device disable and follows the global
+    tool setting; if the global tool is disabled, it is enabled first. Rows
+    are removed automatically via ON DELETE CASCADE when the parent device row
+    is deleted.
+
+    Two behaviours of note (global mode only):
 
     * If ``request.enabled`` matches the registration-time default we
       *delete* the overlay entry instead of writing one — the tool is
@@ -538,32 +587,38 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest, _admin: object
         )
 
     desired = bool(request.enabled)
-    default = _get_default_enabled(tool.info)
-    # Service gate: only matters when the user is trying to enable.
-    # Disabling is always honoured.
-    service_ok = _service_allows_enable(tool.info)
-    new_enabled = desired and service_ok
 
-    if desired == default:
-        removed = ConfigWriter.delete_tool_setting(tool_name)
-        log.info("tool.updated.reset_to_default", {
-            "name": tool_name,
-            "enabled": new_enabled,
-            "default": default,
-            "removed_overlay": removed,
-        })
-    else:
-        ConfigWriter.set_tool_setting(tool_name, {"enabled": desired})
-        log.info("tool.updated", {
-            "name": tool_name,
-            "enabled": new_enabled,
-            "requested": desired,
-            "blocked_by_service": desired and not service_ok,
-            "native": tool.info.native,
-            "store": "overlay",
-        })
+    # --- Per-device mode ---
+    if device_id:
+        from flocks.tool.device.store import (
+            delete_device_tool_setting,
+            set_device_tool_enabled,
+        )
 
-    tool.info.enabled = new_enabled
+        if desired:
+            if not tool.info.enabled:
+                _set_global_tool_enabled(tool, True)
+            removed = await delete_device_tool_setting(device_id, tool_name)
+            log.info("tool.device.updated.reset_to_global", {
+                "name": tool_name,
+                "device_id": device_id,
+                "removed_override": removed,
+                "enabled_global": tool.info.enabled,
+            })
+        else:
+            await set_device_tool_enabled(device_id, tool_name, False)
+            log.info("tool.device.updated", {
+                "name": tool_name,
+                "device_id": device_id,
+                "enabled": False,
+            })
+        # The in-memory ToolInfo.enabled reflects global state. Per-device
+        # enabled=True is not a supported override; switch-on means clear the
+        # per-device disable and follow the global tool setting.
+        return _build_tool_response(tool.info)
+
+    # --- Global mode (original behaviour) ---
+    _set_global_tool_enabled(tool, desired)
     return _build_tool_response(tool.info)
 
 

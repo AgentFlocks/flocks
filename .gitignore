@@ -98,8 +98,8 @@ tmp/
 .ipynb_checkpoints
 *.ipynb
 
-# Documentation
-docs/_build/
+# Documentation (local / agent-generated; not versioned)
+docs/
 site/
 
 # Node.js (TUI)
@@ -107,7 +107,6 @@ node_modules/
 tui/node_modules/
 bun.lockb
 .bun/
-!docs/CHANGELOG.md
 
 # TUI build
 tui/dist/
@@ -134,3 +133,4 @@ changelog.md
 # Integration tests with real host credentials (not for commit)
 tests/integration_ssh_*.py
 .cursor
+.codex/

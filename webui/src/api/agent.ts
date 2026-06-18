@@ -2,6 +2,8 @@ import client from './client';
 
 export interface Agent {
   name: string;
+  /** Chinese display name; canonical `name` remains the stable identifier. */
+  nameCn?: string;
   description?: string;
   /** Chinese UI label; English \`description\` is used for delegation/tooling. */
   descriptionCn?: string;
@@ -53,6 +55,7 @@ export const agentAPI = {
 
   create: (data: {
     name: string;
+    nameCn?: string;
     description?: string;
     descriptionCn?: string;
     prompt: string;
@@ -60,18 +63,21 @@ export const agentAPI = {
     color?: string;
     mode?: string;
     model?: { modelID: string; providerID: string };
+    delegatable?: boolean;
     skills?: string[];
     tools?: string[];
   }) =>
     client.post<Agent>('/api/agent', data),
 
   update: (name: string, data: {
+    nameCn?: string;
     description?: string;
     descriptionCn?: string;
     prompt?: string;
     temperature?: number;
     color?: string;
     model?: { modelID: string; providerID: string };
+    delegatable?: boolean;
     skills?: string[];
     tools?: string[];
   }) =>
@@ -79,6 +85,9 @@ export const agentAPI = {
 
   updateModel: (name: string, model: { modelID: string; providerID: string } | null, temperature?: number) =>
     client.put<Agent>(`/api/agent/${name}/model`, { model, temperature }),
+
+  setDelegatable: (name: string, delegatable: boolean) =>
+    client.patch<Agent>(`/api/agent/${name}/delegatable`, { delegatable }),
 
   delete: (name: string) =>
     client.delete(`/api/agent/${name}`),

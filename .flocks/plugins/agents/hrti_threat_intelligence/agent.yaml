@@ -1,4 +1,5 @@
 name: hrti-threat-intelligence
+name_cn: 热点威胁情报智能体
 description: >-
   Situational threat intelligence subagent for querying and analyzing trending cybersecurity events.
   Understands natural language queries, retrieves hot threat intelligence reports via HRTI_list_query
@@ -23,8 +24,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - threatbook_mcp_hrti_list_query
   - threatbook_mcp_hrti_query

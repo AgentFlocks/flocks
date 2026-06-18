@@ -1,0 +1,83 @@
+name: 360_waf_observability
+description: >
+  360 WAF v5.5 观测与日志工具。用于检索 Web 安全日志和查询仪表盘统计数据。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_waf
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 观测类操作名称。
+      enum:
+        - waf_security_log_search
+        - waf_configuration_log_search
+        - waf_dashboard_stats
+        - test
+    interval:
+      type: string
+      enum: [realtime, hour, day, week, month]
+      description: 日志或仪表盘数据的时间范围。
+    severity:
+      type: integer
+      description: 严重级别过滤，1 严重、2 高危、3 中危、4 低危。
+    start:
+      type: integer
+      description: 分页起始偏移量。
+    limit:
+      type: integer
+      description: 分页条数，最大 500。
+    client_ip:
+      type: string
+      description: 客户端 IP 过滤条件。
+    time_start:
+      type: string
+      description: 自定义开始时间，格式示例 2026/05/29 08:00:00。
+    time_end:
+      type: string
+      description: 自定义结束时间，格式示例 2026/05/29 09:00:00。
+    http_url:
+      type: string
+      description: Web 安全日志 URL 过滤条件。
+    action_filter:
+      type: string
+      description: Web 安全日志防护动作过滤条件，例如 deny、pass、allow。
+    msg:
+      type: string
+      description: 配置日志消息内容过滤条件。
+    server_ip:
+      type: string
+      description: 服务器 IP 过滤条件。
+    site_name:
+      type: string
+      description: 站点名称过滤条件。
+    policy_name:
+      type: string
+      description: 策略名称过滤条件。
+    domain_name:
+      type: string
+      description: 域名过滤条件。
+    http_method:
+      type: string
+      description: HTTP 方法过滤条件。
+    rule_id:
+      type: string
+      description: 规则 ID 过滤条件。
+    protection_type:
+      type: string
+      description: 防护类型过滤条件。
+    protection_sub_type:
+      type: string
+      description: 防护子类型过滤条件。
+    kind:
+      type: string
+      enum: [attack_source_ip, attack_source_country, threat_category, site_attack]
+      description: 仪表盘统计类型。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_waf.handler.py
+  function: observability

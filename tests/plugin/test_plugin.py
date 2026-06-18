@@ -151,6 +151,41 @@ class TestPluginLoader:
         assert len(collected) == 1
         assert collected[0]["name"] == "lookup"
 
+    def test_load_once_extension_skips_later_load_all_passes(self, tmp_path: Path):
+        """Stateful extension points should not be re-imported by load_all."""
+        channels_dir = tmp_path / "channels"
+        counter_file = tmp_path / "counter.txt"
+        _write_plugin(channels_dir, "my_channel.py", f"""\
+            from pathlib import Path
+
+            counter = Path({str(counter_file)!r})
+            count = int(counter.read_text() or "0") if counter.exists() else 0
+            counter.write_text(str(count + 1))
+
+            CHANNELS = [
+                {{"id": "test-channel", "import_count": count + 1}},
+            ]
+        """)
+
+        collected = []
+
+        PluginLoader._plugin_root = tmp_path
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="CHANNELS",
+            subdir="channels",
+            consumer=lambda items, src: collected.extend(items),
+            item_type=dict,
+            dedup_key=lambda d: d["id"],
+            load_once=True,
+        ))
+
+        PluginLoader.load_all(project_dir=tmp_path)
+        PluginLoader.load_all(project_dir=tmp_path)
+
+        assert counter_file.read_text() == "1"
+        assert len(collected) == 1
+        assert collected[0]["import_count"] == 1
+
     def test_multiple_extension_points(self, tmp_path: Path):
         """Both AGENTS and TOOLS extension points loaded in one load_all."""
         agents_dir = tmp_path / "agents"
@@ -178,6 +213,88 @@ class TestPluginLoader:
         assert len(tool_items) == 1
         assert agent_items[0]["name"] == "agent-a"
         assert tool_items[0]["name"] == "tool-t"
+
+    def test_load_extension_scans_only_requested_extension(self, tmp_path: Path):
+        """Scoped loads should not scan or dispatch unrelated extension points."""
+        user_root = tmp_path / "user_plugins"
+        project_dir = tmp_path / "project"
+        _write_plugin(user_root / "agents", "user_agent.py", 'AGENTS = [{"name": "user-agent"}]\n')
+        _write_plugin(user_root / "tools", "tool.py", 'TOOLS = [{"name": "user-tool"}]\n')
+        _write_plugin(
+            project_dir / ".flocks" / "plugins" / "agents",
+            "project_agent.py",
+            'AGENTS = [{"name": "project-agent"}]\n',
+        )
+        extra_file = tmp_path / "extra.py"
+        extra_file.write_text(
+            'AGENTS = [{"name": "extra-agent"}]\n'
+            'TOOLS = [{"name": "extra-tool"}]\n'
+        )
+
+        agent_items = []
+        tool_items = []
+
+        PluginLoader._plugin_root = user_root
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="AGENTS", subdir="agents",
+            consumer=lambda items, src: agent_items.extend(items),
+            item_type=dict, dedup_key=lambda d: d["name"],
+        ))
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="TOOLS", subdir="tools",
+            consumer=lambda items, src: tool_items.extend(items),
+            item_type=dict, dedup_key=lambda d: d["name"],
+        ))
+
+        PluginLoader.load_extension(
+            "AGENTS",
+            extra_sources=[str(extra_file)],
+            project_dir=project_dir,
+        )
+
+        assert [item["name"] for item in agent_items] == [
+            "user-agent",
+            "project-agent",
+            "extra-agent",
+        ]
+        assert tool_items == []
+
+    def test_load_extension_can_load_legacy_entry_points(self, tmp_path: Path, monkeypatch):
+        """Scoped loads opt in to the legacy flocks.plugins entry-point group."""
+        loaded = []
+
+        class _FakeEntryPoint:
+            name = "fake-tools"
+
+            def load(self):
+                def _target(_loader_cls):
+                    loaded.append("entry-point-called")
+
+                return _target
+
+        class _FakeEntryPoints:
+            def select(self, *, group: str):
+                assert group == "flocks.plugins"
+                return [_FakeEntryPoint()]
+
+        PluginLoader._plugin_root = tmp_path / "user_plugins"
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="TOOLS",
+            subdir="tools",
+            consumer=lambda items, src: None,
+        ))
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: _FakeEntryPoints(),
+        )
+
+        PluginLoader.load_extension(
+            "TOOLS",
+            project_dir=tmp_path / "project",
+            load_entry_points=True,
+        )
+
+        assert loaded == ["entry-point-called"]
 
     def test_dedup_first_wins(self, tmp_path: Path):
         agents_dir = tmp_path / "agents"

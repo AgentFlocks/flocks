@@ -39,6 +39,32 @@
   "loading": "Loading...",
   "noAgents": "No agents available",
   "smartAssistant": "AI Smart Assistant",
+  "agentPicker": {
+    "title": "Choose Chat Agent",
+    "hint": "New chats start with Rex; type @Agent to route one message",
+    "filter": {
+      "all": "All",
+      "builtin": "Built-in",
+      "custom": "Custom"
+    },
+    "badge": {
+      "primary": "Primary",
+      "builtin": "Built-in",
+      "custom": "Custom"
+    }
+  },
+  "modelPicker": {
+    "title": "Choose Model",
+    "hint": "Overrides the model used when sending this chat message",
+    "empty": "No available models",
+    "count": "{{count}}",
+    "vision": "Vision",
+    "free": "Free",
+    "noCost": "No cost",
+    "contextWindow": "Context window: {{value}}",
+    "contextUnknown": "Context window: Unknown",
+    "addModel": "Add model"
+  },
   "welcome": {
     "title": "Start a new conversation",
     "description": "AI-native security operations assistant — threat analysis, incident response, and security orchestration",
@@ -57,6 +83,36 @@
     "emptyText": "No execution records",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
+    "contextUsageUnknown": "Context usage unknown",
+    "contextUsage": {
+      "title": "Context Usage",
+      "close": "Close",
+      "full": "{{percent}}% Full",
+      "tokens": "~{{used}} / {{total}} Tokens",
+      "excludedTokens": "{{tokens}} excluded",
+      "noAttributedSegments": "No attributed breakdown",
+      "breakdown": {
+        "systemPrompt": "System prompt",
+        "toolDefinitions": "Tool definitions",
+        "tools": "Tool calls",
+        "skillLoad": "Skill loads",
+        "agentDelegation": "Agent delegation",
+        "conversation": "Conversation",
+        "reasoning": "Reasoning",
+        "draft": "Current draft",
+        "compactedHistory": "Compacted history"
+      }
+    },
+    "goal": {
+      "dismiss": "Dismiss goal notice",
+      "status": {
+        "active": "Goal",
+        "completed": "Completed",
+        "blocked": "Blocked",
+        "paused": "Paused"
+      }
+    },
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",
@@ -68,11 +124,30 @@
     "regenerate": "Regenerate",
     "thinking": "Thinking...",
     "streaming": "Streaming...",
+    "process": {
+      "title": "Process ({{count}})",
+      "reasoningCount": "{{count}} reasoning",
+      "toolCount": "{{count}} tool calls"
+    },
     "you": "You",
     "sending": "Sending...",
     "contextCompressed": "Context compressed",
     "historyMessages": "{{count}} archived messages",
     "compacting": "Compacting context…",
+    "queue": {
+      "count": "{{count}} Queued",
+      "enqueue": "Add to queue",
+      "edit": "Edit queued prompt",
+      "remove": "Remove queued prompt",
+      "runNow": "Run now",
+      "full": "You can queue up to 50 prompts",
+      "enqueueFailed": "Failed to add to queue",
+      "updateFailed": "Failed to update queued prompt",
+      "removeFailed": "Failed to remove queued prompt",
+      "runNowFailed": "Failed to run queued prompt",
+      "attachmentOnly": "Attachment message",
+      "placeholderStreaming": "Rex is working. Send to add this to the queue…"
+    },
     "compactionStage": {
       "load": "Loaded {{count}} messages",
       "strategyGeneric": "Picked compaction strategy",
@@ -86,6 +161,11 @@
       "mergeFailed": "Merge failed",
       "summarizeDone": "Summary written ({{chars}} chars)",
       "complete": "Compaction complete"
+    },
+    "mention": {
+      "title": "Choose Agent",
+      "navigate": "Navigate",
+      "select": "Select"
     },
     "removeNodeRef": "Remove node reference",
     "errors": {
@@ -112,8 +192,34 @@
       "error": "Failed",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
+      "todoStages": "Todo stages",
+      "todoStatus": {
+        "pending": "pending",
+        "inProgress": "in progress",
+        "completed": "completed",
+        "cancelled": "cancelled"
+      },
+      "todoSummary": {
+        "progress": "Progress",
+        "inProgress": "In progress",
+        "completed": "Completed",
+        "done": "Done"
+      },
       "errorLabel": "Error",
-      "elapsed": "Elapsed"
+      "elapsed": "Elapsed",
+      "workflowStage": "Current stage: {{phase}}",
+      "workflowNode": "Node: {{node}}",
+      "workflowLoopIteration": "Loop",
+      "workflowLoopCurrent": "Current",
+      "workflowStep": "Step: {{step}}",
+      "workflowPhase": {
+        "queued": "Queued",
+        "running": "Running",
+        "success": "Completed",
+        "error": "Failed",
+        "timeout": "Timed out",
+        "cancelled": "Cancelled"
+      }
     }
   },
   "groupToday": "Today",
