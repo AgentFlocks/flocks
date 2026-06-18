@@ -87,6 +87,38 @@ async def test_legacy_blob_reads_without_migration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recent_legacy_page_reads_legacy_blob_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_id = "ses_parts_legacy_recent_page"
+    await _write_legacy_session(
+        session_id,
+        {
+            "msg_a": "legacy a",
+            "msg_b": "legacy b",
+            "msg_c": "legacy c",
+        },
+    )
+
+    original_get = Storage.get
+    legacy_blob_reads = 0
+
+    async def counting_get(key: str):
+        nonlocal legacy_blob_reads
+        if key == f"message_parts:{session_id}":
+            legacy_blob_reads += 1
+        return await original_get(key)
+
+    monkeypatch.setattr(Storage, "get", counting_get)
+
+    messages, has_more, next_before = await Message.list_recent_with_parts(session_id, limit=3)
+
+    assert [message.info.id for message in messages] == ["msg_a", "msg_b", "msg_c"]
+    assert [message.parts[0].text for message in messages] == ["legacy a", "legacy b", "legacy c"]
+    assert has_more is False
+    assert next_before is None
+    assert legacy_blob_reads == 1
+
+
+@pytest.mark.asyncio
 async def test_legacy_session_updates_continue_writing_legacy_blob() -> None:
     session_id = "ses_parts_legacy_update"
     await _write_legacy_session(session_id, {"msg_a": "old"})

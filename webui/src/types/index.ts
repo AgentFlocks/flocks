@@ -111,6 +111,8 @@ export interface MessageError {
  */
 export interface MessagePart {
   id: string;
+  messageID?: string;
+  sessionID?: string;
   type: 'text' | 'tool' | 'file' | 'reasoning' | 'toolCall' | 'toolResult' | 'thinking' | 'image' | 'step-start' | 'step-finish';
   // Text part
   text?: string;

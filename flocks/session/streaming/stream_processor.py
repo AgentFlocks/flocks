@@ -71,6 +71,16 @@ def _resolve_tool_error(result: ToolResult) -> str:
     return "Unknown error"
 
 
+def _invalid_tool_call_parse_error(tool_input: Dict[str, Any]) -> tuple[str, str]:
+    """Return original tool name and user-facing parse error for invalid tool events."""
+    original_tool = str(tool_input.get("tool") or "unknown").strip() or "unknown"
+    raw_error = str(tool_input.get("error") or "Failed to parse tool arguments.").strip()
+    prefix = f"Failed to parse tool arguments for {original_tool}"
+    if raw_error.startswith(prefix):
+        return original_tool, raw_error
+    return original_tool, f"{prefix}: {raw_error}"
+
+
 @dataclass
 class ToolCallState:
     """State for tracking tool calls"""
@@ -508,6 +518,56 @@ class StreamProcessor:
         
         tool_state = self.tool_calls[tool_call_id]
         tool_state.input = tool_input
+
+        if tool_name == "invalid":
+            original_tool, parse_error = _invalid_tool_call_parse_error(tool_input)
+            tool_state.name = original_tool
+            tool_state.status = "error"
+            tool_state.error = parse_error
+
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_input,
+                error=parse_error,
+                time={"start": tool_error_time, "end": tool_error_time},
+            )
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=original_tool,
+                state=error_state,
+            )
+            await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": original_tool,
+                        "state": {
+                            "status": "error",
+                            "input": tool_input,
+                            "error": parse_error,
+                            "time": {"start": tool_error_time, "end": tool_error_time},
+                        },
+                    },
+                })
+
+            log.warn("stream.tool_call.invalid_arguments", {
+                "tool_call_id": tool_call_id,
+                "tool_name": original_tool,
+                "error": parse_error,
+            })
+            return
+
         tool_state.status = "running"
         
         # Update ToolPart to running state (like Flocks's Session.updatePart)

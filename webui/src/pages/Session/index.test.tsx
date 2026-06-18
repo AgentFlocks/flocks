@@ -96,6 +96,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     agentName,
     model,
     display,
+    hideInput,
   }: {
     sessionId?: string | null;
     agentName?: string;
@@ -103,6 +104,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     toolbarSlot?: React.ReactNode;
     centerToolbarSlot?: React.ReactNode;
     model?: { providerID: string; modelID: string } | null;
+    hideInput?: boolean;
     display?: {
       compact?: boolean;
       showActions?: boolean;
@@ -119,6 +121,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       data-model={model ? `${model.providerID}/${model.modelID}` : ''}
       data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
       data-process-groups-default-open={String(Boolean(display?.processGroupsDefaultOpen))}
+      data-hide-input={String(Boolean(hideInput))}
     >
       {sessionId ?? 'no-session'}
       {toolbarSlot}
@@ -215,6 +218,7 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
 
     useSessions.mockReturnValue({
       sessions: [session],
@@ -384,17 +388,36 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });
 
-  it('attaches the previously selected session on initial load', () => {
+  it('does not auto-attach the previously selected session on first app visit', () => {
     localStorage.setItem('flocks:last-selected-session', 'session-1');
+
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('attaches the previously selected session after the session page has been visited', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
 
     renderSessionPage();
 
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
   });
 
-  it('defaults session process groups open on the session management page', () => {
+  it('does not auto-attach the previously selected session when entering from home', () => {
     localStorage.setItem('flocks:last-selected-session', 'session-1');
+    sessionStorage.setItem('flocks:sessions:visited', 'true');
 
+    renderSessionPage({
+      pathname: '/sessions',
+      state: { skipLastSelectedSessionRestore: true },
+    });
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('defaults session process groups open on the session management page', () => {
     renderSessionPage();
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-collapse-intermediate', 'true');
@@ -437,6 +460,54 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    });
+  });
+
+  it('keeps a selected session that is valid but missing from the current list', async () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    sessionApi.get.mockResolvedValue({
+      ...session,
+      id: 'session-missing-from-list',
+      title: 'Fetched Session',
+      canWrite: false,
+    });
+
+    renderSessionPage('/sessions?session=session-missing-from-list');
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-missing-from-list');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-hide-input', 'true');
+    });
+  });
+
+  it('clears the selected session after confirming it no longer exists', async () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    sessionApi.get.mockRejectedValue({ response: { status: 404 } });
+
+    renderSessionPage('/sessions?session=session-deleted');
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
     });
   });
 
@@ -545,7 +616,6 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('shows the pinned model for the selected session on load', async () => {
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
     useSessions.mockReturnValue({
       sessions: [{
         ...session,
@@ -571,7 +641,7 @@ describe('SessionPage session actions menu', () => {
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');
@@ -581,7 +651,6 @@ describe('SessionPage session actions menu', () => {
 
   it('persists model changes to the selected session', async () => {
     const user = userEvent.setup();
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
     useSessions.mockReturnValue({
       sessions: [session],
       loading: false,
@@ -608,7 +677,7 @@ describe('SessionPage session actions menu', () => {
       model_pinned: true,
     });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'openai/gpt-4o');
@@ -629,7 +698,6 @@ describe('SessionPage session actions menu', () => {
 
   it('resets the selected model to the default when creating a new session', async () => {
     const user = userEvent.setup();
-    localStorage.setItem('flocks:last-selected-session', 'session-1');
     useSessions.mockReturnValue({
       sessions: [{
         ...session,
@@ -655,7 +723,7 @@ describe('SessionPage session actions menu', () => {
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');

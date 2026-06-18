@@ -1582,6 +1582,9 @@ export default function SessionChat({
     });
   }, []);
 
+  const loadOlderMessagesRef = useRef<(() => Promise<void>) | null>(null);
+  const hasMoreMessagesRef = useRef(false);
+  const loadingOlderMessagesRef = useRef(false);
   const rafScheduledRef = useRef(false);
   const handleScroll = useCallback(() => {
     if (rafScheduledRef.current) return;
@@ -1590,6 +1593,18 @@ export default function SessionChat({
       const el = scrollContainerRef.current;
       if (el) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+        if (el.scrollTop <= 80 && hasMoreMessagesRef.current && !loadingOlderMessagesRef.current) {
+          const previousHeight = el.scrollHeight;
+          const previousTop = el.scrollTop;
+          const loadPromise = loadOlderMessagesRef.current?.();
+          if (loadPromise) void loadPromise.finally(() => {
+            requestAnimationFrame(() => {
+              const current = scrollContainerRef.current;
+              if (!current) return;
+              current.scrollTop = current.scrollHeight - previousHeight + previousTop;
+            });
+          });
+        }
       }
       rafScheduledRef.current = false;
     });
@@ -1598,7 +1613,10 @@ export default function SessionChat({
   const {
     messages,
     loading,
+    loadingOlder,
+    hasMore: hasMoreMessages,
     refetch,
+    loadOlder,
     addMessage,
     updateMessage,
     updateMessagePart,
@@ -1607,6 +1625,9 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  useEffect(() => { loadOlderMessagesRef.current = loadOlder; }, [loadOlder]);
+  useEffect(() => { hasMoreMessagesRef.current = hasMoreMessages; }, [hasMoreMessages]);
+  useEffect(() => { loadingOlderMessagesRef.current = loadingOlder; }, [loadingOlder]);
   const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
   const contextUsageBreakdown = useMemo(
     () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
@@ -1701,7 +1722,26 @@ export default function SessionChat({
   }, [sessionId]);
 
   useEffect(() => {
-    void refreshContextUsage({ clear: true });
+    if (!sessionId) {
+      void refreshContextUsage({ clear: true });
+      return;
+    }
+    const requestIdle = (window as any).requestIdleCallback as
+      | ((cb: () => void, options?: { timeout?: number }) => number)
+      | undefined;
+    const cancelIdle = (window as any).cancelIdleCallback as
+      | ((id: number) => void)
+      | undefined;
+    if (requestIdle) {
+      const idleId = requestIdle(() => {
+        void refreshContextUsage({ clear: true });
+      }, { timeout: 1500 });
+      return () => cancelIdle?.(idleId);
+    }
+    const timer = window.setTimeout(() => {
+      void refreshContextUsage({ clear: true });
+    }, 250);
+    return () => window.clearTimeout(timer);
   }, [refreshContextUsage]);
 
   useEffect(() => {
@@ -2821,8 +2861,10 @@ export default function SessionChat({
     if (!isStreaming || !sessionId) return;
     const timer = setInterval(async () => {
       try {
-        const res = await client.get(`/api/session/${sessionId}/message`);
-        const msgs: any[] = res.data || [];
+        const res = await client.get(`/api/session/${sessionId}/message`, {
+          params: { page: true, limit: 50, include_archived: true },
+        });
+        const msgs: any[] = Array.isArray(res.data) ? res.data : (res.data?.items || []);
         const lastMsg = msgs[msgs.length - 1];
         if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
           const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
@@ -3042,6 +3084,19 @@ export default function SessionChat({
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
+            {hasMoreMessages && (
+              <div className="flex justify-center pb-2">
+                <button
+                  type="button"
+                  onClick={() => void loadOlder()}
+                  disabled={loadingOlder}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loadingOlder ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
+                  <span>{loadingOlder ? t('chat.loadingOlder', 'Loading...') : t('chat.loadOlder', 'Load earlier messages')}</span>
+                </button>
+              </div>
+            )}
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
               return (
@@ -3722,7 +3777,6 @@ function ChatMessageBubbleInner({
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
-
   const avatar = isUser ? (
     <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
@@ -3775,8 +3829,8 @@ function ChatMessageBubbleInner({
           // Render attachments (file/image parts) first so the bubble shows
           // image previews above the textual prompt — matches typical chat
           // UX for "look at this image and …" style messages.
-          const fileParts = parts.filter((p) => p.type === 'file' && p.url);
-          const displayParts = parts.filter((p) => !(p.type === 'file' && p.url));
+          const fileParts = parts.filter((p) => p.type === 'file');
+          const displayParts = parts.filter((p) => p.type !== 'file');
           const isBlockingQuestionToolPart = (part: MessagePart): boolean => {
             if (part.type !== 'tool') return false;
             if (part.callID && pendingQuestions?.[part.callID]) return true;
