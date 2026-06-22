@@ -183,9 +183,10 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         recorded_steps.append((exec_id, step_index, step))
         return step
 
-    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+    async def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
-        kwargs["on_step_complete"](
+        await asyncio.to_thread(
+            kwargs["on_step_complete"],
             SimpleNamespace(
                 model_dump=lambda mode="json": {
                     "node_id": "receive_alert",
@@ -210,7 +211,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
 
     monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(syslog_manager, "run_workflow_managed", _fake_run_workflow)
     monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
     trigger = TriggerDefinition.model_validate(

@@ -21,7 +21,8 @@ from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
-from flocks.workflow.runner import run_workflow, RunWorkflowResult
+from flocks.workflow.runner import RunWorkflowResult
+from flocks.workflow.execution_manager import run_workflow_managed
 from flocks.workflow.center import (
     WorkflowCenterError,
     WorkflowNotFoundError,
@@ -1141,8 +1142,7 @@ async def _run_workflow_execution_task(
             })
 
     try:
-        result: RunWorkflowResult = await asyncio.to_thread(
-            run_workflow,
+        result: RunWorkflowResult = await run_workflow_managed(
             workflow=workflow_json,
             inputs=req.inputs or {},
             timeout_s=req.timeout_s,

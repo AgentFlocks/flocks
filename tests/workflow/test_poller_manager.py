@@ -53,7 +53,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
             "inputs": {"dedup_source_workflow_name": "stream_alert_denoise_gt_fast"},
         }
 
-    def _fake_run_workflow(  # noqa: ANN001
+    async def _fake_run_workflow(  # noqa: ANN001
         *,
         workflow: Any,
         inputs: dict[str, Any],
@@ -103,7 +103,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         "record_execution_result",
         lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
     )
-    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(poller_manager, "run_workflow_managed", _fake_run_workflow)
 
     status = await manager.run_once("wf-run-once")
 
@@ -169,7 +169,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         recorded_steps.append((exec_id, step_index, step))
         return step
 
-    def _fake_run_workflow(  # noqa: ANN001
+    async def _fake_run_workflow(  # noqa: ANN001
         *,
         workflow: Any,
         inputs: dict[str, Any],
@@ -183,7 +183,8 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         assert trace is False
         assert cancel() is False
         assert inputs["dedup_source_workflow_name"] == "stream_alert_denoise_gt_fast"
-        on_step_complete(
+        await asyncio.to_thread(
+            on_step_complete,
             SimpleNamespace(
                 model_dump=lambda mode="json": {
                     "node_id": "load",
@@ -214,7 +215,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
-    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(poller_manager, "run_workflow_managed", _fake_run_workflow)
 
     status = await manager.run_once("wf-business-failure")
 
@@ -249,7 +250,7 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         "inputs": {},
     }
 
-    def _fake_run_workflow(  # noqa: ANN001
+    async def _fake_run_workflow(  # noqa: ANN001
         *,
         workflow: Any,
         inputs: dict[str, Any],
@@ -261,10 +262,10 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         _ = workflow, inputs, timeout_s, trace, cancel
         _ = on_step_complete
         # Keep the run active until the test releases it so a second tick skips.
-        asyncio.run(asyncio.wait_for(threading_event.wait(), timeout=2.0))
+        await asyncio.wait_for(threading_event.wait(), timeout=2.0)
         return RunWorkflowResult(status="success", outputs={"load_stats": {"record_count": 1}})
 
-    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(poller_manager, "run_workflow_managed", _fake_run_workflow)
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
@@ -333,7 +334,7 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     ) -> None:
         _ = workflow_id, exec_id, exec_data
 
-    def _fake_run_workflow(  # noqa: ANN001
+    async def _fake_run_workflow(  # noqa: ANN001
         *,
         workflow: Any,
         inputs: dict[str, Any],
@@ -344,13 +345,13 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     ):
         _ = workflow, inputs, timeout_s, trace, cancel
         _ = on_step_complete
-        release_run.wait(timeout=0.2)
+        await asyncio.to_thread(release_run.wait, 0.2)
         return RunWorkflowResult(status="SUCCEEDED", run_id="run-stop")
 
     monkeypatch.setattr(poller_manager, "RUN_SHUTDOWN_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(poller_manager, "run_workflow_managed", _fake_run_workflow)
 
     await manager._schedule_run(
         "wf-stop",

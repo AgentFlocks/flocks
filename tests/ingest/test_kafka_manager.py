@@ -271,10 +271,11 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
         recorded_steps.append((exec_id, step_index, step))
         return step
 
-    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+    async def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
         large_alert = {"raw_log_id": "alert-1", "req_body": "x" * 50_000}
-        kwargs["on_step_complete"](
+        await asyncio.to_thread(
+            kwargs["on_step_complete"],
             SimpleNamespace(
                 model_dump=lambda mode="json": {
                     "node_id": "receive_alert",
@@ -283,7 +284,8 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
                 }
             )
         )
-        kwargs["on_step_complete"](
+        await asyncio.to_thread(
+            kwargs["on_step_complete"],
             SimpleNamespace(
                 model_dump=lambda mode="json": {
                     "node_id": "dedup_and_write",
@@ -306,7 +308,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
 
     monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(kafka_manager, "run_workflow_managed", _fake_run_workflow)
     monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
     await manager._trigger_workflow(
@@ -349,7 +351,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
     async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
         return None
 
-    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+    async def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
         return SimpleNamespace(
             status="SUCCEEDED",
@@ -362,7 +364,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
 
     monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(kafka_manager, "run_workflow_managed", _fake_run_workflow)
 
     await manager._trigger_workflow(
         "wf-merge",
@@ -403,7 +405,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
         recorded_exec_data.update(exec_data)
 
-    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+    async def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
         return SimpleNamespace(
             status="SUCCEEDED",
@@ -416,7 +418,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
 
     monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(kafka_manager, "run_workflow_managed", _fake_run_workflow)
 
     trigger = TriggerDefinition.model_validate(
         {
