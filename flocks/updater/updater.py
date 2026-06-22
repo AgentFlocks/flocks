@@ -1078,6 +1078,40 @@ def _console_manifest_display_version(data: dict[str, Any]) -> str:
     return f"v{compare_version}" if compare_version and not compare_version.startswith(("v", "V")) else compare_version
 
 
+def _pro_bundle_oss_version(data: dict[str, Any]) -> str:
+    oss_version = str(data.get("oss_version") or "").strip()
+    if oss_version:
+        return oss_version
+    return _console_manifest_display_version(data)
+
+
+def _version_label(version: str) -> str:
+    normalized = str(version or "").strip()
+    if not normalized:
+        return ""
+    return normalized if normalized.startswith(("v", "V")) else f"v{normalized}"
+
+
+def _ensure_pro_bundle_oss_not_older_than_local(
+    manifest: dict[str, Any],
+    current_version: str | None = None,
+) -> None:
+    bundle_oss_version = _pro_bundle_oss_version(manifest)
+    if not bundle_oss_version:
+        return
+    local_version = str(current_version or get_current_version() or "").strip()
+    if not local_version:
+        return
+    if _parse_version(bundle_oss_version) >= _parse_version(local_version):
+        return
+    raise ValueError(
+        "This Pro bundle would downgrade Flocks from "
+        f"{_version_label(local_version)} to {_version_label(bundle_oss_version)}. "
+        "Upload or build a Pro bundle with an OSS core version matching the local "
+        "Flocks version or newer."
+    )
+
+
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
     return f"flocks-{latest_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
 
@@ -2708,6 +2742,16 @@ async def perform_pro_bundle_install(
             success=False,
         )
         return
+    try:
+        _ensure_pro_bundle_oss_not_older_than_local(manifest_info.manifest)
+    except ValueError as exc:
+        log.warning("updater.pro_bundle.oss_downgrade_blocked", {"error": str(exc)})
+        yield UpdateProgress(
+            stage="error",
+            message=str(exc),
+            success=False,
+        )
+        return
 
     zipball_url = manifest_info.bundle_url if manifest_info.bundle_format == "zip" else None
     tarball_url = manifest_info.bundle_url if manifest_info.bundle_format != "zip" else None
@@ -2776,6 +2820,16 @@ async def perform_update(
                 yield UpdateProgress(
                     stage="error",
                     message="Requested Pro bundle version does not match the latest approved manifest.",
+                    success=False,
+                )
+                return
+            try:
+                _ensure_pro_bundle_oss_not_older_than_local(console_manifest_info.manifest, current_version)
+            except ValueError as exc:
+                log.warning("updater.console_manifest.oss_downgrade_blocked", {"error": str(exc)})
+                yield UpdateProgress(
+                    stage="error",
+                    message=str(exc),
                     success=False,
                 )
                 return
@@ -2904,6 +2958,15 @@ async def perform_update(
         _record_update_journal(f"ERROR {msg}")
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
+    if profile.sources == ["console-manifest"]:
+        try:
+            _ensure_pro_bundle_oss_not_older_than_local(pro_bundle_manifest, current_version)
+        except ValueError as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            log.warning("updater.pro_bundle.extracted_oss_downgrade_blocked", {"error": str(exc)})
+            _record_update_journal(f"ERROR {exc}")
+            yield UpdateProgress(stage="error", message=str(exc), success=False)
+            return
 
     # ------------------------------------------------------------------ #
     # Step 3 – determine whether frontend handover is needed

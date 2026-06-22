@@ -425,6 +425,40 @@ async def test_download_console_bundle_reports_http_status_and_body(
 
 
 @pytest.mark.asyncio
+async def test_perform_pro_bundle_install_blocks_older_oss_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="v2026.6.13",
+            release_notes="older core",
+            release_url="https://console.example.com/v1/pro-bundles/rel_old/download",
+            bundle_url="https://console.example.com/v1/pro-bundles/rel_old/download",
+            bundle_sha256=None,
+            bundle_format="zip",
+            manifest={
+                "display_version": "v2026.6.13",
+                "oss_version": "v2026.6.13",
+                "flockspro_component_version": "pro-v2026-06-22",
+            },
+        )
+
+    async def _fail_download(*_args, **_kwargs):
+        raise AssertionError("older Pro bundle should be blocked before download")
+
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.18")
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+    monkeypatch.setattr(updater, "_download_console_bundle", _fail_download)
+
+    progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
+
+    assert len(progresses) == 1
+    assert progresses[0].stage == "error"
+    assert progresses[0].success is False
+    assert "would downgrade Flocks from v2026.6.18 to v2026.6.13" in progresses[0].message
+
+
+@pytest.mark.asyncio
 async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -462,6 +496,7 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     (venv_bin / "python").write_text("#!/usr/bin/env python\n", encoding="utf-8")
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
     monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.5.10")
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", lambda: _async_manifest_info(bundle))
     monkeypatch.setattr(updater, "_download_console_bundle", lambda *_args, **_kwargs: _async_path(bundle))
     monkeypatch.setattr(updater, "_verify_download_sha256", lambda *_args, **_kwargs: None)
@@ -529,6 +564,7 @@ async def test_perform_pro_bundle_install_schedules_restart_before_stream_can_cl
     (venv_bin / "python").write_text("#!/usr/bin/env python\n", encoding="utf-8")
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
     monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.5.10")
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", lambda: _async_manifest_info(bundle))
     monkeypatch.setattr(updater, "_download_console_bundle", lambda *_args, **_kwargs: _async_path(bundle))
     monkeypatch.setattr(updater, "_verify_download_sha256", lambda *_args, **_kwargs: None)
