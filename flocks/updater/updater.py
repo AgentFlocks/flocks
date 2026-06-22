@@ -1068,14 +1068,14 @@ def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str
 
 
 def _console_manifest_display_version(data: dict[str, Any]) -> str:
-    component_version = str(data.get("flockspro_component_version") or "").strip()
-    if component_version:
-        return component_version
     display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
     if display_version:
         return display_version
+    oss_version = str(data.get("oss_version") or "").strip()
+    if oss_version:
+        return oss_version
     compare_version = str(data.get("compare_version") or "").strip()
-    return f"pro-v{compare_version}" if compare_version else ""
+    return f"v{compare_version}" if compare_version and not compare_version.startswith(("v", "V")) else compare_version
 
 
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
@@ -2429,23 +2429,27 @@ def _read_pyproject_version() -> str:
     return ""
 
 
-def _read_pro_bundle_installed_version() -> str:
+def _read_pro_bundle_install_marker() -> dict[str, Any]:
     marker = _flocks_root() / "run" / "pro-bundle-installed.json"
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except Exception:
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    component_version = str(payload.get("flockspro_component_version") or "").strip()
-    if component_version:
-        return component_version
-    installed_version = str(payload.get("installed_version") or "").strip()
-    if installed_version.startswith(("pro-v", "pro-V")):
-        return installed_version
-    if installed_version:
-        return f"pro-{installed_version}" if installed_version.startswith(("v", "V")) else f"pro-v{installed_version}"
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_pro_bundle_installed_bundle_version() -> str:
+    payload = _read_pro_bundle_install_marker()
+    for key in ("installed_version", "display_version", "oss_version"):
+        version = str(payload.get(key) or "").strip()
+        if version:
+            return version
     return ""
+
+
+def _read_pro_bundle_installed_component_version() -> str:
+    payload = _read_pro_bundle_install_marker()
+    return str(payload.get("flockspro_component_version") or "").strip()
 
 
 def get_current_version() -> str:
@@ -2538,27 +2542,38 @@ async def check_update(
         region=region,
         locale=locale,
     )
-    current = _read_pro_bundle_installed_version() if profile.sources == ["console-manifest"] else get_current_version()
+    is_console_manifest = profile.sources == ["console-manifest"]
+    current_bundle_version = _read_pro_bundle_installed_bundle_version() if is_console_manifest else None
+    current_pro_component_version = _read_pro_bundle_installed_component_version() if is_console_manifest else None
+    current = current_bundle_version if is_console_manifest else get_current_version()
     if not current:
         current = get_current_version()
 
     if not ucfg.enabled:
         return VersionInfo(
             current_version=current,
+            current_bundle_version=current_bundle_version,
+            current_pro_component_version=current_pro_component_version,
             deploy_mode=mode,
             update_allowed=(mode != "docker"),
         )
 
     bundle_sha256: str | None = None
     bundle_format: str | None = None
+    latest_bundle_version: str | None = None
+    latest_pro_component_version: str | None = None
     try:
-        if profile.sources == ["console-manifest"]:
+        if is_console_manifest:
             manifest_info = await _fetch_console_manifest_release_info()
             tag = manifest_info.version
             notes = manifest_info.release_notes
             url = manifest_info.release_url
             bundle_sha256 = manifest_info.bundle_sha256
             bundle_format = manifest_info.bundle_format
+            latest_bundle_version = tag
+            latest_pro_component_version = str(
+                manifest_info.manifest.get("flockspro_component_version") or ""
+            ).strip() or None
             zipball = manifest_info.bundle_url if manifest_info.bundle_format == "zip" else None
             tarball = manifest_info.bundle_url if manifest_info.bundle_format != "zip" else None
         else:
@@ -2571,6 +2586,8 @@ async def check_update(
         log.warning("updater.check_failed", {"error": str(exc)})
         return VersionInfo(
             current_version=current,
+            current_bundle_version=current_bundle_version,
+            current_pro_component_version=current_pro_component_version,
             error="Failed to check for updates. Please check your network connection.",
             deploy_mode=mode,
             update_allowed=(mode != "docker"),
@@ -2590,7 +2607,11 @@ async def check_update(
     return VersionInfo(
         current_version=current,
         latest_version=tag,
-        edition="flockspro" if profile.sources == ["console-manifest"] else "flocks",
+        current_bundle_version=current_bundle_version,
+        latest_bundle_version=latest_bundle_version,
+        current_pro_component_version=current_pro_component_version,
+        latest_pro_component_version=latest_pro_component_version,
+        edition="flockspro" if is_console_manifest else "flocks",
         has_update=has_update,
         release_notes=notes,
         release_url=url,

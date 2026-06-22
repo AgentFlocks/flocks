@@ -51,6 +51,17 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
   const localizedReleaseNotes = getLocalizedReleaseNotes(info?.release_notes, i18n.language);
   const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
+  const isProEdition = edition === 'flockspro';
+  const currentBundleVersion = info?.current_bundle_version || (isProEdition ? info?.current_version : null);
+  const latestBundleVersion = info?.latest_bundle_version || (isProEdition ? info?.latest_version : null);
+  const currentProComponentVersion = info?.current_pro_component_version || null;
+  const latestProComponentVersion = info?.latest_pro_component_version || null;
+  const showProVersionBreakdown = isProEdition && Boolean(
+    currentBundleVersion ||
+    latestBundleVersion ||
+    currentProComponentVersion ||
+    latestProComponentVersion,
+  );
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -118,6 +129,25 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
 
   const isBusy = upgrading || restarting;
   const showProgressDialog = upgrading || restarting || steps.length > 0;
+
+  const renderProVersionBreakdown = (
+    bundleVersion?: string | null,
+    proComponentVersion?: string | null,
+    options?: { proNotInstalled?: boolean },
+  ) => (
+    <div className="space-y-1 text-right">
+      <div className="flex items-center justify-end gap-2">
+        <span className="text-gray-400">{t('flocksVersion')}</span>
+        <span className="font-medium text-gray-700">{formatUpdateVersion(bundleVersion)}</span>
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <span className="text-gray-400">{t('proComponent')}</span>
+        <span className={proComponentVersion ? 'font-medium text-gray-700' : 'font-medium text-gray-400'}>
+          {proComponentVersion ? formatUpdateVersion(proComponentVersion) : options?.proNotInstalled ? t('notInstalled') : '—'}
+        </span>
+      </div>
+    </div>
+  );
   const safeClose = () => {
     if (!isBusy) onClose();
   };
@@ -328,13 +358,28 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
           <div className="px-4 pb-3 space-y-3">
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('currentVersion')}</span>
-              <span className="font-medium text-gray-700">{formatUpdateVersion(info?.current_version)}</span>
+              {showProVersionBreakdown ? (
+                renderProVersionBreakdown(currentBundleVersion, currentProComponentVersion, {
+                  proNotInstalled: !currentProComponentVersion,
+                })
+              ) : (
+                <span className="font-medium text-gray-700">{formatUpdateVersion(info?.current_version)}</span>
+              )}
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('latestVersion')}</span>
               <div className="flex items-center gap-1.5">
                 {checking ? (
                   <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
+                ) : showProVersionBreakdown && latestBundleVersion ? (
+                  <>
+                    {renderProVersionBreakdown(latestBundleVersion, latestProComponentVersion)}
+                    {info?.has_update ? (
+                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">{t('hasUpdate')}</span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">{t('upToDate')}</span>
+                    )}
+                  </>
                 ) : info?.latest_version ? (
                   <>
                     <span className="font-medium text-gray-700">{formatUpdateVersion(info.latest_version)}</span>

@@ -47,7 +47,7 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
     monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _Client())
     result = await updater._fetch_console_manifest_release()
     assert result == (
-        "pro-v2026-5-10",
+        "v2026.5.10",
         "bundle release",
         "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
         None,
@@ -59,7 +59,10 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_check_update_uses_pro_marker_and_component_version(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_check_update_uses_pro_marker_bundle_version_and_component_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     marker = tmp_path / "run" / "pro-bundle-installed.json"
     marker.parent.mkdir(parents=True)
     marker.write_text(
@@ -75,13 +78,16 @@ async def test_check_update_uses_pro_marker_and_component_version(monkeypatch: p
 
     async def _fake_manifest_info():
         return updater.ConsoleManifestRelease(
-            version="pro-v2026-05-23",
+            version="v2026.5.23",
             release_notes="latest pro",
             release_url="https://cdn.example.com/flockspro-bundle-pro-v2026-05-23.zip",
             bundle_url="https://cdn.example.com/flockspro-bundle-pro-v2026-05-23.zip",
             bundle_sha256=None,
             bundle_format="zip",
-            manifest={"flockspro_component_version": "pro-v2026-05-23"},
+            manifest={
+                "display_version": "v2026.5.23",
+                "flockspro_component_version": "pro-v2026-05-23",
+            },
         )
 
     async def _fake_config():
@@ -94,13 +100,20 @@ async def test_check_update_uses_pro_marker_and_component_version(monkeypatch: p
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
 
     info = await updater.check_update()
-    assert info.current_version == "pro-v2026-05-23"
-    assert info.latest_version == "pro-v2026-05-23"
+    assert info.current_version == "v2026.5.23"
+    assert info.latest_version == "v2026.5.23"
+    assert info.current_bundle_version == "v2026.5.23"
+    assert info.latest_bundle_version == "v2026.5.23"
+    assert info.current_pro_component_version == "pro-v2026-05-23"
+    assert info.latest_pro_component_version == "pro-v2026-05-23"
     assert info.has_update is False
 
 
 @pytest.mark.asyncio
-async def test_check_update_force_console_manifest_uses_pro_versions(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_check_update_force_console_manifest_uses_bundle_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     marker = tmp_path / "run" / "pro-bundle-installed.json"
     marker.parent.mkdir(parents=True)
     marker.write_text(
@@ -116,13 +129,16 @@ async def test_check_update_force_console_manifest_uses_pro_versions(monkeypatch
 
     async def _fake_manifest_info():
         return updater.ConsoleManifestRelease(
-            version="pro-v2026-05-24",
+            version="v2026.5.24",
             release_notes="latest pro",
             release_url="https://console.example.com/v1/pro-bundles/rel_1/download",
             bundle_url="https://console.example.com/v1/pro-bundles/rel_1/download",
             bundle_sha256="abc123",
             bundle_format="zip",
-            manifest={"flockspro_component_version": "pro-v2026-05-24"},
+            manifest={
+                "display_version": "v2026.5.24",
+                "flockspro_component_version": "pro-v2026-05-24",
+            },
         )
 
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
@@ -133,8 +149,12 @@ async def test_check_update_force_console_manifest_uses_pro_versions(monkeypatch
     info = await updater.check_update(force_console_manifest=True)
 
     assert info.edition == "flockspro"
-    assert info.current_version == "pro-v2026-05-23"
-    assert info.latest_version == "pro-v2026-05-24"
+    assert info.current_version == "v2026.5.23"
+    assert info.latest_version == "v2026.5.24"
+    assert info.current_bundle_version == "v2026.5.23"
+    assert info.latest_bundle_version == "v2026.5.24"
+    assert info.current_pro_component_version == "pro-v2026-05-23"
+    assert info.latest_pro_component_version == "pro-v2026-05-24"
     assert info.bundle_sha256 == "abc123"
     assert info.has_update is True
 
@@ -550,4 +570,3 @@ async def _async_manifest_info(bundle):
 
 async def _async_path(path):
     return path
-

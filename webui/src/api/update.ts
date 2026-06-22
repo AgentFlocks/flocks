@@ -12,6 +12,10 @@ export type UpdateEdition = 'flocks' | 'flockspro';
 export interface VersionInfo {
   current_version: string;
   latest_version: string | null;
+  current_bundle_version?: string | null;
+  latest_bundle_version?: string | null;
+  current_pro_component_version?: string | null;
+  latest_pro_component_version?: string | null;
   edition?: 'flocks' | 'flockspro';
   has_update: boolean;
   release_notes: string | null;
