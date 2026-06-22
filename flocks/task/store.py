@@ -54,6 +54,7 @@ class TaskStore:
             Storage._db_path,
             timeout=Storage._sqlite_timeout_s,
         )
+        cls._conn.text_factory = cls._decode_legacy_text
         await Storage.configure_connection(cls._conn)
         await cls._conn.executescript(_TASKS_DDL)
         for stmt in _INDEX_STMTS:
@@ -89,6 +90,13 @@ class TaskStore:
     @classmethod
     async def raw_db(cls) -> aiosqlite.Connection:
         return await cls._db()
+
+    @staticmethod
+    def _decode_legacy_text(value: bytes) -> str:
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.decode("gb18030", errors="replace")
 
     # ------------------------------------------------------------------
     # Scheduler CRUD
