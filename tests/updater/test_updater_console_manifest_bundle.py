@@ -24,6 +24,8 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
             return {
                 "display_version": "v2026.5.10",
                 "compare_version": "2026.5.10",
+                "release_id": "rel_20260510",
+                "bundle_release_id": "rel_20260510",
                 "bundle_url": "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
                 "bundle_sha256": "abc123",
                 "oss_version": "v2026.5.10",
@@ -54,6 +56,8 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
         "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
     )
     info = await updater._fetch_console_manifest_release_info()
+    assert info.release_id == "rel_20260510"
+    assert info.bundle_release_id == "rel_20260510"
     assert info.bundle_sha256 == "abc123"
     assert info.bundle_format == "tar.gz"
 
@@ -470,6 +474,8 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
     assert marker.is_file()
     marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
+    assert marker_payload["release_id"] == "rel_test"
+    assert marker_payload["bundle_release_id"] == "rel_test"
     assert marker_payload["display_version"] == "v2026.5.10"
     assert marker_payload["oss_version"] == "v2026.5.10"
 
@@ -540,6 +546,8 @@ async def _async_manifest_info(bundle):
         bundle_sha256=None,
         bundle_format="zip",
         manifest={
+            "release_id": "rel_test",
+            "bundle_release_id": "rel_test",
             "display_version": "v2026.5.10",
             "oss_version": "v2026.5.10",
             "flockspro_component_version": "pro-v2026-5-10",
@@ -550,4 +558,3 @@ async def _async_manifest_info(bundle):
 
 async def _async_path(path):
     return path
-

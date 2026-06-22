@@ -1154,6 +1154,76 @@ async def test_auto_activate_reports_already_latest_install(
     assert reported == [("success", None)]
 
 
+async def test_auto_activate_reinstalls_when_existing_pro_marker_is_not_target_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.updater.models import UpdateProgress
+
+    marker_state = {
+        "payload": {
+            "release_id": "rel_20260601",
+            "bundle_release_id": "rel_20260601",
+            "installed_version": "v2026.6.1",
+            "flockspro_component_version": "pro-v2026-6-1",
+            "build_id": "job_20260601",
+        }
+    }
+    reported: list[tuple[str, str | None]] = []
+
+    async def _fake_perform_pro_bundle_install(*args, **kwargs):
+        assert args == ()
+        assert kwargs["restart"] is False
+        marker_state["payload"] = {
+            "release_id": "rel_20260605",
+            "bundle_release_id": "rel_20260605",
+            "installed_version": "v2026.6.5",
+            "flockspro_component_version": "pro-v2026-6-5",
+            "build_id": "job_20260605",
+        }
+        yield UpdateProgress(stage="done", message="Flocks Pro component installed.", success=True)
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        reported.append((install_result, error_message))
+
+    async def _noop(_record: dict):
+        return None
+
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_install", _fake_perform_pro_bundle_install)
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
+    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: marker_state["payload"])
+
+    record = {
+        "request_id": "req_auto_reinstall_target_bundle",
+        "status": "approved",
+        "activate_key": "key_auto",
+        "details": {
+            "auto_install_result": "already_latest",
+            "approved_bundle_release_id": "rel_20260605",
+            "latest_pro_bundle": {
+                "release_id": "rel_20260605",
+                "display_version": "v2026.6.5",
+                "flockspro_component_version": "pro-v2026-6-5",
+                "build_id": "job_20260605",
+            },
+        },
+        "created_at": "2026-06-05T08:00:00+00:00",
+        "updated_at": "2026-06-05T08:00:00+00:00",
+    }
+
+    payload = await console_routes._maybe_auto_activate_upgrade(record)
+
+    assert payload["status"] == "activated"
+    assert payload["details"]["auto_install_result"] == "done"
+    assert payload["details"]["auto_install_release_id"] == "rel_20260605"
+    assert payload["details"]["auto_install_version"] == "v2026.6.5"
+    assert reported == [("success", None)]
+
+
 async def test_auto_activate_does_not_mark_activated_when_license_inactive(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1270,7 +1340,10 @@ async def test_report_pro_bundle_installation_uses_license_id(
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
-        lambda: {"installed_version": "v2026.5.9"},
+        lambda: {
+            "installed_version": "v2026.6.5",
+            "flockspro_component_version": "pro-v2026-6-5",
+        },
     )
 
     record = {
@@ -1278,9 +1351,21 @@ async def test_report_pro_bundle_installation_uses_license_id(
         "status": "approved",
         "activate_key": "activation_token",
         "license_id": "lic_receipt",
-        "details": {"license_id": "lic_receipt"},
+        "details": {
+            "license_id": "lic_receipt",
+            "approved_bundle_release_id": "rel_receipt",
+            "latest_pro_bundle": {
+                "release_id": "rel_receipt",
+                "display_version": "v2026.6.5",
+                "flockspro_component_version": "pro-v2026-6-5",
+                "build_id": "job_receipt",
+            },
+        },
     }
 
     await console_routes._report_pro_bundle_installation(record, install_result="success")
 
     assert posted_payloads[0]["license_id"] == "lic_receipt"
+    assert posted_payloads[0]["release_id"] == "rel_receipt"
+    assert posted_payloads[0]["bundle_release_id"] == "rel_receipt"
+    assert posted_payloads[0]["build_id"] == "job_receipt"

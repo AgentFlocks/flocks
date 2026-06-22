@@ -80,6 +80,8 @@ class ConsoleManifestRelease:
     bundle_format: str
     manifest: dict[str, Any]
     console_session_token: str | None = None
+    release_id: str | None = None
+    bundle_release_id: str | None = None
 
 
 def _record_update_journal(message: str) -> None:
@@ -1252,6 +1254,8 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
     if not bundle_url:
         raise ValueError("manifest 响应缺少 bundle_url")
     bundle_format = _archive_format_for_url(bundle_url, str(data.get("bundle_format") or data.get("archive_format") or ""))
+    release_id = str(data.get("release_id") or data.get("bundle_release_id") or "").strip() or None
+    bundle_release_id = str(data.get("bundle_release_id") or data.get("release_id") or "").strip() or None
     return ConsoleManifestRelease(
         version=latest,
         release_notes=data.get("release_notes") or data.get("notes"),
@@ -1261,6 +1265,8 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
         bundle_format=bundle_format,
         manifest=data,
         console_session_token=token,
+        release_id=release_id,
+        bundle_release_id=bundle_release_id,
     )
 
 
@@ -1773,10 +1779,33 @@ async def run_handoff_upgrade_tasks(
     return None
 
 
+def _merge_console_manifest_release_identity(
+    bundle_manifest: dict[str, Any],
+    console_manifest: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not console_manifest:
+        return bundle_manifest
+    merged = dict(bundle_manifest)
+    release_id = str(console_manifest.get("release_id") or console_manifest.get("bundle_release_id") or "").strip()
+    bundle_release_id = str(console_manifest.get("bundle_release_id") or console_manifest.get("release_id") or "").strip()
+    if release_id and not merged.get("release_id"):
+        merged["release_id"] = release_id
+    if bundle_release_id and not merged.get("bundle_release_id"):
+        merged["bundle_release_id"] = bundle_release_id
+    for key in ("display_version", "oss_version", "flockspro_component_version", "build_id"):
+        if not merged.get(key) and console_manifest.get(key):
+            merged[key] = console_manifest.get(key)
+    return merged
+
+
 def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256: str | None = None) -> None:
     marker = _flocks_root() / "run" / "pro-bundle-installed.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
+    release_id = manifest.get("release_id") or manifest.get("bundle_release_id")
+    bundle_release_id = manifest.get("bundle_release_id") or manifest.get("release_id")
     payload = {
+        "release_id": release_id,
+        "bundle_release_id": bundle_release_id,
         "display_version": manifest.get("display_version"),
         "installed_version": manifest.get("display_version"),
         "oss_version": manifest.get("oss_version"),
@@ -2697,6 +2726,7 @@ async def perform_pro_bundle_install(
         bundle_sha256=manifest_info.bundle_sha256,
         bundle_format=manifest_info.bundle_format,
         console_session_token=manifest_info.console_session_token,
+        console_manifest_payload=manifest_info.manifest,
         restart=restart,
         force_console_manifest=True,
     ):
@@ -2711,6 +2741,7 @@ async def perform_update(
     bundle_sha256: str | None = None,
     bundle_format: str | None = None,
     console_session_token: str | None = None,
+    console_manifest_payload: dict[str, Any] | None = None,
     restart: bool = True,
     locale: str | None = None,
     region: str | None = None,
@@ -2738,6 +2769,7 @@ async def perform_update(
     current_version = get_current_version()
     handover_active = False
     console_manifest_info: ConsoleManifestRelease | None = None
+    console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
     fmt = _choose_archive_format(ucfg.archive_format)
     if profile.sources == ["console-manifest"]:
         if not (zipball_url or tarball_url) or console_session_token is None:
@@ -2765,6 +2797,7 @@ async def perform_update(
             bundle_sha256 = console_manifest_info.bundle_sha256
             bundle_format = console_manifest_info.bundle_format
             console_session_token = console_manifest_info.console_session_token
+            console_manifest_payload = console_manifest_info.manifest
         primary_bundle_url = zipball_url or tarball_url or ""
         fmt = _archive_format_for_url(primary_bundle_url, bundle_format)
 
@@ -2873,6 +2906,11 @@ async def perform_update(
             extract_dir,
         )
         content_root, pro_wheel_path, pro_bundle_manifest = _resolve_pro_bundle_content(content_root)
+        if profile.sources == ["console-manifest"]:
+            pro_bundle_manifest = _merge_console_manifest_release_identity(
+                pro_bundle_manifest,
+                console_manifest_payload,
+            )
         if profile.sources == ["console-manifest"] and pro_wheel_path is None:
             raise ValueError("Pro bundle 中未找到 flockspro wheel")
     except Exception as exc:
