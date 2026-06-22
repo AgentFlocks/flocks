@@ -15,9 +15,7 @@ _CN_BULLET_KEY_RE = re.compile(r"^\s*[-*]\s*(?P<key>[A-Za-z0-9_\-]+)\s*[:：]\s*
 _CN_SECTION_OUTPUT_RE = re.compile(r"^\s*输出要求\s*[:：]?\s*$")
 
 # Patterns that indicate an "expensive" node (LLM call / file write).
-_EXPENSIVE_CALL_RE = re.compile(
-    r"""llm\.ask\s*\(|tool\.run\s*\(\s*['"]write['"]"""
-)
+_EXPENSIVE_CALL_RE = re.compile(r"""llm\.ask\s*\(|tool\.run\s*\(\s*['"]write['"]""")
 
 
 def _split_keys(raw: str) -> list[str]:
@@ -69,6 +67,61 @@ def estimate_node_output_keys(node: Node) -> Set[str]:
     return keys
 
 
+def _strict_edge_mapping_enabled(workflow: Workflow) -> bool:
+    metadata = workflow.metadata if isinstance(workflow.metadata, dict) else {}
+    candidates = [
+        metadata.get("strict_edge_mapping"),
+        metadata.get("strictEdgeMapping"),
+    ]
+    for section_key in ("runtime", "runtime_defaults", "runtimeDefaults"):
+        section = metadata.get(section_key)
+        if isinstance(section, dict):
+            candidates.extend(
+                [
+                    section.get("strict_edge_mapping"),
+                    section.get("strictEdgeMapping"),
+                ]
+            )
+    for value in candidates:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+    return False
+
+
+def lint_implicit_full_payload_edges(workflow: Workflow) -> List[Dict[str, Any]]:
+    nodes = workflow.nodes_by_id()
+    strict = _strict_edge_mapping_enabled(workflow)
+    severity = "error" if strict else "warning"
+    results: list[dict[str, Any]] = []
+    for edge in workflow.edges:
+        if edge.mapping:
+            continue
+        upstream = nodes.get(edge.from_)
+        downstream = nodes.get(edge.to)
+        results.append(
+            {
+                "kind": "implicit_full_payload_edge",
+                "severity": severity,
+                "edge_from": edge.from_,
+                "edge_to": edge.to,
+                "upstream_type": getattr(upstream, "type", None),
+                "downstream_type": getattr(downstream, "type", None),
+                "strict_edge_mapping": strict,
+                "message": (
+                    f"edge {edge.from_!r}->{edge.to!r} has no mapping; the full upstream "
+                    "payload will be passed to the downstream node"
+                ),
+            }
+        )
+    return results
+
+
 def lint_workflow_mappings(workflow: Workflow) -> List[Dict[str, Any]]:
     nodes = workflow.nodes_by_id()
     warnings: list[dict[str, Any]] = []
@@ -85,32 +138,36 @@ def lint_workflow_mappings(workflow: Workflow) -> List[Dict[str, Any]]:
                 src_path = src_path[2:]
             top_key = src_path.split(".", 1)[0] if src_path else ""
             if top_key and upstream_out and top_key not in upstream_out:
-                warnings.append({
-                    "kind": "mapping_src_key_not_in_upstream_outputs",
-                    "edge_from": e.from_,
-                    "edge_to": e.to,
-                    "dst_key": dst,
-                    "src_path": src,
-                    "upstream_type": getattr(upstream, "type", None),
-                    "estimated_upstream_output_keys": sorted(upstream_out)[:50],
-                    "message": (
-                        f"edge.mapping maps src {src!r} but upstream node {e.from_!r} "
-                        "does not appear to write that key to outputs; mapping may produce missing value"
-                    ),
-                })
+                warnings.append(
+                    {
+                        "kind": "mapping_src_key_not_in_upstream_outputs",
+                        "edge_from": e.from_,
+                        "edge_to": e.to,
+                        "dst_key": dst,
+                        "src_path": src,
+                        "upstream_type": getattr(upstream, "type", None),
+                        "estimated_upstream_output_keys": sorted(upstream_out)[:50],
+                        "message": (
+                            f"edge.mapping maps src {src!r} but upstream node {e.from_!r} "
+                            "does not appear to write that key to outputs; mapping may produce missing value"
+                        ),
+                    }
+                )
             if dst == src and not (e.const or {}):
-                warnings.append({
-                    "kind": "scheme_a_suggest_omit_identity_mapping",
-                    "severity": "warning",
-                    "edge_from": e.from_,
-                    "edge_to": e.to,
-                    "dst_key": dst,
-                    "src_path": src,
-                    "message": (
-                        "edge.mapping is an identity mapping. Scheme A recommends omitting mapping "
-                        "to pass through the full payload and reduce missing-key issues."
-                    ),
-                })
+                warnings.append(
+                    {
+                        "kind": "scheme_a_suggest_omit_identity_mapping",
+                        "severity": "warning",
+                        "edge_from": e.from_,
+                        "edge_to": e.to,
+                        "dst_key": dst,
+                        "src_path": src,
+                        "message": (
+                            "edge.mapping is an identity mapping. Scheme A recommends omitting mapping "
+                            "to pass through the full payload and reduce missing-key issues."
+                        ),
+                    }
+                )
     return warnings
 
 
@@ -184,18 +241,20 @@ def lint_join_requirements(workflow: Workflow) -> List[Dict[str, Any]]:
                 break
 
         if not is_exclusive:
-            results.append({
-                "kind": "multi_incoming_no_join",
-                "severity": "error",
-                "node_id": nid,
-                "sources": sorted(sources),
-                "message": (
-                    f"Node {nid!r} has {len(sources)} incoming edges from "
-                    f"non-exclusive sources {sorted(unique_sources)} but join=false. "
-                    "This will cause the node to execute multiple times. "
-                    "Set join=true on this node or restructure edges."
-                ),
-            })
+            results.append(
+                {
+                    "kind": "multi_incoming_no_join",
+                    "severity": "error",
+                    "node_id": nid,
+                    "sources": sorted(sources),
+                    "message": (
+                        f"Node {nid!r} has {len(sources)} incoming edges from "
+                        f"non-exclusive sources {sorted(unique_sources)} but join=false. "
+                        "This will cause the node to execute multiple times. "
+                        "Set join=true on this node or restructure edges."
+                    ),
+                }
+            )
     return results
 
 
@@ -234,18 +293,20 @@ def lint_expensive_node_multi_trigger(workflow: Workflow) -> List[Dict[str, Any]
                 break
 
         if not is_exclusive:
-            results.append({
-                "kind": "expensive_node_multi_trigger",
-                "severity": "error",
-                "node_id": nid,
-                "sources": sorted(sources),
-                "message": (
-                    f"Expensive node {nid!r} (contains LLM/write calls) has "
-                    f"{len(sources)} non-exclusive incoming edges but join=false. "
-                    "This may cause costly duplicate execution. "
-                    "Add a join node before this expensive node."
-                ),
-            })
+            results.append(
+                {
+                    "kind": "expensive_node_multi_trigger",
+                    "severity": "error",
+                    "node_id": nid,
+                    "sources": sorted(sources),
+                    "message": (
+                        f"Expensive node {nid!r} (contains LLM/write calls) has "
+                        f"{len(sources)} non-exclusive incoming edges but join=false. "
+                        "This may cause costly duplicate execution. "
+                        "Add a join node before this expensive node."
+                    ),
+                }
+            )
     return results
 
 
@@ -266,15 +327,17 @@ def lint_subworkflow_depth(workflow: Workflow) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     for node in workflow.nodes:
         if node.type == "subworkflow":
-            results.append({
-                "kind": "SW-001",
-                "severity": "error",
-                "node_id": node.id,
-                "message": (
-                    f"Node {node.id!r} is a subworkflow node. "
-                    "Sub-workflows cannot nest further sub-workflows (max depth=1)."
-                ),
-            })
+            results.append(
+                {
+                    "kind": "SW-001",
+                    "severity": "error",
+                    "node_id": node.id,
+                    "message": (
+                        f"Node {node.id!r} is a subworkflow node. "
+                        "Sub-workflows cannot nest further sub-workflows (max depth=1)."
+                    ),
+                }
+            )
     return results
 
 
@@ -294,23 +357,27 @@ def lint_subworkflow_ids(
         if node.type == "subworkflow":
             wid = node.workflow_id or ""
             if not wid:
-                results.append({
-                    "kind": "SW-002",
-                    "severity": "error",
-                    "node_id": node.id,
-                    "message": f"subworkflow node {node.id!r} has no workflow_id set.",
-                })
+                results.append(
+                    {
+                        "kind": "SW-002",
+                        "severity": "error",
+                        "node_id": node.id,
+                        "message": f"subworkflow node {node.id!r} has no workflow_id set.",
+                    }
+                )
             elif wid not in known_workflow_ids:
-                results.append({
-                    "kind": "SW-002",
-                    "severity": "error",
-                    "node_id": node.id,
-                    "workflow_id": wid,
-                    "message": (
-                        f"subworkflow node {node.id!r} references workflow_id={wid!r} "
-                        "which was not found in the known workflow registry."
-                    ),
-                })
+                results.append(
+                    {
+                        "kind": "SW-002",
+                        "severity": "error",
+                        "node_id": node.id,
+                        "workflow_id": wid,
+                        "message": (
+                            f"subworkflow node {node.id!r} references workflow_id={wid!r} "
+                            "which was not found in the known workflow registry."
+                        ),
+                    }
+                )
     return results
 
 
@@ -338,6 +405,7 @@ def lint_workflow(
             subworkflow nodes.
     """
     results: List[Dict[str, Any]] = []
+    results.extend(lint_implicit_full_payload_edges(workflow))
     # Existing mapping checks (warnings)
     for item in lint_workflow_mappings(workflow):
         item.setdefault("severity", "warning")

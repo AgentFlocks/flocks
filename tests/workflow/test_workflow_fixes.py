@@ -12,12 +12,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from flocks.workflow.errors import WorkflowValidationError
 from flocks.workflow.models import Workflow
 from flocks.workflow.engine import WorkflowEngine
 from flocks.workflow.repl_runtime import PythonExecRuntime
+from flocks.workflow.runner import run_workflow
 from flocks.workflow.tools import ToolFacade
 from flocks.workflow.tools_adapter import FlocksToolAdapter
 from flocks.workflow.workflow_lint import (
+    lint_implicit_full_payload_edges,
     lint_expensive_node_multi_trigger,
     lint_join_requirements,
     lint_workflow,
@@ -27,6 +30,7 @@ from flocks.workflow.workflow_lint import (
 # ---------------------------------------------------------------------------
 # Helper: mock adapter that returns controllable outputs
 # ---------------------------------------------------------------------------
+
 
 class _MockToolAdapter(FlocksToolAdapter):
     """FlocksToolAdapter subclass that bypasses real tool registry."""
@@ -42,6 +46,7 @@ class _MockToolAdapter(FlocksToolAdapter):
             val = self._outputs[name]
             if isinstance(val, Exception):
                 from flocks.workflow.errors import NodeExecutionError
+
                 raise NodeExecutionError(node_id="<tool>", message=str(val))
             return val
         return f"mock_output_for_{name}"
@@ -64,9 +69,7 @@ class TestRunSafe:
         assert result["error"] is None
 
     def test_run_safe_dict_output(self):
-        adapter = _MockToolAdapter(outputs={
-            "memory_search": {"results": [{"id": 1}], "count": 1}
-        })
+        adapter = _MockToolAdapter(outputs={"memory_search": {"results": [{"id": 1}], "count": 1}})
         result = adapter.run_safe("memory_search", query="test")
         assert result["success"] is True
         assert isinstance(result["text"], str)
@@ -82,9 +85,7 @@ class TestRunSafe:
         assert result["obj"] is None
 
     def test_run_safe_error(self):
-        adapter = _MockToolAdapter(outputs={
-            "bad_tool": Exception("connection timeout")
-        })
+        adapter = _MockToolAdapter(outputs={"bad_tool": Exception("connection timeout")})
         result = adapter.run_safe("bad_tool")
         assert result["success"] is False
         assert result["text"] == ""
@@ -103,9 +104,7 @@ class TestRunSafe:
 
     def test_run_safe_explicit_error(self):
         """Explicit error entry in outputs -> run_safe catches and wraps."""
-        adapter = _MockToolAdapter(outputs={
-            "failing": Exception("service unavailable")
-        })
+        adapter = _MockToolAdapter(outputs={"failing": Exception("service unavailable")})
         result = adapter.run_safe("failing")
         assert result["success"] is False
         assert result["obj"] is None
@@ -136,19 +135,21 @@ class TestLintJoinRequirements:
 
     def test_multi_incoming_no_join_error(self):
         """Node with 2+ non-exclusive incoming edges and no join -> error."""
-        wf = Workflow.from_dict({
-            "name": "bad_join",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
-                {"id": "c", "type": "python", "code": "outputs['z'] = inputs.get('x', 0)"},
-            ],
-            "edges": [
-                {"from": "a", "to": "c"},
-                {"from": "b", "to": "c"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "bad_join",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
+                    {"id": "c", "type": "python", "code": "outputs['z'] = inputs.get('x', 0)"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "c"},
+                    {"from": "b", "to": "c"},
+                ],
+            }
+        )
         results = lint_join_requirements(wf)
         assert len(results) == 1
         assert results[0]["kind"] == "multi_incoming_no_join"
@@ -157,66 +158,72 @@ class TestLintJoinRequirements:
 
     def test_exclusive_branch_no_error(self):
         """Edges from same branch with different labels are exclusive -> no error."""
-        wf = Workflow.from_dict({
-            "name": "ok_branch",
-            "start": "start",
-            "nodes": [
-                {"id": "start", "type": "python", "code": "outputs['flag'] = True"},
-                {"id": "br", "type": "branch", "select_key": "flag"},
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['x'] = 2"},
-                {"id": "merge", "type": "python", "code": "outputs['r'] = inputs.get('x')"},
-            ],
-            "edges": [
-                {"from": "start", "to": "br"},
-                {"from": "br", "to": "a", "label": "true"},
-                {"from": "br", "to": "b", "label": "false"},
-                {"from": "a", "to": "merge"},
-                {"from": "b", "to": "merge"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "ok_branch",
+                "start": "start",
+                "nodes": [
+                    {"id": "start", "type": "python", "code": "outputs['flag'] = True"},
+                    {"id": "br", "type": "branch", "select_key": "flag"},
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['x'] = 2"},
+                    {"id": "merge", "type": "python", "code": "outputs['r'] = inputs.get('x')"},
+                ],
+                "edges": [
+                    {"from": "start", "to": "br"},
+                    {"from": "br", "to": "a", "label": "true"},
+                    {"from": "br", "to": "b", "label": "false"},
+                    {"from": "a", "to": "merge"},
+                    {"from": "b", "to": "merge"},
+                ],
+            }
+        )
         results = lint_join_requirements(wf)
         assert len(results) == 0
 
     def test_join_true_no_error(self):
         """Node with join=true should not trigger the lint."""
-        wf = Workflow.from_dict({
-            "name": "ok_join",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
-                {"id": "c", "type": "python", "code": "pass", "join": True},
-            ],
-            "edges": [
-                {"from": "a", "to": "c"},
-                {"from": "b", "to": "c"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "ok_join",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
+                    {"id": "c", "type": "python", "code": "pass", "join": True},
+                ],
+                "edges": [
+                    {"from": "a", "to": "c"},
+                    {"from": "b", "to": "c"},
+                ],
+            }
+        )
         results = lint_join_requirements(wf)
         assert len(results) == 0
 
     def test_mixed_exclusive_and_non_exclusive(self):
         """Branch targets + extra direct edge -> error (not fully exclusive)."""
-        wf = Workflow.from_dict({
-            "name": "mixed",
-            "start": "start",
-            "nodes": [
-                {"id": "start", "type": "python", "code": "outputs['flag'] = True"},
-                {"id": "br", "type": "branch", "select_key": "flag"},
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['x'] = 2"},
-                {"id": "merge", "type": "python", "code": "pass"},
-            ],
-            "edges": [
-                {"from": "start", "to": "br"},
-                {"from": "br", "to": "a", "label": "true"},
-                {"from": "br", "to": "b", "label": "false"},
-                {"from": "a", "to": "merge"},
-                {"from": "b", "to": "merge"},
-                {"from": "start", "to": "merge"},  # extra non-exclusive edge
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "mixed",
+                "start": "start",
+                "nodes": [
+                    {"id": "start", "type": "python", "code": "outputs['flag'] = True"},
+                    {"id": "br", "type": "branch", "select_key": "flag"},
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['x'] = 2"},
+                    {"id": "merge", "type": "python", "code": "pass"},
+                ],
+                "edges": [
+                    {"from": "start", "to": "br"},
+                    {"from": "br", "to": "a", "label": "true"},
+                    {"from": "br", "to": "b", "label": "false"},
+                    {"from": "a", "to": "merge"},
+                    {"from": "b", "to": "merge"},
+                    {"from": "start", "to": "merge"},  # extra non-exclusive edge
+                ],
+            }
+        )
         results = lint_join_requirements(wf)
         assert len(results) == 1
         assert results[0]["node_id"] == "merge"
@@ -227,23 +234,25 @@ class TestLintExpensiveNodeMultiTrigger:
 
     def test_expensive_node_multi_incoming_error(self):
         """Expensive node (LLM call) with multiple non-exclusive edges -> error."""
-        wf = Workflow.from_dict({
-            "name": "expensive_bad",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
-                {
-                    "id": "expensive",
-                    "type": "python",
-                    "code": "result = llm.ask('summarize')\noutputs['summary'] = result",
-                },
-            ],
-            "edges": [
-                {"from": "a", "to": "expensive"},
-                {"from": "b", "to": "expensive"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "expensive_bad",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
+                    {
+                        "id": "expensive",
+                        "type": "python",
+                        "code": "result = llm.ask('summarize')\noutputs['summary'] = result",
+                    },
+                ],
+                "edges": [
+                    {"from": "a", "to": "expensive"},
+                    {"from": "b", "to": "expensive"},
+                ],
+            }
+        )
         results = lint_expensive_node_multi_trigger(wf)
         assert len(results) == 1
         assert results[0]["kind"] == "expensive_node_multi_trigger"
@@ -251,41 +260,45 @@ class TestLintExpensiveNodeMultiTrigger:
 
     def test_non_expensive_node_no_error(self):
         """Non-expensive node with multiple edges -> no error from this check."""
-        wf = Workflow.from_dict({
-            "name": "cheap_ok",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
-                {"id": "c", "type": "python", "code": "outputs['z'] = 3"},
-            ],
-            "edges": [
-                {"from": "a", "to": "c"},
-                {"from": "b", "to": "c"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "cheap_ok",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
+                    {"id": "c", "type": "python", "code": "outputs['z'] = 3"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "c"},
+                    {"from": "b", "to": "c"},
+                ],
+            }
+        )
         results = lint_expensive_node_multi_trigger(wf)
         assert len(results) == 0
 
     def test_write_tool_detected_as_expensive(self):
         """Node calling tool.run('write', ...) is detected as expensive."""
-        wf = Workflow.from_dict({
-            "name": "write_bad",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
-                {
-                    "id": "writer",
-                    "type": "python",
-                    "code": "tool.run('write', filePath='out.md', content='hi')",
-                },
-            ],
-            "edges": [
-                {"from": "a", "to": "writer"},
-                {"from": "b", "to": "writer"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "write_bad",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
+                    {
+                        "id": "writer",
+                        "type": "python",
+                        "code": "tool.run('write', filePath='out.md', content='hi')",
+                    },
+                ],
+                "edges": [
+                    {"from": "a", "to": "writer"},
+                    {"from": "b", "to": "writer"},
+                ],
+            }
+        )
         results = lint_expensive_node_multi_trigger(wf)
         assert len(results) == 1
         assert results[0]["node_id"] == "writer"
@@ -296,36 +309,94 @@ class TestLintWorkflowUnified:
 
     def test_lint_workflow_combines_all_checks(self):
         """lint_workflow() should return results from all check functions."""
-        wf = Workflow.from_dict({
-            "name": "combined",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
-                {"id": "c", "type": "python", "code": "pass"},
-            ],
-            "edges": [
-                {"from": "a", "to": "c"},
-                {"from": "b", "to": "c"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "combined",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = 2"},
+                    {"id": "c", "type": "python", "code": "pass"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "c"},
+                    {"from": "b", "to": "c"},
+                ],
+            }
+        )
         results = lint_workflow(wf)
         kinds = {r["kind"] for r in results}
         assert "multi_incoming_no_join" in kinds
 
     def test_lint_workflow_clean(self):
         """A well-formed workflow should produce no lint results."""
-        wf = Workflow.from_dict({
-            "name": "clean",
+        wf = Workflow.from_dict(
+            {
+                "name": "clean",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('mapped_x')"},
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"mapped_x": "x"}}],
+            }
+        )
+        results = lint_workflow(wf)
+        assert len(results) == 0
+
+    def test_missing_edge_mapping_warns_by_default(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "implicit_mapping",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('x')"},
+                ],
+                "edges": [{"from": "a", "to": "b"}],
+            }
+        )
+
+        results = lint_implicit_full_payload_edges(wf)
+
+        assert len(results) == 1
+        assert results[0]["kind"] == "implicit_full_payload_edge"
+        assert results[0]["severity"] == "warning"
+
+    def test_missing_edge_mapping_is_error_when_strict(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "strict_implicit_mapping",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('x')"},
+                ],
+                "edges": [{"from": "a", "to": "b"}],
+                "metadata": {"runtime": {"strict_edge_mapping": True}},
+            }
+        )
+
+        results = lint_implicit_full_payload_edges(wf)
+
+        assert len(results) == 1
+        assert results[0]["kind"] == "implicit_full_payload_edge"
+        assert results[0]["severity"] == "error"
+
+    def test_run_workflow_rejects_strict_implicit_mapping(self):
+        workflow = {
+            "name": "strict_implicit_mapping",
             "start": "a",
             "nodes": [
                 {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
                 {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('x')"},
             ],
             "edges": [{"from": "a", "to": "b"}],
-        })
-        results = lint_workflow(wf)
-        assert len(results) == 0
+            "metadata": {"runtime": {"strict_edge_mapping": True}},
+        }
+
+        with pytest.raises(WorkflowValidationError):
+            run_workflow(workflow=workflow, ensure_requirements=False)
 
 
 # ===================================================================
@@ -338,21 +409,23 @@ class TestEngineDedup:
 
     def test_dedup_different_inputs_both_execute(self):
         """When a node receives different inputs from two sources, both execute (no dedup)."""
-        wf = Workflow.from_dict({
-            "name": "dedup_test",
-            "start": "a",
-            "nodes": [
-                # a fans out to b and c (python node sends to all outgoing edges)
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                {"id": "b", "type": "python", "code": "outputs['x'] = 2"},
-                {"id": "d", "type": "python", "code": "outputs['result'] = inputs.get('x', 0)"},
-            ],
-            "edges": [
-                {"from": "a", "to": "b"},
-                {"from": "a", "to": "d"},
-                {"from": "b", "to": "d"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "dedup_test",
+                "start": "a",
+                "nodes": [
+                    # a fans out to b and c (python node sends to all outgoing edges)
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['x'] = 2"},
+                    {"id": "d", "type": "python", "code": "outputs['result'] = inputs.get('x', 0)"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "b"},
+                    {"from": "a", "to": "d"},
+                    {"from": "b", "to": "d"},
+                ],
+            }
+        )
         engine = WorkflowEngine(
             wf,
             runtime=PythonExecRuntime(),
@@ -370,19 +443,21 @@ class TestEngineDedup:
 
     def test_dedup_skips_truly_identical_inputs(self):
         """Identical inputs to the same node -> second execution is skipped."""
-        wf = Workflow.from_dict({
-            "name": "dedup_identical",
-            "start": "a",
-            "nodes": [
-                {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
-                # Two edges from a to b (rare but possible)
-                {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('x')"},
-            ],
-            "edges": [
-                {"from": "a", "to": "b"},
-                {"from": "a", "to": "b"},
-            ],
-        })
+        wf = Workflow.from_dict(
+            {
+                "name": "dedup_identical",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    # Two edges from a to b (rare but possible)
+                    {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('x')"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "b"},
+                    {"from": "a", "to": "b"},
+                ],
+            }
+        )
         engine = WorkflowEngine(
             wf,
             runtime=PythonExecRuntime(),
@@ -409,6 +484,7 @@ class TestExampleWorkflow:
     def test_example_workflow_loads(self):
         """Example workflow.json should be valid and loadable."""
         import os
+
         wf_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -429,6 +505,7 @@ class TestExampleWorkflow:
     def test_example_workflow_no_lint_errors(self):
         """Example workflow should pass all lint checks (no errors)."""
         import os
+
         wf_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -450,6 +527,7 @@ class TestExampleWorkflow:
     def test_no_exec_json_files(self):
         """workflow-exec.json and workflow-exec-b.json should not exist."""
         import os
+
         base = os.path.join(
             os.path.dirname(__file__),
             "..",

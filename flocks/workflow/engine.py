@@ -29,6 +29,7 @@ StepEndHook = Callable[[_T, "StepResult"], None]
 
 class _ExecOutcome(NamedTuple):
     """Result of executing a single node within a batch."""
+
     idx: int
     outputs: Dict[str, Any]
     stdout: str
@@ -50,18 +51,12 @@ def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
             return {"_type": "string", "chars": len(value), "preview": value[:200]}
         return value
     if isinstance(value, dict):
-        return {
-            key: _summarize_for_observability(item, depth=depth + 1)
-            for key, item in list(value.items())[:50]
-        }
+        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in list(value.items())[:50]}
     if isinstance(value, (list, tuple, set)):
         return {
             "_type": type(value).__name__,
             "count": len(value),
-            "preview": [
-                _summarize_for_observability(item, depth=depth + 1)
-                for item in list(value)[:3]
-            ],
+            "preview": [_summarize_for_observability(item, depth=depth + 1) for item in list(value)[:3]],
         }
     if isinstance(value, str) and len(value) > 200:
         return {"_type": "string", "chars": len(value), "preview": value[:200]}
@@ -107,6 +102,7 @@ def _default_workflow_loader(workflow_id: str) -> "Workflow":
 
     async def _load():
         from flocks.storage.storage import Storage
+
         data = await Storage.read(f"workflow/{workflow_id}")
         if data is None:
             raise NodeExecutionError(
@@ -181,6 +177,7 @@ class WorkflowEngine:
                 globals=dict(self.runtime.globals),
                 tool_registry=self.runtime.tool_registry,
                 cancel_checker=self.runtime.cancel_checker,
+                cleanup_globals_after_execute=self.runtime.cleanup_globals_after_execute,
             )
         return self.runtime
 
@@ -203,9 +200,7 @@ class WorkflowEngine:
             incoming_from.setdefault(e.to, []).append(e.from_)
         for k in incoming_from:
             incoming_from[k].sort()
-        q: Deque[Tuple[str, Dict[str, Any], Optional[str]]] = deque(
-            [(self.workflow.start, initial_inputs or {}, None)]
-        )
+        q: Deque[Tuple[str, Dict[str, Any], Optional[str]]] = deque([(self.workflow.start, initial_inputs or {}, None)])
         history: list[StepResult] = []
         last_outputs: Dict[str, Any] = {}
         step_count = 0
@@ -225,6 +220,7 @@ class WorkflowEngine:
             previous_cancel_checker = self.runtime.cancel_checker
             self.runtime.cancel_checker = cancel
         try:
+
             def _retain_step(step: StepResult) -> None:
                 if retain_history:
                     history.append(step)
@@ -321,7 +317,9 @@ class WorkflowEngine:
                         try:
                             _hash_raw = json.dumps(
                                 {"n": node_id, "i": inputs},
-                                sort_keys=True, ensure_ascii=False, default=str,
+                                sort_keys=True,
+                                ensure_ascii=False,
+                                default=str,
                             )
                             _input_hash = hashlib.sha256(_hash_raw.encode()).hexdigest()[:16]
                         except Exception:
@@ -329,7 +327,8 @@ class WorkflowEngine:
                     if _input_hash and node_id in _dedup_hashes and _dedup_hashes[node_id] == _input_hash:
                         _logger.info(
                             "wf.step.dedup_skip node=%s (identical input hash %s)",
-                            node_id, _input_hash,
+                            node_id,
+                            _input_hash,
                             extra={"run_id": rid, "node_id": node_id, "input_hash": _input_hash},
                         )
                         continue
@@ -352,10 +351,14 @@ class WorkflowEngine:
                         _desc = (_nd.description or "").strip().splitlines()[0:1]
                         _desc_text = _desc[0] if _desc else ""
                         _par_tag = " [parallel]" if use_parallel else ""
-                        print(f"\n[WF] step={step_count+_idx+1} node={_nid} type={_nd.type} {_desc_text}{_par_tag}".rstrip())
+                        print(
+                            f"\n[WF] step={step_count + _idx + 1} node={_nid} type={_nd.type} {_desc_text}{_par_tag}".rstrip()
+                        )
                     _logger.info(
                         "wf.step.start step=%s node=%s type=%s%s",
-                        step_count + _idx + 1, _nid, _nd.type,
+                        step_count + _idx + 1,
+                        _nid,
+                        _nd.type,
                         " (parallel)" if use_parallel else "",
                         extra={"run_id": rid, "step": step_count + _idx + 1, "node_id": _nid, "node_type": _nd.type},
                     )
@@ -383,9 +386,14 @@ class WorkflowEngine:
                             return _ExecOutcome(_pi, _pouts, _pso, None, None, (time.perf_counter() - _t0) * 1000.0)
                         except RunCancelledError as _ce:
                             return _ExecOutcome(
-                                _pi, {}, "", str(_ce), None,
+                                _pi,
+                                {},
+                                "",
+                                str(_ce),
+                                None,
                                 (time.perf_counter() - _t0) * 1000.0,
-                                False, True,
+                                False,
+                                True,
                             )
                         except Exception as _pe:
                             _perr = str(_pe)
@@ -411,13 +419,17 @@ class WorkflowEngine:
                         except FuturesTimeoutError:
                             for _f2, _ci2 in _fut_map.items():
                                 if _ci2 not in _completed_idx:
-                                    exec_results.append(_ExecOutcome(
-                                        idx=_ci2, outputs={}, stdout="",
-                                        error=f"节点执行超时 ({self.node_timeout_s}s)",
-                                        traceback=None,
-                                        duration_ms=(step_timeout_s or 0) * 1000.0,
-                                        is_timeout=True,
-                                    ))
+                                    exec_results.append(
+                                        _ExecOutcome(
+                                            idx=_ci2,
+                                            outputs={},
+                                            stdout="",
+                                            error=f"节点执行超时 ({self.node_timeout_s}s)",
+                                            traceback=None,
+                                            duration_ms=(step_timeout_s or 0) * 1000.0,
+                                            is_timeout=True,
+                                        )
+                                    )
                     finally:
                         try:
                             _pool.shutdown(wait=False, cancel_futures=True)
@@ -434,11 +446,17 @@ class WorkflowEngine:
                                 _outs, _so = _sfut.result(timeout=step_timeout_s)
                             else:
                                 _outs, _so = self._execute_node(_nd, _inp)
-                            exec_results.append(_ExecOutcome(_idx, _outs, _so, None, None, (time.perf_counter() - _t0) * 1000.0))
+                            exec_results.append(
+                                _ExecOutcome(_idx, _outs, _so, None, None, (time.perf_counter() - _t0) * 1000.0)
+                            )
                         except FuturesTimeoutError as _fte:
                             _fte_msg = str(_fte).strip()
                             _err = _fte_msg if _fte_msg else f"节点执行超时 ({self.node_timeout_s}s)"
-                            exec_results.append(_ExecOutcome(_idx, {}, "", _err, None, (time.perf_counter() - _t0) * 1000.0, is_timeout=True))
+                            exec_results.append(
+                                _ExecOutcome(
+                                    _idx, {}, "", _err, None, (time.perf_counter() - _t0) * 1000.0, is_timeout=True
+                                )
+                            )
                             if timeout_executor is not None:
                                 try:
                                     timeout_executor.shutdown(wait=False, cancel_futures=True)
@@ -456,7 +474,9 @@ class WorkflowEngine:
                                 _so = _e.stdout or ""
                             if isinstance(_e, NodeExecutionError) and getattr(_e, "traceback", None):
                                 _tb = _e.traceback
-                            exec_results.append(_ExecOutcome(_idx, {}, _so, _err, _tb, (time.perf_counter() - _t0) * 1000.0))
+                            exec_results.append(
+                                _ExecOutcome(_idx, {}, _so, _err, _tb, (time.perf_counter() - _t0) * 1000.0)
+                            )
 
                 # ── Phase 3: record results, hooks, enqueue downstream ────
                 _stop_exc: Optional[NodeExecutionError] = None
@@ -465,9 +485,7 @@ class WorkflowEngine:
                     _sn = step_count + _eo.idx + 1
                     last_node_id = _nid
                     last_outputs = (
-                        _summarize_for_observability(_eo.outputs)
-                        if self.history_mode == "summary"
-                        else _eo.outputs
+                        _summarize_for_observability(_eo.outputs) if self.history_mode == "summary" else _eo.outputs
                     )
 
                     def _build_step_result(
@@ -535,19 +553,35 @@ class WorkflowEngine:
                         (_logger.warning if _eo.is_timeout else _logger.error)(
                             f"wf.step.{_status}",
                             extra={
-                                "run_id": rid, "step": _sn, "node_id": _nid,
-                                "node_type": _nd.type, "error": _eo.error,
-                                **({"timeout_s": self.node_timeout_s} if _eo.is_timeout else {"traceback": (_eo.traceback or "")[:500]}),
+                                "run_id": rid,
+                                "step": _sn,
+                                "node_id": _nid,
+                                "node_type": _nd.type,
+                                "error": _eo.error,
+                                **(
+                                    {"timeout_s": self.node_timeout_s}
+                                    if _eo.is_timeout
+                                    else {"traceback": (_eo.traceback or "")[:500]}
+                                ),
                             },
                         )
                         outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
                             "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
-                            _sn, _nid, _nd.type, _status, _eo.duration_ms, outputs_keys,
+                            _sn,
+                            _nid,
+                            _nd.type,
+                            _status,
+                            _eo.duration_ms,
+                            outputs_keys,
                             extra={
-                                "run_id": rid, "step": _sn, "node_id": _nid,
-                                "node_type": _nd.type, "status": _status,
-                                "duration_ms": _eo.duration_ms, "outputs_keys": outputs_keys,
+                                "run_id": rid,
+                                "step": _sn,
+                                "node_id": _nid,
+                                "node_type": _nd.type,
+                                "status": _status,
+                                "duration_ms": _eo.duration_ms,
+                                "outputs_keys": outputs_keys,
                                 "error": _eo.error,
                             },
                         )
@@ -555,10 +589,16 @@ class WorkflowEngine:
                             outputs_for_debug = _outputs_for_log(_eo.outputs)
                             _logger.debug(
                                 "wf.step.outputs step=%s node=%s status=%s outputs=%s",
-                                _sn, _nid, _status, outputs_for_debug,
+                                _sn,
+                                _nid,
+                                _status,
+                                outputs_for_debug,
                                 extra={
-                                    "run_id": rid, "step": _sn, "node_id": _nid,
-                                    "node_type": _nd.type, "status": _status,
+                                    "run_id": rid,
+                                    "step": _sn,
+                                    "node_id": _nid,
+                                    "node_type": _nd.type,
+                                    "status": _status,
                                     "outputs": outputs_for_debug,
                                     "error": _eo.error,
                                 },
@@ -573,8 +613,10 @@ class WorkflowEngine:
                                 )
                         if self.stop_on_error and _stop_exc is None and not _eo.is_timeout:
                             _stop_exc = NodeExecutionError(
-                                node_id=_nid, message=_eo.error,
-                                stdout=_eo.stdout, traceback=_eo.traceback,
+                                node_id=_nid,
+                                message=_eo.error,
+                                stdout=_eo.stdout,
+                                traceback=_eo.traceback,
                                 execution_context={
                                     "run_id": rid,
                                     "steps": step_count + len(exec_results),
@@ -602,11 +644,20 @@ class WorkflowEngine:
                         outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
                             "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
-                            _sn, _nid, _nd.type, "ok", _eo.duration_ms, outputs_keys,
+                            _sn,
+                            _nid,
+                            _nd.type,
+                            "ok",
+                            _eo.duration_ms,
+                            outputs_keys,
                             extra={
-                                "run_id": rid, "step": _sn, "node_id": _nid,
-                                "node_type": _nd.type, "status": "ok",
-                                "duration_ms": _eo.duration_ms, "outputs_keys": outputs_keys,
+                                "run_id": rid,
+                                "step": _sn,
+                                "node_id": _nid,
+                                "node_type": _nd.type,
+                                "status": "ok",
+                                "duration_ms": _eo.duration_ms,
+                                "outputs_keys": outputs_keys,
                                 "error": None,
                             },
                         )
@@ -614,10 +665,16 @@ class WorkflowEngine:
                             outputs_for_debug = _outputs_for_log(_eo.outputs)
                             _logger.debug(
                                 "wf.step.outputs step=%s node=%s status=%s outputs=%s",
-                                _sn, _nid, "ok", outputs_for_debug,
+                                _sn,
+                                _nid,
+                                "ok",
+                                outputs_for_debug,
                                 extra={
-                                    "run_id": rid, "step": _sn, "node_id": _nid,
-                                    "node_type": _nd.type, "status": "ok",
+                                    "run_id": rid,
+                                    "step": _sn,
+                                    "node_id": _nid,
+                                    "node_type": _nd.type,
+                                    "status": "ok",
                                     "outputs": outputs_for_debug,
                                     "error": None,
                                 },
@@ -749,9 +806,7 @@ class WorkflowEngine:
             return self._execute_http_request_node(node, inputs)
         if node.type == "subworkflow":
             return self._execute_subworkflow_node(node, inputs, _runtime=_runtime)
-        raise NodeExecutionError(
-            node_id=node_id, message=f"Unsupported node.type={node.type!r}"
-        )
+        raise NodeExecutionError(node_id=node_id, message=f"Unsupported node.type={node.type!r}")
 
     def _execute_tool_node(
         self,
@@ -801,6 +856,7 @@ class WorkflowEngine:
         assert node.prompt, "llm node requires prompt"
         try:
             from jinja2 import Template, TemplateError
+
             rendered = Template(node.prompt).render(**inputs)
         except Exception as e:
             raise NodeExecutionError(
@@ -808,6 +864,7 @@ class WorkflowEngine:
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
         from .llm import get_llm_client
+
         _rt = _runtime or self.runtime
         cancel_checker = getattr(_rt, "cancel_checker", None)
         try:
@@ -829,6 +886,7 @@ class WorkflowEngine:
         assert node.method, "http_request node requires method"
         try:
             from jinja2 import Template
+
             url = Template(node.url).render(**inputs)
             method = node.method.upper()
             headers = node.headers or {}
@@ -842,6 +900,7 @@ class WorkflowEngine:
             ) from e
         try:
             import httpx
+
             with httpx.Client(timeout=30.0) as client:
                 if method in {"GET", "DELETE", "HEAD"}:
                     resp = client.request(method, url, headers=headers)
@@ -945,7 +1004,13 @@ class WorkflowEngine:
                     available_keys = list(upstream.keys())[:10]
                     _logger.warning(
                         "wf.edge.mapping.none_value",
-                        extra={"edge_from": edge.from_, "edge_to": edge.to, "dst_key": dst, "src_path": src, "available_keys": available_keys},
+                        extra={
+                            "edge_from": edge.from_,
+                            "edge_to": edge.to,
+                            "dst_key": dst,
+                            "src_path": src,
+                            "available_keys": available_keys,
+                        },
                     )
         else:
             out = dict(upstream)
