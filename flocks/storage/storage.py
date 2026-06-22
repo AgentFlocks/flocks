@@ -162,7 +162,7 @@ class Storage:
         """Return the storage DB path for a prefix-scoped KV operation."""
         if prefix and (
             cls._is_workflow_key(prefix)
-            or any(workflow_prefix.startswith(prefix) for workflow_prefix in cls._workflow_key_prefixes)
+            or f"{prefix}/" in cls._workflow_key_prefixes
         ):
             return cls.get_workflow_db_path()
         return cls.get_db_path()
@@ -1288,11 +1288,15 @@ class Storage:
             Number of deleted entries
         """
         await cls._ensure_init()
-        db_path = cls.route_db_path_for_prefix(prefix)
-        if db_path != cls.get_db_path():
-            await cls._ensure_storage_table(db_path)
+        if prefix is None:
+            db_paths = (cls.get_db_path(), cls.get_workflow_db_path())
+        else:
+            db_paths = (cls.route_db_path_for_prefix(prefix),)
+        for db_path in db_paths:
+            if db_path != cls.get_db_path():
+                await cls._ensure_storage_table(db_path)
         
-        async def _clear() -> int:
+        async def _clear_db(db_path: Path) -> int:
             async with cls.connect(db_path) as db:
                 if prefix:
                     query = "DELETE FROM storage WHERE key LIKE ?"
@@ -1310,11 +1314,13 @@ class Storage:
                 await db.commit()
                 return cursor.rowcount
 
-        deleted = await cls._run_write_with_retry(
-            _clear,
-            action="clear",
-            target=prefix or "<all>",
-        )
+        deleted = 0
+        for db_path in db_paths:
+            deleted += await cls._run_write_with_retry(
+                lambda db_path=db_path: _clear_db(db_path),
+                action="clear",
+                target=f"{prefix or '<all>'}@{db_path}",
+            )
         
         cls._log.info("storage.clear", {"prefix": prefix, "deleted": deleted})
         cls._invalidate_runtime_caches()

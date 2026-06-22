@@ -64,6 +64,28 @@ async def test_workflow_keys_route_to_workflow_db() -> None:
 
 
 @pytest.mark.asyncio
+async def test_short_non_workflow_prefix_stays_on_flocks_db() -> None:
+    await Storage.init()
+
+    await Storage.write("workspace/item-1", {"name": "workspace"})
+    await Storage.write("workflow/item-1", {"name": "workflow"})
+
+    assert await Storage.list_keys("work") == ["workspace/item-1"]
+
+
+@pytest.mark.asyncio
+async def test_clear_without_prefix_clears_flocks_and_workflow_dbs() -> None:
+    await Storage.init()
+
+    await Storage.write("project/proj-1", {"name": "project"})
+    await Storage.write("workflow/wf-1", {"name": "workflow"})
+
+    assert await Storage.clear() == 2
+    assert await Storage.read("project/proj-1") is None
+    assert await Storage.read("workflow/wf-1") is None
+
+
+@pytest.mark.asyncio
 async def test_workflow_kv_migrates_from_legacy_flocks_db() -> None:
     flocks_db = Config.get_data_path() / "flocks.db"
     flocks_db.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +147,10 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
             schedulerID="missing-legacy-scheduler",
             title="legacy orphan execution",
         )
+        legacy_non_utf8_execution = TaskExecution(
+            schedulerID=legacy_scheduler.id,
+            title="legacy non-utf8 execution",
+        )
         conn.execute(
             """
             INSERT INTO task_executions
@@ -136,6 +162,22 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             TaskStore._execution_to_row(legacy_orphan_execution),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_executions
+            (id, scheduler_id, title, description, priority, source, trigger_type,
+             status, delivery_status, queued_at, started_at, completed_at, duration_ms,
+             session_id, result_summary, error, execution_input_snapshot,
+             workspace_directory, retry, execution_mode, agent_name, workflow_id,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            TaskStore._execution_to_row(legacy_non_utf8_execution),
+        )
+        conn.execute(
+            "UPDATE task_executions SET description = CAST(? AS TEXT) WHERE id = ?",
+            ("扫描 Windows 主机 192.168.254.1".encode("gbk"), legacy_non_utf8_execution.id),
         )
         conn.commit()
     finally:
@@ -154,10 +196,15 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
             "SELECT title FROM task_executions WHERE id = ?",
             (legacy_orphan_execution.id,),
         ).fetchone()
+        non_utf8_row = conn.execute(
+            "SELECT description FROM task_executions WHERE id = ?",
+            (legacy_non_utf8_execution.id,),
+        ).fetchone()
     finally:
         conn.close()
     assert row[0] == "legacy task"
     assert orphan_row[0] == "legacy orphan execution"
+    assert non_utf8_row[0] == "扫描 Windows 主机 192.168.254.1"
 
     new_scheduler = TaskScheduler(title="new task")
     await TaskStore.create_scheduler(new_scheduler)
@@ -175,7 +222,7 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
 
     marker = await Storage.get(Storage._multi_db_migration_marker_key)
     assert marker["tasks_migrated"] is True
-    assert marker["task_rows"] == 2
+    assert marker["task_rows"] == 3
     assert marker["task_foreign_key_violations"] == 1
 
     await TaskStore.close()

@@ -165,6 +165,8 @@ class TaskStore:
         source = Storage.connect_sync(source_path)
         target = Storage.connect_sync(target_path)
         try:
+            source.text_factory = cls._decode_legacy_text
+            target.text_factory = cls._decode_legacy_text
             original_foreign_keys = target.execute("PRAGMA foreign_keys").fetchone()[0]
             target.execute("PRAGMA foreign_keys = OFF")
             total = 0
