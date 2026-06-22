@@ -34,6 +34,8 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
+MAX_SERVICE_LOG_BYTES = 1024 * 1024 * 1024
+LOG_TRIM_CHUNK_BYTES = 1024 * 1024
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
 DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portalflocks.threatbook.cn"
 DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portalflocks.threatbook.cn"
@@ -1680,6 +1682,7 @@ def _spawn_process(
         kwargs["start_new_session"] = True
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _cap_service_log_file(log_path, MAX_SERVICE_LOG_BYTES)
     handle = log_path.open("a", encoding="utf-8")
     try:
         return subprocess.Popen(
@@ -1694,6 +1697,40 @@ def _spawn_process(
         )
     finally:
         handle.close()
+
+
+def _cap_service_log_file(log_path: Path, max_bytes: int = MAX_SERVICE_LOG_BYTES) -> bool:
+    """Keep service logs under *max_bytes* without deleting or renaming them."""
+    if max_bytes <= 0:
+        return False
+    try:
+        size = log_path.stat().st_size
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    if size <= max_bytes:
+        return False
+
+    read_offset = size - max_bytes
+    write_offset = 0
+    try:
+        with log_path.open("r+b") as handle:
+            while read_offset < size:
+                handle.seek(read_offset)
+                chunk = handle.read(min(LOG_TRIM_CHUNK_BYTES, size - read_offset))
+                if not chunk:
+                    break
+                handle.seek(write_offset)
+                handle.write(chunk)
+                read_offset += len(chunk)
+                write_offset += len(chunk)
+            handle.truncate(write_offset)
+        return True
+    except OSError:
+        # Logging must not make daemon startup fail.  If Windows still has a
+        # transient lock, leave the file untouched and continue with append.
+        return False
 
 
 def _run_windows_netstat(port: int) -> str:
