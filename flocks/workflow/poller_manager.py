@@ -25,7 +25,8 @@ from flocks.workflow.execution_store import (
     resolve_execution_outcome,
 )
 from flocks.workflow.fs_store import read_workflow_from_fs
-from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow.runner import RunWorkflowResult
+from flocks.workflow.execution_manager import run_workflow_managed
 
 WORKFLOW_POLLER_CONFIG_PREFIX = "workflow_poller_config/"
 DEFAULT_INTERVAL_SECONDS = 30
@@ -428,8 +429,7 @@ class WorkflowPollerManager:
         self._status[workflow_id] = current
 
         try:
-            result = await asyncio.to_thread(
-                run_workflow,
+            result = await run_workflow_managed(
                 workflow=workflow_json,
                 inputs=inputs,
                 timeout_s=config["timeoutSeconds"],

@@ -17,7 +17,7 @@ from flocks.workflow.execution_store import (
     resolve_execution_outcome,
 )
 from flocks.workflow.fs_store import read_workflow_from_fs
-from flocks.workflow.runner import run_workflow
+from flocks.workflow.execution_manager import run_workflow_managed
 
 from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.ingest.syslog.listener import run_tcp_syslog_server, run_udp_syslog_server
@@ -532,8 +532,7 @@ class SyslogManager:
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             try:
-                result = await asyncio.to_thread(
-                    run_workflow,
+                result = await run_workflow_managed(
                     workflow=workflow_json,
                     inputs=mapped_inputs,
                     trace=False,

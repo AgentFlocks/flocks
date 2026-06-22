@@ -26,6 +26,8 @@ from flocks.workflow.repl_runtime import (
     SandboxPythonExecRuntime,
 )
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow.process_executor import ProcessWorkflowExecutor, run_workflow_process
+from flocks.workflow.execution_manager import WorkflowExecutionManager, run_workflow_managed
 from flocks.workflow.requirements import (
     RequirementsInstaller,
     SandboxRequirementsInstaller,
@@ -83,6 +85,10 @@ __all__ = [
     "Runtime",
     "RunWorkflowResult",
     "run_workflow",
+    "ProcessWorkflowExecutor",
+    "run_workflow_process",
+    "WorkflowExecutionManager",
+    "run_workflow_managed",
     "RequirementsInstaller",
     "SandboxRequirementsInstaller",
     "requirements_cache_key",

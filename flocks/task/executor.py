@@ -165,6 +165,7 @@ class TaskExecutor:
         cls, execution: TaskExecution, scheduler: TaskScheduler
     ) -> Optional[str]:
         from flocks.workflow.fs_store import read_workflow_from_fs
+        from flocks.workflow.execution_manager import run_workflow_managed
 
         if not execution.workflow_id:
             raise ValueError("workflow execution_mode requires workflow_id")
@@ -173,12 +174,27 @@ class TaskExecutor:
             raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
         snapshot = execution.execution_input_snapshot or {}
         inputs = snapshot.get("context") or scheduler.context or {}
-        result = await asyncio.to_thread(
-            cls._run_workflow_sync,
-            execution.id,
-            workflow_data["workflowJson"],
-            inputs,
-        )
+        cancel_event = threading.Event()
+        done_event = threading.Event()
+        with _workflow_cancel_lock:
+            _workflow_cancel_events[execution.id] = cancel_event
+            _workflow_done_events[execution.id] = done_event
+        try:
+            result = await run_workflow_managed(
+                workflow=workflow_data["workflowJson"],
+                inputs=inputs,
+                timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
+                cancel=cancel_event.is_set,
+            )
+        finally:
+            done_event.set()
+            with _workflow_cancel_lock:
+                current_cancel = _workflow_cancel_events.get(execution.id)
+                if current_cancel is cancel_event:
+                    _workflow_cancel_events.pop(execution.id, None)
+                current_done = _workflow_done_events.get(execution.id)
+                if current_done is done_event:
+                    _workflow_done_events.pop(execution.id, None)
         result_status = getattr(result, "status", None)
         if result_status == "CANCELLED":
             raise RuntimeError(result.error or "Workflow execution cancelled")
@@ -187,37 +203,6 @@ class TaskExecutor:
         if result.error:
             raise RuntimeError(f"Workflow failed: {result.error}")
         return str(result.outputs) if result.outputs else None
-
-    @classmethod
-    def _run_workflow_sync(
-        cls,
-        execution_id: str,
-        workflow: dict[str, Any],
-        inputs: Dict[str, Any],
-    ):
-        from flocks.workflow.runner import run_workflow
-
-        cancel_event = threading.Event()
-        done_event = threading.Event()
-        with _workflow_cancel_lock:
-            _workflow_cancel_events[execution_id] = cancel_event
-            _workflow_done_events[execution_id] = done_event
-        try:
-            return run_workflow(
-                workflow=workflow,
-                inputs=inputs,
-                timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
-                cancel=cancel_event.is_set,
-            )
-        finally:
-            done_event.set()
-            with _workflow_cancel_lock:
-                current_cancel = _workflow_cancel_events.get(execution_id)
-                if current_cancel is cancel_event:
-                    _workflow_cancel_events.pop(execution_id, None)
-                current_done = _workflow_done_events.get(execution_id)
-                if current_done is done_event:
-                    _workflow_done_events.pop(execution_id, None)
 
     @classmethod
     async def _resolve_task_session_context(

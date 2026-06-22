@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field
 
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
-from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow.runner import RunWorkflowResult
+from flocks.workflow.execution_manager import run_workflow_managed
 from flocks.workflow.tool_context import build_workflow_tool_context
 
 log = Log.create(service="workflow.service_runtime")
@@ -110,8 +111,7 @@ def create_service_app(
                 workflow_id=app.state.workflow_id,
                 action_name="invoke",
             )
-            result: RunWorkflowResult = await asyncio.to_thread(
-                run_workflow,
+            result: RunWorkflowResult = await run_workflow_managed(
                 workflow=app.state.workflow_json,
                 inputs=req.inputs,
                 timeout_s=req.timeout_s,

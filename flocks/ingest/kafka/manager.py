@@ -39,7 +39,7 @@ from flocks.workflow.execution_store import (
     resolve_execution_outcome,
 )
 from flocks.workflow.fs_store import read_workflow_from_fs
-from flocks.workflow.runner import run_workflow
+from flocks.workflow.execution_manager import run_workflow_managed
 
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
 from flocks.workflow.triggers.compat import legacy_kafka_trigger_from_config
@@ -686,8 +686,7 @@ class KafkaManager:
                 ),
             )
             try:
-                result = await asyncio.to_thread(
-                    run_workflow,
+                result = await run_workflow_managed(
                     workflow=workflow_json,
                     inputs=mapped_inputs,
                     trace=False,

@@ -53,7 +53,10 @@ def _get_workflow_runtime():
         return None, None, None
     try:
         # Prefer in-repo integration (flocks.workflow). Fallback to external package if installed.
-        from flocks.workflow import RequirementsInstaller as _ReqInstaller, run_workflow as _run
+        from flocks.workflow import (
+            RequirementsInstaller as _ReqInstaller,
+            run_workflow_managed as _run,
+        )
         from flocks.workflow.runner import RunWorkflowResult as _Result
 
         RequirementsInstaller = _ReqInstaller
@@ -78,6 +81,16 @@ def _get_workflow_runtime():
             _WORKFLOW_AVAILABLE = False
             log.warn("run_workflow.import_failed", {"message": str(e), "fallback_message": str(e2)})
             return None, None, None
+
+
+async def _call_workflow_runtime(runtime_fn, call_kwargs: Dict[str, Any]):
+    """Call either the async process executor or a legacy sync workflow runtime."""
+    if inspect.iscoroutinefunction(runtime_fn):
+        return await runtime_fn(**call_kwargs)
+    result = await asyncio.to_thread(runtime_fn, **call_kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 _BASE_DESCRIPTION = """Execute a workflow definition using the flocks-workflow runtime.
@@ -760,18 +773,18 @@ async def run_workflow_tool(
             call_kwargs["cancel"] = ctx.abort.is_set
 
         try:
-            result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
+            result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
         except TypeError as te:
             # Fallback if the runtime rejects `use_llm` (unexpected keyword).
             if supports_use_llm and "use_llm" in str(te):
                 call_kwargs.pop("use_llm", None)
-                result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
+                result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             elif supports_step_start and "on_step_start" in str(te):
                 call_kwargs.pop("on_step_start", None)
-                result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
+                result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             elif supports_cancel and "cancel" in str(te):
                 call_kwargs.pop("cancel", None)
-                result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
+                result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             else:
                 raise
         

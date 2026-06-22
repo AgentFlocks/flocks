@@ -660,7 +660,7 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from flocks.workflow import fs_store
-    from flocks.workflow import runner
+    from flocks.workflow import execution_manager
 
     workflow_json = {
         "name": "Local Script Runner",
@@ -674,13 +674,13 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
         captured["workflow_id"] = workflow_id
         return {"workflowJson": workflow_json}
 
-    def fake_run_workflow(*, workflow, inputs, **_kwargs):
+    async def fake_run_workflow(*, workflow, inputs, **_kwargs):
         captured["workflow"] = workflow
         captured["inputs"] = inputs
         return SimpleNamespace(error=None, outputs={"ok": True})
 
     monkeypatch.setattr(fs_store, "read_workflow_from_fs", fake_read_workflow_from_fs)
-    monkeypatch.setattr(runner, "run_workflow", fake_run_workflow)
+    monkeypatch.setattr(execution_manager, "run_workflow_managed", fake_run_workflow)
 
     scheduler = TaskScheduler(
         title="定时 workflow",

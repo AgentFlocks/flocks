@@ -13,7 +13,7 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     init_mock = AsyncMock()
-    run_mock = Mock(
+    run_mock = AsyncMock(
         return_value=SimpleNamespace(
             outputs={"ok": True},
             history=[],
@@ -32,7 +32,7 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     )
 
     monkeypatch.setattr(MCP, "init", init_mock)
-    monkeypatch.setattr(workflow_module, "run_workflow", run_mock)
+    monkeypatch.setattr(workflow_module, "run_workflow_managed", run_mock)
     monkeypatch.setattr(workflow_module, "_resolve_execution_outcome", lambda _result: ("success", None))
     monkeypatch.setattr(workflow_module, "_record_execution_result", record_result)
     monkeypatch.setattr(workflow_module.Storage, "read", storage_read)
@@ -53,7 +53,7 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     )
 
     init_mock.assert_not_awaited()
-    run_mock.assert_called_once()
+    run_mock.assert_awaited_once()
     assert run_mock.call_args.kwargs["tool_context"] is tool_context
     record_result.assert_awaited_once()
 
