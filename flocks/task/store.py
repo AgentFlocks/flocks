@@ -1,8 +1,11 @@
 """Task Store — SQLite persistence for scheduler/execution domain."""
 
+import asyncio
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
@@ -34,6 +37,11 @@ class TaskStore:
     _init_pid: Optional[int] = None
 
     @classmethod
+    def get_db_path(cls) -> Path:
+        """Return the SQLite database path for task-center tables."""
+        return Storage.get_db_path().with_name("tasks.db")
+
+    @classmethod
     async def init(cls) -> None:
         current_pid = os.getpid()
         if cls._initialized and cls._init_pid == current_pid:
@@ -50,8 +58,10 @@ class TaskStore:
             cls._initialized = False
             cls._init_pid = None
         await Storage._ensure_init()
+        db_path = cls.get_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         cls._conn = await aiosqlite.connect(
-            Storage._db_path,
+            db_path,
             timeout=Storage._sqlite_timeout_s,
         )
         await Storage.configure_connection(cls._conn)
@@ -59,6 +69,7 @@ class TaskStore:
         for stmt in _INDEX_STMTS:
             await cls._conn.execute(stmt)
         await cls._conn.commit()
+        await cls._migrate_task_tables_to_tasks_db()
         await cls._normalize_legacy_paused_executions()
         cls._initialized = True
         cls._init_pid = current_pid
@@ -89,6 +100,134 @@ class TaskStore:
     @classmethod
     async def raw_db(cls) -> aiosqlite.Connection:
         return await cls._db()
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+        rows = conn.execute(f"PRAGMA table_info({TaskStore._quote_identifier(table_name)})").fetchall()
+        return [str(row["name"]) for row in rows]
+
+    @classmethod
+    def _copy_task_table_sync(
+        cls,
+        source: sqlite3.Connection,
+        target: sqlite3.Connection,
+        table_name: str,
+    ) -> int:
+        if not cls._table_exists(source, table_name):
+            return 0
+        source_columns = cls._table_columns(source, table_name)
+        target_columns = set(cls._table_columns(target, table_name))
+        copy_columns = [column for column in source_columns if column in target_columns]
+        if not copy_columns:
+            return 0
+        quoted_columns = ", ".join(cls._quote_identifier(column) for column in copy_columns)
+        table_sql = cls._quote_identifier(table_name)
+        rows = source.execute(f"SELECT {quoted_columns} FROM {table_sql}").fetchall()
+        if not rows:
+            return 0
+        placeholders = ", ".join("?" for _ in copy_columns)
+        insert_sql = (
+            f"INSERT OR REPLACE INTO {table_sql} ({quoted_columns}) "
+            f"VALUES ({placeholders})"
+        )
+        target.executemany(
+            insert_sql,
+            [tuple(row[column] for column in copy_columns) for row in rows],
+        )
+        return len(rows)
+
+    @classmethod
+    def _copy_task_tables_to_tasks_db_sync(cls) -> tuple[int, int]:
+        source_path = Storage.get_db_path()
+        target_path = cls.get_db_path()
+        if not source_path.exists():
+            return 0, 0
+        source = Storage.connect_sync(source_path)
+        target = Storage.connect_sync(target_path)
+        try:
+            original_foreign_keys = target.execute("PRAGMA foreign_keys").fetchone()[0]
+            target.execute("PRAGMA foreign_keys = OFF")
+            total = 0
+            for table_name in (
+                "task_schedulers",
+                "task_executions",
+                "task_execution_queue_refs",
+            ):
+                total += cls._copy_task_table_sync(source, target, table_name)
+            target.commit()
+            foreign_key_violations = len(target.execute("PRAGMA foreign_key_check").fetchall())
+            target.execute(f"PRAGMA foreign_keys = {original_foreign_keys}")
+            return total, foreign_key_violations
+        except Exception:
+            if target.in_transaction:
+                target.rollback()
+            try:
+                target.execute("PRAGMA foreign_keys = ON")
+            except Exception:
+                pass
+            raise
+        finally:
+            source.close()
+            target.close()
+
+    @classmethod
+    async def _migrate_task_tables_to_tasks_db(cls) -> None:
+        marker = await asyncio.to_thread(Storage._read_multi_db_migration_marker_sync)
+        if marker.get("tasks_migrated") is True:
+            return
+
+        marker.setdefault("version", 1)
+        marker.setdefault("started_at", datetime.now(timezone.utc).isoformat())
+        marker["source_db"] = str(Storage.get_db_path())
+        marker["tasks_db"] = str(cls.get_db_path())
+        try:
+            migrated, foreign_key_violations = await asyncio.to_thread(
+                cls._copy_task_tables_to_tasks_db_sync
+            )
+            marker["tasks_migrated"] = True
+            marker["tasks_migrated_at"] = datetime.now(timezone.utc).isoformat()
+            marker["task_rows"] = migrated
+            marker["task_foreign_key_violations"] = foreign_key_violations
+            marker.pop("tasks_error", None)
+            await asyncio.to_thread(Storage._write_multi_db_migration_marker_sync, marker)
+            log.info("task.store.multi_db_migrated", {
+                "rows": migrated,
+                "foreign_key_violations": foreign_key_violations,
+                "source_db": marker["source_db"],
+                "tasks_db": marker["tasks_db"],
+            })
+            if foreign_key_violations:
+                log.warn("task.store.multi_db_migrated_with_legacy_fk_violations", {
+                    "foreign_key_violations": foreign_key_violations,
+                    "source_db": marker["source_db"],
+                    "tasks_db": marker["tasks_db"],
+                })
+        except Exception as exc:
+            marker["tasks_migrated"] = False
+            marker["tasks_error"] = str(exc)
+            marker["tasks_failed_at"] = datetime.now(timezone.utc).isoformat()
+            try:
+                await asyncio.to_thread(Storage._write_multi_db_migration_marker_sync, marker)
+            except Exception:
+                pass
+            log.error("task.store.multi_db_migration_failed", {
+                "source_db": marker.get("source_db"),
+                "tasks_db": marker.get("tasks_db"),
+                "error": str(exc),
+            })
+            raise
 
     # ------------------------------------------------------------------
     # Scheduler CRUD

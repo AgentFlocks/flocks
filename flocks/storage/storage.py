@@ -93,6 +93,21 @@ class Storage:
     _sqlite_synchronous = "NORMAL"
     _sqlite_write_retry_attempts = 6
     _sqlite_write_retry_base_delay_s = 0.05
+    _multi_db_migration_marker_key = "storage.migration.multi_db.v1"
+    _workflow_key_prefixes = (
+        "workflow/",
+        "workflow_execution/",
+        "workflow_execution_step/",
+        "workflow_registry/",
+        "workflow_release/",
+        "workflow_runtime/",
+        "workflow_local_pid/",
+        "workflow_api_service/",
+        "workflow_integration_config/",
+        "workflow_kafka_config/",
+        "workflow_poller_config/",
+        "workflow_syslog_config/",
+    )
 
     # Substrings that mark an SQLite file as unrecoverably damaged at open
     # time.  We deliberately keep this list short and English-only because
@@ -129,6 +144,32 @@ class Storage:
             return cls._db_path
         data_dir = Config.get_data_path()
         return data_dir / "flocks.db"
+
+    @classmethod
+    def get_workflow_db_path(cls) -> Path:
+        """Return the SQLite database path for workflow-domain KV data."""
+        return cls.get_db_path().with_name("workflow.db")
+
+    @classmethod
+    def route_db_path_for_key(cls, key: str) -> Path:
+        """Return the storage DB path that owns *key*."""
+        if cls._is_workflow_key(key):
+            return cls.get_workflow_db_path()
+        return cls.get_db_path()
+
+    @classmethod
+    def route_db_path_for_prefix(cls, prefix: Optional[str]) -> Path:
+        """Return the storage DB path for a prefix-scoped KV operation."""
+        if prefix and (
+            cls._is_workflow_key(prefix)
+            or any(workflow_prefix.startswith(prefix) for workflow_prefix in cls._workflow_key_prefixes)
+        ):
+            return cls.get_workflow_db_path()
+        return cls.get_db_path()
+
+    @classmethod
+    def _is_workflow_key(cls, key: str) -> bool:
+        return any(key.startswith(prefix) for prefix in cls._workflow_key_prefixes)
 
     @classmethod
     async def configure_connection(
@@ -426,6 +467,153 @@ class Storage:
         if isinstance(key, list):
             return "/".join(key)
         return key
+
+    @classmethod
+    async def _ensure_storage_table(cls, db_path: Path) -> None:
+        """Ensure the generic KV storage table exists in *db_path*."""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        async def _create_storage_table() -> None:
+            async with cls.connect(db_path) as db:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS storage (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                await db.commit()
+
+        await cls._run_write_with_retry(
+            _create_storage_table,
+            action="init.create_storage_table",
+            target=str(db_path),
+        )
+
+    @classmethod
+    def _read_multi_db_migration_marker_sync(cls) -> Dict[str, Any]:
+        if cls._db_path is None or not cls._db_path.exists():
+            return {}
+        try:
+            conn = cls.connect_sync(cls._db_path)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM storage WHERE key = ?",
+                    (cls._multi_db_migration_marker_key,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                return {}
+            value = json.loads(row["value"])
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    @classmethod
+    def _write_multi_db_migration_marker_sync(cls, marker: Dict[str, Any]) -> None:
+        if cls._db_path is None:
+            raise StorageError("Storage DB path is not initialized")
+        from datetime import UTC
+
+        now = datetime.now(UTC).isoformat()
+        serialized = json.dumps(marker)
+        conn = cls.connect_sync(cls._db_path)
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
+                VALUES (?, ?, ?,
+                    COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
+                    ?)
+                """,
+                (
+                    cls._multi_db_migration_marker_key,
+                    serialized,
+                    "json",
+                    cls._multi_db_migration_marker_key,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
+    def _copy_workflow_kv_to_workflow_db_sync(cls) -> int:
+        if cls._db_path is None:
+            raise StorageError("Storage DB path is not initialized")
+        workflow_db_path = cls.get_workflow_db_path()
+        source = cls.connect_sync(cls._db_path)
+        target = cls.connect_sync(workflow_db_path)
+        try:
+            clauses = " OR ".join("key LIKE ?" for _ in cls._workflow_key_prefixes)
+            rows = source.execute(
+                f"SELECT key, value, type, created_at, updated_at FROM storage WHERE {clauses}",
+                tuple(f"{prefix}%" for prefix in cls._workflow_key_prefixes),
+            ).fetchall()
+            for row in rows:
+                target.execute(
+                    """
+                    INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["key"],
+                        row["value"],
+                        row["type"],
+                        row["created_at"],
+                        row["updated_at"],
+                    ),
+                )
+            target.commit()
+            return len(rows)
+        finally:
+            source.close()
+            target.close()
+
+    @classmethod
+    async def _migrate_workflow_storage_to_workflow_db(cls) -> None:
+        """Copy legacy workflow-domain KV rows from flocks.db to workflow.db."""
+        marker = await asyncio.to_thread(cls._read_multi_db_migration_marker_sync)
+        if marker.get("workflow_migrated") is True:
+            return
+
+        from datetime import UTC
+
+        marker.setdefault("version", 1)
+        marker.setdefault("started_at", datetime.now(UTC).isoformat())
+        marker["source_db"] = str(cls.get_db_path())
+        marker["workflow_db"] = str(cls.get_workflow_db_path())
+        try:
+            migrated = await asyncio.to_thread(cls._copy_workflow_kv_to_workflow_db_sync)
+            marker["workflow_migrated"] = True
+            marker["workflow_migrated_at"] = datetime.now(UTC).isoformat()
+            marker["workflow_rows"] = migrated
+            marker.pop("workflow_error", None)
+            await asyncio.to_thread(cls._write_multi_db_migration_marker_sync, marker)
+            cls._log.info("storage.multi_db.workflow_migrated", {
+                "rows": migrated,
+                "source_db": marker["source_db"],
+                "workflow_db": marker["workflow_db"],
+            })
+        except Exception as exc:
+            marker["workflow_migrated"] = False
+            marker["workflow_error"] = str(exc)
+            marker["workflow_failed_at"] = datetime.now(UTC).isoformat()
+            try:
+                await asyncio.to_thread(cls._write_multi_db_migration_marker_sync, marker)
+            except Exception:
+                pass
+            cls._log.error("storage.multi_db.workflow_migration_failed", {
+                "source_db": marker.get("source_db"),
+                "workflow_db": marker.get("workflow_db"),
+                "error": str(exc),
+            })
+            raise
     
     @classmethod
     async def init(cls, db_path: Optional[Path] = None) -> None:
@@ -500,6 +688,13 @@ class Storage:
             if quarantined is None:
                 raise
             await cls._bootstrap_schema()
+
+        # Workflow-domain KV rows live in a sibling workflow.db.  Keep the
+        # public Storage API unchanged by routing workflow key prefixes at
+        # the KV-operation seam, while initialising the sibling DB here so
+        # startup fails early if that database is unusable.
+        await cls._ensure_storage_table(cls.get_workflow_db_path())
+        await cls._migrate_workflow_storage_to_workflow_db()
 
         # Drain any residual WAL frames left by the previous process so the
         # next ``SIGKILL`` does not have to truncate a 4 MB-class WAL during
@@ -666,24 +861,7 @@ class Storage:
         first call surfaces the corruption, and the second call (after the
         rename) bootstraps a fresh database in its place.
         """
-        async def _create_storage_table() -> None:
-            async with cls.connect(cls._db_path) as db:
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS storage (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL,
-                        type TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                """)
-                await db.commit()
-
-        await cls._run_write_with_retry(
-            _create_storage_table,
-            action="init.create_storage_table",
-            target=str(cls._db_path),
-        )
+        await cls._ensure_storage_table(cls._db_path)
 
         # Initialize vector storage tables (for memory system)
         try:
@@ -830,6 +1008,9 @@ class Storage:
             value_type: Type identifier for the value
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_key(key)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
         
         if isinstance(value, BaseModel):
             serialized = value.model_dump_json()
@@ -840,7 +1021,7 @@ class Storage:
         now = datetime.now(UTC).isoformat()
         
         async def _write() -> None:
-            async with cls.connect(cls._db_path) as db:
+            async with cls.connect(db_path) as db:
                 await db.execute("""
                     INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
                     VALUES (?, ?, ?, 
@@ -866,8 +1047,11 @@ class Storage:
             Stored value or None if not found
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_key(key)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
         
-        async with cls.connect(cls._db_path) as db:
+        async with cls.connect(db_path) as db:
             async with db.execute(
                 "SELECT value, type FROM storage WHERE key = ?", (key,)
             ) as cursor:
@@ -897,9 +1081,12 @@ class Storage:
             True if deleted, False if not found
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_key(key)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
         
         async def _delete() -> bool:
-            async with cls.connect(cls._db_path) as db:
+            async with cls.connect(db_path) as db:
                 cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
                 await db.commit()
                 return cursor.rowcount > 0
@@ -923,8 +1110,11 @@ class Storage:
             List of matching keys
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_prefix(prefix)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
         
-        async with cls.connect(cls._db_path) as db:
+        async with cls.connect(db_path) as db:
             if prefix:
                 query = "SELECT key FROM storage WHERE key LIKE ?"
                 params = (f"{prefix}%",)
@@ -957,8 +1147,11 @@ class Storage:
             List of ``(key, value)`` tuples
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_prefix(prefix)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
 
-        async with cls.connect(cls._db_path) as db:
+        async with cls.connect(db_path) as db:
             if prefix:
                 query = "SELECT key, value FROM storage WHERE key LIKE ?"
                 params = (f"{prefix}%",)
@@ -989,12 +1182,15 @@ class Storage:
     ) -> tuple[List[Tuple[str, T | Any]], int]:
         """List one page of entries for a prefix, plus total matching rows."""
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_prefix(prefix)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
 
         safe_offset = max(int(offset), 0)
         safe_limit = max(int(limit), 0)
         params = (f"{prefix}%",)
 
-        async with cls.connect(cls._db_path) as db:
+        async with cls.connect(db_path) as db:
             async with db.execute(
                 "SELECT COUNT(*) FROM storage WHERE key LIKE ?",
                 params,
@@ -1039,6 +1235,9 @@ class Storage:
         Compatible with all SQLite versions (no ``json_extract`` required).
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_prefix(prefix)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
 
         if prefix:
             query = "SELECT key, value FROM storage WHERE key LIKE ?"
@@ -1047,7 +1246,7 @@ class Storage:
             query = "SELECT key, value FROM storage"
             params = ()
 
-        async with cls.connect(cls._db_path) as db:
+        async with cls.connect(db_path) as db:
             async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
 
@@ -1065,8 +1264,11 @@ class Storage:
             True if exists, False otherwise
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_key(key)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
         
-        async with cls.connect(cls._db_path) as db:
+        async with cls.connect(db_path) as db:
             async with db.execute(
                 "SELECT 1 FROM storage WHERE key = ?", (key,)
             ) as cursor:
@@ -1086,17 +1288,25 @@ class Storage:
             Number of deleted entries
         """
         await cls._ensure_init()
+        db_path = cls.route_db_path_for_prefix(prefix)
+        if db_path != cls.get_db_path():
+            await cls._ensure_storage_table(db_path)
         
         async def _clear() -> int:
-            async with cls.connect(cls._db_path) as db:
+            async with cls.connect(db_path) as db:
                 if prefix:
                     query = "DELETE FROM storage WHERE key LIKE ?"
                     params = (f"{prefix}%",)
+                    cursor = await db.execute(query, params)
                 else:
-                    query = "DELETE FROM storage"
-                    params = ()
+                    query = "DELETE FROM storage WHERE key != ?"
+                    params = (cls._multi_db_migration_marker_key,)
+                    cursor = await db.execute(query, params)
+                    await db.execute(
+                        "DELETE FROM storage WHERE key = ?",
+                        (cls._multi_db_migration_marker_key,),
+                    )
 
-                cursor = await db.execute(query, params)
                 await db.commit()
                 return cursor.rowcount
 
