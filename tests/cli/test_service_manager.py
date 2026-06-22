@@ -1400,6 +1400,37 @@ def test_spawn_process_appends_without_rotated_suffix(monkeypatch, tmp_path: Pat
     assert not (tmp_path / "logs" / "backend.log.1").exists()
 
 
+def test_cap_service_log_file_keeps_recent_bytes_without_rename(tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_bytes(b"0123456789")
+
+    trimmed = service_manager._cap_service_log_file(log_path, max_bytes=4)
+
+    assert trimmed is True
+    assert log_path.read_bytes() == b"6789"
+    assert not (tmp_path / "logs" / "backend.log.1").exists()
+
+
+def test_spawn_process_caps_log_before_appending(monkeypatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_bytes(b"0123456789")
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write("new\n")
+        kwargs["stdout"].flush()
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "MAX_SERVICE_LOG_BYTES", 4)
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert log_path.read_text(encoding="utf-8") == "6789new\n"
+
+
 def test_spawn_process_passes_custom_environment(monkeypatch, tmp_path: Path) -> None:
     captured = {}
     log_path = tmp_path / "logs" / "backend.log"
