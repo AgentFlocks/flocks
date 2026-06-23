@@ -1016,7 +1016,8 @@ export default function SessionPage() {
             showActions: true,
             showTimestamp: true,
             collapseIntermediateSteps: true,
-            processGroupsDefaultOpen: true,
+            processGroupsDefaultOpen: false,
+            processGroupsOpenWhileActive: true,
           }}
           agentName={selectedAgent}
           mentionAgents={chatAgents}
