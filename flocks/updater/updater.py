@@ -2486,6 +2486,16 @@ def _read_pro_bundle_installed_component_version() -> str:
     return str(payload.get("flockspro_component_version") or "").strip()
 
 
+def _is_newer_version(latest: str | None, current: str | None) -> bool:
+    latest_version = str(latest or "").strip()
+    if not latest_version:
+        return False
+    current_version = str(current or "").strip()
+    if not current_version:
+        return True
+    return _parse_version(latest_version) > _parse_version(current_version)
+
+
 def get_current_version() -> str:
     """
     Return the running version.
@@ -2627,13 +2637,21 @@ async def check_update(
             update_allowed=(mode != "docker"),
         )
 
-    has_update = _parse_version(tag) > _parse_version(current)
+    bundle_has_update = _is_newer_version(tag, current)
+    pro_component_has_update = (
+        _is_newer_version(latest_pro_component_version, current_pro_component_version)
+        if is_console_manifest
+        else False
+    )
+    has_update = bundle_has_update or pro_component_has_update
     log.info(
         "updater.check.result",
         {
             "current": current,
             "latest": tag,
             "has_update": has_update,
+            "bundle_has_update": bundle_has_update,
+            "pro_component_has_update": pro_component_has_update,
             "sources": profile.sources,
             "region": profile.region,
         },

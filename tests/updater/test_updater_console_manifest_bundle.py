@@ -160,6 +160,55 @@ async def test_check_update_force_console_manifest_uses_bundle_versions(
 
 
 @pytest.mark.asyncio
+async def test_check_update_force_console_manifest_detects_component_only_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    marker = tmp_path / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        """{
+  "installed_version": "v2026.6.18",
+  "flockspro_component_version": "v2026.6.1"
+}""",
+        encoding="utf-8",
+    )
+
+    async def _fake_config():
+        return SimpleNamespace(enabled=True, sources=["github"], repo="", token=None)
+
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="v2026.6.18",
+            release_notes="latest pro",
+            release_url="https://console.example.com/v1/pro-bundles/rel_2/download",
+            bundle_url="https://console.example.com/v1/pro-bundles/rel_2/download",
+            bundle_sha256="def456",
+            bundle_format="zip",
+            manifest={
+                "display_version": "v2026.6.18",
+                "oss_version": "v2026.6.18",
+                "flockspro_component_version": "v2026.6.2",
+            },
+        )
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr("flocks.updater.deploy.detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+
+    info = await updater.check_update(force_console_manifest=True)
+
+    assert info.current_version == "v2026.6.18"
+    assert info.latest_version == "v2026.6.18"
+    assert info.current_bundle_version == "v2026.6.18"
+    assert info.latest_bundle_version == "v2026.6.18"
+    assert info.current_pro_component_version == "v2026.6.1"
+    assert info.latest_pro_component_version == "v2026.6.2"
+    assert info.has_update is True
+
+
+@pytest.mark.asyncio
 async def test_load_console_session_token_falls_back_to_shared_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
