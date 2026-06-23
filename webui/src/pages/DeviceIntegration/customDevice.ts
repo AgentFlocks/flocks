@@ -30,10 +30,30 @@ function buildBaseDeviceSessionContext(): string[] {
   ];
 }
 
-export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): string {
+export function buildCustomDeviceModeRoutingPrompt(): string {
+  return [
+    '如果没有合适的已安装设备模板，按以下规则引导用户进入与「手动接入 > 自定义设备」一致的自定义设备接入路径：',
+    '- 设备提供 API 能力、API 文档或开放接口时，选择「API 接入」。',
+    '- 设备没有开放 API、主要通过 Web 控制台操作时，选择「WebCLI 接入」。',
+    '- 数据通过 Syslog、Kafka 或 Webhook 上报时，选择「Workflow 接入」；不要创建 device 插件，请提示用户前往 Workflow 接入完成配置。',
+    '识别到自定义设备时，不要继续输出设备配置 JSON；必须先使用 `question` 工具询问用户选择接入方式，选项固定为「API 接入」「WebCLI 接入」「Workflow 接入」。',
+    '如果能根据用户描述判断推荐路径，先说明推荐原因，再让用户确认或改选接入方式。',
+    '用户确认接入方式后，必须使用下方对应规则继续澄清和推进：',
+    '',
+    '【API 接入规则】',
+    buildCustomDeviceModeInstruction('api'),
+    '',
+    '【WebCLI 接入规则】',
+    buildCustomDeviceModeInstruction('webcli'),
+    '',
+    '【Workflow 接入规则】',
+    buildCustomDeviceModeInstruction('workflow'),
+  ].join('\n');
+}
+
+export function buildCustomDeviceModeInstruction(mode: CustomDeviceAccessMode): string {
   if (mode === 'api') {
     return [
-      ...buildBaseDeviceSessionContext(),
       '目标是把用户描述的 API 能力接入为可在“设备接入”页面出现的 device 插件，而不是普通 API 服务。',
       '本次接入方式是 API 接入。',
       '你必须先读取并使用 tool-builder skill，再开始生成插件。',
@@ -44,7 +64,6 @@ export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): s
   }
   if (mode === 'webcli') {
     return [
-      ...buildBaseDeviceSessionContext(),
       '本次接入方式是 WebCLI 接入。',
       '你必须先读取并使用 web2cli skill，再开始捕获与转换流程。',
       '用户会提供产品 URL 和需要获取的接口/页面行为。目标是安全设备接入，需要生成 device 插件。',
@@ -55,6 +74,13 @@ export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): s
   return [
     '本次是 Workflow 接入引导，不需要创建 device 插件。',
     '请引导用户前往工作流发布页面，根据实际场景选择 Syslog、Kafka 或 Webhook。',
+  ].join('\n');
+}
+
+export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): string {
+  return [
+    ...buildBaseDeviceSessionContext(),
+    buildCustomDeviceModeInstruction(mode),
   ].join('\n');
 }
 

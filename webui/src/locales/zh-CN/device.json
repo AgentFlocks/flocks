@@ -64,6 +64,48 @@
     "step2Custom": "2 选择设备 / 方式",
     "step3Custom": "3 填写资料 / 配置",
     "selectVendorTitle": "选择 {{vendor}} 设备",
+    "tabs": {
+      "rex": "Rex 接入",
+      "manual": "手动接入"
+    },
+    "rex": {
+      "title": "Rex 引导添加设备",
+      "heading": "Rex 引导接入",
+      "subtitle": "描述设备型号、接入方式和已有资料，Rex 会帮你确认模板、凭据字段和测试步骤。",
+      "welcome": "请告诉我你要接入的设备厂商、型号、版本，以及当前已有的 API 文档、控制台地址或认证方式。\n\n如果是已支持设备，我会帮你整理手动接入表单需要填写的内容；信息足够后，我会输出一段 ```json 配置草稿，页面检测到后可一键填充表单。如果还没有接入模板，我会引导你创建自定义设备接入。",
+      "placeholder": "描述要接入的设备、地址、认证方式或上传相关资料",
+      "pending": "Rex 准备中...",
+      "manualAction": "切换到手动接入",
+      "applyDraft": "应用到表单",
+      "applyDone": "已填充设备配置表单",
+      "extracting": "提取中...",
+      "extractEmpty": "还没有可提取的 Rex 输出",
+      "extractNoTemplate": "未能从 Rex 输出中匹配到设备模板",
+      "extractFailed": "提取失败，请让 Rex 输出 ```json 设备配置草稿后重试",
+      "installFirst": "该模板尚未安装，先前往 FlockHub 安装",
+      "detectedDraft": "检测到可填充的设备配置草稿",
+      "detectedInstall": "检测到设备模板，但该模板尚未安装",
+      "applyDetected": "填充表单",
+      "installDetected": "前往安装",
+      "dismissDraft": "忽略",
+      "guides": {
+        "existing": {
+          "title": "已有模板",
+          "desc": "整理已支持设备的手动接入字段",
+          "prompt": "我要接入一个已有模板支持的安全设备，请引导我确认厂商、设备型号、连接地址、认证字段和连通测试步骤。"
+        },
+        "api": {
+          "title": "自定义 API",
+          "desc": "通过 API 文档创建自定义 device 插件",
+          "prompt": "我要接入一个暂未支持的 API 设备，请先帮我确认需要的 API 文档、认证方式、设备信息和生成 device 插件的步骤。"
+        },
+        "webcli": {
+          "title": "WebCLI",
+          "desc": "通过 Web 控制台页面创建接入能力",
+          "prompt": "我要接入一个没有开放 API 的 Web 控制台设备，请引导我准备产品 URL、登录方式、目标页面/操作和 WebCLI 接入步骤。"
+        }
+      }
+    },
     "vendorHint": "选择设备所属厂商，共 {{count}} 家",
     "chooseVendorOrCustom": "选择设备所属厂商，或创建自定义设备接入",
     "customCardTitle": "自定义设备",

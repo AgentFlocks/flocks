@@ -94,6 +94,7 @@ async def test_device_context_deduplicates_tool_sets_and_references_them_from_de
     content = await build_device_context_section()
 
     assert content is not None
+    assert "设备不存在时，请提醒用户前往设备接入页面添加设备。" in content
     assert "工具名和描述:" in content
     assert "工具能力:" not in content
     assert "action 可选:" not in content
