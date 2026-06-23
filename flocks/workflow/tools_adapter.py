@@ -8,6 +8,7 @@ from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from typing import Any, Callable, Dict, List, Optional
 
 from flocks.tool import ToolContext, ToolRegistry, ToolResult
+from flocks.utils.log import Log
 from flocks.workflow.errors import NodeExecutionError, RunCancelledError
 from flocks.workflow._async_runtime import (
     run_sync as _run_sync_on_shared_loop,
@@ -17,6 +18,8 @@ from flocks.workflow.tools_spec import ToolSpec
 
 # Tools that must not be exposed inside workflow (avoid circular invocation).
 WORKFLOW_TOOL_BLOCKLIST = frozenset({"run_workflow"})
+log = Log.create(service="workflow.tools_adapter")
+_MCP_INIT_ATTEMPTED = False
 
 
 class FlocksToolAdapter:
@@ -63,6 +66,9 @@ class FlocksToolAdapter:
             )
         tool = ToolRegistry.get(name)
         if tool is None:
+            _try_lazy_load_mcp_tools()
+            tool = ToolRegistry.get(name)
+        if tool is None:
             raise NodeExecutionError(node_id="<tool>", message=f"Tool not found: {name!r}")
 
         ctx = self._ctx or ToolContext(session_id="workflow", message_id="workflow")
@@ -79,9 +85,7 @@ class FlocksToolAdapter:
         except asyncio.CancelledError as e:
             raise RunCancelledError("<tool>") from e
         except Exception as e:
-            raise NodeExecutionError(
-                node_id="<tool>", message=f"Tool {name!r} failed: {e}"
-            ) from e
+            raise NodeExecutionError(node_id="<tool>", message=f"Tool {name!r} failed: {e}") from e
 
         if not result.success:
             raise NodeExecutionError(
@@ -173,3 +177,16 @@ class _ToolStub:
     @property
     def __doc__(self) -> str:
         return getattr(self._tool.info, "description", "") or ""
+
+
+def _try_lazy_load_mcp_tools() -> None:
+    global _MCP_INIT_ATTEMPTED
+    if _MCP_INIT_ATTEMPTED:
+        return
+    _MCP_INIT_ATTEMPTED = True
+    try:
+        from flocks.mcp import MCP
+
+        _run_sync_on_shared_loop(MCP.init())
+    except Exception as exc:
+        log.warning("workflow.tools_adapter.mcp_lazy_init_failed", {"error": str(exc)})

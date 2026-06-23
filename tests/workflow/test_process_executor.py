@@ -4,7 +4,7 @@ import pytest
 
 from flocks.tool import ToolContext
 from flocks.workflow.events import WorkflowWorkerLimits, WorkflowWorkerRequest, workflow_event
-from flocks.workflow.process_executor import run_workflow_process
+from flocks.workflow.process_executor import _serialize_tool_context, run_workflow_process
 
 
 def _simple_workflow() -> dict:
@@ -37,6 +37,39 @@ def test_worker_request_serializes_defaults() -> None:
     assert payload["retain_history"] is False
     assert payload["limits"]["memory_limit_mb"] > 0
     assert payload["limits"]["soft_memory_budget_mb"] == int(payload["limits"]["memory_limit_mb"] * 0.75)
+
+
+def test_worker_context_serializes_safe_extra_only(tmp_path) -> None:
+    ctx = ToolContext(
+        session_id="session-safe-extra",
+        message_id="message-safe-extra",
+        agent="rex",
+        call_id="call-1",
+        extra={
+            "workspace_dir": str(tmp_path),
+            "main_session_key": "main-session",
+            "workflowAction": "invoke",
+            "sandbox": {
+                "container_name": "sandbox-1",
+                "workspace_dir": str(tmp_path),
+                "container_workdir": "/workspace",
+                "env": {"SAFE": "1"},
+            },
+            "not_allowed": "drop-me",
+            "sandbox_elevated": {"enabled": True, "tools": ["bash"]},
+            "bad_object": object(),
+        },
+    )
+
+    payload = _serialize_tool_context(ctx, workflow_id="wf-safe-extra")
+
+    assert payload["workspace_dir"] == str(tmp_path)
+    assert payload["action_name"] == "invoke"
+    assert payload["call_id"] == "call-1"
+    assert payload["extra"]["sandbox"]["container_name"] == "sandbox-1"
+    assert payload["extra"]["sandbox_elevated"] == {"enabled": True, "tools": ["bash"]}
+    assert "not_allowed" not in payload["extra"]
+    assert "bad_object" not in payload["extra"]
 
 
 def test_worker_limits_default_to_eighty_percent_machine_memory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,3 +282,52 @@ async def test_process_executor_bridges_tool_event_publish_callback() -> None:
     assert result.status == "SUCCEEDED"
     assert result.outputs["published"] is True
     assert ("workflow.bridge_event", {"value": "ok"}) in published_events
+
+
+@pytest.mark.asyncio
+async def test_process_executor_restores_serialized_tool_context_extra(tmp_path) -> None:
+    workflow = {
+        "name": "extra_bridge_test",
+        "start": "inspect_extra",
+        "nodes": [
+            {
+                "id": "inspect_extra",
+                "type": "python",
+                "code": "\n".join(
+                    [
+                        "ctx = getattr(getattr(tool, 'registry', None), '_ctx', None)",
+                        "extra = getattr(ctx, 'extra', {}) or {}",
+                        "outputs['workspace_dir'] = extra.get('workspace_dir')",
+                        "outputs['sandbox_container'] = extra.get('sandbox', {}).get('container_name')",
+                        "outputs['workflow_action'] = extra.get('workflowAction')",
+                    ]
+                ),
+            }
+        ],
+        "edges": [],
+    }
+
+    result = await run_workflow_process(
+        workflow=workflow,
+        ensure_requirements=False,
+        timeout_s=10,
+        tool_context=ToolContext(
+            session_id="session-extra-bridge",
+            message_id="message-extra-bridge",
+            agent="rex",
+            extra={
+                "workspace_dir": str(tmp_path),
+                "workflowAction": "invoke",
+                "sandbox": {
+                    "container_name": "sandbox-extra-bridge",
+                    "workspace_dir": str(tmp_path),
+                    "container_workdir": "/workspace",
+                },
+            },
+        ),
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs["workspace_dir"] == str(tmp_path)
+    assert result.outputs["sandbox_container"] == "sandbox-extra-bridge"
+    assert result.outputs["workflow_action"] == "invoke"

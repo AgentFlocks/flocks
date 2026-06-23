@@ -24,6 +24,19 @@ from flocks.workflow.runner import RunWorkflowResult
 StepStartHook = Callable[[Optional[str], int, Any, Dict[str, Any]], Any]
 StepCompleteHook = Callable[[Any], Any]
 WorkerEventHook = Callable[[Dict[str, Any]], Awaitable[None] | None]
+_SERIALIZED_EXTRA_KEYS = frozenset(
+    {
+        "main_session_key",
+        "project_id",
+        "projectId",
+        "sandbox",
+        "sandbox_elevated",
+        "workflowAction",
+        "workflowId",
+        "workspace_dir",
+    }
+)
+_SERIALIZED_EXTRA_MAX_BYTES = 64 * 1024
 
 
 class StepResultEvent(dict):
@@ -241,20 +254,91 @@ def _workflow_to_payload(workflow: Any) -> Dict[str, Any]:
     raise TypeError("workflow must be a dict, Workflow model, or workflow file path")
 
 
-def _serialize_tool_context(tool_context: Any, *, workflow_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def _serialize_tool_context(tool_context: Any, *, workflow_id: Optional[str]) -> Dict[str, Any]:
     if tool_context is None:
-        return None
+        workspace_dir = os.getcwd()
+        return {
+            "workflow_id": workflow_id,
+            "session_id": None,
+            "message_id": None,
+            "agent": None,
+            "workspace_dir": workspace_dir,
+            "action_name": "run",
+            "extra": {
+                "workspace_dir": workspace_dir,
+                "workflowId": workflow_id,
+                "workflowAction": "run",
+            },
+        }
     extra = getattr(tool_context, "extra", None)
     if not isinstance(extra, dict):
         extra = {}
+    serialized_extra = _serialize_context_extra(extra)
+    workspace_dir = serialized_extra.get("workspace_dir") or extra.get("workspace_dir") or os.getcwd()
+    action_name = serialized_extra.get("workflowAction") or extra.get("workflowAction") or "run"
+    serialized_extra.setdefault("workspace_dir", workspace_dir)
+    serialized_extra.setdefault("workflowId", workflow_id)
+    serialized_extra.setdefault("workflowAction", action_name)
     return {
         "workflow_id": workflow_id,
         "session_id": getattr(tool_context, "session_id", None),
         "message_id": getattr(tool_context, "message_id", None),
         "agent": getattr(tool_context, "agent", None),
-        "workspace_dir": extra.get("workspace_dir") or os.getcwd(),
-        "action_name": extra.get("workflowAction") or "run",
+        "workspace_dir": workspace_dir,
+        "action_name": action_name,
+        "call_id": getattr(tool_context, "call_id", None),
+        "extra": serialized_extra,
     }
+
+
+def _serialize_context_extra(extra: Dict[str, Any]) -> Dict[str, Any]:
+    serialized: Dict[str, Any] = {}
+    for key in _SERIALIZED_EXTRA_KEYS:
+        if key not in extra:
+            continue
+        value = _json_safe_value(extra[key])
+        if value is not _UNSERIALIZABLE:
+            serialized[key] = value
+
+    try:
+        encoded = json.dumps(serialized, ensure_ascii=False, default=str).encode("utf-8")
+    except Exception:
+        return {}
+    if len(encoded) <= _SERIALIZED_EXTRA_MAX_BYTES:
+        return serialized
+
+    # Keep the minimum context needed for deterministic workspace/session
+    # resolution when optional payloads such as sandbox env are too large.
+    return {
+        key: value
+        for key, value in serialized.items()
+        if key in {"workspace_dir", "main_session_key", "workflowId", "workflowAction"}
+    }
+
+
+_UNSERIALIZABLE = object()
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        result: Dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            safe_item = _json_safe_value(item)
+            if safe_item is not _UNSERIALIZABLE:
+                result[key] = safe_item
+        return result
+    if isinstance(value, (list, tuple)):
+        result_list: list[Any] = []
+        for item in value:
+            safe_item = _json_safe_value(item)
+            if safe_item is not _UNSERIALIZABLE:
+                result_list.append(safe_item)
+        return result_list
+    return _UNSERIALIZABLE
 
 
 async def _dispatch_event(

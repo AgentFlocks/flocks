@@ -57,7 +57,10 @@ def _write_event(event: Dict[str, Any], *, max_bytes: Optional[int] = None) -> N
 async def _build_tool_context(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return None
+    serialized_extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
     workspace_dir = str(payload.get("workspace_dir") or "").strip()
+    if not workspace_dir:
+        workspace_dir = str(serialized_extra.get("workspace_dir") or "").strip()
     if workspace_dir:
         try:
             os.chdir(workspace_dir)
@@ -76,6 +79,14 @@ async def _build_tool_context(payload: Any) -> Any:
             message_id=message_id,
             agent=agent,
         )
+        _merge_serialized_extra(
+            tool_context,
+            serialized_extra,
+            workflow_id=workflow_id,
+            action_name=action_name,
+            workspace_dir=workspace_dir,
+            session_id=session_id,
+        )
         _install_control_bridge(tool_context)
         return tool_context
     except Exception:
@@ -86,12 +97,13 @@ async def _build_tool_context(payload: Any) -> Any:
             abort_event=_ABORT_EVENT,
             permission_callback=_permission_callback,
             event_publish_callback=_event_publish_callback,
-            extra={
-                "workspace_dir": workspace_dir or os.getcwd(),
-                "main_session_key": str(session_id or ""),
-                "workflowId": workflow_id,
-                "workflowAction": action_name,
-            },
+            extra=_merged_extra(
+                serialized_extra,
+                workflow_id=workflow_id,
+                action_name=action_name,
+                workspace_dir=workspace_dir,
+                session_id=session_id,
+            ),
         )
 
 
@@ -99,6 +111,43 @@ def _install_control_bridge(tool_context: ToolContext) -> None:
     tool_context._abort_event = _ABORT_EVENT
     tool_context._permission_callback = _permission_callback
     tool_context.event_publish_callback = _event_publish_callback
+
+
+def _merge_serialized_extra(
+    tool_context: ToolContext,
+    serialized_extra: Dict[str, Any],
+    *,
+    workflow_id: str,
+    action_name: str,
+    workspace_dir: str,
+    session_id: Any,
+) -> None:
+    tool_context.extra = _merged_extra(
+        serialized_extra,
+        workflow_id=workflow_id,
+        action_name=action_name,
+        workspace_dir=workspace_dir,
+        session_id=session_id or getattr(tool_context, "session_id", ""),
+        base=getattr(tool_context, "extra", None),
+    )
+
+
+def _merged_extra(
+    serialized_extra: Dict[str, Any],
+    *,
+    workflow_id: str,
+    action_name: str,
+    workspace_dir: str,
+    session_id: Any,
+    base: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    merged: Dict[str, Any] = dict(base or {})
+    merged.update(serialized_extra)
+    merged.setdefault("workspace_dir", workspace_dir or os.getcwd())
+    merged.setdefault("main_session_key", str(session_id or ""))
+    merged.setdefault("workflowId", workflow_id)
+    merged.setdefault("workflowAction", action_name)
+    return merged
 
 
 async def _permission_callback(request: Any) -> None:
