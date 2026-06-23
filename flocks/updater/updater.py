@@ -1092,24 +1092,26 @@ def _version_label(version: str) -> str:
     return normalized if normalized.startswith(("v", "V")) else f"v{normalized}"
 
 
-def _ensure_pro_bundle_oss_not_older_than_local(
+def _is_pro_bundle_oss_older_than_local(
     manifest: dict[str, Any],
     current_version: str | None = None,
-) -> None:
+) -> bool:
     bundle_oss_version = _pro_bundle_oss_version(manifest)
     if not bundle_oss_version:
-        return
+        return False
     local_version = str(current_version or get_current_version() or "").strip()
     if not local_version:
-        return
-    if _parse_version(bundle_oss_version) >= _parse_version(local_version):
-        return
-    raise ValueError(
-        "This Pro bundle would downgrade Flocks from "
-        f"{_version_label(local_version)} to {_version_label(bundle_oss_version)}. "
-        "Upload or build a Pro bundle with an OSS core version matching the local "
-        "Flocks version or newer."
-    )
+        return False
+    return _parse_version(bundle_oss_version) < _parse_version(local_version)
+
+
+def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_oss_version: str) -> dict[str, Any]:
+    payload = dict(manifest)
+    effective_label = _version_label(effective_oss_version)
+    if effective_label:
+        payload["display_version"] = effective_label
+        payload["oss_version"] = effective_label
+    return payload
 
 
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
@@ -2496,6 +2498,16 @@ def _is_newer_version(latest: str | None, current: str | None) -> bool:
     return _parse_version(latest_version) > _parse_version(current_version)
 
 
+def _pick_newer_version(left: str | None, right: str | None) -> str:
+    left_version = str(left or "").strip()
+    right_version = str(right or "").strip()
+    if not left_version:
+        return right_version
+    if not right_version:
+        return left_version
+    return left_version if _parse_version(left_version) >= _parse_version(right_version) else right_version
+
+
 def get_current_version() -> str:
     """
     Return the running version.
@@ -2587,11 +2599,16 @@ async def check_update(
         locale=locale,
     )
     is_console_manifest = profile.sources == ["console-manifest"]
-    current_bundle_version = _read_pro_bundle_installed_bundle_version() if is_console_manifest else None
+    local_core_version = get_current_version()
+    current_bundle_version = (
+        _pick_newer_version(_read_pro_bundle_installed_bundle_version(), local_core_version)
+        if is_console_manifest
+        else None
+    )
     current_pro_component_version = _read_pro_bundle_installed_component_version() if is_console_manifest else None
-    current = current_bundle_version if is_console_manifest else get_current_version()
+    current = current_bundle_version if is_console_manifest else local_core_version
     if not current:
-        current = get_current_version()
+        current = local_core_version
 
     if not ucfg.enabled:
         return VersionInfo(
@@ -2614,7 +2631,7 @@ async def check_update(
             url = manifest_info.release_url
             bundle_sha256 = manifest_info.bundle_sha256
             bundle_format = manifest_info.bundle_format
-            latest_bundle_version = tag
+            latest_bundle_version = _pick_newer_version(tag, current_bundle_version)
             latest_pro_component_version = str(
                 manifest_info.manifest.get("flockspro_component_version") or ""
             ).strip() or None
@@ -2760,16 +2777,6 @@ async def perform_pro_bundle_install(
             success=False,
         )
         return
-    try:
-        _ensure_pro_bundle_oss_not_older_than_local(manifest_info.manifest)
-    except ValueError as exc:
-        log.warning("updater.pro_bundle.oss_downgrade_blocked", {"error": str(exc)})
-        yield UpdateProgress(
-            stage="error",
-            message=str(exc),
-            success=False,
-        )
-        return
 
     zipball_url = manifest_info.bundle_url if manifest_info.bundle_format == "zip" else None
     tarball_url = manifest_info.bundle_url if manifest_info.bundle_format != "zip" else None
@@ -2819,6 +2826,8 @@ async def perform_update(
     )
     install_root = _get_repo_root()
     current_version = get_current_version()
+    effective_update_version = current_version
+    skip_core_replace = False
     handover_active = False
     console_manifest_info: ConsoleManifestRelease | None = None
     fmt = _choose_archive_format(ucfg.archive_format)
@@ -2838,16 +2847,6 @@ async def perform_update(
                 yield UpdateProgress(
                     stage="error",
                     message="Requested Pro bundle version does not match the latest approved manifest.",
-                    success=False,
-                )
-                return
-            try:
-                _ensure_pro_bundle_oss_not_older_than_local(console_manifest_info.manifest, current_version)
-            except ValueError as exc:
-                log.warning("updater.console_manifest.oss_downgrade_blocked", {"error": str(exc)})
-                yield UpdateProgress(
-                    stage="error",
-                    message=str(exc),
                     success=False,
                 )
                 return
@@ -2977,20 +2976,31 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
     if profile.sources == ["console-manifest"]:
-        try:
-            _ensure_pro_bundle_oss_not_older_than_local(pro_bundle_manifest, current_version)
-        except ValueError as exc:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            log.warning("updater.pro_bundle.extracted_oss_downgrade_blocked", {"error": str(exc)})
-            _record_update_journal(f"ERROR {exc}")
-            yield UpdateProgress(stage="error", message=str(exc), success=False)
-            return
+        skip_core_replace = _is_pro_bundle_oss_older_than_local(pro_bundle_manifest, current_version)
+        if skip_core_replace:
+            bundle_oss_version = _pro_bundle_oss_version(pro_bundle_manifest)
+            pro_bundle_manifest = _effective_pro_bundle_manifest(pro_bundle_manifest, current_version)
+            log.info(
+                "updater.pro_bundle.keep_local_core",
+                {
+                    "local_version": current_version,
+                    "bundle_oss_version": bundle_oss_version,
+                },
+            )
+        else:
+            effective_update_version = latest_tag
+    else:
+        effective_update_version = latest_tag
 
     # ------------------------------------------------------------------ #
     # Step 3 – determine whether frontend handover is needed
     # ------------------------------------------------------------------ #
     staged_webui_dir = content_root / "webui"
-    needs_handover = staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists()
+    needs_handover = (
+        not skip_core_replace
+        and staged_webui_dir.is_dir()
+        and (staged_webui_dir / "package.json").exists()
+    )
 
     # ------------------------------------------------------------------ #
     # Step 4 – replace install tree
@@ -2998,7 +3008,11 @@ async def perform_update(
     # ------------------------------------------------------------------ #
     yield UpdateProgress(
         stage="applying",
-        message=f"Applying v{latest_tag}...",
+        message=(
+            f"Keeping local Flocks {_version_label(current_version)} and installing the Pro component..."
+            if skip_core_replace
+            else f"Applying v{latest_tag}..."
+        ),
     )
 
     async def _restore_after_apply_failure() -> None:
@@ -3025,11 +3039,12 @@ async def perform_update(
         )
 
     try:
-        await asyncio.to_thread(
-            _replace_install_dir,
-            content_root,
-            install_root,
-        )
+        if not skip_core_replace:
+            await asyncio.to_thread(
+                _replace_install_dir,
+                content_root,
+                install_root,
+            )
     except Exception as exc:
         final_replace_error: Exception | None = exc
         if (
@@ -3043,11 +3058,12 @@ async def perform_update(
             try:
                 _prepare_upgrade_handover(latest_tag)
                 handover_active = True
-                await asyncio.to_thread(
-                    _replace_install_dir,
-                    content_root,
-                    install_root,
-                )
+                if not skip_core_replace:
+                    await asyncio.to_thread(
+                        _replace_install_dir,
+                        content_root,
+                        install_root,
+                    )
             except Exception as retry_exc:
                 final_replace_error = retry_exc
             else:
@@ -3103,7 +3119,7 @@ async def perform_update(
         task_error = await run_handoff_upgrade_tasks(
             install_root=install_root,
             uv_path=uv_path,
-            version=latest_tag,
+            version=effective_update_version,
             uv_default_index=profile.uv_default_index,
             npm_registry=profile.npm_registry,
             pro_wheel_path=pro_wheel_path,
@@ -3119,10 +3135,10 @@ async def perform_update(
             return
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        log.info("updater.apply.done", {"version": latest_tag, "restart": False, "region": profile.region})
+        log.info("updater.apply.done", {"version": effective_update_version, "restart": False, "region": profile.region})
         yield UpdateProgress(
             stage="done",
-            message=f"Upgraded to v{latest_tag}",
+            message=f"Upgraded to {_version_label(effective_update_version)}",
             success=True,
         )
         return
@@ -3133,6 +3149,7 @@ async def perform_update(
         "updater.restart",
         {
             "tag": latest_tag,
+            "effective_version": effective_update_version,
             "sources": profile.sources,
             "repo": ucfg.repo,
             "region": profile.region,
@@ -3181,7 +3198,7 @@ async def perform_update(
             install_root,
             uv_path=uv_path,
             sync_timeout=sync_timeout,
-            version=latest_tag,
+            version=effective_update_version,
             current_version=current_version,
             backup_path=backup_path,
             uv_default_index=profile.uv_default_index,

@@ -98,6 +98,7 @@ async def test_check_update_uses_pro_marker_bundle_version_and_component_metadat
     monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
     monkeypatch.setattr(updater, "_resolve_sources_for_edition", _fake_sources)
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.5.23")
 
     info = await updater.check_update()
     assert info.current_version == "v2026.5.23"
@@ -145,6 +146,7 @@ async def test_check_update_force_console_manifest_uses_bundle_versions(
     monkeypatch.setattr("flocks.updater.deploy.detect_deploy_mode", lambda: "source")
     monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.5.23")
 
     info = await updater.check_update(force_console_manifest=True)
 
@@ -201,6 +203,55 @@ async def test_check_update_force_console_manifest_detects_component_only_update
 
     assert info.current_version == "v2026.6.18"
     assert info.latest_version == "v2026.6.18"
+    assert info.current_bundle_version == "v2026.6.18"
+    assert info.latest_bundle_version == "v2026.6.18"
+    assert info.current_pro_component_version == "v2026.6.1"
+    assert info.latest_pro_component_version == "v2026.6.2"
+    assert info.has_update is True
+
+
+@pytest.mark.asyncio
+async def test_check_update_keeps_newer_local_bundle_version_when_manifest_core_is_older(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    marker = tmp_path / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        """{
+  "installed_version": "v2026.6.18",
+  "flockspro_component_version": "v2026.6.1"
+}""",
+        encoding="utf-8",
+    )
+
+    async def _fake_config():
+        return SimpleNamespace(enabled=True, sources=["github"], repo="", token=None)
+
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="v2026.6.13",
+            release_notes="latest pro",
+            release_url="https://console.example.com/v1/pro-bundles/rel_3/download",
+            bundle_url="https://console.example.com/v1/pro-bundles/rel_3/download",
+            bundle_sha256="ghi789",
+            bundle_format="zip",
+            manifest={
+                "display_version": "v2026.6.13",
+                "oss_version": "v2026.6.13",
+                "flockspro_component_version": "v2026.6.2",
+            },
+        )
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr("flocks.updater.deploy.detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+
+    info = await updater.check_update(force_console_manifest=True)
+
+    assert info.current_version == "v2026.6.18"
+    assert info.latest_version == "v2026.6.13"
     assert info.current_bundle_version == "v2026.6.18"
     assert info.latest_bundle_version == "v2026.6.18"
     assert info.current_pro_component_version == "v2026.6.1"
@@ -474,37 +525,93 @@ async def test_download_console_bundle_reports_http_status_and_body(
 
 
 @pytest.mark.asyncio
-async def test_perform_pro_bundle_install_blocks_older_oss_core(
+async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_oss_is_older(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
+    bundle_root = tmp_path / "bundle-root"
+    core_root = bundle_root / "flocks"
+    core_root.mkdir(parents=True)
+    (core_root / "pyproject.toml").write_text('[project]\nname = "flocks"\n', encoding="utf-8")
+    (core_root / "older_core.py").write_text("OLDER = True\n", encoding="utf-8")
+    wheels = bundle_root / "wheels"
+    wheels.mkdir()
+    wheel = wheels / "flockspro-0.2.0-py3-none-any.whl"
+    wheel.write_bytes(b"fake-wheel")
+    (bundle_root / "manifest.json").write_text(
+        """{
+  "display_version": "v2026.6.13",
+  "oss_version": "v2026.6.13",
+  "flockspro_component_version": "v2026.6.2",
+  "flockspro_wheel": "wheels/flockspro-0.2.0-py3-none-any.whl",
+  "build_id": "job_new_pro_old_core"
+}""",
+        encoding="utf-8",
+    )
+    bundle = tmp_path / "flockspro-bundle.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        for path in bundle_root.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(bundle_root).as_posix())
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    (install_root / "current_core.py").write_text("CURRENT = True\n", encoding="utf-8")
+    venv_bin = install_root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/usr/bin/env python\n", encoding="utf-8")
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.18")
+
     async def _fake_manifest_info():
         return updater.ConsoleManifestRelease(
             version="v2026.6.13",
-            release_notes="older core",
-            release_url="https://console.example.com/v1/pro-bundles/rel_old/download",
-            bundle_url="https://console.example.com/v1/pro-bundles/rel_old/download",
+            release_notes="new Pro on older core",
+            release_url=str(bundle),
+            bundle_url=str(bundle),
             bundle_sha256=None,
             bundle_format="zip",
             manifest={
                 "display_version": "v2026.6.13",
                 "oss_version": "v2026.6.13",
-                "flockspro_component_version": "pro-v2026-06-22",
+                "flockspro_component_version": "v2026.6.2",
+                "build_id": "job_new_pro_old_core",
             },
         )
 
-    async def _fail_download(*_args, **_kwargs):
-        raise AssertionError("older Pro bundle should be blocked before download")
-
-    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.18")
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
-    monkeypatch.setattr(updater, "_download_console_bundle", _fail_download)
+    monkeypatch.setattr(updater, "_download_console_bundle", lambda *_args, **_kwargs: _async_path(bundle))
+    monkeypatch.setattr(updater, "_verify_download_sha256", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_write_version_marker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda *_args, **_kwargs: None)
+
+    captured: list[list[str]] = []
+
+    async def _fake_run_async(cmd, **_kwargs):
+        captured.append(cmd)
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_run_async", _fake_run_async)
 
     progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
 
-    assert len(progresses) == 1
-    assert progresses[0].stage == "error"
-    assert progresses[0].success is False
-    assert "would downgrade Flocks from v2026.6.18 to v2026.6.13" in progresses[0].message
+    assert progresses[-1].stage == "done"
+    assert any("Keeping local Flocks v2026.6.18" in step.message for step in progresses)
+    assert (install_root / "current_core.py").is_file()
+    assert not (install_root / "older_core.py").exists()
+    pip_installs = [cmd for cmd in captured if cmd[:3] == ["/usr/bin/uv", "pip", "install"]]
+    assert pip_installs
+    assert str(wheel.name) in pip_installs[-1][-1]
+    marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
+    marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
+    assert marker_payload["display_version"] == "v2026.6.18"
+    assert marker_payload["installed_version"] == "v2026.6.18"
+    assert marker_payload["oss_version"] == "v2026.6.18"
+    assert marker_payload["flockspro_component_version"] == "v2026.6.2"
 
 
 @pytest.mark.asyncio
