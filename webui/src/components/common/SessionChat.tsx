@@ -21,7 +21,7 @@ import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, 
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
-import { QuestionTool } from './QuestionTool';
+import { QuestionTool, type QuestionItem } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
@@ -126,6 +126,8 @@ export interface SessionChatDisplay {
   collapseIntermediateSteps?: boolean;
   /** Initial open state for grouped reasoning/tool-process details. */
   processGroupsDefaultOpen?: boolean;
+  /** Keep grouped reasoning/tool-process details open while the assistant message is actively streaming. */
+  processGroupsOpenWhileActive?: boolean;
 }
 
 export interface SessionChatProps {
@@ -1424,6 +1426,7 @@ export default function SessionChat({
   const showTimestamp = display?.showTimestamp ?? false;
   const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
   const processGroupsDefaultOpen = display?.processGroupsDefaultOpen ?? false;
+  const processGroupsOpenWhileActive = display?.processGroupsOpenWhileActive ?? false;
   const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
   const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
@@ -3116,6 +3119,7 @@ export default function SessionChat({
                   showTimestamp={showTimestamp}
                   collapseIntermediateSteps={collapseIntermediateSteps}
                   processGroupsDefaultOpen={processGroupsDefaultOpen}
+                  processGroupsOpenWhileActive={processGroupsOpenWhileActive}
                   compact={compact}
                   onCopy={handleCopy}
                   editingMessageId={editingMessageId}
@@ -3661,6 +3665,7 @@ export interface ChatMessageBubbleProps {
   showTimestamp?: boolean;
   collapseIntermediateSteps?: boolean;
   processGroupsDefaultOpen?: boolean;
+  processGroupsOpenWhileActive?: boolean;
   compact?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
@@ -3711,6 +3716,7 @@ function ChatMessageBubbleInner({
   showTimestamp = false,
   collapseIntermediateSteps = false,
   processGroupsDefaultOpen = false,
+  processGroupsOpenWhileActive = false,
   compact = true,
   onCopy,
   editingMessageId,
@@ -3831,21 +3837,28 @@ function ChatMessageBubbleInner({
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file');
           const displayParts = parts.filter((p) => p.type !== 'file');
-          const isBlockingQuestionToolPart = (part: MessagePart): boolean => {
+          const isQuestionToolPart = (part: MessagePart): boolean => {
             if (part.type !== 'tool') return false;
-            if (part.callID && pendingQuestions?.[part.callID]) return true;
-            const toolName = (part.tool || '').toLowerCase();
-            return toolName === 'question' || toolName === 'request_user_input' || toolName.includes('question');
+            return isQuestionToolName(part.tool || '');
+          };
+          const isPendingQuestionToolPart = (part: MessagePart): boolean => {
+            if (!isQuestionToolPart(part)) return false;
+            return !!(part.callID && pendingQuestions?.[part.callID]);
           };
           const isIntermediateProcessPart = (part: MessagePart): boolean => {
             if (part.type === 'reasoning' || part.type === 'thinking') {
               return !!getRenderableThinkingText(part);
             }
-            return part.type === 'tool' && !isBlockingQuestionToolPart(part);
+            if (part.type !== 'tool') return false;
+            if (isPendingQuestionToolPart(part)) return false;
+            return true;
           };
+          const isRenderableTextPart = (part: MessagePart): boolean => (
+            part.type === 'text' && !!getMessagePartDisplayText(part).trim()
+          );
           const isRenderableDisplayPart = (part: MessagePart): boolean => {
             if (isIntermediateProcessPart(part)) return true;
-            if (part.type === 'text') return !!getMessagePartDisplayText(part).trim();
+            if (part.type === 'text') return isRenderableTextPart(part);
             if (part.type === 'tool') return true;
             if (part.type === 'file') return !!part.url;
             return false;
@@ -3958,15 +3971,17 @@ function ChatMessageBubbleInner({
           const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
             const reasoningCount = group.filter(({ part }) => part.type === 'reasoning' || part.type === 'thinking').length;
             const toolCount = group.filter(({ part }) => part.type === 'tool').length;
+            const textCount = group.filter(({ part }) => part.type === 'text').length;
             const summary = [
               reasoningCount > 0 ? t('chat.process.reasoningCount', { count: reasoningCount }) : '',
               toolCount > 0 ? t('chat.process.toolCount', { count: toolCount }) : '',
+              textCount > 0 ? t('chat.process.textCount', { count: textCount }) : '',
             ].filter(Boolean).join(' · ');
-            const groupKey = group.map(({ part, index }) => part.id || index).join('-');
+            const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             return (
               <ProcessGroupDetails
-                key={`process-${groupIndex}-${groupKey}`}
-                defaultOpen={processGroupsDefaultOpen}
+                key={`process-${groupIndex}`}
+                defaultOpen={processGroupOpen}
               >
                 <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50">
                   <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
@@ -3993,6 +4008,9 @@ function ChatMessageBubbleInner({
             const nodes: React.ReactNode[] = [];
             let processGroup: Array<{ part: MessagePart; index: number }> = [];
             let processGroupIndex = 0;
+            const lastIntermediateProcessIndex = displayParts.reduce((lastIndex, part, index) => (
+              isIntermediateProcessPart(part) ? index : lastIndex
+            ), -1);
             const flushProcessGroup = () => {
               if (processGroup.length === 0) return;
               nodes.push(renderProcessGroup(processGroup, processGroupIndex));
@@ -4000,12 +4018,14 @@ function ChatMessageBubbleInner({
               processGroupIndex += 1;
             };
             displayParts.forEach((part, index) => {
-              if (isIntermediateProcessPart(part)) {
+              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
                 processGroup.push({ part, index });
                 return;
               }
               if (!isRenderableDisplayPart(part)) return;
-              flushProcessGroup();
+              if (isPendingQuestionToolPart(part) || isRenderableTextPart(part)) {
+                flushProcessGroup();
+              }
               nodes.push(renderPart(part, index));
             });
             flushProcessGroup();
@@ -4412,6 +4432,382 @@ function todoStatusLabelClass(status: string | undefined): string {
   }
 }
 
+function isQuestionToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'question' || normalized === 'request_user_input' || normalized.includes('question');
+}
+
+function isBashToolName(toolName: string): boolean {
+  return toolName.toLowerCase() === 'bash';
+}
+
+function formatToolPayload(output: unknown): string {
+  if (typeof output === 'string') {
+    try { return JSON.stringify(JSON.parse(output), null, 2); } catch { return output; }
+  }
+  return JSON.stringify(output, null, 2);
+}
+
+function readQuestionItems(value: unknown): QuestionItem[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .map((item) => ({
+      question: typeof item.question === 'string' ? item.question : '',
+      header: typeof item.header === 'string' ? item.header : undefined,
+      type: typeof item.type === 'string' ? item.type as QuestionItem['type'] : undefined,
+      options: Array.isArray(item.options) ? item.options as QuestionItem['options'] : undefined,
+      multiple: typeof item.multiple === 'boolean' ? item.multiple : undefined,
+      custom: typeof item.custom === 'boolean' ? item.custom : undefined,
+    }))
+    .filter((item) => item.question.trim().length > 0);
+}
+
+function normalizeQuestionAnswer(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+  }
+  if (value == null) return [];
+  const text = String(value).trim();
+  return text ? [text] : [];
+}
+
+function formatQuestionAnswerValue(question: QuestionItem, value: string, t: TodoTranslator): string {
+  const normalized = value.trim().toLowerCase();
+  if (question.type === 'confirm') {
+    if (normalized === 'yes' || normalized === 'true') return t('chat.questionResult.yes');
+    if (normalized === 'no' || normalized === 'false') return t('chat.questionResult.no');
+  }
+  return value;
+}
+
+function ChatQuestionResult({
+  state,
+  statusLabel,
+  statusIcon,
+  statusIconColor,
+  t,
+}: {
+  state: Partial<ToolState>;
+  statusLabel: string;
+  statusIcon: React.ReactNode;
+  statusIconColor: string;
+  t: TodoTranslator;
+}) {
+  const questions = readQuestionItems(state.input?.questions);
+  if (questions.length === 0) return null;
+  const rawAnswers = Array.isArray(state.metadata?.answers) ? state.metadata.answers : [];
+  const status = state.status || 'pending';
+  const displayStatus = statusLabel;
+  const isCompleted = status === 'completed';
+  const isError = status === 'error';
+  const answerLabelClass = isCompleted
+    ? 'text-emerald-600'
+    : isError
+    ? 'text-red-500'
+    : 'text-zinc-500';
+  const answerChipClass = isCompleted
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : isError
+    ? 'border-red-200 bg-red-50 text-red-600'
+    : 'border-zinc-200 bg-zinc-50 text-zinc-600';
+  const statusPillClass = isCompleted
+    ? 'bg-emerald-50 text-emerald-600'
+    : isError
+    ? 'bg-red-50 text-red-500'
+    : 'bg-zinc-100 text-zinc-500';
+  const firstQuestion = questions[0]?.header || questions[0]?.question || '';
+
+  return (
+    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+        <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">question</span>
+            {firstQuestion && (
+              <span className="text-[11px] text-zinc-400 truncate min-w-0">
+                {firstQuestion}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-1.5 flex-shrink-0 self-center">
+          <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${statusPillClass}`}>
+            {displayStatus}
+          </span>
+          <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+        </div>
+      </summary>
+      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
+        {questions.map((question, index) => {
+          const answers = normalizeQuestionAnswer(rawAnswers[index]);
+          const displayAnswers = answers.length > 0
+            ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
+            : [t('chat.questionResult.unanswered')];
+          return (
+            <div
+              key={`${question.question}-${index}`}
+              className="space-y-2 py-2 first:pt-2 last:pb-0"
+            >
+              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+                <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
+                  {t('chat.questionResult.questionLabel')}
+                </span>
+                <div className="min-w-0">
+                  {question.header && (
+                    <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
+                  )}
+                  <div className="text-xs leading-5 text-zinc-700">{question.question}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+                <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
+                  {t('chat.questionResult.answerLabel')}
+                </span>
+                <div className="flex min-w-0 flex-wrap gap-1.5">
+                  {displayAnswers.map((answer, answerIndex) => (
+                    <span
+                      key={`${answer}-${answerIndex}`}
+                      className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
+                    >
+                      {answer}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function pickStringValue(data: Record<string, unknown> | undefined, ...keys: string[]): string | undefined {
+  if (!data) return undefined;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'string' && value.trim().length > 0) return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  }
+  return undefined;
+}
+
+function pickNumberValue(data: Record<string, unknown> | undefined, ...keys: string[]): number | undefined {
+  if (!data) return undefined;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function pickBooleanValue(data: Record<string, unknown> | undefined, ...keys: string[]): boolean {
+  if (!data) return false;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+  }
+  return false;
+}
+
+function extractBashMetadata(text: string): { output: string; metadataLines: string[] } {
+  const metadataMatch = text.match(/\n*<bash_metadata>\n?([\s\S]*?)\n?<\/bash_metadata>\s*$/);
+  if (!metadataMatch) return { output: text, metadataLines: [] };
+  return {
+    output: text.slice(0, metadataMatch.index).trimEnd(),
+    metadataLines: metadataMatch[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+  };
+}
+
+function buildBashCommandSummary(state: Partial<ToolState>): string {
+  const command = pickStringValue(state.input, 'command', 'cmd', 'shell');
+  return truncateToolDisplayText(command || state.title || '');
+}
+
+function getBashDescription(state: Partial<ToolState>): string {
+  const command = pickStringValue(state.input, 'command', 'cmd', 'shell') || '';
+  const metadata = asRecord(state.metadata);
+  const description = pickStringValue(state.input, 'description')
+    || pickStringValue(metadata, 'description')
+    || state.title
+    || '';
+  return description && description !== command ? description : '';
+}
+
+function buildBashHeaderSummary(state: Partial<ToolState>): string {
+  return truncateToolDisplayText(getBashDescription(state) || buildBashCommandSummary(state));
+}
+
+function formatBashDuration(state: Partial<ToolState>): string | undefined {
+  const start = state.time?.start;
+  const end = state.time?.end;
+  if (typeof start === 'number' && typeof end === 'number' && end >= start) {
+    return `${((end - start) / 1000).toFixed(2)}s`;
+  }
+  const metadata = asRecord(state.metadata);
+  const durationMs = pickNumberValue(metadata, 'duration_ms', 'durationMs', 'elapsed_ms', 'elapsedMs');
+  if (durationMs !== undefined) return `${(durationMs / 1000).toFixed(2)}s`;
+  return undefined;
+}
+
+function normalizeBashOutput(state: Partial<ToolState>) {
+  const metadata = asRecord(state.metadata);
+  const outputRecord = asRecord(state.output)
+    || (typeof state.output === 'string' ? parseJsonRecord(state.output) : undefined);
+  const stdout = pickStringValue(outputRecord, 'stdout');
+  const stderr = pickStringValue(outputRecord, 'stderr');
+  const genericOutput = pickStringValue(outputRecord, 'output', 'text', 'result')
+    ?? (typeof state.output === 'string' ? state.output : undefined)
+    ?? pickStringValue(metadata, 'output');
+  const errorFromOutput = pickStringValue(outputRecord, 'error');
+  const rawError = errorFromOutput || state.error || '';
+  const errorSummary = rawError.split('\n\n')[0]?.trim() || '';
+  const extracted = extractBashMetadata(stdout || genericOutput || '');
+  const fallbackRawOutput = !stdout && !genericOutput && state.output !== undefined && !outputRecord
+    ? formatToolPayload(state.output)
+    : '';
+
+  return {
+    stdout: stdout ? extracted.output : '',
+    stderr: stderr || '',
+    output: stdout ? '' : (extracted.output || fallbackRawOutput),
+    metadataLines: extracted.metadataLines,
+    errorSummary,
+    timedOut: pickBooleanValue(metadata, 'timed_out', 'timedOut'),
+    aborted: pickBooleanValue(metadata, 'aborted'),
+  };
+}
+
+function ChatBashPayload({
+  state,
+  t,
+}: {
+  state: Partial<ToolState>;
+  t: TodoTranslator;
+}) {
+  const command = pickStringValue(state.input, 'command', 'cmd', 'shell') || state.title || '';
+  const workdir = pickStringValue(state.input, 'workdir', 'cwd', 'directory');
+  const timeout = pickNumberValue(state.input, 'timeout', 'timeout_ms', 'timeoutMs');
+  const duration = formatBashDuration(state);
+  const output = normalizeBashOutput(state);
+  const hasOutput = !!(output.stdout || output.output || output.stderr || output.errorSummary);
+
+  return (
+    <div className="space-y-2">
+      {command && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.command')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-zinc-100 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+            <span className="text-zinc-500">$ </span>{command}
+          </pre>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+        {workdir && (
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.workdir')} <span className="font-mono text-zinc-600">{workdir}</span>
+          </span>
+        )}
+        {duration && (
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.duration')} {duration}
+          </span>
+        )}
+        {timeout !== undefined && (
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.timeout')} {timeout}ms
+          </span>
+        )}
+        {output.timedOut && (
+          <span className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
+            {t('chat.bash.timedOut')}
+          </span>
+        )}
+        {output.aborted && (
+          <span className="rounded-md border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 font-medium text-zinc-600">
+            {t('chat.bash.aborted')}
+          </span>
+        )}
+      </div>
+
+      {output.metadataLines.length > 0 && (
+        <div className="rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-5 text-amber-700">
+          {output.metadataLines.join(' · ')}
+        </div>
+      )}
+
+      {output.errorSummary && !output.stderr && (
+        <div className="rounded-md bg-red-50 px-2 py-1.5 text-[11px] leading-5 text-red-600">
+          {output.errorSummary}
+        </div>
+      )}
+
+      {output.stdout && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.stdout')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+            {output.stdout}
+          </pre>
+        </div>
+      )}
+
+      {output.output && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.output')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+            {output.output}
+          </pre>
+        </div>
+      )}
+
+      {output.stderr && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-red-500">{t('chat.bash.stderr')}</div>
+          <pre className="rounded-md bg-red-950 p-2 text-[11px] leading-relaxed text-red-100 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+            {output.stderr}
+          </pre>
+        </div>
+      )}
+
+      {!hasOutput && (
+        <div className="rounded-md bg-white px-2 py-1.5 text-[11px] text-zinc-400 border border-zinc-200/70">
+          {t('chat.bash.noOutput')}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export interface ChatToolPartProps {
   part: MessagePart;
   pendingQuestion?: PendingQuestion;
@@ -4470,17 +4866,11 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     },
   };
   const config = statusConfig[status] ?? statusConfig.pending;
-
-  const formatOutput = (output: unknown): string => {
-    if (typeof output === 'string') {
-      try { return JSON.stringify(JSON.parse(output), null, 2); } catch { return output; }
-    }
-    return JSON.stringify(output, null, 2);
-  };
+  const isBashTool = isBashToolName(toolName);
   const todoEntries = toolName === 'todo'
     ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
     : [];
-  const showGenericToolPayload = toolName !== 'todo';
+  const showGenericToolPayload = toolName !== 'todo' && !isBashTool;
   const isTodoTool = toolName === 'todo';
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
@@ -4489,6 +4879,8 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     ? truncateToolDisplayText(
         toolName === 'todo'
           ? buildTodoSummary(state, t)
+          : isBashTool
+          ? buildBashHeaderSummary(state)
           : buildToolInputSummary(state.input),
       )
     : '';
@@ -4509,6 +4901,18 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           compact
         />
       </div>
+    );
+  }
+
+  if (isQuestionToolName(toolName) && readQuestionItems(state.input?.questions).length > 0) {
+    return (
+      <ChatQuestionResult
+        state={state}
+        statusLabel={config.label}
+        statusIcon={config.icon}
+        statusIconColor={config.iconColor}
+        t={t}
+      />
     );
   }
 
@@ -4584,6 +4988,10 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           </div>
         )}
 
+        {isBashTool && (
+          <ChatBashPayload state={state} t={t} />
+        )}
+
         {showGenericToolPayload && state.input && (
           <details>
             <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
@@ -4601,7 +5009,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
               {t('chat.tool.outputResult')}
             </summary>
             <pre className="p-2 bg-zinc-950 text-green-400 rounded-md text-[11px] overflow-x-auto max-h-48 overflow-y-auto font-mono leading-relaxed">
-              {formatOutput(state.output)}
+              {formatToolPayload(state.output)}
             </pre>
           </details>
         )}
@@ -4637,6 +5045,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.showActions !== next.showActions) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
+  if (prev.processGroupsOpenWhileActive !== next.processGroupsOpenWhileActive) return false;
   if (prev.editingMessageId !== next.editingMessageId) return false;
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;

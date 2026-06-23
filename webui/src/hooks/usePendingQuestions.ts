@@ -22,8 +22,25 @@ interface PendingQuestionApiResponse {
   };
 }
 
+function isNotFoundError(error: unknown): boolean {
+  return !!(
+    error &&
+    typeof error === 'object' &&
+    'response' in error &&
+    (error as { response?: { status?: number } }).response?.status === 404
+  );
+}
+
 export function usePendingQuestions() {
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, PendingQuestion>>({});
+
+  const removeByCallId = useCallback((callID: string) => {
+    setPendingQuestions(prev => {
+      const next = { ...prev };
+      delete next[callID];
+      return next;
+    });
+  }, []);
 
   /** Call from the SSE event handler when `question.asked` fires. */
   const handleQuestionAsked = useCallback(
@@ -39,27 +56,27 @@ export function usePendingQuestions() {
   /** Submit answers for a pending question. */
   const submitAnswer = useCallback(
     async (callID: string, requestId: string, answers: string[][]) => {
-      await client.post(`/api/question/${requestId}/reply`, { answers });
-      setPendingQuestions(prev => {
-        const next = { ...prev };
-        delete next[callID];
-        return next;
-      });
+      try {
+        await client.post(`/api/question/${requestId}/reply`, { answers });
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+      }
+      removeByCallId(callID);
     },
-    [],
+    [removeByCallId],
   );
 
   /** Reject / skip a pending question. */
   const submitReject = useCallback(
     async (callID: string, requestId: string) => {
-      await client.post(`/api/question/${requestId}/reject`, {});
-      setPendingQuestions(prev => {
-        const next = { ...prev };
-        delete next[callID];
-        return next;
-      });
+      try {
+        await client.post(`/api/question/${requestId}/reject`, {});
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+      }
+      removeByCallId(callID);
     },
-    [],
+    [removeByCallId],
   );
 
   /** Remove a pending question by request ID (e.g. after SSE reply/reject). */
