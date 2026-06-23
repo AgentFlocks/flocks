@@ -98,6 +98,7 @@ class Storage:
     _workflow_key_prefixes = (
         "workflow/",
         "workflow_execution/",
+        "workflow_execution_index/",
         "workflow_execution_step/",
         "workflow_registry/",
         "workflow_release/",
