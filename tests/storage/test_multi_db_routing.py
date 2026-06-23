@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from flocks.config.config import Config
-from flocks.storage.storage import Storage
+from flocks.storage.storage import Storage, StorageError
 from flocks.task.models import TaskExecution, TaskScheduler
 from flocks.task.store import TaskStore, _TASKS_DDL
 
@@ -30,6 +30,14 @@ def _fetch_storage_value(db_path: Path, key: str):
             (key,),
         ).fetchone()
         return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _fetch_table_count(db_path: Path, table_name: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
     finally:
         conn.close()
 
@@ -86,6 +94,24 @@ async def test_clear_without_prefix_clears_flocks_and_workflow_dbs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_without_prefix_merges_flocks_and_workflow_dbs() -> None:
+    await Storage.init()
+
+    await Storage.write("project/proj-1", {"name": "project"})
+    await Storage.write("workflow/wf-1", {"name": "workflow"})
+
+    keys = await Storage.list_keys()
+    entries = dict(await Storage.list_entries())
+    raw_entries = dict(await Storage.list_raw())
+
+    assert {"project/proj-1", "workflow/wf-1"}.issubset(set(keys))
+    assert entries["project/proj-1"] == {"name": "project"}
+    assert entries["workflow/wf-1"] == {"name": "workflow"}
+    assert raw_entries["project/proj-1"] == '{"name": "project"}'
+    assert raw_entries["workflow/wf-1"] == '{"name": "workflow"}'
+
+
+@pytest.mark.asyncio
 async def test_workflow_kv_migrates_from_legacy_flocks_db() -> None:
     flocks_db = Config.get_data_path() / "flocks.db"
     flocks_db.parent.mkdir(parents=True, exist_ok=True)
@@ -118,11 +144,85 @@ async def test_workflow_kv_migrates_from_legacy_flocks_db() -> None:
 
     workflow_db = Storage.get_workflow_db_path()
     assert _fetch_storage_value(workflow_db, "workflow_registry/wf-legacy") == '{"ok": true}'
-    assert _fetch_storage_value(flocks_db, "workflow_registry/wf-legacy") == '{"ok": true}'
+    assert _fetch_storage_value(flocks_db, "workflow_registry/wf-legacy") is None
     assert _fetch_storage_value(workflow_db, "session:legacy") is None
     marker = await Storage.get(Storage._multi_db_migration_marker_key)
     assert marker["workflow_migrated"] is True
     assert marker["workflow_rows"] == 1
+    assert marker["workflow_source_rows_deleted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_prefix_migration_treats_underscore_literally() -> None:
+    flocks_db = Config.get_data_path() / "flocks.db"
+    flocks_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(flocks_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE storage (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("workflow_registry/wf-ok", '{"ok": true}', "json", "old", "old"),
+        )
+        conn.execute(
+            "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("workflowXregistry/wf-bad", '{"bad": true}', "json", "old", "old"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    await Storage.init()
+
+    workflow_db = Storage.get_workflow_db_path()
+    assert _fetch_storage_value(workflow_db, "workflow_registry/wf-ok") == '{"ok": true}'
+    assert _fetch_storage_value(workflow_db, "workflowXregistry/wf-bad") is None
+    assert _fetch_storage_value(flocks_db, "workflowXregistry/wf-bad") == '{"bad": true}'
+    assert await Storage.list_keys("workflow_registry/") == ["workflow_registry/wf-ok"]
+
+
+@pytest.mark.asyncio
+async def test_completed_workflow_migration_fails_if_workflow_db_disappears() -> None:
+    flocks_db = Config.get_data_path() / "flocks.db"
+    flocks_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(flocks_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE storage (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("workflow/wf-legacy", '{"ok": true}', "json", "old", "old"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    await Storage.init()
+    workflow_db = Storage.get_workflow_db_path()
+    assert workflow_db.exists()
+    workflow_db.unlink()
+    _reset_state()
+
+    with pytest.raises(StorageError, match="workflow.db is missing"):
+        await Storage.init()
 
 
 @pytest.mark.asyncio
@@ -224,6 +324,9 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
     assert marker["tasks_migrated"] is True
     assert marker["task_rows"] == 3
     assert marker["task_foreign_key_violations"] == 1
+    assert marker["task_source_rows_deleted"] == 3
+    assert _fetch_table_count(flocks_db, "task_schedulers") == 0
+    assert _fetch_table_count(flocks_db, "task_executions") == 0
 
     await TaskStore.close()
     TaskStore._initialized = False
@@ -234,3 +337,58 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
     finally:
         conn.close()
     assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_completed_task_migration_fails_if_tasks_db_disappears() -> None:
+    await Storage.init()
+    flocks_db = Storage.get_db_path()
+    conn = sqlite3.connect(flocks_db)
+    try:
+        conn.executescript(_TASKS_DDL)
+        legacy_scheduler = TaskScheduler(title="legacy task")
+        conn.execute(
+            """
+            INSERT INTO task_schedulers
+            (id, title, description, mode, status, priority, source, trigger,
+             execution_mode, agent_name, workflow_id, skills, category, context,
+             workspace_directory, retry, tags, created_at, updated_at, created_by, dedup_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            TaskStore._scheduler_to_row(legacy_scheduler),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    await TaskStore.init()
+    tasks_db = TaskStore.get_db_path()
+    assert tasks_db.exists()
+    await TaskStore.close()
+    tasks_db.unlink()
+    _reset_state()
+
+    with pytest.raises(RuntimeError, match="tasks.db is missing"):
+        await TaskStore.init()
+
+
+@pytest.mark.asyncio
+async def test_task_store_init_failure_clears_half_open_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await Storage.init()
+
+    async def fail_migration(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        TaskStore,
+        "_migrate_task_tables_to_tasks_db",
+        classmethod(fail_migration),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await TaskStore.init()
+
+    assert TaskStore._conn is None
+    assert TaskStore._initialized is False

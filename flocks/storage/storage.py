@@ -94,6 +94,7 @@ class Storage:
     _sqlite_write_retry_attempts = 6
     _sqlite_write_retry_base_delay_s = 0.05
     _multi_db_migration_marker_key = "storage.migration.multi_db.v1"
+    _multi_db_migration_batch_size = 500
     _workflow_key_prefixes = (
         "workflow/",
         "workflow_execution/",
@@ -469,6 +470,38 @@ class Storage:
         return key
 
     @classmethod
+    def _like_prefix_pattern(cls, prefix: str) -> str:
+        """Return a SQLite LIKE pattern that treats prefix chars literally."""
+        return (
+            prefix.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            + "%"
+        )
+
+    @classmethod
+    def _like_prefix_clause(cls, column: str = "key") -> str:
+        return f"{column} LIKE ? ESCAPE '\\'"
+
+    @classmethod
+    def _workflow_prefix_filter(cls) -> tuple[str, tuple[str, ...]]:
+        clause = " OR ".join(
+            cls._like_prefix_clause("key") for _ in cls._workflow_key_prefixes
+        )
+        params = tuple(
+            cls._like_prefix_pattern(prefix)
+            for prefix in cls._workflow_key_prefixes
+        )
+        return clause, params
+
+    @staticmethod
+    def _marker_row_count(marker: Dict[str, Any], key: str) -> int:
+        try:
+            return int(marker.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
     async def _ensure_storage_table(cls, db_path: Path) -> None:
         """Ensure the generic KV storage table exists in *db_path*."""
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -543,43 +576,102 @@ class Storage:
             conn.close()
 
     @classmethod
-    def _copy_workflow_kv_to_workflow_db_sync(cls) -> int:
+    def _copy_workflow_kv_to_workflow_db_sync(cls) -> tuple[int, int]:
         if cls._db_path is None:
             raise StorageError("Storage DB path is not initialized")
         workflow_db_path = cls.get_workflow_db_path()
         source = cls.connect_sync(cls._db_path)
         target = cls.connect_sync(workflow_db_path)
         try:
-            clauses = " OR ".join("key LIKE ?" for _ in cls._workflow_key_prefixes)
-            rows = source.execute(
-                f"SELECT key, value, type, created_at, updated_at FROM storage WHERE {clauses}",
-                tuple(f"{prefix}%" for prefix in cls._workflow_key_prefixes),
-            ).fetchall()
-            for row in rows:
-                target.execute(
+            clauses, params = cls._workflow_prefix_filter()
+            total_migrated = 0
+            total_deleted = 0
+            last_key = ""
+            while True:
+                rows = source.execute(
+                    f"""
+                    SELECT key, value, type, created_at, updated_at
+                    FROM storage
+                    WHERE ({clauses}) AND key > ?
+                    ORDER BY key
+                    LIMIT ?
+                    """,
+                    (*params, last_key, cls._multi_db_migration_batch_size),
+                ).fetchall()
+                if not rows:
+                    break
+
+                target.executemany(
                     """
                     INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (
-                        row["key"],
-                        row["value"],
-                        row["type"],
-                        row["created_at"],
-                        row["updated_at"],
-                    ),
+                    [
+                        (
+                            row["key"],
+                            row["value"],
+                            row["type"],
+                            row["created_at"],
+                            row["updated_at"],
+                        )
+                        for row in rows
+                    ],
                 )
-            target.commit()
-            return len(rows)
+                target.commit()
+
+                keys = [row["key"] for row in rows]
+                placeholders = ", ".join("?" for _ in keys)
+                copied = target.execute(
+                    f"SELECT COUNT(*) FROM storage WHERE key IN ({placeholders})",
+                    keys,
+                ).fetchone()[0]
+                if copied != len(keys):
+                    raise StorageError(
+                        "Workflow storage migration verification failed: "
+                        f"expected {len(keys)} copied rows, got {copied}"
+                    )
+
+                deleted = 0
+                for key in keys:
+                    cursor = source.execute(
+                        "DELETE FROM storage WHERE key = ?",
+                        (key,),
+                    )
+                    if cursor.rowcount > 0:
+                        deleted += cursor.rowcount
+                source.commit()
+
+                total_migrated += len(rows)
+                total_deleted += deleted
+                last_key = keys[-1]
+
+            return total_migrated, total_deleted
+        except Exception:
+            if source.in_transaction:
+                source.rollback()
+            if target.in_transaction:
+                target.rollback()
+            raise
         finally:
             source.close()
             target.close()
 
     @classmethod
-    async def _migrate_workflow_storage_to_workflow_db(cls) -> None:
+    async def _migrate_workflow_storage_to_workflow_db(
+        cls,
+        *,
+        workflow_db_existed_before_init: bool,
+    ) -> None:
         """Copy legacy workflow-domain KV rows from flocks.db to workflow.db."""
         marker = await asyncio.to_thread(cls._read_multi_db_migration_marker_sync)
         if marker.get("workflow_migrated") is True:
+            if (
+                not workflow_db_existed_before_init
+                and cls._marker_row_count(marker, "workflow_rows") > 0
+            ):
+                raise StorageError(
+                    "workflow.db is missing after a completed multi-db migration"
+                )
             return
 
         from datetime import UTC
@@ -589,14 +681,18 @@ class Storage:
         marker["source_db"] = str(cls.get_db_path())
         marker["workflow_db"] = str(cls.get_workflow_db_path())
         try:
-            migrated = await asyncio.to_thread(cls._copy_workflow_kv_to_workflow_db_sync)
+            migrated, deleted = await asyncio.to_thread(
+                cls._copy_workflow_kv_to_workflow_db_sync
+            )
             marker["workflow_migrated"] = True
             marker["workflow_migrated_at"] = datetime.now(UTC).isoformat()
             marker["workflow_rows"] = migrated
+            marker["workflow_source_rows_deleted"] = deleted
             marker.pop("workflow_error", None)
             await asyncio.to_thread(cls._write_multi_db_migration_marker_sync, marker)
             cls._log.info("storage.multi_db.workflow_migrated", {
                 "rows": migrated,
+                "source_rows_deleted": deleted,
                 "source_db": marker["source_db"],
                 "workflow_db": marker["workflow_db"],
             })
@@ -693,8 +789,12 @@ class Storage:
         # public Storage API unchanged by routing workflow key prefixes at
         # the KV-operation seam, while initialising the sibling DB here so
         # startup fails early if that database is unusable.
-        await cls._ensure_storage_table(cls.get_workflow_db_path())
-        await cls._migrate_workflow_storage_to_workflow_db()
+        workflow_db_path = cls.get_workflow_db_path()
+        workflow_db_existed_before_init = workflow_db_path.exists()
+        await cls._ensure_storage_table(workflow_db_path)
+        await cls._migrate_workflow_storage_to_workflow_db(
+            workflow_db_existed_before_init=workflow_db_existed_before_init,
+        )
 
         # Drain any residual WAL frames left by the previous process so the
         # next ``SIGKILL`` does not have to truncate a 4 MB-class WAL during
@@ -1110,22 +1210,60 @@ class Storage:
             List of matching keys
         """
         await cls._ensure_init()
-        db_path = cls.route_db_path_for_prefix(prefix)
-        if db_path != cls.get_db_path():
-            await cls._ensure_storage_table(db_path)
+        if prefix is None:
+            db_paths = (cls.get_db_path(), cls.get_workflow_db_path())
+        else:
+            db_paths = (cls.route_db_path_for_prefix(prefix),)
+        for db_path in db_paths:
+            if db_path != cls.get_db_path():
+                await cls._ensure_storage_table(db_path)
         
-        async with cls.connect(db_path) as db:
-            if prefix:
-                query = "SELECT key FROM storage WHERE key LIKE ?"
-                params = (f"{prefix}%",)
-            else:
-                query = "SELECT key FROM storage"
-                params = ()
-            
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
+        keys: set[str] = set()
+        for db_path in db_paths:
+            async with cls.connect(db_path) as db:
+                if prefix:
+                    query = f"SELECT key FROM storage WHERE {cls._like_prefix_clause()}"
+                    params = (cls._like_prefix_pattern(prefix),)
+                else:
+                    query = "SELECT key FROM storage"
+                    params = ()
+
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+            keys.update(row[0] for row in rows)
         
-        return [row[0] for row in rows]
+        return sorted(keys)
+
+    @classmethod
+    async def _list_entry_rows(
+        cls,
+        *,
+        prefix: Optional[str],
+    ) -> List[Tuple[str, str]]:
+        if prefix is None:
+            db_paths = (cls.get_db_path(), cls.get_workflow_db_path())
+        else:
+            db_paths = (cls.route_db_path_for_prefix(prefix),)
+        for db_path in db_paths:
+            if db_path != cls.get_db_path():
+                await cls._ensure_storage_table(db_path)
+
+        rows_by_key: dict[str, str] = {}
+        for db_path in db_paths:
+            async with cls.connect(db_path) as db:
+                if prefix:
+                    query = f"SELECT key, value FROM storage WHERE {cls._like_prefix_clause()}"
+                    params = (cls._like_prefix_pattern(prefix),)
+                else:
+                    query = "SELECT key, value FROM storage"
+                    params = ()
+
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+            for key, value in rows:
+                rows_by_key[key] = value
+
+        return sorted(rows_by_key.items(), key=lambda item: item[0])
 
     @classmethod
     async def list_entries(
@@ -1147,20 +1285,7 @@ class Storage:
             List of ``(key, value)`` tuples
         """
         await cls._ensure_init()
-        db_path = cls.route_db_path_for_prefix(prefix)
-        if db_path != cls.get_db_path():
-            await cls._ensure_storage_table(db_path)
-
-        async with cls.connect(db_path) as db:
-            if prefix:
-                query = "SELECT key, value FROM storage WHERE key LIKE ?"
-                params = (f"{prefix}%",)
-            else:
-                query = "SELECT key, value FROM storage"
-                params = ()
-
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
+        rows = await cls._list_entry_rows(prefix=prefix)
 
         entries: List[Tuple[str, T | Any]] = []
         for key, value_str in rows:
@@ -1188,11 +1313,11 @@ class Storage:
 
         safe_offset = max(int(offset), 0)
         safe_limit = max(int(limit), 0)
-        params = (f"{prefix}%",)
+        params = (cls._like_prefix_pattern(prefix),)
 
         async with cls.connect(db_path) as db:
             async with db.execute(
-                "SELECT COUNT(*) FROM storage WHERE key LIKE ?",
+                f"SELECT COUNT(*) FROM storage WHERE {cls._like_prefix_clause()}",
                 params,
             ) as cursor:
                 row = await cursor.fetchone()
@@ -1202,13 +1327,13 @@ class Storage:
                 return [], total
 
             async with db.execute(
-                """
+                f"""
                 SELECT key, value FROM storage
-                WHERE key LIKE ?
+                WHERE {cls._like_prefix_clause()}
                 ORDER BY key
                 LIMIT ? OFFSET ?
                 """,
-                (f"{prefix}%", safe_limit, safe_offset),
+                (cls._like_prefix_pattern(prefix), safe_limit, safe_offset),
             ) as cursor:
                 rows = await cursor.fetchall()
 
@@ -1235,22 +1360,7 @@ class Storage:
         Compatible with all SQLite versions (no ``json_extract`` required).
         """
         await cls._ensure_init()
-        db_path = cls.route_db_path_for_prefix(prefix)
-        if db_path != cls.get_db_path():
-            await cls._ensure_storage_table(db_path)
-
-        if prefix:
-            query = "SELECT key, value FROM storage WHERE key LIKE ?"
-            params: tuple = (f"{prefix}%",)
-        else:
-            query = "SELECT key, value FROM storage"
-            params = ()
-
-        async with cls.connect(db_path) as db:
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-
-        return [(row[0], row[1]) for row in rows]
+        return await cls._list_entry_rows(prefix=prefix)
 
     @classmethod
     async def exists(cls, key: str) -> bool:
@@ -1299,8 +1409,8 @@ class Storage:
         async def _clear_db(db_path: Path) -> int:
             async with cls.connect(db_path) as db:
                 if prefix:
-                    query = "DELETE FROM storage WHERE key LIKE ?"
-                    params = (f"{prefix}%",)
+                    query = f"DELETE FROM storage WHERE {cls._like_prefix_clause()}"
+                    params = (cls._like_prefix_pattern(prefix),)
                     cursor = await db.execute(query, params)
                 else:
                     query = "DELETE FROM storage WHERE key != ?"

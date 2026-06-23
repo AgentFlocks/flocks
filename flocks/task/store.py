@@ -59,22 +59,33 @@ class TaskStore:
             cls._init_pid = None
         await Storage._ensure_init()
         db_path = cls.get_db_path()
+        db_existed_before_init = db_path.exists()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        cls._conn = await aiosqlite.connect(
-            db_path,
-            timeout=Storage._sqlite_timeout_s,
-        )
-        cls._conn.text_factory = cls._decode_legacy_text
-        await Storage.configure_connection(cls._conn)
-        await cls._conn.executescript(_TASKS_DDL)
-        for stmt in _INDEX_STMTS:
-            await cls._conn.execute(stmt)
-        await cls._conn.commit()
-        await cls._migrate_task_tables_to_tasks_db()
-        await cls._normalize_legacy_paused_executions()
-        cls._initialized = True
-        cls._init_pid = current_pid
-        log.info("task.store.initialized")
+        try:
+            cls._conn = await aiosqlite.connect(
+                db_path,
+                timeout=Storage._sqlite_timeout_s,
+            )
+            cls._conn.text_factory = cls._decode_legacy_text
+            await Storage.configure_connection(cls._conn)
+            await cls._conn.executescript(_TASKS_DDL)
+            for stmt in _INDEX_STMTS:
+                await cls._conn.execute(stmt)
+            await cls._conn.commit()
+            await cls._migrate_task_tables_to_tasks_db(
+                tasks_db_existed_before_init=db_existed_before_init,
+            )
+            cls._initialized = True
+            cls._init_pid = current_pid
+            await cls._normalize_legacy_paused_executions()
+            log.info("task.store.initialized")
+        except Exception:
+            if cls._conn:
+                await cls._conn.close()
+            cls._conn = None
+            cls._initialized = False
+            cls._init_pid = None
+            raise
 
     @classmethod
     async def close(cls) -> None:
@@ -94,7 +105,7 @@ class TaskStore:
             and cls._init_pid != os.getpid()
         ):
             await cls.init()
-        if not cls._conn:
+        if not cls._conn or not cls._initialized:
             await cls.init()
         return cls._conn  # type: ignore[return-value]
 
@@ -132,58 +143,111 @@ class TaskStore:
         source: sqlite3.Connection,
         target: sqlite3.Connection,
         table_name: str,
-    ) -> int:
+    ) -> tuple[int, list[str]]:
         if not cls._table_exists(source, table_name):
-            return 0
+            return 0, []
         source_columns = cls._table_columns(source, table_name)
         target_columns = set(cls._table_columns(target, table_name))
         copy_columns = [column for column in source_columns if column in target_columns]
-        if not copy_columns:
-            return 0
+        if not copy_columns or "id" not in copy_columns:
+            return 0, []
         quoted_columns = ", ".join(cls._quote_identifier(column) for column in copy_columns)
         table_sql = cls._quote_identifier(table_name)
-        rows = source.execute(f"SELECT {quoted_columns} FROM {table_sql}").fetchall()
-        if not rows:
-            return 0
         placeholders = ", ".join("?" for _ in copy_columns)
         insert_sql = (
             f"INSERT OR REPLACE INTO {table_sql} ({quoted_columns}) "
             f"VALUES ({placeholders})"
         )
-        target.executemany(
-            insert_sql,
-            [tuple(row[column] for column in copy_columns) for row in rows],
-        )
-        return len(rows)
+        copied = 0
+        copied_ids: list[str] = []
+        last_rowid = 0
+        while True:
+            rows = source.execute(
+                f"""
+                SELECT rowid AS __rowid, {quoted_columns}
+                FROM {table_sql}
+                WHERE rowid > ?
+                ORDER BY rowid
+                LIMIT ?
+                """,
+                (last_rowid, Storage._multi_db_migration_batch_size),
+            ).fetchall()
+            if not rows:
+                break
+
+            target.executemany(
+                insert_sql,
+                [tuple(row[column] for column in copy_columns) for row in rows],
+            )
+            ids = [str(row["id"]) for row in rows]
+            placeholders = ", ".join("?" for _ in ids)
+            verified = target.execute(
+                f"SELECT COUNT(*) FROM {table_sql} WHERE id IN ({placeholders})",
+                ids,
+            ).fetchone()[0]
+            if verified != len(ids):
+                raise RuntimeError(
+                    f"Task table migration verification failed for {table_name}: "
+                    f"expected {len(ids)} copied rows, got {verified}"
+                )
+
+            copied += len(rows)
+            copied_ids.extend(ids)
+            last_rowid = int(rows[-1]["__rowid"])
+
+        return copied, copied_ids
 
     @classmethod
-    def _copy_task_tables_to_tasks_db_sync(cls) -> tuple[int, int]:
+    def _copy_task_tables_to_tasks_db_sync(cls) -> tuple[int, int, int]:
         source_path = Storage.get_db_path()
         target_path = cls.get_db_path()
         if not source_path.exists():
-            return 0, 0
+            return 0, 0, 0
         source = Storage.connect_sync(source_path)
         target = Storage.connect_sync(target_path)
         try:
             source.text_factory = cls._decode_legacy_text
             target.text_factory = cls._decode_legacy_text
+            source.execute("PRAGMA foreign_keys = OFF")
             original_foreign_keys = target.execute("PRAGMA foreign_keys").fetchone()[0]
             target.execute("PRAGMA foreign_keys = OFF")
             total = 0
+            copied_ids_by_table: dict[str, list[str]] = {}
             for table_name in (
                 "task_schedulers",
                 "task_executions",
                 "task_execution_queue_refs",
             ):
-                total += cls._copy_task_table_sync(source, target, table_name)
+                copied, copied_ids = cls._copy_task_table_sync(source, target, table_name)
+                total += copied
+                copied_ids_by_table[table_name] = copied_ids
             target.commit()
             foreign_key_violations = len(target.execute("PRAGMA foreign_key_check").fetchall())
             target.execute(f"PRAGMA foreign_keys = {original_foreign_keys}")
-            return total, foreign_key_violations
+
+            deleted = 0
+            for table_name in (
+                "task_execution_queue_refs",
+                "task_executions",
+                "task_schedulers",
+            ):
+                table_sql = cls._quote_identifier(table_name)
+                for row_id in copied_ids_by_table.get(table_name, []):
+                    cursor = source.execute(
+                        f"DELETE FROM {table_sql} WHERE id = ?",
+                        (row_id,),
+                    )
+                    if cursor.rowcount > 0:
+                        deleted += cursor.rowcount
+            source.commit()
+            return total, foreign_key_violations, deleted
         except Exception:
+            if source.in_transaction:
+                source.rollback()
             if target.in_transaction:
                 target.rollback()
             try:
+                source.execute("PRAGMA foreign_keys = ON")
                 target.execute("PRAGMA foreign_keys = ON")
             except Exception:
                 pass
@@ -193,9 +257,20 @@ class TaskStore:
             target.close()
 
     @classmethod
-    async def _migrate_task_tables_to_tasks_db(cls) -> None:
+    async def _migrate_task_tables_to_tasks_db(
+        cls,
+        *,
+        tasks_db_existed_before_init: bool,
+    ) -> None:
         marker = await asyncio.to_thread(Storage._read_multi_db_migration_marker_sync)
         if marker.get("tasks_migrated") is True:
+            if (
+                not tasks_db_existed_before_init
+                and Storage._marker_row_count(marker, "task_rows") > 0
+            ):
+                raise RuntimeError(
+                    "tasks.db is missing after a completed multi-db migration"
+                )
             return
 
         marker.setdefault("version", 1)
@@ -203,17 +278,19 @@ class TaskStore:
         marker["source_db"] = str(Storage.get_db_path())
         marker["tasks_db"] = str(cls.get_db_path())
         try:
-            migrated, foreign_key_violations = await asyncio.to_thread(
+            migrated, foreign_key_violations, deleted = await asyncio.to_thread(
                 cls._copy_task_tables_to_tasks_db_sync
             )
             marker["tasks_migrated"] = True
             marker["tasks_migrated_at"] = datetime.now(timezone.utc).isoformat()
             marker["task_rows"] = migrated
             marker["task_foreign_key_violations"] = foreign_key_violations
+            marker["task_source_rows_deleted"] = deleted
             marker.pop("tasks_error", None)
             await asyncio.to_thread(Storage._write_multi_db_migration_marker_sync, marker)
             log.info("task.store.multi_db_migrated", {
                 "rows": migrated,
+                "source_rows_deleted": deleted,
                 "foreign_key_violations": foreign_key_violations,
                 "source_db": marker["source_db"],
                 "tasks_db": marker["tasks_db"],
