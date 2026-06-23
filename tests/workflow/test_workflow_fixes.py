@@ -12,11 +12,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from flocks.tool import Tool, ToolCategory, ToolContext, ToolInfo, ToolRegistry, ToolResult
 from flocks.workflow.errors import WorkflowValidationError
 from flocks.workflow.models import Workflow
 from flocks.workflow.engine import WorkflowEngine
 from flocks.workflow.repl_runtime import PythonExecRuntime
 from flocks.workflow.runner import run_workflow
+from flocks.workflow import tools_adapter as tools_adapter_module
 from flocks.workflow.tools import ToolFacade
 from flocks.workflow.tools_adapter import FlocksToolAdapter
 from flocks.workflow.workflow_lint import (
@@ -116,6 +118,36 @@ class TestRunSafe:
         result = facade.run_safe("websearch", query="test")
         assert result["success"] is True
         assert result["text"] == "search results"
+
+    def test_run_safe_retries_after_lazy_mcp_tool_load(self, monkeypatch: pytest.MonkeyPatch):
+        tool_name = "workflow_lazy_mcp_test_tool"
+        ToolRegistry.unregister(tool_name)
+
+        async def _handler(_ctx: ToolContext) -> ToolResult:
+            return ToolResult(success=True, output="lazy-mcp-ok")
+
+        def _fake_lazy_load() -> None:
+            ToolRegistry.register(
+                Tool(
+                    info=ToolInfo(
+                        name=tool_name,
+                        description="Lazy MCP test tool",
+                        category=ToolCategory.CUSTOM,
+                        parameters=[],
+                    ),
+                    handler=_handler,
+                )
+            )
+
+        monkeypatch.setattr(tools_adapter_module, "_try_lazy_load_mcp_tools", _fake_lazy_load)
+        try:
+            adapter = FlocksToolAdapter()
+            result = adapter.run_safe(tool_name)
+        finally:
+            ToolRegistry.unregister(tool_name)
+
+        assert result["success"] is True
+        assert result["text"] == "lazy-mcp-ok"
 
     def test_run_safe_list_output(self):
         adapter = _MockToolAdapter(outputs={"list_tool": [1, 2, 3]})
