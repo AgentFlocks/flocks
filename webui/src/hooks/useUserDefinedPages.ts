@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import i18n from '@/i18n';
 import { userDefinedPagesAPI, type UserDefinedPageListItem } from '@/api/userDefinedPages';
+import { useSSE } from '@/hooks/useSSE';
 
 export function useUserDefinedPages() {
   const [pages, setPages] = useState<UserDefinedPageListItem[]>([]);
@@ -53,6 +54,16 @@ export function useUserDefinedPages() {
       window.removeEventListener('focus', onFocus);
     };
   }, [refreshOnResume]);
+
+  useSSE({
+    url: '/api/event',
+    onEvent: useCallback((evt) => {
+      if (evt.type === 'user_defined_pages.nav_changed') {
+        void fetchPages(true);
+      }
+    }, [fetchPages]),
+    reconnect: { maxRetries: 5, initialDelay: 2000 },
+  });
 
   return {
     pages,
