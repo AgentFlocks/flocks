@@ -1,5 +1,7 @@
 # Flocks
 
+AI 原生 SecOps 平台
+
 <p align="center">
   <a href="https://agentflocks.github.io/flocks-docs/"><img alt="文档" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
   <a href="https://github.com/AgentFlocks/flocks/releases"><img alt="Release" src="https://img.shields.io/badge/release-v2026.6.18-f06f2f?style=for-the-badge"></a>
@@ -10,8 +12,6 @@
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/lang-English-e33f44?style=for-the-badge"></a>
   <a href="README_zh.md"><img alt="中文" src="https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-e33f44?style=for-the-badge"></a>
 </p>
-
-AI 原生 SecOps 平台
 
 ![Flocks Web](assets/flocks.webp)
 
