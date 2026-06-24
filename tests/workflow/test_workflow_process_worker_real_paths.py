@@ -108,7 +108,7 @@ def lifecycle_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 
 @pytest.mark.asyncio
 async def test_execution_manager_persists_real_workflow_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    state: dict[str, list[Any]] = {"created": [], "results": []}
+    state: dict[str, list[Any]] = {"created": [], "results": [], "steps": [], "progress": []}
 
     async def _create_execution_record(
         workflow_id: str,
@@ -133,8 +133,16 @@ async def test_execution_manager_persists_real_workflow_lifecycle(monkeypatch: p
     ) -> None:
         state["results"].append((workflow_id, exec_id, dict(exec_data)))
 
+    async def _record_execution_step(exec_id: str, step_index: int, step_data: dict[str, Any]) -> None:
+        state["steps"].append((exec_id, step_index, dict(step_data)))
+
+    async def _storage_write(key: str, data: dict[str, Any]) -> None:
+        state["progress"].append((key, dict(data)))
+
     monkeypatch.setattr("flocks.workflow.execution_manager.create_execution_record", _create_execution_record)
     monkeypatch.setattr("flocks.workflow.execution_manager.record_execution_result", _record_execution_result)
+    monkeypatch.setattr("flocks.workflow.execution_manager.record_execution_step", _record_execution_step)
+    monkeypatch.setattr("flocks.workflow.execution_manager.Storage.write", _storage_write)
 
     result = await WorkflowExecutionManager().run(
         workflow_id="wf-manager-real",
@@ -148,6 +156,42 @@ async def test_execution_manager_persists_real_workflow_lifecycle(monkeypatch: p
     assert result.outputs["summary"] == "processed:manager"
     assert state["results"][0][2]["status"] == "success"
     assert state["results"][0][2]["outputResults"]["summary"] == "processed:manager"
+    assert [step[1] for step in state["steps"]] == [1, 2]
+    assert state["steps"][0][2]["node_id"] == "normalize"
+    assert state["steps"][1][2]["node_id"] == "finish"
+    assert state["results"][0][2]["stepCount"] == 2
+    assert any(progress[1].get("currentNodeId") == "normalize" for progress in state["progress"])
+
+
+@pytest.mark.asyncio
+async def test_execution_manager_passes_explicit_workflow_id_to_worker() -> None:
+    workflow = {
+        "start": "inspect_context",
+        "nodes": [
+            {
+                "id": "inspect_context",
+                "type": "python",
+                "code": "\n".join(
+                    [
+                        "ctx = getattr(getattr(tool, 'registry', None), '_ctx', None)",
+                        "extra = getattr(ctx, 'extra', {}) or {}",
+                        "outputs['workflow_id'] = extra.get('workflowId')",
+                    ]
+                ),
+            }
+        ],
+        "edges": [],
+    }
+
+    result = await WorkflowExecutionManager().run(
+        workflow_id="wf-manager-explicit-id",
+        workflow=workflow,
+        ensure_requirements=False,
+        persist=False,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs["workflow_id"] == "wf-manager-explicit-id"
 
 
 def test_service_runtime_invoke_runs_real_workflow(monkeypatch: pytest.MonkeyPatch) -> None:
