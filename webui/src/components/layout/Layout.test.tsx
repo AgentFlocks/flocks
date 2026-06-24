@@ -140,7 +140,9 @@ vi.mock('@/components/common/UpdateModal', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    t: (key: string, options?: Record<string, string>) => (
+      options?.version ? `${key} ${options.version}` : key
+    ),
     i18n: { language: 'zh-CN', changeLanguage: vi.fn() },
   }),
 }));
@@ -356,8 +358,20 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it('skips GitHub-backed update checks when Flocks Pro is active', async () => {
-    vi.useFakeTimers();
+  it('checks Flocks Pro bundle updates when Flocks Pro is active', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: '2026.6.22',
+      current_version: '2026.6.21',
+      current_bundle_version: '2026.6.21',
+      latest_bundle_version: '2026.6.22',
+      current_core_version: '2026.6.21',
+      latest_core_version: '2026.6.21',
+      current_pro_component_version: '2026.6.20',
+      latest_pro_component_version: '2026.6.22',
+      error: null,
+    });
     flocksproUsersApi.getLicenseStatus.mockResolvedValue({
       pro_enabled: true,
       active: true,
@@ -372,13 +386,8 @@ describe('Layout onboarding entry', () => {
 
     renderHomeWithLayout();
 
-    await flushEffects();
-    expect(checkUpdate).not.toHaveBeenCalled();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_600_000);
-    });
-    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    expect(await screen.findByText(/newVersion v2026\.6\.22/)).toBeInTheDocument();
   });
 
   it('shows Flocks Pro branding and version for member users', async () => {
@@ -400,16 +409,16 @@ describe('Layout onboarding entry', () => {
     });
     consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
       installed: true,
-      installed_version: '2026.05.22',
-      flockspro_component_version: '2026.05.22',
+      installed_version: '2026.6.21',
+      flockspro_component_version: '2026.6.20',
     });
 
     renderHomeWithLayout();
 
     expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
-    expect(await screen.findByText('Flocks Pro pro-v2026.05.22')).toBeInTheDocument();
+    expect(await screen.findByText(/Flocks Pro v2026\.6\.21/)).toBeInTheDocument();
     expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
-    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
   });
 
   it('enforces a ten-minute minimum gap for focus-triggered update checks', async () => {
