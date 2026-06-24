@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Info,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -16,10 +15,10 @@ import { useSessionChat } from '@/hooks/useSessionChat';
 import { sessionApi } from '@/api/session';
 import { providerAPI } from '@/api/provider';
 import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
-import type { APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
+import { hubAPI } from '@/api/hub';
+import type { APIServiceCredentialField, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
-import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
 import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
 
 // ============================================================================
@@ -75,8 +74,11 @@ function vendorPresentation(vendorKey: string): DeviceVendor {
   };
 }
 
-function deviceTemplateHubUrl(template: DeviceTemplate): string {
-  return `/hub?type=device&plugin=${encodeURIComponent(template.plugin_id)}&q=${encodeURIComponent(template.plugin_id)}`;
+function templateAction(template: DeviceTemplate): 'install' | 'update' | null {
+  if (template.installed) return null;
+  if (template.state === 'available') return 'install';
+  if (template.state === 'updateAvailable') return 'update';
+  return null;
 }
 
 // ============================================================================
@@ -154,8 +156,6 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // ============================================================================
 // Add device wizard panel (step 1: vendor, step 2: product)
 // ============================================================================
-
-type DeviceAddTab = 'rex' | 'manual';
 
 interface DeviceAddDraft {
   template: DeviceTemplate;
@@ -329,19 +329,43 @@ function buildDeviceDraftAction(
   };
 }
 
+function buildTemplateGuidePrompt(template: DeviceTemplate): string {
+  const fields = template.credential_schema
+    .map((field) => `${field.key}${field.required ? '*' : ''}${field.label ? ` (${field.label})` : ''}`)
+    .join(', ');
+  const installed = template.installed;
+  return [
+    `我要接入设备「${template.name}」。`,
+    '我已从已支持设备列表选择了这个设备模板，请按该模板继续引导接入。',
+    `模板信息：storage_key=${template.storage_key}，service_id=${template.service_id}，plugin_id=${template.plugin_id}，状态=${installed ? 'installed' : template.state}。`,
+    fields ? `该设备表单字段包括：${fields}。` : '该设备模板没有声明额外表单字段。',
+    installed
+      ? '请直接引导我确认设备名称、所属机房、连接地址、认证字段、SSL 验证和连通测试步骤。'
+      : '该模板尚未安装，请先引导我前往 FlockHub 安装或更新该设备模板，安装完成后再继续配置。',
+    installed
+      ? '信息足够后，请输出设备配置 JSON 草稿，页面会用它填充表单；不要在 JSON 中写入真实密钥。'
+      : '模板安装完成前不要输出设备配置 JSON 草稿。',
+  ].join('\n');
+}
+
 function DeviceAddRexPanel({
   templates,
   onApplyDraft,
   onInstallTemplate,
+  instanceCounts,
 }: {
   templates: DeviceTemplate[];
   onApplyDraft: (draft: DeviceAddDraft) => void;
-  onInstallTemplate: (template: DeviceTemplate) => void;
+  onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
+  instanceCounts: Record<string, number>;
 }) {
-  const { t } = useTranslation('device');
+  const { t, i18n } = useTranslation('device');
   const toast = useToast();
   const [extracting, setExtracting] = useState(false);
   const [detectedAction, setDetectedAction] = useState<DetectedDeviceDraftAction | null>(null);
+  const [showBuiltInTemplates, setShowBuiltInTemplates] = useState(false);
+  const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set());
+  const [installingTemplateKey, setInstallingTemplateKey] = useState<string | null>(null);
   const rexComposerControls = useRexComposerControls();
   const contextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
   const welcomeMessage = t('wizard.rex.welcome');
@@ -353,6 +377,98 @@ function DeviceAddRexPanel({
   });
 
   useEffect(() => reset, [reset]);
+
+  const startGuidedPrompt = useCallback((prompt: string) => {
+    createAndSend({
+      text: prompt,
+      agent: rexComposerControls.rexAgentName,
+      model: rexComposerControls.rexModel,
+    }).catch(() => {});
+  }, [createAndSend, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+
+  const vendorGroups = useMemo(() => {
+    const groups = new Map<string, { vendor: DeviceVendor; templates: DeviceTemplate[] }>();
+    for (const template of templates) {
+      const vendorKey = template.vendor || '__unspecified__';
+      const vendor = vendorKey === '__unspecified__'
+        ? { id: vendorKey, nameCn: t('vendor.unspecified'), nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
+        : vendorPresentation(vendorKey);
+      if (!groups.has(vendorKey)) {
+        groups.set(vendorKey, { vendor, templates: [] });
+      }
+      groups.get(vendorKey)!.templates.push(template);
+    }
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        templates: [...group.templates].sort((a, b) => {
+          if (a.installed !== b.installed) return a.installed ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        }),
+      }))
+      .sort((a, b) => {
+        const rank = (vendor: DeviceVendor) => {
+          if (vendor.id === 'threatbook') return 0;
+          if (vendor.id === '__unspecified__') return 99;
+          return 1;
+        };
+        const ra = rank(a.vendor);
+        const rb = rank(b.vendor);
+        if (ra !== rb) return ra - rb;
+        return a.vendor.id.localeCompare(b.vendor.id);
+      });
+  }, [templates, t]);
+
+  const findCaseTemplate = useCallback((keywords: string[]) => {
+    const normalizedKeywords = keywords.map((keyword) => keyword.toLowerCase());
+    const matches = templates.filter((template) => {
+      const haystack = [
+        template.name,
+        template.plugin_id,
+        template.storage_key,
+        template.service_id,
+      ].join(' ').toLowerCase();
+      return normalizedKeywords.some((keyword) => haystack.includes(keyword));
+    });
+    return matches.find((template) => template.installed) ?? matches[0];
+  }, [templates]);
+
+  const handleTemplatePrompt = useCallback(async (template: DeviceTemplate) => {
+    const action = templateAction(template);
+    if (!action) {
+      setShowBuiltInTemplates(false);
+      startGuidedPrompt(buildTemplateGuidePrompt(template));
+      return;
+    }
+    setInstallingTemplateKey(template.storage_key);
+    try {
+      const installedTemplate = await onInstallTemplate(template);
+      if (installedTemplate) {
+        setShowBuiltInTemplates(false);
+        startGuidedPrompt(buildTemplateGuidePrompt(installedTemplate));
+      }
+    } finally {
+      setInstallingTemplateKey(null);
+    }
+  }, [onInstallTemplate, startGuidedPrompt]);
+
+  const handleCaseTemplate = useCallback((keywords: string[], fallbackPrompt: string) => {
+    const template = findCaseTemplate(keywords);
+    if (!template) {
+      startGuidedPrompt(fallbackPrompt);
+      return;
+    }
+    void handleTemplatePrompt(template);
+  }, [findCaseTemplate, handleTemplatePrompt, startGuidedPrompt]);
+
+  const toggleVendor = (vendorId: string) => {
+    setExpandedVendors((current) => {
+      const next = new Set(current);
+      if (next.has(vendorId)) next.delete(vendorId);
+      else next.add(vendorId);
+      return next;
+    });
+  };
 
   const detectLatestDraft = useCallback(async (silent: boolean) => {
     if (!sessionId || extracting) return;
@@ -379,11 +495,14 @@ function DeviceAddRexPanel({
     }
   }, [extracting, sessionId, t, templates, toast]);
 
-  const handleConfirmDetectedDraft = () => {
+  const handleConfirmDetectedDraft = async () => {
     if (!detectedAction) return;
     if (detectedAction.kind === 'install') {
-      toast.info(t('wizard.rex.installFirst'));
-      onInstallTemplate(detectedAction.template);
+      const installedTemplate = await onInstallTemplate(detectedAction.template);
+      setDetectedAction(null);
+      if (installedTemplate) {
+        startGuidedPrompt(buildTemplateGuidePrompt(installedTemplate));
+      }
       return;
     }
     onApplyDraft(detectedAction.draft);
@@ -414,15 +533,131 @@ function DeviceAddRexPanel({
         emptyText={t('wizard.rex.pending')}
         onStreamingDone={() => void detectLatestDraft(true)}
         welcomeContent={
-          <div className="mx-4 my-4 flex items-start gap-2.5">
-            <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-red-500 text-sm font-bold text-white shadow-sm ring-2 ring-white">
-              R
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="mb-1.5 text-xs font-semibold text-zinc-700">Rex</div>
-              <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm leading-relaxed text-zinc-700 shadow-sm whitespace-pre-line">
-                {welcomeMessage}
-              </div>
+          <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
+            <div className="flex max-h-[min(620px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
+              {!showBuiltInTemplates ? (
+                <>
+                  <div className="flex-shrink-0">
+                    <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+                      <ServerCog className="h-5 w-5" />
+                    </div>
+                    <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
+                    <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
+                      {t('wizard.guide.subtitle')}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
+                    <WorkbenchSection title={t('wizard.guide.customTitle')}>
+                      <WorkbenchAction
+                        label={t('wizard.guide.actions.api')}
+                        onClick={() => startGuidedPrompt(t('wizard.guide.prompts.api'))}
+                      />
+                      <WorkbenchAction
+                        label={t('wizard.guide.actions.browser')}
+                        onClick={() => startGuidedPrompt(t('wizard.guide.prompts.browser'))}
+                      />
+                    </WorkbenchSection>
+
+                    <WorkbenchSection title={t('wizard.guide.caseTitle')}>
+                      <WorkbenchAction
+                        label={t('wizard.guide.cases.tdp')}
+                        onClick={() => handleCaseTemplate(['tdp'], t('wizard.guide.prompts.tdp'))}
+                      />
+                      <WorkbenchAction
+                        label={t('wizard.guide.cases.onesec')}
+                        onClick={() => handleCaseTemplate(['onesec', 'one sec'], t('wizard.guide.prompts.onesec'))}
+                      />
+                      <WorkbenchAction
+                        label={t('wizard.guide.cases.more')}
+                        onClick={() => setShowBuiltInTemplates(true)}
+                      />
+                    </WorkbenchSection>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex-shrink-0 text-left">
+                    <button
+                      type="button"
+                      onClick={() => setShowBuiltInTemplates(false)}
+                      className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                      {t('wizard.supportedList.back')}
+                    </button>
+                    <h3 className="text-sm font-semibold text-gray-900">{t('wizard.supportedList.title')}</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-gray-500">{t('wizard.supportedList.subtitle')}</p>
+                  </div>
+
+                  <div className="mt-4 min-h-0 space-y-2 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
+                    {vendorGroups.map(({ vendor, templates: vendorTemplates }) => {
+                      const expanded = expandedVendors.has(vendor.id);
+                      const vendorName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
+                      const integratedCount = vendorTemplates.reduce(
+                        (sum, template) => sum + (instanceCounts[template.storage_key] ?? 0),
+                        0,
+                      );
+                      return (
+                        <section key={vendor.id} className="rounded-lg border border-gray-200 bg-white">
+                          <button
+                            type="button"
+                            onClick={() => toggleVendor(vendor.id)}
+                            className="flex h-10 w-full items-center gap-2 px-3 text-left"
+                            aria-expanded={expanded}
+                          >
+                            <div className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-[11px] font-bold ${vendor.color}`}>
+                              {vendorName[0]}
+                            </div>
+                            <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700">{vendorName}</span>
+                            <span className="text-[10px] font-medium text-gray-400">
+                              {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
+                              {integratedCount > 0 ? ` / ${t('wizard.supportedList.integratedCount', { count: integratedCount })}` : ''}
+                            </span>
+                            <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                          </button>
+                          {expanded && (
+                            <div className="border-t border-gray-100 px-2 pb-2">
+                              {vendorTemplates.map((tpl) => {
+                                const count = instanceCounts[tpl.storage_key] ?? 0;
+                                const action = templateAction(tpl);
+                                const installing = installingTemplateKey === tpl.storage_key;
+                                const stateBadge = tpl.installed
+                                  ? t('wizard.installState.installed')
+                                  : tpl.state === 'updateAvailable'
+                                    ? t('wizard.installState.updateAvailable')
+                                    : tpl.state === 'broken'
+                                      ? t('wizard.installState.brokenShort')
+                                      : t('wizard.installState.available');
+                                return (
+                                  <button
+                                    key={tpl.storage_key}
+                                    type="button"
+                                    disabled={!!installingTemplateKey}
+                                    onClick={() => {
+                                      void handleTemplatePrompt(tpl);
+                                    }}
+                                    className="group mt-1.5 flex h-9 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
+                                  >
+                                    <span className="min-w-0 flex-1 truncate">{tpl.name}</span>
+                                    <span className="flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium text-gray-400">
+                                      {count > 0 && <span>{t('wizard.instanceCount', { count })}</span>}
+                                      <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
+                                    </span>
+                                    {installing
+                                      ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
+                                      : <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </section>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         }
@@ -464,63 +699,44 @@ function DeviceAddRexPanel({
   );
 }
 
-function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onApplyRexDraft, onInstallTemplate, onClose }: {
+function WorkbenchSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
+      <div className="flex flex-col gap-1.5">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function WorkbenchAction({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
+    >
+      <span className="min-w-0 truncate">{label}</span>
+      <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />
+    </button>
+  );
+}
+
+function AddDeviceWizardPanel({ templates, instanceCounts, onApplyRexDraft, onInstallTemplate, onClose }: {
   templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
-  initialVendor?: DeviceVendor;
-  onSelect: (template: DeviceTemplate) => void;
-  onSelectCustom: (mode: CustomDeviceAccessMode) => void;
   onApplyRexDraft: (draft: DeviceAddDraft) => void;
-  onInstallTemplate: (template: DeviceTemplate) => void;
+  onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
   onClose: () => void;
 }) {
-  const { t, i18n } = useTranslation('device');
-  const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<DeviceAddTab>('rex');
-  const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
-  const [showCustomModes, setShowCustomModes] = useState(false);
-
-  const availableVendors = useMemo<DeviceVendor[]>(() => {
-    const seen: string[] = [];
-    for (const t of templates) {
-      const key = t.vendor || '__unspecified__';
-      if (!seen.includes(key)) seen.push(key);
-    }
-    seen.sort((a, b) => {
-      const rank = (k: string) => {
-        if (k === 'threatbook') return 0;
-        if (k === '__unspecified__') return 99;
-        return 1;
-      };
-      const ra = rank(a);
-      const rb = rank(b);
-      if (ra !== rb) return ra - rb;
-      return a.localeCompare(b);
-    });
-    return seen.map((key) =>
-      key === '__unspecified__'
-        ? { id: '__unspecified__', nameCn: t('vendor.unspecified'), nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
-        : vendorPresentation(key),
-    );
-  }, [templates]);
-
-  const vendorTotalCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const t of templates) {
-      const key = t.vendor || '__unspecified__';
-      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.storage_key] ?? 0);
-    }
-    return counts;
-  }, [templates, instanceCounts]);
-
-  const vendorTemplates = useMemo(() => {
-    if (!selectedVendor) return [];
-    return templates.filter((t) => (t.vendor || '__unspecified__') === selectedVendor.id);
-  }, [templates, selectedVendor]);
-
-  const inModeSelection = showCustomModes && !selectedVendor;
-  const shouldShowVendorSecondary = (vendor: DeviceVendor) =>
-    vendor.nameCn.trim().toLocaleLowerCase() !== vendor.nameEn.trim().toLocaleLowerCase();
+  const { t } = useTranslation('device');
 
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
@@ -538,244 +754,29 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
         {/* Header */}
         <div className="px-5 py-4 border-b border-zinc-100 flex-shrink-0">
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold text-zinc-900">{t('wizard.title')}</h3>
+            <div className="flex min-w-0 items-center gap-2">
+              <h3 className="truncate text-lg font-semibold text-zinc-900">{t('wizard.title')}</h3>
+            </div>
             <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
               <X className="w-4 h-4" />
             </button>
           </div>
-          <div className="mt-3 grid w-full grid-cols-2 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
-            {[
-              { key: 'rex' as const, label: t('wizard.tabs.rex') },
-              { key: 'manual' as const, label: t('wizard.tabs.manual') },
-            ].map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => setActiveTab(tab.key)}
-                className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                  activeTab === tab.key
-                    ? 'bg-white text-blue-600 shadow-sm'
-                    : 'text-zinc-500 hover:text-zinc-700'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-          {activeTab === 'manual' && (
-            <div className="mt-3 flex items-center gap-2.5">
-              {(selectedVendor || inModeSelection) && (
-                <button
-                  onClick={() => {
-                    setSelectedVendor(null);
-                    setShowCustomModes(false);
-                  }}
-                  className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                </button>
-              )}
-              <div className="min-w-0">
-                {(selectedVendor || inModeSelection) && (
-                  <p className="mb-1 text-xs font-medium text-zinc-600">
-                    {selectedVendor
-                      ? t('wizard.selectVendorTitle', { vendor: i18n.language.startsWith('zh') ? selectedVendor.nameCn : selectedVendor.nameEn })
-                      : t('wizard.modeTitle')}
-                  </p>
-                )}
-                <div className="flex items-center gap-1.5">
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
-                    {t('wizard.step1Custom')}
-                  </span>
-                  <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
-                    {t('wizard.step2Custom')}
-                  </span>
-                  <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
-                    {t('wizard.step3Custom')}
-                  </span>
-                </div>
-              </div>
+          <div className="mt-5 flex justify-center border-b border-red-500">
+            <div className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600">
+              <ServerCog className="h-4 w-4" />
+              {t('wizard.guide.workbenchTab')}
             </div>
-          )}
+          </div>
         </div>
 
         {/* Content */}
-        <div className={`flex-1 min-h-0 ${activeTab === 'rex' ? 'overflow-hidden' : 'overflow-y-auto p-5'}`}>
-          {activeTab === 'rex' ? (
-            <DeviceAddRexPanel
-              templates={templates}
-              onApplyDraft={onApplyRexDraft}
-              onInstallTemplate={onInstallTemplate}
-            />
-          ) : !selectedVendor && !inModeSelection ? (
-            <>
-              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  onClick={() => setShowCustomModes(true)}
-                  className="group flex w-full items-center gap-3 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50"
-                >
-                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-blue-100 text-sm font-bold text-blue-700">
-                    自
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-zinc-800 truncate">{t('wizard.customCardTitle')}</p>
-                    <p className="text-[11px] text-zinc-400 truncate">{t('wizard.customCardSubtitle')}</p>
-                    <p className="text-[10px] text-blue-600 mt-1 font-medium truncate">
-                      {t('wizard.customCardCta')}
-                    </p>
-                  </div>
-                  <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-blue-300 transition-colors group-hover:text-blue-500" />
-                </button>
-                {availableVendors.map((vendor) => {
-                  const count = vendorTotalCounts[vendor.id] ?? 0;
-                  const productCount = templates.filter(
-                    (t) => (t.vendor || '__unspecified__') === vendor.id,
-                  ).length;
-                  const primaryName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
-                  const secondaryName = i18n.language.startsWith('zh') ? vendor.nameEn : vendor.nameCn;
-                  const showSecondary = shouldShowVendorSecondary(vendor);
-                  return (
-                    <button
-                      key={vendor.id}
-                      onClick={() => setSelectedVendor(vendor)}
-                      className="group flex w-full items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
-                    >
-                      <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-sm font-bold ${vendor.color}`}>
-                        {vendor.nameCn[0]}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold text-zinc-800 truncate">{primaryName}</p>
-                        {showSecondary && <p className="text-[11px] text-zinc-400 truncate">{secondaryName}</p>}
-                        <p className="text-[10px] text-zinc-400 mt-1 truncate">
-                          {t('wizard.productCount', { count: productCount })}
-                          {count > 0 && <span className="text-zinc-500"> / {t('wizard.instanceCount', { count })}</span>}
-                        </p>
-                      </div>
-                      <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300 transition-colors group-hover:text-blue-400" />
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          ) : inModeSelection ? (
-            <>
-              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseCustomMode')}</p>
-              <div className="space-y-3">
-                {[
-                  {
-                    key: 'api' as const,
-                    title: t('wizard.customModes.api.title'),
-                    desc: t('wizard.customModes.api.desc'),
-                  },
-                  {
-                    key: 'webcli' as const,
-                    title: t('wizard.customModes.webcli.title'),
-                    desc: t('wizard.customModes.webcli.desc'),
-                  },
-                  {
-                    key: 'workflow' as const,
-                    title: t('wizard.customModes.workflow.title'),
-                    desc: t('wizard.customModes.workflow.desc'),
-                  },
-                ].map((mode) => (
-                  <button
-                    key={mode.key}
-                    onClick={() => onSelectCustom(mode.key)}
-                    className="w-full text-left flex items-start gap-3 px-4 py-4 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
-                  >
-                    <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
-                      <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-zinc-800 leading-snug">{mode.title}</p>
-                      <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{mode.desc}</p>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-xs text-zinc-400 mb-4">
-                {t('wizard.productHint', { count: vendorTemplates.length })}
-              </p>
-              <div className="space-y-2">
-                {vendorTemplates.map((tpl) => {
-                  const count = instanceCounts[tpl.storage_key] ?? 0;
-                  const disabled = !tpl.installed;
-                  const stateHint = tpl.state === 'updateAvailable'
-                    ? t('wizard.installState.update')
-                    : tpl.state === 'broken'
-                      ? t('wizard.installState.broken')
-                      : t('wizard.installState.install');
-                  const stateBadge = tpl.state === 'updateAvailable'
-                    ? t('wizard.installState.updateAvailable')
-                    : tpl.state === 'broken'
-                      ? t('wizard.installState.brokenShort')
-                      : tpl.installed
-                        ? t('wizard.installState.installed')
-                        : t('wizard.installState.available');
-                  const hubUrl = deviceTemplateHubUrl(tpl);
-                  return (
-                    <button
-                      key={tpl.storage_key}
-                      onClick={() => { if (disabled) navigate(hubUrl); else onSelect(tpl); }}
-                      className={`w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border transition-all group ${
-                        disabled
-                          ? 'border-zinc-100 bg-zinc-50 opacity-85 hover:border-amber-200 hover:bg-amber-50/30'
-                          : 'border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30'
-                      }`}
-                    >
-                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors ${
-                        disabled ? 'bg-zinc-100' : 'bg-zinc-50 group-hover:bg-blue-50'
-                      }`}>
-                        <Plug className={`w-4 h-4 transition-colors ${disabled ? 'text-zinc-300' : 'text-zinc-400 group-hover:text-blue-500'}`} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-sm font-medium text-zinc-800 leading-snug">{tpl.name}</p>
-                          {tpl.version && (
-                            <span className="text-[10px] text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5">
-                              v{tpl.version}
-                            </span>
-                          )}
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5 font-medium ${
-                            tpl.installed
-                              ? 'bg-green-50 text-green-700'
-                              : tpl.state === 'broken'
-                                ? 'bg-red-50 text-red-700'
-                                : 'bg-amber-50 text-amber-700'
-                          }`}>
-                            {stateBadge}
-                          </span>
-                        </div>
-                        {(tpl.description_cn || tpl.description) && (
-                          <p className="text-xs text-zinc-400 mt-0.5 line-clamp-2 leading-relaxed">
-                            {tpl.description_cn || tpl.description}
-                          </p>
-                        )}
-                        {count > 0 && (
-                          <span className="inline-block mt-1.5 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md font-medium">
-                            {t('wizard.instanceCount', { count })}
-                          </span>
-                        )}
-                        {disabled && (
-                          <span className="inline-block mt-1.5 text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-md font-medium underline underline-offset-2">
-                            {stateHint}
-                          </span>
-                        )}
-                      </div>
-                      <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-2 transition-colors ${disabled ? 'text-amber-300 group-hover:text-amber-500' : 'text-zinc-300 group-hover:text-blue-400'}`} />
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <DeviceAddRexPanel
+            templates={templates}
+            instanceCounts={instanceCounts}
+            onApplyDraft={onApplyRexDraft}
+            onInstallTemplate={onInstallTemplate}
+          />
         </div>
       </div>
     </div>
@@ -1640,16 +1641,14 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 
 type PanelMode =
   | { kind: 'pick-group' }
-  | { kind: 'wizard'; initialVendor?: DeviceVendor }
+  | { kind: 'wizard' }
   | { kind: 'add'; template: DeviceTemplate; draft?: Omit<DeviceAddDraft, 'template'> }
-  | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
 
 export default function DeviceIntegrationPage() {
   const toast = useToast();
   const { t } = useTranslation('device');
-  const navigate = useNavigate();
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
   const [templates, setTemplates] = useState<DeviceTemplate[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
@@ -1683,16 +1682,20 @@ export default function DeviceIntegrationPage() {
     [devices, selectedGroupId],
   );
 
-  const fetchData = useCallback(async (silent = false, refreshTemplates = false): Promise<DeviceTemplate[]> => {
+  const fetchData = useCallback(async (
+    silent = false,
+    refreshTemplates = false,
+    syncDeviceInstances = false,
+  ): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
-      if (refreshTemplates) {
-        await deviceAPI.sync({ refresh: true });
+      if (syncDeviceInstances) {
+        await deviceAPI.sync({ refresh: refreshTemplates });
       }
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        deviceAPI.listTemplates(),
+        refreshTemplates ? deviceAPI.listTemplates({ refresh: true }) : deviceAPI.listTemplates(),
         deviceAPI.listGroups(),
       ]);
       const nextTemplates = tplRes.data || [];
@@ -1877,10 +1880,28 @@ export default function DeviceIntegrationPage() {
   // Whether the room field should be locked (read-only) in the config panel.
   const groupLocked = selectedGroupId !== null;
 
-  const handleInstallTemplate = useCallback((template: DeviceTemplate) => {
-    setPanel(null);
-    navigate(deviceTemplateHubUrl(template));
-  }, [navigate]);
+  const handleInstallTemplate = useCallback(async (template: DeviceTemplate): Promise<DeviceTemplate | null> => {
+    const action = templateAction(template);
+    if (!action) return template;
+    try {
+      if (action === 'install') {
+        toast.info(t('wizard.installState.installingTemplate', { name: template.name }));
+        await hubAPI.install('device', template.plugin_id);
+      } else {
+        toast.info(t('wizard.installState.updatingTemplate', { name: template.name }));
+        await hubAPI.update('device', template.plugin_id);
+      }
+      const nextTemplates = await fetchData(true, true, false);
+      const installedTemplate = nextTemplates.find((item) => item.plugin_id === template.plugin_id)
+        ?? nextTemplates.find((item) => item.storage_key === template.storage_key)
+        ?? { ...template, installed: true, state: 'installed' as const };
+      toast.success(t(action === 'install' ? 'wizard.installState.installDone' : 'wizard.installState.updateDone', { name: template.name }));
+      return installedTemplate;
+    } catch (err: unknown) {
+      toast.error(errDetail(err, t(action === 'install' ? 'wizard.installState.installFailed' : 'wizard.installState.updateFailed', { name: template.name })));
+      return null;
+    }
+  }, [fetchData, t, toast]);
 
   const handleApplyRexDraft = useCallback((draft: DeviceAddDraft) => {
     const normalizedGroupName = draft.groupName?.trim().toLowerCase();
@@ -1936,7 +1957,7 @@ export default function DeviceIntegrationPage() {
         action={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => void fetchData(true, true)}
+              onClick={() => void fetchData(true, true, true)}
               disabled={refreshing}
               title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
@@ -2184,20 +2205,9 @@ export default function DeviceIntegrationPage() {
         <AddDeviceWizardPanel
           templates={templates}
           instanceCounts={instanceCounts}
-          initialVendor={panel.initialVendor}
-          onSelect={(tpl) => setPanel({ kind: 'add', template: tpl })}
-          onSelectCustom={(mode) => setPanel({ kind: 'custom', mode })}
           onApplyRexDraft={handleApplyRexDraft}
           onInstallTemplate={handleInstallTemplate}
           onClose={() => setPanel(null)}
-        />
-      )}
-
-      {panel?.kind === 'custom' && (
-        <CustomDeviceAccessPanel
-          mode={panel.mode}
-          onClose={() => setPanel(null)}
-          onBack={() => setPanel({ kind: 'wizard' })}
         />
       )}
 
@@ -2223,13 +2233,7 @@ export default function DeviceIntegrationPage() {
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={() => setPanel(null)}
             onTest={panel.kind === 'edit' ? handleTest : undefined}
-            onBack={panel.kind === 'add'
-              ? () => setPanel({
-                  kind: 'wizard',
-                  initialVendor: panelVendorKey ? vendorPresentation(panelVendorKey) : undefined,
-                })
-              : undefined
-            }
+            onBack={panel.kind === 'add' ? () => setPanel({ kind: 'wizard' }) : undefined}
           />
         );
       })()}

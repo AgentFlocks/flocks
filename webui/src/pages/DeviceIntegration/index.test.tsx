@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   listDeviceTools: vi.fn(),
   updateDeviceTool: vi.fn(),
   listTemplates: vi.fn(),
+  hubInstall: vi.fn(),
+  hubUpdate: vi.fn(),
   getServiceMetadata: vi.fn(),
   listTools: vi.fn(),
   setToolEnabled: vi.fn(),
@@ -50,6 +52,7 @@ vi.mock('react-i18next', () => ({
         'toolbar.addDevice': '立即添加设备',
         'empty.addNow': '立即添加设备',
         'config.closeAriaLabel': '关闭设备配置面板',
+        'config.newDeviceTitle': '填写配置',
         'config.nameLabel': '设备名称',
         'config.roomLabel': '所属机房',
         'config.saveBtn': '保存配置',
@@ -60,6 +63,41 @@ vi.mock('react-i18next', () => ({
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
         'wizard.tabs.rex': 'Rex 接入',
         'wizard.tabs.manual': '手动接入',
+        'wizard.guide.workbenchTab': '工作台',
+        'wizard.guide.title': 'Rex 辅助接入',
+        'wizard.guide.subtitle': '选择一个引导或案例',
+        'wizard.guide.customTitle': '自定义设备接入',
+        'wizard.guide.caseTitle': '创建案例',
+        'wizard.guide.examples.supported': '我想接入一台已支持的安全设备',
+        'wizard.guide.examples.addressOnly': '我只有设备地址和登录方式',
+        'wizard.guide.examples.noApi': '这台设备没有开放 API',
+        'wizard.guide.prompts.api': '我已选择 API 接入，请按 API 接入继续',
+        'wizard.guide.prompts.browser': '我已选择浏览器接入，请按浏览器接入继续',
+        'wizard.guide.prompts.addressOnly': '我只有待接入设备的地址和登录方式，请先帮我判断它是否已有模板可用',
+        'wizard.guide.prompts.tdp': '我已选择 TDP 接入案例，请引导我接入微步 TDP 设备',
+        'wizard.guide.prompts.onesec': '我已选择 OneSEC 接入案例，请引导我接入 OneSEC 设备',
+        'wizard.guide.actions.api': 'API 接入',
+        'wizard.guide.actions.browser': '浏览器接入',
+        'wizard.guide.cases.tdp': 'TDP 接入',
+        'wizard.guide.cases.onesec': 'OneSEC 接入',
+        'wizard.guide.cases.more': '查看更多',
+        'wizard.supportedList.back': '返回',
+        'wizard.supportedList.title': '已支持设备列表',
+        'wizard.supportedList.subtitle': '先选择厂商，再选择要接入的设备',
+        'wizard.supportedList.deviceCount': `${String(params?.count ?? '')} 款设备`,
+        'wizard.supportedList.integratedCount': `已接入 ${String(params?.count ?? '')} 台`,
+        'wizard.installState.installed': '已安装',
+        'wizard.installState.available': '可安装',
+        'wizard.installState.updateAvailable': '可更新',
+        'wizard.installState.brokenShort': '不可用',
+        'wizard.installState.installing': '安装中',
+        'wizard.installState.updating': '更新中',
+        'wizard.installState.installingTemplate': `正在安装设备模板「${String(params?.name ?? '')}」`,
+        'wizard.installState.updatingTemplate': `正在更新设备模板「${String(params?.name ?? '')}」`,
+        'wizard.installState.installDone': `设备模板「${String(params?.name ?? '')}」已安装`,
+        'wizard.installState.updateDone': `设备模板「${String(params?.name ?? '')}」已更新`,
+        'wizard.installState.installFailed': `设备模板「${String(params?.name ?? '')}」安装失败`,
+        'wizard.installState.updateFailed': `设备模板「${String(params?.name ?? '')}」更新失败`,
         'wizard.rex.title': 'Rex 引导添加设备',
         'wizard.rex.heading': 'Rex 引导接入',
         'wizard.rex.subtitle': '描述设备型号、接入方式和已有资料',
@@ -85,12 +123,12 @@ vi.mock('react-i18next', () => ({
         'wizard.rex.guides.api.title': '自定义 API',
         'wizard.rex.guides.api.desc': '通过 API 文档创建自定义 device 插件',
         'wizard.rex.guides.api.prompt': '我要接入一个暂未支持的 API 设备',
-        'wizard.rex.guides.webcli.title': 'WebCLI',
+        'wizard.rex.guides.webcli.title': '浏览器接入',
         'wizard.rex.guides.webcli.desc': '通过 Web 控制台页面创建接入能力',
         'wizard.rex.guides.webcli.prompt': '我要接入一个没有开放 API 的 Web 控制台设备',
         'wizard.customCardTitle': '自定义设备',
         'wizard.customModes.api.title': 'API 接入',
-        'wizard.customModes.webcli.title': 'WebCLI 接入',
+        'wizard.customModes.webcli.title': '浏览器接入',
         'wizard.customModes.workflow.title': 'Workflow 接入',
         'custom.actions.submit': '提交给 Rex',
         'custom.actions.openSessionList': '前往会话列表查看',
@@ -231,6 +269,13 @@ vi.mock('@/api/device', () => ({
   },
 }));
 
+vi.mock('@/api/hub', () => ({
+  hubAPI: {
+    install: (...args: unknown[]) => mocks.hubInstall(...args),
+    update: (...args: unknown[]) => mocks.hubUpdate(...args),
+  },
+}));
+
 vi.mock('@/api/provider', () => ({
   providerAPI: {
     getServiceMetadata: (...args: unknown[]) => mocks.getServiceMetadata(...args),
@@ -269,7 +314,21 @@ function buildTemplate(overrides: Record<string, unknown> = {}) {
 
 async function openManualAddWizard(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
-  await user.click(screen.getByRole('button', { name: /^手动接入$/ }));
+}
+
+async function openSupportedDeviceList(user: ReturnType<typeof userEvent.setup>) {
+  await openManualAddWizard(user);
+  await user.click(screen.getByRole('button', { name: /查看更多/ }));
+}
+
+async function openApiDeviceGuidance(user: ReturnType<typeof userEvent.setup>) {
+  await openManualAddWizard(user);
+  await user.click(screen.getByRole('button', { name: /^API 接入$/ }));
+}
+
+async function openBrowserDeviceGuidance(user: ReturnType<typeof userEvent.setup>) {
+  await openManualAddWizard(user);
+  await user.click(screen.getByRole('button', { name: /^浏览器接入$/ }));
 }
 
 describe('DeviceIntegrationPage', () => {
@@ -301,6 +360,8 @@ describe('DeviceIntegrationPage', () => {
       data: [{ id: 'default', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 }],
     });
     mocks.listTemplates.mockResolvedValue({ data: [buildTemplate()] });
+    mocks.hubInstall.mockResolvedValue({ data: {} });
+    mocks.hubUpdate.mockResolvedValue({ data: {} });
     mocks.getServiceMetadata.mockResolvedValue({ data: { credential_schema: [] } });
     mocks.revealDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
     mocks.listTools.mockResolvedValue({ data: [] });
@@ -332,16 +393,17 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.syncDevices).not.toHaveBeenCalled();
   });
 
-  it('shows custom device option and access modes', async () => {
+  it('shows custom guidance and example entries on the add-device workbench', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
     await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
 
     expect(screen.getByText('API 接入')).toBeInTheDocument();
-    expect(screen.getByText('WebCLI 接入')).toBeInTheDocument();
-    expect(screen.getByText('Workflow 接入')).toBeInTheDocument();
+    expect(screen.getByText('浏览器接入')).toBeInTheDocument();
+    expect(screen.getByText('TDP 接入')).toBeInTheDocument();
+    expect(screen.getByText('OneSEC 接入')).toBeInTheDocument();
+    expect(screen.getByText('查看更多')).toBeInTheDocument();
   });
 
   it('opens the add-device panel on the Rex-guided tab by default', async () => {
@@ -352,6 +414,10 @@ describe('DeviceIntegrationPage', () => {
 
     expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
     expect(screen.getByText('SessionChat:pending')).toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助接入')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^API 接入$/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^浏览器接入$/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^查看更多$/ })).toBeInTheDocument();
     expect(screen.getByText('Placeholder:描述要接入的设备、地址、认证方式或上传相关资料')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^填充表单$/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /自定义设备/ })).toBeNull();
@@ -366,12 +432,42 @@ describe('DeviceIntegrationPage', () => {
     const contextMessage = mocks.useSessionChatOptions.mock.calls.at(-1)?.[0].contextMessage;
     expect(contextMessage).toContain('```json');
     expect(contextMessage).toContain('API 接入');
-    expect(contextMessage).toContain('WebCLI 接入');
+    expect(contextMessage).toContain('浏览器接入');
     expect(contextMessage).toContain('Workflow 接入');
     expect(contextMessage).toContain('Syslog、Kafka 或 Webhook');
     expect(contextMessage).toContain('不要继续输出设备配置 JSON');
-    expect(contextMessage).toContain('必须先使用 `question` 工具询问用户选择接入方式');
+    expect(contextMessage).toContain('只有用户没有明确选择接入方式时，才使用 `question` 工具询问用户选择接入方式');
+    expect(contextMessage).toContain('如果用户当前消息已经明确写了「API 接入」或「浏览器接入」，不要再询问接入方式');
     expect(contextMessage).toContain('用户确认接入方式后，必须使用下方对应规则继续澄清和推进');
+  });
+
+  it('starts a guided Rex prompt from the add-device welcome card', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(screen.getByRole('button', { name: /TDP 接入/ }));
+
+    expect(mocks.createAndSend).toHaveBeenCalledWith({
+      text: expect.stringContaining('我已选择 TDP 接入案例'),
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    });
+  });
+
+  it('sends the custom API guidance prompt from the add-device welcome card', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(screen.getByRole('button', { name: /^API 接入$/ }));
+
+    expect(mocks.createAndSend).toHaveBeenCalledWith({
+      text: expect.stringContaining('我已选择 API 接入'),
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    });
+    expect(screen.getByText('Placeholder:描述要接入的设备、地址、认证方式或上传相关资料')).toBeInTheDocument();
   });
 
   it('applies Rex device draft to the add-device config form', async () => {
@@ -481,98 +577,84 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
-  it('navigates unavailable templates to FlockHub', async () => {
+  it('installs unavailable supported templates and then sends them to Rex', async () => {
     const user = userEvent.setup();
+    const availableTemplate = buildTemplate({
+      plugin_id: 'onesig_v2_5_3_D20250710',
+      storage_key: 'onesig_v2_5_3_D20250710_api_v2_5_3_D20250710',
+      service_id: 'onesig_v2_5_3_D20250710_api',
+      name: 'onesig',
+      version: '2.5.3 D20250710',
+      installed: false,
+      state: 'available',
+    });
     mocks.listTemplates.mockResolvedValueOnce({
-      data: [
-        buildTemplate({
-          plugin_id: 'onesig_v2_5_3_D20250710',
-          storage_key: 'onesig_v2_5_3_D20250710_api_v2_5_3_D20250710',
-          service_id: 'onesig_v2_5_3_D20250710_api',
-          name: 'onesig',
-          version: '2.5.3 D20250710',
-          installed: false,
-          state: 'available',
-        }),
-      ],
+      data: [availableTemplate],
+    });
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [{ ...availableTemplate, installed: true, state: 'installed' }],
     });
 
     render(<DeviceIntegrationPage />);
 
-    await openManualAddWizard(user);
+    await openSupportedDeviceList(user);
     await user.click(screen.getByText('微步'));
     await user.click(screen.getByText('onesig'));
 
-    expect(mocks.navigate).toHaveBeenCalledWith(
-      '/hub?type=device&plugin=onesig_v2_5_3_D20250710&q=onesig_v2_5_3_D20250710',
-    );
+    await waitFor(() => {
+      expect(mocks.hubInstall).toHaveBeenCalledWith('device', 'onesig_v2_5_3_D20250710');
+    });
+    expect(mocks.syncDevices).not.toHaveBeenCalled();
+    expect(mocks.listTemplates).toHaveBeenLastCalledWith({ refresh: true });
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('我要接入设备「onesig」'),
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    })));
+    expect(mocks.createAndSend.mock.calls[0][0].text).toContain('storage_key=onesig_v2_5_3_D20250710_api_v2_5_3_D20250710');
   });
 
-  it('opens api mode directly in Rex chat with built-in guidance', async () => {
+  it('sends api guidance directly to Rex without opening a custom form', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /API 接入/ }));
+    await openApiDeviceGuidance(user);
 
     expect(screen.queryByLabelText('设备产品名')).toBeNull();
     expect(screen.queryByLabelText('Base URL')).toBeNull();
     expect(screen.queryByRole('button', { name: /提交给 Rex/ })).toBeNull();
     expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
-    expect(screen.getByText('Placeholder:请提供产品 API 文档')).toBeInTheDocument();
-    expect(screen.getByText(/请提供待接入设备的 API 资料。/)).toBeInTheDocument();
-    expect(mocks.createAndSend).not.toHaveBeenCalled();
-    const options = mocks.useSessionChatOptions.mock.calls.at(-1)?.[0];
-    expect(options).toEqual(
-      expect.objectContaining({
-        category: 'entity-config',
-        welcomeMessage: expect.stringContaining('API 文档链接'),
-      }),
-    );
-    expect(options.contextMessage).toContain('本次接入方式是 API 接入');
-    expect(options.contextMessage).toContain('在正式开始构建设备插件之前');
-    expect(options.contextMessage).toContain('使用 `question` 工具明确');
-    expect(options.welcomeMessage).toContain('请提供待接入设备的 API 资料。');
-    expect(options.welcomeMessage).toContain('资料确认后，Rex 将生成');
+    expect(mocks.createAndSend).toHaveBeenCalledWith({
+      text: expect.stringContaining('我已选择 API 接入'),
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    });
   });
 
-  it('opens webcli mode directly in Rex chat with skill-first guidance', async () => {
+  it('sends browser guidance directly to Rex without opening a custom form', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /WebCLI 接入/ }));
+    await openBrowserDeviceGuidance(user);
 
     expect(screen.queryByLabelText('登录说明')).toBeNull();
     expect(screen.queryByLabelText('产品 URL')).toBeNull();
     expect(screen.queryByLabelText('需要获取的接口或页面行为')).toBeNull();
     expect(screen.queryByRole('button', { name: /提交给 Rex/ })).toBeNull();
     expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
-    expect(screen.getByText('Placeholder:请提供网站地址')).toBeInTheDocument();
-    expect(screen.getByText(/请提供待接入设备的 Web 控制台资料。/)).toBeInTheDocument();
-    expect(mocks.createAndSend).not.toHaveBeenCalled();
-    const options = mocks.useSessionChatOptions.mock.calls.at(-1)?.[0];
-    expect(options).toEqual(
-      expect.objectContaining({
-        welcomeMessage: expect.stringContaining('登录 URL'),
-      }),
-    );
-    expect(options.contextMessage).toContain('本次接入方式是 WebCLI 接入');
-    expect(options.contextMessage).toContain('向用户提出必要问题');
-    expect(options.contextMessage).toContain('使用 `question` 工具明确');
-    expect(options.welcomeMessage).toContain('请提供待接入设备的 Web 控制台资料。');
-    expect(options.welcomeMessage).toContain('资料确认后，Rex 将沉淀 WebCLI 资产');
+    expect(mocks.createAndSend).toHaveBeenCalledWith({
+      text: expect.stringContaining('我已选择浏览器接入'),
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    });
   });
 
-  it('creates custom device session only after the user sends a message', async () => {
+  it('creates a Rex device-add session when the user sends a message', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
     await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
     expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
     expect(mocks.createAndSend).not.toHaveBeenCalled();
@@ -583,6 +665,8 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.createAndSend).toHaveBeenCalledWith({
       text: '用户补充资料',
       imageParts: [],
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
     });
   });
 
@@ -590,41 +674,53 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /API 接入/ }));
+    await openApiDeviceGuidance(user);
 
     await screen.findByText('SessionChat:pending');
     expect(screen.queryByRole('button', { name: /刷新设备模板/ })).toBeNull();
     expect(screen.queryByText(/已进入 Rex 对话/)).toBeNull();
   });
 
-  it('navigates to the matching session from rex chat view', async () => {
+  it('sends the selected supported device template to Rex from the vendor accordion', async () => {
     const user = userEvent.setup();
-    mocks.sessionId = 'session-1';
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          vendor: 'threatbook',
+          installed: true,
+          state: 'installed',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
     render(<DeviceIntegrationPage />);
 
-    await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /API 接入/ }));
+    await openSupportedDeviceList(user);
+    await user.click(screen.getByRole('button', { name: /微步/ }));
+    await user.click(screen.getByRole('button', { name: /TDP/ }));
 
-    await screen.findByText('SessionChat:session-1');
-    await user.click(screen.getByRole('button', { name: /前往会话列表查看/ }));
-
-    expect(mocks.navigate).toHaveBeenCalledWith('/sessions?session=session-1');
-  });
-
-  it('redirects workflow integration flow to workflows page', async () => {
-    const user = userEvent.setup();
-    render(<DeviceIntegrationPage />);
-
-    await openManualAddWizard(user);
-    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /Workflow 接入/ }));
-    expect(screen.queryByRole('button', { name: /新建工作流/ })).toBeNull();
-    await user.click(screen.getByRole('button', { name: /前往工作流列表/ }));
-
-    expect(mocks.navigate).toHaveBeenCalledWith('/workflows');
+    expect(screen.queryByText('填写配置')).toBeNull();
+    expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('我要接入设备「TDP」'),
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    }));
+    expect(mocks.createAndSend.mock.calls[0][0].text).toContain('storage_key=tdp_api_v3_3_10');
+    expect(mocks.createAndSend.mock.calls[0][0].text).toContain('base_url* (Base URL)');
   });
 
   it('clicking the blank backdrop closes the config panel', async () => {
