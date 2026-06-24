@@ -13,7 +13,6 @@ import {
 } from '@/api/consoleUpgrade';
 import { type UpdateProgress } from '@/api/update';
 import { extractErrorMessage } from '@/utils/error';
-import { checkRestartReadiness } from '@/utils/restartPolling';
 
 interface UpgradeApplyFormState {
   product: string;
@@ -55,6 +54,7 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
   notes: '',
 };
 
+const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
 const DISMISSED_REJECTED_REQUESTS_KEY = 'flockspro-dismissed-rejected-requests';
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
@@ -765,22 +765,27 @@ export default function FlocksproUpgradePage() {
 
   const pollUntilReady = () => {
     const startedAt = Date.now();
-    let lastPollFailure = '';
     const poll = async () => {
       if (Date.now() - startedAt > HEALTH_POLL_TIMEOUT) {
-        setUpgradeError(lastPollFailure ? `${t('upgrade.restartTimeout')} ${lastPollFailure}` : t('upgrade.restartTimeout'));
+        setUpgradeError(t('upgrade.restartTimeout'));
         setProRestarting(false);
         setProUpgrading(false);
         return;
       }
-
-      const readiness = await checkRestartReadiness();
-      if (readiness.ready) {
-        window.location.reload();
-        return;
+      try {
+        const healthResponse = await fetch('/api/health', { cache: 'no-store' });
+        if (healthResponse.ok) {
+          const rootResponse = await fetch('/', { cache: 'no-store' });
+          const rootHtml = await rootResponse.text();
+          const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
+          if (rootResponse.ok && !stillShowingUpgradePage) {
+            window.location.assign(`${window.location.pathname}${window.location.search}`);
+            return;
+          }
+        }
+      } catch {
+        // Backend may be restarting.
       }
-      lastPollFailure = readiness.reason || lastPollFailure;
-
       setTimeout(() => {
         void poll();
       }, HEALTH_POLL_INTERVAL);
@@ -1456,3 +1461,4 @@ export default function FlocksproUpgradePage() {
     </div>
   );
 }
+
