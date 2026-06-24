@@ -519,6 +519,8 @@ async def test_delete_workflow_cleans_directory_and_storage(
         f"workflow_release/{workflow_id}/active",
         f"workflow_release/{workflow_id}/rel-1",
         workflow_routes._workflow_execution_key("exec-delete"),
+        "workflow_execution_step/exec-delete/00000001",
+        f"workflow_execution_index/{workflow_id}/00000000000000000001/exec-delete",
     ]
     for key in storage_keys:
         payload = {"workflowId": workflow_id}

@@ -23,9 +23,7 @@ function getInitialTheme(): Theme {
   const stored = typeof storage?.getItem === 'function' ? storage.getItem(THEME_STORAGE_KEY) : null;
   if (stored === 'light' || stored === 'dark') return stored;
 
-  if (typeof window.matchMedia !== 'function') return 'light';
-
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return 'light';
 }
 
 function applyTheme(theme: Theme) {

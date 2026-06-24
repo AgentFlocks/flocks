@@ -127,7 +127,28 @@
     "process": {
       "title": "Process ({{count}})",
       "reasoningCount": "{{count}} reasoning",
-      "toolCount": "{{count}} tool calls"
+      "toolCount": "{{count}} tool calls",
+      "textCount": "{{count}} intermediate replies"
+    },
+    "questionResult": {
+      "answered": "Answered",
+      "unanswered": "Unanswered",
+      "questionLabel": "Question",
+      "answerLabel": "Answer",
+      "yes": "Yes",
+      "no": "No"
+    },
+    "bash": {
+      "command": "Command",
+      "workdir": "Working directory",
+      "duration": "Duration",
+      "timeout": "Timeout",
+      "timedOut": "Timed out",
+      "aborted": "Aborted",
+      "stdout": "Stdout",
+      "stderr": "Stderr",
+      "output": "Output",
+      "noOutput": "No output"
     },
     "you": "You",
     "sending": "Sending...",

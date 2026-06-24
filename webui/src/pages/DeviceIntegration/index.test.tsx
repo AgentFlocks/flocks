@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   listTools: vi.fn(),
   setToolEnabled: vi.fn(),
   refreshTools: vi.fn(),
+  getSessionMessagesPage: vi.fn(),
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -57,6 +58,36 @@ vi.mock('react-i18next', () => ({
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
+        'wizard.tabs.rex': 'Rex 接入',
+        'wizard.tabs.manual': '手动接入',
+        'wizard.rex.title': 'Rex 引导添加设备',
+        'wizard.rex.heading': 'Rex 引导接入',
+        'wizard.rex.subtitle': '描述设备型号、接入方式和已有资料',
+        'wizard.rex.welcome': '请告诉我你要接入的设备厂商、型号、版本。信息足够后，我会输出一段 ```json 配置草稿。',
+        'wizard.rex.placeholder': '描述要接入的设备、地址、认证方式或上传相关资料',
+        'wizard.rex.pending': 'Rex 准备中...',
+        'wizard.rex.manualAction': '切换到手动接入',
+        'wizard.rex.applyDraft': '应用到表单',
+        'wizard.rex.applyDone': '已填充设备配置表单',
+        'wizard.rex.extracting': '提取中...',
+        'wizard.rex.extractEmpty': '还没有可提取的 Rex 输出',
+        'wizard.rex.extractNoTemplate': '未能从 Rex 输出中匹配到设备模板',
+        'wizard.rex.extractFailed': '提取失败，请让 Rex 输出 ```json 设备配置草稿后重试',
+        'wizard.rex.installFirst': '该模板尚未安装，先前往 FlockHub 安装',
+        'wizard.rex.detectedDraft': '检测到可填充的设备配置草稿',
+        'wizard.rex.detectedInstall': '检测到设备模板，但该模板尚未安装',
+        'wizard.rex.applyDetected': '填充表单',
+        'wizard.rex.installDetected': '前往安装',
+        'wizard.rex.dismissDraft': '忽略',
+        'wizard.rex.guides.existing.title': '已有模板',
+        'wizard.rex.guides.existing.desc': '整理已支持设备的手动接入字段',
+        'wizard.rex.guides.existing.prompt': '我要接入一个已有模板支持的安全设备',
+        'wizard.rex.guides.api.title': '自定义 API',
+        'wizard.rex.guides.api.desc': '通过 API 文档创建自定义 device 插件',
+        'wizard.rex.guides.api.prompt': '我要接入一个暂未支持的 API 设备',
+        'wizard.rex.guides.webcli.title': 'WebCLI',
+        'wizard.rex.guides.webcli.desc': '通过 Web 控制台页面创建接入能力',
+        'wizard.rex.guides.webcli.prompt': '我要接入一个没有开放 API 的 Web 控制台设备',
         'wizard.customCardTitle': '自定义设备',
         'wizard.customModes.api.title': 'API 接入',
         'wizard.customModes.webcli.title': 'WebCLI 接入',
@@ -124,11 +155,13 @@ vi.mock('@/components/common/SessionChat', () => ({
     sessionId,
     welcomeContent,
     onCreateAndSend,
+    onStreamingDone,
     placeholder,
   }: {
     sessionId?: string | null;
     welcomeContent?: React.ReactNode;
     onCreateAndSend?: (text: string, imageParts: []) => void;
+    onStreamingDone?: () => void;
     placeholder?: string;
   }) => (
     <div>
@@ -140,8 +173,27 @@ vi.mock('@/components/common/SessionChat', () => ({
           mock send
         </button>
       )}
+      {onStreamingDone && (
+        <button type="button" onClick={onStreamingDone}>
+          mock stream done
+        </button>
+      )}
     </div>
   ),
+}));
+
+vi.mock('@/components/common/useRexComposerControls', () => ({
+  useRexComposerControls: () => ({
+    rexAgentName: 'rex',
+    rexMentionAgents: [{ name: 'rex', description: 'Rex' }],
+    rexModel: { providerID: 'openai', modelID: 'gpt-4.1' },
+    rexSupportsVision: true,
+    rexContextWindowTokens: 128000,
+    rexComposerTextareaMinHeight: 48,
+    rexComposerTextareaMaxHeight: 120,
+    rexToolbarSlot: <div>RexAgentDisplay</div>,
+    rexCenterToolbarSlot: <div>RexModelPicker</div>,
+  }),
 }));
 
 vi.mock('@/hooks/useSessionChat', () => ({
@@ -193,6 +245,12 @@ vi.mock('@/api/tool', () => ({
   },
 }));
 
+vi.mock('@/api/session', () => ({
+  sessionApi: {
+    getMessagesPage: (...args: unknown[]) => mocks.getSessionMessagesPage(...args),
+  },
+}));
+
 function buildTemplate(overrides: Record<string, unknown> = {}) {
   return {
     plugin_id: 'existing_device_v1',
@@ -207,6 +265,11 @@ function buildTemplate(overrides: Record<string, unknown> = {}) {
     vendor: 'threatbook',
     ...overrides,
   };
+}
+
+async function openManualAddWizard(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+  await user.click(screen.getByRole('button', { name: /^手动接入$/ }));
 }
 
 describe('DeviceIntegrationPage', () => {
@@ -245,6 +308,7 @@ describe('DeviceIntegrationPage', () => {
     mocks.listDeviceTools.mockResolvedValue({ data: [] });
     mocks.updateDeviceTool.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
+    mocks.getSessionMessagesPage.mockResolvedValue({ items: [] });
   });
 
   it('refreshes devices and templates without syncing when the window regains focus', async () => {
@@ -272,12 +336,149 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
 
     expect(screen.getByText('API 接入')).toBeInTheDocument();
     expect(screen.getByText('WebCLI 接入')).toBeInTheDocument();
     expect(screen.getByText('Workflow 接入')).toBeInTheDocument();
+  });
+
+  it('opens the add-device panel on the Rex-guided tab by default', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+
+    expect(await screen.findByText('SessionChat:pending')).toBeInTheDocument();
+    expect(screen.getByText('SessionChat:pending')).toBeInTheDocument();
+    expect(screen.getByText('Placeholder:描述要接入的设备、地址、认证方式或上传相关资料')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^填充表单$/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /自定义设备/ })).toBeNull();
+    expect(screen.queryByText('Rex 引导接入')).toBeNull();
+    expect(mocks.useSessionChatOptions.mock.calls.at(-1)?.[0]).toEqual(
+      expect.objectContaining({
+        title: 'Rex 引导添加设备',
+        category: 'entity-config',
+        contextMessage: expect.stringContaining('当前可见设备模板'),
+      }),
+    );
+    const contextMessage = mocks.useSessionChatOptions.mock.calls.at(-1)?.[0].contextMessage;
+    expect(contextMessage).toContain('```json');
+    expect(contextMessage).toContain('API 接入');
+    expect(contextMessage).toContain('WebCLI 接入');
+    expect(contextMessage).toContain('Workflow 接入');
+    expect(contextMessage).toContain('Syslog、Kafka 或 Webhook');
+    expect(contextMessage).toContain('不要继续输出设备配置 JSON');
+    expect(contextMessage).toContain('必须先使用 `question` 工具询问用户选择接入方式');
+    expect(contextMessage).toContain('用户确认接入方式后，必须使用下方对应规则继续澄清和推进');
+  });
+
+  it('applies Rex device draft to the add-device config form', async () => {
+    const user = userEvent.setup();
+    mocks.sessionId = 'session-1';
+    mocks.listGroups.mockResolvedValue({
+      data: [
+        { id: 'group-1', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 },
+        { id: 'group-2', name: '北京机房', sort_order: 1, created_at: 0, updated_at: 0 },
+      ],
+    });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          storage_key: 'qingteng_v3_4_1_66',
+          service_id: 'qingteng',
+          name: '青藤云安全',
+          vendor: 'qingteng',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+            {
+              key: 'username',
+              label: 'Username',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'text',
+              config_key: 'username',
+            },
+          ],
+        }),
+      ],
+    });
+    mocks.getSessionMessagesPage.mockResolvedValue({
+      items: [
+        {
+          info: { role: 'assistant' },
+          parts: [
+            {
+              type: 'text',
+              text: '```json\n{"storage_key":"qingteng_v3_4_1_66","device_name":"青藤万相","fields":{"base_url":"https://example.com","username":"admin"},"verify_ssl":false}\n```',
+            },
+          ],
+        },
+      ],
+    });
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(await screen.findByRole('button', { name: /mock stream done/ }));
+    expect(await screen.findByText('检测到可填充的设备配置草稿')).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /^填充表单$/ }));
+
+    expect(await screen.findByDisplayValue('青藤万相')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://example.com')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('admin')).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveValue('group-1');
+    expect(screen.getAllByText('北京机房').length).toBeGreaterThan(0);
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('已填充设备配置表单');
+  });
+
+  it('does not detect Rex prose as a fillable device draft', async () => {
+    const user = userEvent.setup();
+    mocks.sessionId = 'session-1';
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          storage_key: 'qingteng_v3_4_1_66',
+          service_id: 'qingteng',
+          name: '青藤云安全',
+          vendor: 'qingteng',
+        }),
+      ],
+    });
+    mocks.getSessionMessagesPage.mockResolvedValue({
+      items: [
+        {
+          info: { role: 'assistant' },
+          parts: [
+            {
+              type: 'text',
+              text: '模板：`qingteng_v3_4_1_66`\n设备名称：青藤万相\n所属机房：北京机房\nBase URL：https://example.com',
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(await screen.findByRole('button', { name: /mock stream done/ }));
+
+    await waitFor(() => {
+      expect(mocks.getSessionMessagesPage).toHaveBeenCalledWith('session-1', { limit: 50 });
+    });
+    expect(screen.queryByText('检测到可填充的设备配置草稿')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^填充表单$/ })).toBeNull();
+    expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
   it('navigates unavailable templates to FlockHub', async () => {
@@ -298,7 +499,7 @@ describe('DeviceIntegrationPage', () => {
 
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByText('微步'));
     await user.click(screen.getByText('onesig'));
 
@@ -311,7 +512,7 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
@@ -340,7 +541,7 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /WebCLI 接入/ }));
 
@@ -369,7 +570,7 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
@@ -389,7 +590,7 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
@@ -403,7 +604,7 @@ describe('DeviceIntegrationPage', () => {
     mocks.sessionId = 'session-1';
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /API 接入/ }));
 
@@ -417,7 +618,7 @@ describe('DeviceIntegrationPage', () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
-    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await openManualAddWizard(user);
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
     await user.click(screen.getByRole('button', { name: /Workflow 接入/ }));
     expect(screen.queryByRole('button', { name: /新建工作流/ })).toBeNull();

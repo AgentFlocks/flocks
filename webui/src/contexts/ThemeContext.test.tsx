@@ -45,7 +45,7 @@ describe('ThemeProvider', () => {
     mockPreferredScheme(false);
   });
 
-  it('uses system dark preference when no stored theme exists', async () => {
+  it('defaults to light when no stored theme exists', async () => {
     mockPreferredScheme(true);
 
     render(
@@ -54,10 +54,10 @@ describe('ThemeProvider', () => {
       </ThemeProvider>,
     );
 
-    expect(screen.getByTestId('theme-value')).toHaveTextContent('dark');
-    expect(document.documentElement).toHaveClass('dark');
-    expect(document.documentElement.style.colorScheme).toBe('dark');
-    await waitFor(() => expect(localStorage.getItem('flocks_theme')).toBe('dark'));
+    expect(screen.getByTestId('theme-value')).toHaveTextContent('light');
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(document.documentElement.style.colorScheme).toBe('light');
+    await waitFor(() => expect(localStorage.getItem('flocks_theme')).toBe('light'));
   });
 
   it('prefers the stored theme over system preference', async () => {

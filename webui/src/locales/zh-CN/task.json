@@ -206,7 +206,89 @@
     "selfContainedHint": "定时任务执行时会创建全新的 Rex 会话，不再继承父 session；请把执行上下文直接写在描述或任务补充信息里。",
     "recentRuns": "最近运行",
     "recentRunsEmpty": "暂无运行记录",
-    "recentRunsLoading": "正在加载运行记录..."
+    "recentRunsLoading": "正在加载运行记录...",
+    "create": {
+      "emptyStateTitle": "暂无创建对话",
+      "guidePanelTitle": "Rex 辅助创建任务",
+      "guidePanelDesc": "选择一个引导或案例，Rex 会先确认任务目标、执行对象、调度方式和输出要求，再整理成可创建的任务配置。",
+      "guideSectionTitle": "创建引导",
+      "caseSectionTitle": "创建案例",
+      "guideActions": [
+        {
+          "label": "创建定时任务",
+          "description": "从目标、执行对象、频率、时区和输出要求开始配置。",
+          "prompt": "请引导我创建一个 Flocks 定时任务。先不要直接输出最终 JSON，先用 question 工具一次只问一个最关键问题，帮我确认任务目标、执行模式（Agent 或 Workflow）、具体执行指令、调度方式（立即、指定时间或循环）、时区、优先级和输出要求；我确认后再整理成可提取到表单的任务配置。"
+        },
+        {
+          "label": "梳理执行指令",
+          "description": "把模糊需求整理成 Agent 可直接执行的 userPrompt。",
+          "prompt": "请帮我梳理这个任务的执行指令。请一次只问一个问题，确认任务目标、输入来源、处理步骤、输出格式、失败时怎么处理，以及哪些上下文必须写进任务说明里；最后整理成适合填入任务补充信息的文本。"
+        },
+        {
+          "label": "选择调度频率",
+          "description": "确认一次性、每日、每周、工作日或自定义 Cron。",
+          "prompt": "请帮我选择这个任务的调度频率。请先确认业务时区、是否需要立即执行或指定时间执行、是否是循环任务、执行窗口和节假日/周末规则；确认后给出 scheduleKind、runAt 或 cron、timezone 和 cronDescription。"
+        },
+        {
+          "label": "选择执行方式",
+          "description": "判断应该交给 Agent 还是已有 Workflow 执行。",
+          "prompt": "请帮我判断这个任务应该用 Agent 还是 Workflow 执行。请先确认任务是否需要固定流程、结构化输入、可重复节点和稳定输出；如果适合 Agent，请推荐 agentName 和 userPrompt；如果适合 Workflow，请确认 workflowID 和 context JSON。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "每日安全日报",
+          "description": "每天固定时间收集安全数据并输出日报。",
+          "prompt": "我想创建一个每日安全日报定时任务，每天早上 9 点执行，汇总过去 24 小时的安全告警、重点资产风险和处置建议，并输出 Markdown 报告。请引导我确认 Agent/Workflow、数据来源、输出格式、时区和失败处理。"
+        },
+        {
+          "label": "IOC 定期复查",
+          "description": "定期查询 IOC 信誉变化并输出变化摘要。",
+          "prompt": "我想创建一个 IOC 定期复查任务，用于每天检查一批 IP、域名、URL 或哈希的威胁情报变化，并输出新增风险和处置建议。请引导我确认输入来源、执行 Agent 或 Workflow、调度频率、输出格式和告警阈值。"
+        },
+        {
+          "label": "每周资产巡检",
+          "description": "每周检查资产状态、暴露面和异常变化。",
+          "prompt": "我想创建一个每周资产巡检任务，用于检查重点资产的暴露面、风险状态和异常变化，并生成巡检摘要。请引导我确认巡检范围、执行方式、频率、Workflow 参数或 Agent 指令，以及报告格式。"
+        }
+      ]
+    },
+    "edit": {
+      "emptyStateTitle": "暂无编辑对话",
+      "guidePanelTitle": "Rex 辅助修改任务",
+      "guidePanelDesc": "选择一个编辑入口，Rex 会基于当前任务配置，引导你调整执行指令、调度频率、执行方式和输出要求。",
+      "guideSectionTitle": "编辑引导",
+      "caseSectionTitle": "编辑案例",
+      "guideActions": [
+        {
+          "label": "优化当前任务",
+          "description": "先诊断当前配置，再确认需要修改的字段。",
+          "prompt": "请帮我修改当前任务「{{name}}」。请先基于当前配置做一个简短诊断，不要直接修改；再用 question 工具一次只问一个最关键问题，帮我确认要调整的执行指令、调度时间、执行方式、优先级和输出要求。确认后输出可提取到表单的 JSON 配置摘要。"
+        },
+        {
+          "label": "调整调度时间",
+          "description": "修改执行时间、周期、时区或展示描述。",
+          "prompt": "请帮我调整当前任务「{{name}}」的调度时间。请确认时区、执行周期、是否需要一次性执行、避开哪些时间窗口，以及 cronDescription 应该如何展示；确认后整理成可提取的调度字段。"
+        },
+        {
+          "label": "改写执行指令",
+          "description": "让 Agent 或 Workflow 获取更完整的上下文。",
+          "prompt": "请帮我改写当前任务「{{name}}」的任务补充信息。请先检查当前指令是否说明目标、输入、步骤、输出格式和失败处理，再逐步确认缺失信息；确认后整理成更清晰的 userPrompt。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "降低频率",
+          "description": "减少任务执行压力，改成更合适的周期。",
+          "prompt": "我想降低当前任务「{{name}}」的执行频率，避免过于频繁。请帮我根据任务目标推荐新的 cron、timezone 和展示描述，并说明影响。"
+        },
+        {
+          "label": "改成 Workflow",
+          "description": "把自由 Agent 指令切换成固定 Workflow 执行。",
+          "prompt": "我想评估当前任务「{{name}}」是否应该改成 Workflow 执行。请帮我确认固定流程、输入参数、workflowID、context JSON 和输出要求，并整理成可提取配置。"
+        }
+      ]
+    }
   },
   "dashboard": {
     "completedWeek": "7日内完成",
