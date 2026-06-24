@@ -617,6 +617,7 @@ async def _report_pro_bundle_installation(
                 headers={"Authorization": f"Bearer {console_session['console_session_token']}"},
             )
             resp.raise_for_status()
+            details.pop("install_receipt_error", None)
             details["install_receipt_reported_at"] = datetime.now(UTC).isoformat()
     except Exception as exc:
         details["install_receipt_error"] = str(exc)
@@ -663,6 +664,38 @@ async def _maybe_auto_activate_upgrade(record: dict[str, Any]) -> dict[str, Any]
         await _report_pro_bundle_installation(record, install_result="failed", error_message=str(exc))
     finally:
         record["updated_at"] = datetime.now(UTC).isoformat()
+    return record
+
+
+async def _finalize_restarting_upgrade_if_installed(record: dict[str, Any]) -> dict[str, Any]:
+    details = record.setdefault("details", {})
+    if details.get("auto_install_result") != "restarting":
+        return record
+    marker = _read_pro_bundle_install_marker()
+    if not _marker_matches_target_bundle(marker, record):
+        return record
+
+    await _maybe_activate_pro_license(record)
+    await _maybe_refresh_pro_license(record)
+    capability = _record_pro_capability(details)
+    details["auto_install_result"] = "done" if capability.get("pro_enabled") else "license_inactive"
+    details["auto_install_version"] = marker.get("installed_version") or marker.get("display_version")
+    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+    details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
+    details["auto_install_message"] = "Upgrade completed after service restart"
+    _enrich_record_from_install_marker(record)
+    if capability.get("pro_enabled"):
+        record["status"] = "activated"
+    record["updated_at"] = datetime.now(UTC).isoformat()
+
+    previous_reported_at = details.get("install_receipt_reported_at")
+    await _report_pro_bundle_installation(record, install_result="success")
+    if details.get("install_receipt_reported_at") == previous_reported_at and details.get("install_receipt_error"):
+        details["auto_install_result"] = "restarting"
+        record["updated_at"] = datetime.now(UTC).isoformat()
+        return record
+    if capability.get("pro_enabled"):
+        await _mark_console_upgrade_activated(record)
     return record
 
 
@@ -813,6 +846,8 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
     for request_id in reversed(await _list_request_ids()):
         raw = await Storage.get(_request_key(request_id))
         if raw:
+            raw = await _finalize_restarting_upgrade_if_installed(raw)
+            await Storage.set(_request_key(request_id), raw, "json")
             result.append(UpgradeRequestStatus(**_enrich_record_from_install_marker(raw)))
     return result
 
@@ -935,6 +970,8 @@ async def get_upgrade_request(request_id: str, request: Request) -> UpgradeReque
     raw = await Storage.get(_request_key(request_id))
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
+    raw = await _finalize_restarting_upgrade_if_installed(raw)
+    await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**_enrich_record_from_install_marker(raw))
 
 
@@ -963,6 +1000,8 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
         except httpx.HTTPError as exc:
             _raise_console_service_error(exc)
         else:
+            remote_details = data.get("form_data") if isinstance(data.get("form_data"), dict) else {}
+            local_details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
             raw.update(
                 {
                     "status": data.get("status", raw["status"]),
@@ -975,13 +1014,14 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
                     "max_admins": data.get("max_admins", raw.get("max_admins")),
                     "max_members": data.get("max_members", raw.get("max_members")),
                     "expires_at": data.get("expires_at", raw.get("expires_at")),
-                    "details": data.get("form_data", raw.get("details", {})),
+                    "details": {**remote_details, **local_details},
                     "updated_at": datetime.now(UTC).isoformat(),
                 }
             )
     else:
         raw["updated_at"] = datetime.now(UTC).isoformat()
 
+    raw = await _finalize_restarting_upgrade_if_installed(raw)
     _enrich_record_from_install_marker(raw)
     await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**raw)
