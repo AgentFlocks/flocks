@@ -1,4 +1,7 @@
 import { useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
+import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle,
   ArrowRight,
@@ -6,16 +9,24 @@ import {
   ChevronRight,
   Download,
   FileText,
+  Loader2,
+  RefreshCw,
   Search,
   X,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import { Badge } from './components';
 import {
-  incidentClusters,
-} from './mockData';
-
-type IncidentCluster = typeof incidentClusters[number];
+  getAlertNeedsReview,
+  useAlertOperationsData,
+  type AlertTableColumn,
+  type IncidentCluster,
+} from './useAlertOperationsData';
+import {
+  parseTaggedTriageReport,
+  type TaggedTriageReport,
+  type TriageReportTag,
+} from './triageReportMarkdown';
 
 export default function SocAlertsPage() {
   return (
@@ -32,15 +43,32 @@ export default function SocAlertsPage() {
 }
 
 function AlertsOperation() {
+  const { data, loading, error, refetch } = useAlertOperationsData();
+  const { summary, incidents } = data;
+  const needsReview = getAlertNeedsReview(summary);
+  const flowMetrics = [
+    [
+      summary.totalRaw.toLocaleString('zh-CN'),
+      '全量告警',
+      `${data.source.label}（${summary.sourceAssetDate}）`,
+    ],
+    [
+      summary.totalUnique.toLocaleString('zh-CN'),
+      '告警去重降噪',
+      `去重 ${summary.duplicates.toLocaleString('zh-CN')} 条重复告警`,
+    ],
+    [
+      needsReview.toLocaleString('zh-CN'),
+      '重点研判',
+      `攻击成功 ${summary.attackSuccess} 条，攻击行为 ${summary.attack} 条`,
+    ],
+  ];
+
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          {[
-            ['9836', '全量告警', '来自 SIEM / NDR / WAF / EDR'],
-            ['1023', '告警去重降噪', '去重、合并、压制误报'],
-            ['5', '告警研判', '补全情报、资产和请求响应上下文'],
-          ].map(([value, label, hint], index) => (
+          {flowMetrics.map(([value, label, hint], index) => (
             <div key={label} className="relative rounded-lg border border-gray-200 bg-gray-50 p-3">
               {index < 2 && (
                 <ArrowRight className="absolute -right-4 top-1/2 z-10 hidden h-5 w-5 -translate-y-1/2 text-gray-300 md:block" />
@@ -59,59 +87,107 @@ function AlertsOperation() {
             <Search className="h-4 w-4 text-red-600" />
             告警研判
           </div>
-          <Badge tone="red">5 条告警待人工核实</Badge>
+          <div className="flex items-center gap-2">
+            {loading && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
+            <Badge tone={error ? 'orange' : 'red'}>
+              {incidents.length.toLocaleString('zh-CN')} 条真实告警 · {data.tableColumns.length} 个字段
+            </Badge>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              className="rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+              title="刷新数据"
+              aria-label="刷新数据"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         <div className="p-3">
-          <TriageResult />
+          {error && (
+            <div className="mb-3 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-700">
+              数据源暂不可用，已切换本地 assets 样例。
+            </div>
+          )}
+          <TriageResult incidents={incidents} columns={data.tableColumns} />
         </div>
       </div>
     </div>
   );
 }
 
-function TriageResult() {
+function TriageResult({ incidents, columns }: { incidents: IncidentCluster[]; columns: AlertTableColumn[] }) {
   const [selectedIncident, setSelectedIncident] = useState<IncidentCluster | null>(null);
+  const useFieldDrivenTable = columns.length > 0 && incidents.some((incident) => incident.tableCells);
 
   return (
     <>
-      <div className="overflow-hidden rounded-lg border border-gray-200">
-        <table className="min-w-full divide-y divide-gray-200">
+      <div className="overflow-x-auto rounded-lg border border-gray-200">
+        <table className={`${useFieldDrivenTable ? 'min-w-max' : 'min-w-full'} divide-y divide-gray-200`}>
           <thead className="bg-gray-50">
-            <tr>
-              {['告警 ID', '优先级', 'NDR 告警', '源 IP 情报', '目标资产', '请求 / 响应', '结论'].map((header) => (
-                <th key={header} className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  {header}
-                </th>
-              ))}
-            </tr>
+            {useFieldDrivenTable ? (
+              <tr>
+                {columns.map((column) => (
+                  <th
+                    key={column.key}
+                    className={`${column.widthClass ?? 'min-w-40'} px-4 py-2.5 text-left align-bottom`}
+                  >
+                    <div className="font-mono text-xs font-semibold text-gray-700">{column.label}</div>
+                    {column.description && (
+                      <div className="mt-1 text-[11px] font-medium text-gray-400">{column.description}</div>
+                    )}
+                  </th>
+                ))}
+              </tr>
+            ) : (
+              <tr>
+                {['告警 ID', '优先级', 'NDR 告警', '源 IP 情报', '目标资产', '请求 / 响应', '结论'].map((header) => (
+                  <th key={header} className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            )}
           </thead>
           <tbody className="divide-y divide-gray-100 bg-white">
-            {incidentClusters.map((cluster) => (
+            {incidents.map((cluster) => (
               <tr
                 key={cluster.id}
                 onClick={() => setSelectedIncident(cluster)}
                 className="cursor-pointer transition-colors hover:bg-red-50/50"
               >
-                <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-gray-900">{cluster.id}</td>
-                <td className="px-4 py-3"><Badge tone={cluster.priority === 'P1' ? 'red' : 'orange'}>{cluster.priority}</Badge></td>
-                <td className="px-4 py-3">
-                  <div className="text-sm font-medium text-gray-900">{cluster.title}</div>
-                  <div className="mt-1 max-w-xl truncate text-xs text-gray-500">{cluster.reason}</div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="whitespace-nowrap text-sm font-medium text-gray-900">{cluster.srcIp}</div>
-                  <div className="mt-1 text-xs text-gray-500">{cluster.srcIntel.verdict} · {cluster.srcIntel.location}</div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="whitespace-nowrap text-sm font-medium text-gray-900">{cluster.asset.name}</div>
-                  <div className="mt-1 text-xs text-gray-500">{cluster.asset.business} · {cluster.asset.exposure}</div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="whitespace-nowrap text-sm text-gray-900">{cluster.request.method} {cluster.request.uri}</div>
-                  <div className="mt-1 text-xs text-gray-500">响应 {cluster.response.statusCode}</div>
-                </td>
-                <td className="whitespace-nowrap px-4 py-3 text-sm text-red-600">{cluster.conclusion.verdict}</td>
+                {useFieldDrivenTable ? (
+                  columns.map((column) => (
+                    <td key={column.key} className="px-4 py-3 align-top">
+                      <FieldCell column={column} incident={cluster} />
+                    </td>
+                  ))
+                ) : (
+                  <>
+                    <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-gray-900" title={cluster.id}>
+                      <div className="max-w-40 truncate">{cluster.id}</div>
+                    </td>
+                    <td className="px-4 py-3"><Badge tone={cluster.priority === 'P1' ? 'red' : 'orange'}>{cluster.priority}</Badge></td>
+                    <td className="px-4 py-3">
+                      <div className="text-sm font-medium text-gray-900">{cluster.title}</div>
+                      <div className="mt-1 max-w-xl truncate text-xs text-gray-500">{cluster.reason}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="whitespace-nowrap text-sm font-medium text-gray-900">{cluster.srcIp}</div>
+                      <div className="mt-1 text-xs text-gray-500">{cluster.srcIntel.verdict} · {cluster.srcIntel.location}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="whitespace-nowrap text-sm font-medium text-gray-900">{cluster.asset.name}</div>
+                      <div className="mt-1 text-xs text-gray-500">{cluster.asset.business} · {cluster.asset.exposure}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="whitespace-nowrap text-sm text-gray-900">{cluster.request.method} {cluster.request.uri}</div>
+                      <div className="mt-1 text-xs text-gray-500">响应 {cluster.response.statusCode}</div>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-sm text-red-600">{cluster.conclusion.verdict}</td>
+                  </>
+                )}
               </tr>
             ))}
           </tbody>
@@ -125,11 +201,41 @@ function TriageResult() {
   );
 }
 
+function FieldCell({ column, incident }: { column: AlertTableColumn; incident: IncidentCluster }) {
+  const cell = incident.tableCells?.[column.key];
+  const value = cell?.value || '-';
+  const toneClass = cell?.tone ? {
+    red: 'text-red-700 bg-red-50 border-red-100',
+    orange: 'text-orange-700 bg-orange-50 border-orange-100',
+    blue: 'text-blue-700 bg-blue-50 border-blue-100',
+    green: 'text-green-700 bg-green-50 border-green-100',
+    purple: 'text-purple-700 bg-purple-50 border-purple-100',
+    slate: 'text-slate-700 bg-slate-50 border-slate-100',
+  }[cell.tone] : '';
+  const textClass = cell?.mono || column.mono ? 'font-mono' : '';
+
+  return (
+    <div title={cell?.detail ? `${value}\n${cell.detail}` : value}>
+      <div className={`inline-flex max-w-72 rounded border px-2 py-1 text-xs font-medium ${textClass} ${toneClass || 'border-transparent text-gray-900'}`}>
+        <span className="truncate">{value}</span>
+      </div>
+      {cell?.detail && (
+        <div className="mt-1 max-w-72 truncate text-[11px] leading-4 text-gray-500">{cell.detail}</div>
+      )}
+    </div>
+  );
+}
+
 function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onClose: () => void }) {
   const [stepsOpen, setStepsOpen] = useState(false);
+  const taggedReport = parseTaggedTriageReport(incident.triageReport);
   const steps = buildAnalysisSteps(incident);
-  const isSuccess = incident.conclusion.verdict.includes('成功') || incident.conclusion.verdict.includes('成立');
+  const stepCount = taggedReport?.stepCount ?? steps.length;
+  const isSuccess = taggedReport
+    ? taggedReport.sections.report_meta.includes('攻击成功')
+    : incident.conclusion.verdict.includes('成功') || incident.conclusion.verdict.includes('成立');
   const isPhishing = incident.title.includes('钓鱼');
+  const drawerTitle = taggedReport?.title ?? 'Web日志分析';
 
   return (
     <div className="fixed inset-0 z-[70]">
@@ -144,7 +250,7 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
           <div className="flex items-center gap-2.5">
             <FileText className="h-5 w-5 text-gray-900" />
             <div>
-              <div className="text-base font-semibold text-gray-900">Web日志分析</div>
+              <div className="text-base font-semibold text-gray-900">{drawerTitle}</div>
               <div className="text-xs text-gray-500">{incident.id} · {incident.ndrRule}</div>
             </div>
           </div>
@@ -174,7 +280,7 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
             >
               <div className="flex items-center gap-4">
                 <span className="text-base font-semibold text-gray-900">分析步骤</span>
-                <span className="text-sm text-gray-500">{steps.length} 个步骤</span>
+                <span className="text-sm text-gray-500">{stepCount} 个步骤</span>
               </div>
               <span className="inline-flex items-center gap-2 text-xs font-medium text-gray-600">
                 {stepsOpen ? '收起' : '展开查看'}
@@ -182,7 +288,13 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
               </span>
             </button>
 
-            {stepsOpen && (
+            {stepsOpen && taggedReport && (
+              <div className="mb-6 rounded-lg border border-gray-200 bg-gray-50 px-5 py-4">
+                <ReportMarkdown content={taggedReport.sections.analysis_steps} />
+              </div>
+            )}
+
+            {stepsOpen && !taggedReport && (
               <div className="mb-6 border-l border-gray-200 pl-5">
                 {steps.map((step) => (
                   <div key={step.title} className="relative mb-5 last:mb-0">
@@ -197,9 +309,12 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
               </div>
             )}
 
+            {taggedReport ? (
+              <TaggedTriageReportArticle report={taggedReport} isSuccess={isSuccess} />
+            ) : (
             <article className="relative pb-10 text-gray-900">
               <div className="mb-3 flex items-center gap-3 text-sm">
-                <span>2026-06-14 09:44</span>
+                <span>{incident.observedAt}</span>
                 <span className={`rounded-full px-2.5 py-1 text-xs font-semibold text-white ${isSuccess ? 'bg-red-600' : 'bg-orange-500'}`}>
                   {incident.conclusion.verdict}
                 </span>
@@ -296,6 +411,7 @@ function IncidentDrawer({ incident, onClose }: { incident: IncidentCluster; onCl
                 </div>
               )}
             </article>
+            )}
           </div>
         </div>
 
@@ -327,6 +443,52 @@ function ReportCodeBlock({ code }: { code: string }) {
       <pre className="overflow-x-auto whitespace-pre-wrap bg-gray-50 px-4 py-3 font-mono text-sm leading-6 text-gray-700">
         {code}
       </pre>
+    </div>
+  );
+}
+
+const TRIAGE_REPORT_BODY_ORDER: TriageReportTag[] = [
+  'triage_conclusion',
+  'attack_payload',
+  'payload_explanation',
+  'response_evidence',
+  'key_evidence',
+  'disposal_recommendation',
+];
+
+function TaggedTriageReportArticle({
+  report,
+  isSuccess,
+}: {
+  report: TaggedTriageReport;
+  isSuccess: boolean;
+}) {
+  return (
+    <article className="relative pb-10 text-gray-900">
+      <ReportMarkdown content={report.sections.report_title} />
+      <div className="mt-3 rounded-lg bg-gray-50 px-4 py-3">
+        <ReportMarkdown content={report.sections.report_meta} compact />
+      </div>
+      {TRIAGE_REPORT_BODY_ORDER.map((tag) => (
+        <section key={tag}>
+          <ReportMarkdown content={report.sections[tag]} />
+        </section>
+      ))}
+      {isSuccess && (
+        <div className="pointer-events-none absolute bottom-4 right-4 rotate-[-12deg] rounded-full border-[4px] border-red-500/50 px-6 py-5 text-2xl font-black text-red-500/60">
+          攻击成功
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ReportMarkdown({ content, compact = false }: { content: string; compact?: boolean }) {
+  return (
+    <div
+      className={`prose prose-sm max-w-none prose-headings:tracking-normal prose-h1:text-2xl prose-h1:font-bold prose-h1:text-gray-950 prose-h2:mt-7 prose-h2:text-lg prose-h2:font-bold prose-h2:text-gray-950 prose-h3:text-base prose-h3:font-semibold prose-p:leading-7 prose-li:leading-7 prose-pre:whitespace-pre-wrap prose-pre:rounded-md prose-pre:bg-gray-50 prose-pre:px-4 prose-pre:py-3 prose-pre:text-sm prose-pre:text-gray-700 prose-code:text-gray-800 ${compact ? 'prose-p:my-1 prose-ul:my-1' : ''}`}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{content}</ReactMarkdown>
     </div>
   );
 }
@@ -440,13 +602,14 @@ function getPayloadNotes(incident: IncidentCluster) {
     ];
   }
   return [
-    'shell.php 文件名与 PHP 脚本执行环境高度相关，属于高风险上传对象。',
-    'system($_GET["cmd"]) 会执行外部传入的 cmd 参数，是典型 WebShell 行为。',
-    'multipart/form-data 上传接口如果缺少后缀、内容和存储路径限制，容易导致脚本落盘执行。',
+    `请求命中 ${incident.title} 相关特征，规则 ${incident.ndrRule}。`,
+    `关键请求对象为 ${incident.request.method} ${incident.request.host}${incident.request.uri}。`,
+    `响应状态为 ${incident.response.statusCode}，需要结合响应样本和资产日志判断成功性。`,
   ];
 }
 
 function getResponseExample(incident: IncidentCluster) {
+  if (incident.response.sample) return incident.response.sample;
   if (incident.title.includes('WordPress')) return "XPATH syntax error: '~root@localhost~'";
   if (incident.title.includes('钓鱼')) return 'HTTP/1.1 200 OK\n<title>Invoice Verification Portal</title>\n<form action="/session" method="post">\n  <input name="account">\n  <input name="password" type="password">\n</form>';
   if (incident.title.includes('Log4Shell')) return 'HTTP/1.1 200 OK\n\n[ndr] outbound ldap connection: shop-api.example.com -> 45.83.12.21:1389\n[ndr] follow-up request: GET /Exploit.class';

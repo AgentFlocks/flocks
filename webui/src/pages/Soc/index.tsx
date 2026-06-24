@@ -13,21 +13,7 @@ import { useToast } from '@/components/common/Toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTranslation } from 'react-i18next';
 import { Card } from './components';
-
-const sceneCards = [
-  {
-    title: '告警运营',
-    href: '/soc/alerts',
-    icon: AlertTriangle,
-    tone: 'red' as const,
-    stat: '1,023',
-    label: '降噪后告警',
-    metrics: [
-      { value: '5', label: '待处理事件' },
-    ],
-    action: '确认攻击成功性，处理封禁、修复、复测建议',
-  },
-];
+import { getAlertNeedsReview, useAlertOperationsData } from './useAlertOperationsData';
 
 export default function SocOverviewPage() {
   const { t } = useTranslation('home');
@@ -36,6 +22,24 @@ export default function SocOverviewPage() {
   const { user } = useAuth();
   const canCreateUserDefinedPage = user?.role === 'admin';
   const [creatingUserDefinedPageSession, setCreatingUserDefinedPageSession] = useState(false);
+  const { data, loading, error } = useAlertOperationsData();
+  const { summary } = data;
+  const sceneCards = [
+    {
+      title: '告警运营',
+      href: '/soc/alerts',
+      icon: AlertTriangle,
+      tone: 'red' as const,
+      stat: summary.totalUnique.toLocaleString('zh-CN'),
+      label: '首见告警',
+      metrics: [
+        { value: getAlertNeedsReview(summary).toLocaleString('zh-CN'), label: '重点研判' },
+      ],
+      action: error
+        ? '数据源不可用，使用本地样例'
+        : `${loading ? '同步中' : data.source.label} ${summary.sourceAssetDate} · 去重 ${summary.duplicates.toLocaleString('zh-CN')} 条`,
+    },
+  ];
 
   const handleCreateUserDefinedPage = useCallback(async () => {
     if (creatingUserDefinedPageSession) return;
