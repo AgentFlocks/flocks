@@ -586,7 +586,6 @@ class Storage:
         try:
             clauses, params = cls._workflow_prefix_filter()
             total_migrated = 0
-            total_deleted = 0
             last_key = ""
             while True:
                 rows = source.execute(
@@ -632,21 +631,10 @@ class Storage:
                         f"expected {len(keys)} copied rows, got {copied}"
                     )
 
-                deleted = 0
-                for key in keys:
-                    cursor = source.execute(
-                        "DELETE FROM storage WHERE key = ?",
-                        (key,),
-                    )
-                    if cursor.rowcount > 0:
-                        deleted += cursor.rowcount
-                source.commit()
-
                 total_migrated += len(rows)
-                total_deleted += deleted
                 last_key = keys[-1]
 
-            return total_migrated, total_deleted
+            return total_migrated, 0
         except Exception:
             if source.in_transaction:
                 source.rollback()
