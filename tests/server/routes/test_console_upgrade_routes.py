@@ -991,6 +991,82 @@ async def test_start_approved_request_streams_restart_without_marking_activated(
     assert reported == []
 
 
+async def test_restarting_request_reports_receipt_after_service_restart(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    request_id = "req_restart_complete"
+    await Storage.set("console:upgrade_request_ids", [request_id], "json")
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "approved",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_start",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {
+                "auto_install_result": "restarting",
+                "approved_bundle_release_id": "rel_restart",
+                "latest_pro_bundle": {
+                    "release_id": "rel_restart",
+                    "display_version": "v2026.6.24",
+                    "core_version": "v2026.6.21",
+                    "flockspro_component_version": "v2026.6.24",
+                    "build_id": "job_restart",
+                },
+            },
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    async def _noop(_record: dict, **_kwargs):
+        return None
+
+    reported: list[tuple[str, str | None]] = []
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        reported.append((install_result, error_message))
+        record.setdefault("details", {})["install_receipt_reported_at"] = "2026-06-24T08:11:09+00:00"
+
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_mark_console_upgrade_activated", _noop)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {
+            "release_id": "rel_restart",
+            "bundle_release_id": "rel_restart",
+            "installed_version": "v2026.6.24",
+            "core_version": "v2026.6.21",
+            "flockspro_component_version": "v2026.6.24",
+            "build_id": "job_restart",
+        },
+    )
+
+    resp = await client.get(f"/api/console/upgrade-requests/{request_id}")
+
+    assert resp.status_code == status.HTTP_200_OK
+    payload = resp.json()
+    assert payload["status"] == "activated"
+    assert payload["details"]["auto_install_result"] == "done"
+    assert payload["details"]["auto_install_version"] == "v2026.6.24"
+    assert reported == [("success", None)]
+
+
 async def test_start_approved_request_reports_error_after_restart_stage(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1397,6 +1473,7 @@ async def test_report_pro_bundle_installation_uses_license_id(
             "latest_pro_bundle": {
                 "release_id": "rel_receipt",
                 "display_version": "v2026.6.5",
+                "core_version": "v2026.6.1",
                 "flockspro_component_version": "v2026.6.5",
                 "build_id": "job_receipt",
             },
@@ -1405,10 +1482,12 @@ async def test_report_pro_bundle_installation_uses_license_id(
 
     await console_routes._report_pro_bundle_installation(record, install_result="success")
 
-    assert posted_payloads[0]["request_id"] == "req_receipt"
     assert posted_payloads[0]["license_id"] == "lic_receipt"
+    assert posted_payloads[0]["request_id"] == "req_receipt"
     assert posted_payloads[0]["release_id"] == "rel_receipt"
     assert posted_payloads[0]["bundle_release_id"] == "rel_receipt"
+    assert posted_payloads[0]["core_version"] == "v2026.6.1"
+    assert posted_payloads[0]["oss_version"] == "v2026.6.1"
     assert posted_payloads[0]["build_id"] == "job_receipt"
 
 
