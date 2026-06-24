@@ -144,12 +144,12 @@ async def test_workflow_kv_migrates_from_legacy_flocks_db() -> None:
 
     workflow_db = Storage.get_workflow_db_path()
     assert _fetch_storage_value(workflow_db, "workflow_registry/wf-legacy") == '{"ok": true}'
-    assert _fetch_storage_value(flocks_db, "workflow_registry/wf-legacy") is None
+    assert _fetch_storage_value(flocks_db, "workflow_registry/wf-legacy") == '{"ok": true}'
     assert _fetch_storage_value(workflow_db, "session:legacy") is None
     marker = await Storage.get(Storage._multi_db_migration_marker_key)
     assert marker["workflow_migrated"] is True
     assert marker["workflow_rows"] == 1
-    assert marker["workflow_source_rows_deleted"] == 1
+    assert marker["workflow_source_rows_deleted"] == 0
 
 
 @pytest.mark.asyncio
@@ -186,6 +186,7 @@ async def test_workflow_prefix_migration_treats_underscore_literally() -> None:
     workflow_db = Storage.get_workflow_db_path()
     assert _fetch_storage_value(workflow_db, "workflow_registry/wf-ok") == '{"ok": true}'
     assert _fetch_storage_value(workflow_db, "workflowXregistry/wf-bad") is None
+    assert _fetch_storage_value(flocks_db, "workflow_registry/wf-ok") == '{"ok": true}'
     assert _fetch_storage_value(flocks_db, "workflowXregistry/wf-bad") == '{"bad": true}'
     assert await Storage.list_keys("workflow_registry/") == ["workflow_registry/wf-ok"]
 
@@ -324,9 +325,9 @@ async def test_task_store_uses_tasks_db_and_migrates_existing_task_tables() -> N
     assert marker["tasks_migrated"] is True
     assert marker["task_rows"] == 3
     assert marker["task_foreign_key_violations"] == 1
-    assert marker["task_source_rows_deleted"] == 3
-    assert _fetch_table_count(flocks_db, "task_schedulers") == 0
-    assert _fetch_table_count(flocks_db, "task_executions") == 0
+    assert marker["task_source_rows_deleted"] == 0
+    assert _fetch_table_count(flocks_db, "task_schedulers") == 1
+    assert _fetch_table_count(flocks_db, "task_executions") == 2
 
     await TaskStore.close()
     TaskStore._initialized = False

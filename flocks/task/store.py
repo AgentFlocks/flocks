@@ -143,14 +143,14 @@ class TaskStore:
         source: sqlite3.Connection,
         target: sqlite3.Connection,
         table_name: str,
-    ) -> tuple[int, list[str]]:
+    ) -> int:
         if not cls._table_exists(source, table_name):
-            return 0, []
+            return 0
         source_columns = cls._table_columns(source, table_name)
         target_columns = set(cls._table_columns(target, table_name))
         copy_columns = [column for column in source_columns if column in target_columns]
         if not copy_columns or "id" not in copy_columns:
-            return 0, []
+            return 0
         quoted_columns = ", ".join(cls._quote_identifier(column) for column in copy_columns)
         table_sql = cls._quote_identifier(table_name)
         placeholders = ", ".join("?" for _ in copy_columns)
@@ -159,7 +159,6 @@ class TaskStore:
             f"VALUES ({placeholders})"
         )
         copied = 0
-        copied_ids: list[str] = []
         last_rowid = 0
         while True:
             rows = source.execute(
@@ -192,10 +191,9 @@ class TaskStore:
                 )
 
             copied += len(rows)
-            copied_ids.extend(ids)
             last_rowid = int(rows[-1]["__rowid"])
 
-        return copied, copied_ids
+        return copied
 
     @classmethod
     def _copy_task_tables_to_tasks_db_sync(cls) -> tuple[int, int, int]:
@@ -212,35 +210,18 @@ class TaskStore:
             original_foreign_keys = target.execute("PRAGMA foreign_keys").fetchone()[0]
             target.execute("PRAGMA foreign_keys = OFF")
             total = 0
-            copied_ids_by_table: dict[str, list[str]] = {}
             for table_name in (
                 "task_schedulers",
                 "task_executions",
                 "task_execution_queue_refs",
             ):
-                copied, copied_ids = cls._copy_task_table_sync(source, target, table_name)
+                copied = cls._copy_task_table_sync(source, target, table_name)
                 total += copied
-                copied_ids_by_table[table_name] = copied_ids
             target.commit()
             foreign_key_violations = len(target.execute("PRAGMA foreign_key_check").fetchall())
             target.execute(f"PRAGMA foreign_keys = {original_foreign_keys}")
 
-            deleted = 0
-            for table_name in (
-                "task_execution_queue_refs",
-                "task_executions",
-                "task_schedulers",
-            ):
-                table_sql = cls._quote_identifier(table_name)
-                for row_id in copied_ids_by_table.get(table_name, []):
-                    cursor = source.execute(
-                        f"DELETE FROM {table_sql} WHERE id = ?",
-                        (row_id,),
-                    )
-                    if cursor.rowcount > 0:
-                        deleted += cursor.rowcount
-            source.commit()
-            return total, foreign_key_violations, deleted
+            return total, foreign_key_violations, 0
         except Exception:
             if source.in_transaction:
                 source.rollback()
