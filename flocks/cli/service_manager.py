@@ -43,6 +43,11 @@ MISSING_PORT_OWNER_TOOLS_WARNING = (
     "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
     "可尝试安装：apt/yum install lsof -y"
 )
+WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
+    "UV_HANDLE_CLOSING",
+    "src\\win\\async.c",
+    "src/win/async.c",
+)
 
 
 class ServiceError(RuntimeError):
@@ -559,10 +564,12 @@ def _windows_process_snapshot(pid: int) -> dict[str, str] | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode == 0:
             with contextlib.suppress(json.JSONDecodeError):
-                payload = json.loads(completed.stdout.strip() or "{}")
+                payload = json.loads((completed.stdout or "").strip() or "{}")
                 if isinstance(payload, dict):
                     return {
                         "name": str(payload.get("Name") or ""),
@@ -1038,14 +1045,20 @@ def start_frontend(config: ServiceConfig, console) -> None:
     frontend_env = build_frontend_env(config)
     if not config.skip_frontend_build:
         console.print("[flocks] 构建 WebUI...")
-        completed = subprocess.run(
-            [npm, "run", "build"],
-            cwd=webui_dir,
-            check=False,
-            env=frontend_env,
-        )
+        run_kwargs: dict[str, object] = {"cwd": webui_dir, "check": False, "env": frontend_env}
+        if sys.platform == "win32":
+            run_kwargs.update({"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"})
+        completed = subprocess.run([npm, "run", "build"], **run_kwargs)
         if completed.returncode != 0:
-            raise ServiceError("WebUI 构建失败。")
+            output = "\n".join(
+                value for value in (getattr(completed, "stdout", None), getattr(completed, "stderr", None)) if value
+            )
+            if windows_frontend_build_assertion_is_recoverable(webui_dir, output):
+                console.print("[flocks] WebUI 构建产物已生成，忽略 Windows Node.js 退出断言。")
+            else:
+                if output:
+                    console.print(output)
+                raise ServiceError("WebUI 构建失败。")
 
     command = [
         npm,
@@ -1612,6 +1625,15 @@ def backend_access_base_url(config: ServiceConfig) -> str:
 def websocket_access_base_url(config: ServiceConfig) -> str:
     """Return the websocket base URL matching ``backend_access_base_url()``."""
     return _http_to_ws_url(backend_access_base_url(config))
+
+
+def windows_frontend_build_assertion_is_recoverable(webui_dir: Path, output: str) -> bool:
+    """Return True when Windows npm crashed after producing a usable build."""
+    if sys.platform != "win32":
+        return False
+    if not (webui_dir / "dist" / "index.html").exists():
+        return False
+    return any(marker in output for marker in WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS)
 
 
 def build_frontend_env(config: ServiceConfig) -> dict[str, str]:

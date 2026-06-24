@@ -179,6 +179,24 @@ def test_pid_is_running_uses_windows_probe(monkeypatch) -> None:
     assert service_manager.pid_is_running(456) is False
 
 
+def test_windows_process_snapshot_handles_empty_stdout(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+
+    def fake_run(*_args, **kwargs):
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        return SimpleNamespace(returncode=0, stdout=None)
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._windows_process_snapshot(123) == {
+        "name": "",
+        "command_line": "",
+        "executable_path": "",
+    }
+
+
 def test_process_group_is_running_ignores_permission_error_without_live_members(monkeypatch) -> None:
     monkeypatch.setattr(service_manager.sys, "platform", "darwin")
     monkeypatch.setattr(
@@ -1189,6 +1207,53 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     assert record is not None
     assert record.host == "0.0.0.0"
     assert record.port == 5174
+
+
+def test_start_frontend_tolerates_windows_node_assertion_after_build(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    webui_dir = tmp_path / "webui"
+    webui_dist = webui_dir / "dist"
+    webui_dist.mkdir(parents=True)
+    console = DummyConsole()
+    preview_calls: list[list[str]] = []
+
+    def fake_run(_command, **_kwargs):
+        (webui_dist / "index.html").write_text("<html></html>", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=3221226505,
+            stdout="built in 6.83s",
+            stderr="Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 76",
+        )
+
+    def fake_spawn(command, **_kwargs):
+        preview_calls.append(list(command))
+        return SimpleNamespace(pid=2468)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: "npm.cmd")
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+    monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
+
+    service_manager.start_frontend(service_manager.ServiceConfig(), console)
+
+    assert preview_calls[0][:3] == ["npm.cmd", "run", "preview"]
+    assert "[flocks] WebUI 构建产物已生成，忽略 Windows Node.js 退出断言。" in console.messages
 
 
 def test_start_frontend_passes_direct_backend_urls_when_opted_in(monkeypatch, tmp_path: Path) -> None:
