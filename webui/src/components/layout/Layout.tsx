@@ -60,7 +60,7 @@ const UPDATE_CHECK_MIN_GAP_MS = 600_000;
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
-  return normalized ? `pro-v${normalized}` : null;
+  return normalized ? `v${normalized}` : null;
 }
 
 function formatUpdateVersion(version?: string | null): string | null {
@@ -135,13 +135,6 @@ export default function Layout() {
 
   const refreshUpdateStatus = useCallback(async (force = false) => {
     if (!flocksproStatusReady) return;
-    if (isFlocksproActive) {
-      setUpdateInfo(null);
-      setHasUpdate(false);
-      setLatestVersion(null);
-      setHasCompletedUpdateCheck(true);
-      return;
-    }
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
@@ -151,7 +144,8 @@ export default function Layout() {
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const info = await checkUpdate(i18n.language);
+      const edition = isFlocksproActive ? 'flockspro' : 'flocks';
+      const info = await checkUpdate(i18n.language, edition);
       setUpdateInfo(info);
 
       if (info.current_version) {
@@ -267,7 +261,7 @@ export default function Layout() {
           const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
           setIsFlocksproActive(active);
           const version = active
-            ? formatProVersion(packageStatus?.flockspro_component_version || packageStatus?.installed_version)
+            ? formatProVersion(packageStatus?.installed_version || packageStatus?.flockspro_component_version)
             : null;
           setFlocksproVersion(version);
         })
@@ -470,7 +464,9 @@ export default function Layout() {
     matchPath('/devices', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
-    ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
+    ? updateInfo?.edition === 'flockspro' && currentVersion
+      ? formatProVersion(currentVersion)
+      : flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
     : currentVersion ? `v${currentVersion}` : null;
   const currentVersionLabel = isFlocksproActive
     ? t('currentProductVersionLabel', { version: displayVersion || productName })
