@@ -192,6 +192,7 @@ async def run_workflow_process(
     *,
     workflow: Any,
     inputs: Optional[Dict[str, Any]] = None,
+    workflow_id: Optional[str] = None,
     timeout_s: Optional[float] = None,
     trace: bool = False,
     use_llm: Optional[bool] = None,
@@ -207,10 +208,11 @@ async def run_workflow_process(
 ) -> RunWorkflowResult:
     executor = ProcessWorkflowExecutor()
     workflow_payload = _workflow_to_payload(workflow)
+    workflow_id_value = str(workflow_id or workflow_payload.get("id") or workflow_payload.get("name") or "workflow")
     return await executor.run(
         workflow=workflow_payload,
         inputs=inputs,
-        workflow_id=str(workflow_payload.get("id") or workflow_payload.get("name") or "workflow"),
+        workflow_id=workflow_id_value,
         timeout_s=timeout_s,
         trace=trace,
         use_llm=use_llm,

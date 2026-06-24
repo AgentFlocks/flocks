@@ -79,6 +79,36 @@ async def test_process_executor_runs_workflow_and_dispatches_step_events() -> No
 
 
 @pytest.mark.asyncio
+async def test_process_executor_preserves_explicit_workflow_id_without_payload_id() -> None:
+    workflow = {
+        "start": "inspect_context",
+        "nodes": [
+            {
+                "id": "inspect_context",
+                "type": "python",
+                "code": "\n".join(
+                    [
+                        "ctx = getattr(getattr(tool, 'registry', None), '_ctx', None)",
+                        "extra = getattr(ctx, 'extra', {}) or {}",
+                        "outputs['workflow_id'] = extra.get('workflowId')",
+                    ]
+                ),
+            }
+        ],
+        "edges": [],
+    }
+
+    result = await run_workflow_process(
+        workflow=workflow,
+        workflow_id="wf-explicit-context-id",
+        ensure_requirements=False,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs["workflow_id"] == "wf-explicit-context-id"
+
+
+@pytest.mark.asyncio
 async def test_process_executor_times_out_worker_without_crashing_parent() -> None:
     workflow = {
         "name": "process_timeout_test",
