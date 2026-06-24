@@ -1,6 +1,8 @@
-# Flocks
+<h1 align="center">Flocks</h1>
 
-AI 原生 SecOps 平台
+<p align="center">
+  AI 原生 SecOps 平台
+</p>
 
 <p align="center">
   <a href="https://agentflocks.github.io/flocks-docs/"><img alt="文档" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>

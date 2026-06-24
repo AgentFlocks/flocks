@@ -1,6 +1,8 @@
-# Flocks
+<h1 align="center">Flocks</h1>
 
-AI-Native SecOps Platform
+<p align="center">
+  AI-Native SecOps Platform
+</p>
 
 <p align="center">
   <a href="https://agentflocks.github.io/flocks-docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
