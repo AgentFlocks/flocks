@@ -11,7 +11,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat from '@/components/common/SessionChat';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
-import { useSessionChat } from '@/hooks/useSessionChat';
+import { useSessionChat, type CreateAndSendOptions } from '@/hooks/useSessionChat';
 import { sessionApi } from '@/api/session';
 import { providerAPI } from '@/api/provider';
 import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
@@ -348,13 +348,39 @@ function buildTemplateGuidePrompt(template: DeviceTemplate): string {
   ].join('\n');
 }
 
+function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceTemplate): CreateAndSendOptions {
+  const fieldKeys = Object.keys(device.fields || {});
+  const fieldStatus = fieldKeys.length > 0
+    ? fieldKeys.map((key) => `${key}${device.fields_set?.[key] ? '(已填写)' : ''}`).join(', ')
+    : '无额外字段';
+  const text = [
+    `设备「${device.name}」已确认接入并保存。`,
+    `device_id=${device.id}，storage_key=${device.storage_key}，service_id=${device.service_id}，模板名称=${template.name}。`,
+    `设备当前状态=${device.status}，enabled=${device.enabled}，verify_ssl=${device.verify_ssl}，group_id=${device.group_id}。`,
+    `已填写字段：${fieldStatus}。`,
+    '请继续留在当前会话，引导我完成连通测试和冒烟验证。',
+    '不要再询问接入方式，也不要让我在 API 接入、浏览器接入、Workflow 接入之间选择；不要重新输出设备配置 JSON 草稿。',
+    '请先说明下一步需要在页面上执行的连通测试动作、成功/失败时如何判断，以及失败时优先排查哪些配置项。',
+  ].join('\n');
+  return {
+    text,
+    displayText: `设备「${device.name}」已确认接入，请继续引导我测试。`,
+  };
+}
+
 function DeviceAddRexPanel({
   templates,
+  sessionId,
+  createAndSend,
+  rexComposerControls,
   onApplyDraft,
   onInstallTemplate,
   instanceCounts,
 }: {
   templates: DeviceTemplate[];
+  sessionId: string | null;
+  createAndSend: (options: CreateAndSendOptions) => Promise<string>;
+  rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyDraft: (draft: DeviceAddDraft) => void;
   onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
   instanceCounts: Record<string, number>;
@@ -366,17 +392,6 @@ function DeviceAddRexPanel({
   const [showBuiltInTemplates, setShowBuiltInTemplates] = useState(false);
   const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set());
   const [installingTemplateKey, setInstallingTemplateKey] = useState<string | null>(null);
-  const rexComposerControls = useRexComposerControls();
-  const contextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
-  const welcomeMessage = t('wizard.rex.welcome');
-  const { sessionId, createAndSend, reset } = useSessionChat({
-    title: t('wizard.rex.title'),
-    category: 'entity-config',
-    contextMessage,
-    welcomeMessage,
-  });
-
-  useEffect(() => reset, [reset]);
 
   const startGuidedPrompt = useCallback((prompt: string) => {
     createAndSend({
@@ -729,9 +744,21 @@ function WorkbenchAction({ label, onClick }: { label: string; onClick: () => voi
   );
 }
 
-function AddDeviceWizardPanel({ templates, instanceCounts, onApplyRexDraft, onInstallTemplate, onClose }: {
+function AddDeviceWizardPanel({
+  templates,
+  instanceCounts,
+  sessionId,
+  createAndSend,
+  rexComposerControls,
+  onApplyRexDraft,
+  onInstallTemplate,
+  onClose,
+}: {
   templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
+  sessionId: string | null;
+  createAndSend: (options: CreateAndSendOptions) => Promise<string>;
+  rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyRexDraft: (draft: DeviceAddDraft) => void;
   onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
   onClose: () => void;
@@ -774,6 +801,9 @@ function AddDeviceWizardPanel({ templates, instanceCounts, onApplyRexDraft, onIn
           <DeviceAddRexPanel
             templates={templates}
             instanceCounts={instanceCounts}
+            sessionId={sessionId}
+            createAndSend={createAndSend}
+            rexComposerControls={rexComposerControls}
             onApplyDraft={onApplyRexDraft}
             onInstallTemplate={onInstallTemplate}
           />
@@ -1661,6 +1691,18 @@ export default function DeviceIntegrationPage() {
   // Group ids whose section is collapsed in the "全部机房" view. Default
   // (absent) = expanded, so brand-new rooms show their devices immediately.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const rexComposerControls = useRexComposerControls();
+  const rexContextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
+  const {
+    sessionId: rexSessionId,
+    createAndSend: createAndSendRex,
+    reset: resetRexSession,
+  } = useSessionChat({
+    title: t('wizard.rex.title'),
+    category: 'entity-config',
+    contextMessage: rexContextMessage,
+    welcomeMessage: t('wizard.rex.welcome'),
+  });
 
   const toggleGroupCollapsed = useCallback((groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -1675,6 +1717,11 @@ export default function DeviceIntegrationPage() {
     () => groups.find((g) => g.id === selectedGroupId) ?? null,
     [groups, selectedGroupId],
   );
+
+  const closeAddWorkbench = useCallback(() => {
+    setPanel(null);
+    resetRexSession();
+  }, [resetRexSession]);
 
   // Devices shown in the main area (filtered by selected room)
   const filteredDevices = useMemo(
@@ -1818,7 +1865,7 @@ export default function DeviceIntegrationPage() {
     group_id: string;
   }) => {
     if (panel?.kind === 'add') {
-      await deviceAPI.create({
+      const createRes = await deviceAPI.create({
         name: data.name,
         storage_key: panel.template.storage_key,
         service_id: panel.template.service_id,
@@ -1827,8 +1874,17 @@ export default function DeviceIntegrationPage() {
         verify_ssl: data.verify_ssl,
         fields: data.fields,
       });
-      setPanel(null);
-    } else if (panel?.kind === 'edit') {
+      const createdDevice = createRes.data;
+      setPanel({ kind: 'wizard' });
+      createAndSendRex({
+        ...buildDeviceTestGuidePrompt(createdDevice, panel.template),
+        agent: rexComposerControls.rexAgentName,
+        model: rexComposerControls.rexModel,
+      }).catch(() => {});
+      await fetchData(true);
+      return;
+    }
+    if (panel?.kind === 'edit') {
       await deviceAPI.update(panel.device.id, {
         name: data.name,
         group_id: data.group_id,
@@ -2205,9 +2261,12 @@ export default function DeviceIntegrationPage() {
         <AddDeviceWizardPanel
           templates={templates}
           instanceCounts={instanceCounts}
+          sessionId={rexSessionId}
+          createAndSend={createAndSendRex}
+          rexComposerControls={rexComposerControls}
           onApplyRexDraft={handleApplyRexDraft}
           onInstallTemplate={handleInstallTemplate}
-          onClose={() => setPanel(null)}
+          onClose={closeAddWorkbench}
         />
       )}
 
@@ -2231,7 +2290,7 @@ export default function DeviceIntegrationPage() {
             initialDraft={panel.kind === 'add' ? panel.draft : undefined}
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
-            onClose={() => setPanel(null)}
+            onClose={panel.kind === 'add' ? closeAddWorkbench : () => setPanel(null)}
             onTest={panel.kind === 'edit' ? handleTest : undefined}
             onBack={panel.kind === 'add' ? () => setPanel({ kind: 'wizard' }) : undefined}
           />

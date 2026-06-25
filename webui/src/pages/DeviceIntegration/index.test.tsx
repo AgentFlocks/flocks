@@ -537,6 +537,96 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('已填充设备配置表单');
   });
 
+  it('returns to the Rex session and asks for testing guidance after confirming integration', async () => {
+    const user = userEvent.setup();
+    mocks.sessionId = 'session-1';
+    const template = buildTemplate({
+      storage_key: 'qingteng_v3_4_1_66',
+      service_id: 'qingteng',
+      name: '青藤云安全',
+      vendor: 'qingteng',
+      credential_schema: [
+        {
+          key: 'base_url',
+          label: 'Base URL',
+          storage: 'config',
+          sensitive: false,
+          required: true,
+          input_type: 'url',
+          config_key: 'base_url',
+        },
+        {
+          key: 'username',
+          label: 'Username',
+          storage: 'config',
+          sensitive: false,
+          required: true,
+          input_type: 'text',
+          config_key: 'username',
+        },
+      ],
+    });
+    mocks.listGroups.mockResolvedValue({
+      data: [
+        { id: 'group-1', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 },
+      ],
+    });
+    mocks.listTemplates.mockResolvedValue({ data: [template] });
+    mocks.getSessionMessagesPage.mockResolvedValue({
+      items: [
+        {
+          info: { role: 'assistant' },
+          parts: [
+            {
+              type: 'text',
+              text: '```json\n{"storage_key":"qingteng_v3_4_1_66","device_name":"青藤万相","fields":{"base_url":"https://example.com","username":"admin"},"verify_ssl":false}\n```',
+            },
+          ],
+        },
+      ],
+    });
+    mocks.createDevice.mockResolvedValue({
+      data: {
+        id: 'device-new',
+        group_id: 'group-1',
+        name: '青藤万相',
+        storage_key: 'qingteng_v3_4_1_66',
+        service_id: 'qingteng',
+        enabled: true,
+        verify_ssl: false,
+        fields: { base_url: 'https://example.com', username: 'admin' },
+        fields_set: { base_url: true, username: true },
+        status: 'unknown',
+        created_at: 0,
+        updated_at: 0,
+      },
+    });
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(await screen.findByRole('button', { name: /mock stream done/ }));
+    await user.click(await screen.findByRole('button', { name: /^填充表单$/ }));
+    expect(await screen.findByDisplayValue('青藤万相')).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /^(确认接入|添加设备|config.addBtn)$/ }));
+
+    await waitFor(() => {
+      expect(mocks.createDevice).toHaveBeenCalledWith(expect.objectContaining({
+        name: '青藤万相',
+        storage_key: 'qingteng_v3_4_1_66',
+        service_id: 'qingteng',
+        group_id: 'group-1',
+      }));
+    });
+    expect(await screen.findByText('SessionChat:session-1')).toBeInTheDocument();
+    await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('设备「青藤万相」已确认接入并保存'),
+      displayText: '设备「青藤万相」已确认接入，请继续引导我测试。',
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    })));
+    expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('不要再询问接入方式');
+  });
+
   it('does not detect Rex prose as a fillable device draft', async () => {
     const user = userEvent.setup();
     mocks.sessionId = 'session-1';
