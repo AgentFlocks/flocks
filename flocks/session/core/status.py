@@ -139,8 +139,8 @@ class SessionStatus:
     def get_busy_session_ids(cls) -> List[str]:
         """Return IDs of all sessions that are busy or compacting (across all instances)."""
         result: List[str] = []
-        for _inst_id, statuses in cls._state.items():
-            for sid, info in statuses.items():
+        for _inst_id, statuses in list(cls._state.items()):
+            for sid, info in list(statuses.items()):
                 if info.type in ("busy", "compacting"):
                     result.append(sid)
         return result

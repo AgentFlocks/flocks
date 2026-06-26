@@ -753,7 +753,7 @@ class SessionRunner:
         
         cancelled = 0
         child_ids = [
-            sid for sid, runner in cls._active_sessions.items()
+            sid for sid, runner in list(cls._active_sessions.items())
             if getattr(runner.session, 'parent_id', None) == parent_session_id
         ]
         for sid in child_ids:
@@ -2939,7 +2939,7 @@ class SessionRunner:
                 name=tc_state.name,
                 arguments=tc_state.input,
             )
-            for tc_state in processor.tool_calls.values()
+            for tc_state in list(processor.tool_calls.values())
         ]
         result_action = "continue" if tool_calls_for_result else "stop"
         response_payload = _build_llm_response_payload(

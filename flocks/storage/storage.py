@@ -121,19 +121,32 @@ class Storage:
     )
 
     @classmethod
-    def _invalidate_runtime_caches(cls) -> None:
-        """Clear higher-level caches that depend on the active storage DB."""
-        try:
-            from flocks.session.session import Session
-            Session.invalidate_cache()
-        except Exception:
-            pass
+    def _prefix_matches_runtime_cache(cls, prefix: Optional[str], roots: tuple[str, ...]) -> bool:
+        if prefix is None:
+            return True
+        normalized = str(prefix)
+        return any(
+            normalized == root.rstrip(":/")
+            or normalized.startswith(root)
+            for root in roots
+        )
 
-        try:
-            from flocks.session.message import Message
-            Message.invalidate_cache()
-        except Exception:
-            pass
+    @classmethod
+    def _invalidate_runtime_caches(cls, prefix: Optional[str] = None) -> None:
+        """Clear higher-level caches that depend on the active storage DB."""
+        if cls._prefix_matches_runtime_cache(prefix, ("session:",)):
+            try:
+                from flocks.session.session import Session
+                Session.invalidate_cache()
+            except Exception:
+                pass
+
+        if cls._prefix_matches_runtime_cache(prefix, ("message:", "message_parts:")):
+            try:
+                from flocks.session.message import Message
+                Message.invalidate_cache()
+            except Exception:
+                pass
     
     @classmethod
     def get_db_path(cls) -> Path:
@@ -1422,7 +1435,7 @@ class Storage:
             )
         
         cls._log.info("storage.clear", {"prefix": prefix, "deleted": deleted})
-        cls._invalidate_runtime_caches()
+        cls._invalidate_runtime_caches(prefix)
         return deleted
     
     # ==================== TypeScript-compatible API ====================
