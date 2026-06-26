@@ -218,6 +218,54 @@ class TestSessionCRUD:
         get_resp = await client.get(f"/api/session/{session_id}")
         assert get_resp.status_code == status.HTTP_404_NOT_FOUND
 
+    @staticmethod
+    def _patch_delete_session_dependencies(
+        monkeypatch,
+        session_routes,
+        *,
+        session_id: str,
+        order: list[str],
+        session_list,
+    ) -> None:
+        async def fake_abort_session_processing(abort_session_id: str) -> bool:
+            order.append(f"abort:{abort_session_id}")
+            return True
+
+        async def fake_wait_for_sessions_idle(session_ids: list[str], timeout_s: float = 5.0) -> None:
+            order.append(f"wait:{','.join(session_ids)}")
+
+        async def fake_interaction_queue_clear(_session_id: str) -> None:
+            order.append("queue_clear")
+
+        async def fake_goal_clear(_session_id: str) -> None:
+            order.append("goal_clear")
+
+        async def fake_session_delete(_project_id: str, delete_session_id: str) -> bool:
+            assert delete_session_id == session_id
+            order.append("delete")
+            return True
+
+        monkeypatch.setattr(session_routes.Session, "list", session_list)
+        monkeypatch.setattr(
+            session_routes,
+            "_abort_session_processing",
+            fake_abort_session_processing,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_wait_for_sessions_idle",
+            fake_wait_for_sessions_idle,
+        )
+        monkeypatch.setattr(
+            "flocks.session.interaction_queue.InteractionQueue.clear",
+            fake_interaction_queue_clear,
+        )
+        monkeypatch.setattr(
+            "flocks.session.goal.GoalManager.clear",
+            fake_goal_clear,
+        )
+        monkeypatch.setattr(session_routes.Session, "delete", fake_session_delete)
+
     @pytest.mark.asyncio
     async def test_delete_session_aborts_and_waits_before_delete(
         self,
@@ -230,48 +278,114 @@ class TestSessionCRUD:
 
         order: list[str] = []
 
-        async def fake_abort_session_processing(_session_id: str) -> bool:
-            order.append("abort")
-            return True
+        async def fake_session_list(_project_id: str):
+            return []
 
-        async def fake_wait_for_session_idle(_session_id: str) -> None:
-            order.append("wait")
-
-        async def fake_interaction_queue_clear(_session_id: str) -> None:
-            order.append("queue_clear")
-
-        async def fake_goal_clear(_session_id: str) -> None:
-            order.append("goal_clear")
-
-        async def fake_session_delete(_project_id: str, _session_id: str) -> bool:
-            order.append("delete")
-            return True
-
-        monkeypatch.setattr(
+        self._patch_delete_session_dependencies(
+            monkeypatch,
             session_routes,
-            "_abort_session_processing",
-            fake_abort_session_processing,
+            session_id=session_id,
+            order=order,
+            session_list=fake_session_list,
         )
-        monkeypatch.setattr(
-            session_routes,
-            "_wait_for_session_idle",
-            fake_wait_for_session_idle,
-        )
-        monkeypatch.setattr(
-            "flocks.session.interaction_queue.InteractionQueue.clear",
-            fake_interaction_queue_clear,
-        )
-        monkeypatch.setattr(
-            "flocks.session.goal.GoalManager.clear",
-            fake_goal_clear,
-        )
-        monkeypatch.setattr(session_routes.Session, "delete", fake_session_delete)
 
         resp = await client.delete(f"/api/session/{session_id}")
 
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json() is True
-        assert order == ["abort", "queue_clear", "goal_clear", "wait", "delete"]
+        assert order == [
+            f"abort:{session_id}",
+            "queue_clear",
+            "goal_clear",
+            f"wait:{session_id}",
+            "delete",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_delete_session_waits_for_descendant_loops_before_delete(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch,
+    ):
+        """DELETE waits for child and grandchild loops before recursive delete."""
+        from flocks.server.routes import session as session_routes
+
+        child_id = "ses_delete_child_wait"
+        grandchild_id = "ses_delete_grandchild_wait"
+        order: list[str] = []
+
+        async def fake_session_list(_project_id: str):
+            return [
+                SimpleNamespace(id=child_id, parent_id=session_id),
+                SimpleNamespace(id=grandchild_id, parent_id=child_id),
+            ]
+
+        self._patch_delete_session_dependencies(
+            monkeypatch,
+            session_routes,
+            session_id=session_id,
+            order=order,
+            session_list=fake_session_list,
+        )
+
+        resp = await client.delete(f"/api/session/{session_id}")
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() is True
+        assert order == [
+            f"abort:{session_id}",
+            "queue_clear",
+            "goal_clear",
+            f"wait:{session_id}",
+            f"abort:{child_id}",
+            f"abort:{grandchild_id}",
+            f"wait:{child_id},{grandchild_id}",
+            "delete",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_delete_session_aborts_descendant_that_appears_after_parent_wait(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch,
+    ):
+        """DELETE re-collects descendants after parent abort to catch late children."""
+        from flocks.server.routes import session as session_routes
+
+        child_id = "ses_delete_late_child_wait"
+        list_calls = 0
+        order: list[str] = []
+
+        async def fake_session_list(_project_id: str):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return []
+            return [SimpleNamespace(id=child_id, parent_id=session_id)]
+
+        self._patch_delete_session_dependencies(
+            monkeypatch,
+            session_routes,
+            session_id=session_id,
+            order=order,
+            session_list=fake_session_list,
+        )
+
+        resp = await client.delete(f"/api/session/{session_id}")
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() is True
+        assert order == [
+            f"abort:{session_id}",
+            "queue_clear",
+            "goal_clear",
+            f"wait:{session_id}",
+            f"abort:{child_id}",
+            f"wait:{child_id}",
+            "delete",
+        ]
 
     @pytest.mark.asyncio
     async def test_delete_session_not_found(self, client: AsyncClient):

@@ -36,6 +36,7 @@ log = Log.create(service="session-routes")
 # Default agent name constant
 DEFAULT_AGENT = "rex"
 DEFAULT_MESSAGE_PAGE_LIMIT = 50
+_DESCENDANT_ABORT_SCAN_LIMIT = 3
 
 # File extensions that are safe to persist when materialising data-URL uploads.
 # Intentionally narrow: any extension outside this set is rejected to prevent
@@ -716,7 +717,8 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     await _abort_session_processing(sessionID)
     await InteractionQueue.clear(sessionID)
     await GoalManager.clear(sessionID)
-    await _wait_for_session_idle(sessionID)
+    await _wait_for_sessions_idle([sessionID])
+    await _abort_and_wait_descendant_sessions(session.project_id, sessionID)
     await Session.delete(session.project_id, sessionID)
 
     # Best-effort cleanup of any image/file uploads materialised for this
@@ -761,6 +763,56 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     except Exception:
         pass
     return True
+
+
+async def _collect_descendant_session_ids(project_id: str, session_id: str) -> List[str]:
+    """Return child session IDs in the same order Session.delete will recurse."""
+    sessions = await Session.list(project_id)
+    children_by_parent: Dict[str, List[str]] = {}
+    for child in sessions:
+        if child.parent_id is None:
+            continue
+        children_by_parent.setdefault(child.parent_id, []).append(child.id)
+
+    descendants: List[str] = []
+    seen: set[str] = set()
+
+    def visit(parent_id: str) -> None:
+        for child_id in children_by_parent.get(parent_id, []):
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            descendants.append(child_id)
+            visit(child_id)
+
+    visit(session_id)
+    return descendants
+
+
+async def _abort_and_wait_descendant_sessions(project_id: str, session_id: str) -> None:
+    """Abort descendants that exist after the parent stops and wait as a batch."""
+    known: set[str] = set()
+    latest: List[str] = []
+
+    for _ in range(_DESCENDANT_ABORT_SCAN_LIMIT):
+        latest = await _collect_descendant_session_ids(project_id, session_id)
+        new_ids = [sid for sid in latest if sid not in known]
+        for descendant_id in new_ids:
+            await _abort_session_processing(descendant_id)
+        known.update(new_ids)
+
+        if latest:
+            await _wait_for_sessions_idle(latest)
+
+        refreshed = await _collect_descendant_session_ids(project_id, session_id)
+        if set(refreshed).issubset(known):
+            return
+        latest = refreshed
+
+    log.warn("session.delete.descendants_unstable", {
+        "session_id": session_id,
+        "descendants": latest,
+    })
 
 
 class SessionUpdateRequest(BaseModel):
@@ -3322,11 +3374,30 @@ async def _schedule_prompt_queue_drain(session_id: str, working_directory: str) 
 
 
 async def _wait_for_session_idle(session_id: str, timeout_s: float = 5.0) -> None:
+    await _wait_for_sessions_idle([session_id], timeout_s=timeout_s)
+
+
+async def _wait_for_sessions_idle(session_ids: List[str], timeout_s: float = 5.0) -> None:
     from flocks.session.session_loop import SessionLoop
 
+    pending = set(session_ids)
+    if not pending:
+        return
+
     deadline = time.time() + timeout_s
-    while SessionLoop.is_running(session_id) and time.time() < deadline:
-        await asyncio.sleep(0.05)
+    while pending:
+        running = {sid for sid in pending if SessionLoop.is_running(sid)}
+        if not running:
+            return
+        now = time.time()
+        if now >= deadline:
+            log.warn("session.wait_idle.timeout", {
+                "session_ids": sorted(running),
+                "timeout_s": timeout_s,
+            })
+            return
+        pending = running
+        await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
 
 
 def _build_prompt_request_from_event(event, prompt_text: str, display_text: Optional[str] = None):

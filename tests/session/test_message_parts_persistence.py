@@ -6,6 +6,7 @@ import pytest
 
 from flocks.session.message import (
     Message,
+    MessageCacheInvalidatedError,
     MessageRole,
     TextPart,
     UserMessageInfo,
@@ -230,6 +231,126 @@ async def test_clear_tolerates_cache_invalidation_during_full_parts_load(monkeyp
 
     assert await Message.clear(session_id) == 0
     assert session_id not in Message._lru
+    assert session_id not in Message._parts_fully_loaded
+
+
+@pytest.mark.asyncio
+async def test_ensure_cache_raises_after_repeated_invalidation(monkeypatch) -> None:
+    session_id = "ses_parts_full_load_repeated_invalidate"
+    await _write_legacy_session(session_id, {"msg_a": "never stabilizes"})
+
+    async def fake_load_all_parts_locked(cls, sid: str, *, message_times: dict) -> None:
+        assert sid == session_id
+        Message.invalidate_cache(sid)
+        for index in range(Message._MAX_CACHE_GENERATIONS + 5):
+            Message.invalidate_cache(f"ses_parts_full_load_churn_{index}")
+        Message._parts_cache[sid] = {
+            "msg_a": [_text_part(sid, "msg_a", "partial")]
+        }
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(
+        Message,
+        "_load_all_parts_locked",
+        classmethod(fake_load_all_parts_locked),
+    )
+
+    with pytest.raises(MessageCacheInvalidatedError):
+        await Message._ensure_cache(session_id)
+
+    assert session_id not in Message._lru
+    assert session_id not in Message._messages_cache
+    assert session_id not in Message._parts_cache
+    assert session_id not in Message._parts_fully_loaded
+
+
+@pytest.mark.asyncio
+async def test_ensure_cache_retries_when_invalidated_during_full_parts_load(monkeypatch) -> None:
+    session_id = "ses_parts_full_load_invalidate_retry"
+    await _write_legacy_session(session_id, {"msg_a": "survives reload"})
+
+    original_load_all_parts_locked = Message._load_all_parts_locked
+    invalidated = False
+
+    async def fake_load_all_parts_locked(cls, sid: str, *, message_times: dict) -> None:
+        nonlocal invalidated
+        assert sid == session_id
+        if not invalidated:
+            invalidated = True
+            Message.invalidate_cache(sid)
+            await asyncio.sleep(0)
+            return
+        await original_load_all_parts_locked(sid, message_times=message_times)
+
+    monkeypatch.setattr(
+        Message,
+        "_load_all_parts_locked",
+        classmethod(fake_load_all_parts_locked),
+    )
+
+    await Message._ensure_cache(session_id)
+
+    assert invalidated is True
+    assert session_id in Message._lru
+    assert session_id in Message._messages_cache
+    assert session_id in Message._parts_fully_loaded
+    messages = await Message.list(session_id)
+    assert [message.id for message in messages] == ["msg_a"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_cache_ignores_unrelated_session_invalidation(monkeypatch) -> None:
+    session_id = "ses_parts_full_load_target"
+    unrelated_id = "ses_parts_full_load_unrelated"
+    await _write_legacy_session(session_id, {"msg_a": "target survives"})
+    await _write_legacy_session(unrelated_id, {"msg_b": "unrelated"})
+
+    original_load_all_parts_locked = Message._load_all_parts_locked
+    load_calls = 0
+
+    async def fake_load_all_parts_locked(cls, sid: str, *, message_times: dict) -> None:
+        nonlocal load_calls
+        assert sid == session_id
+        load_calls += 1
+        Message.invalidate_cache(unrelated_id)
+        await original_load_all_parts_locked(sid, message_times=message_times)
+
+    monkeypatch.setattr(
+        Message,
+        "_load_all_parts_locked",
+        classmethod(fake_load_all_parts_locked),
+    )
+
+    await Message._ensure_cache(session_id)
+
+    assert load_calls == 1
+    assert session_id in Message._parts_fully_loaded
+    messages = await Message.list(session_id)
+    assert [message.id for message in messages] == ["msg_a"]
+
+
+def test_session_cache_generation_map_is_bounded() -> None:
+    Message.invalidate_cache()
+
+    for index in range(Message._MAX_CACHE_GENERATIONS + 25):
+        Message.invalidate_cache(f"ses_generation_bound_{index}")
+
+    assert len(Message._session_cache_generations) == Message._MAX_CACHE_GENERATIONS
+
+
+@pytest.mark.asyncio
+async def test_message_list_recovers_when_lru_outlives_message_cache() -> None:
+    session_id = "ses_parts_stale_lru_without_messages"
+    await _write_legacy_session(session_id, {"msg_a": "restored from disk"})
+    Message._lru[session_id] = True
+    Message._messages_cache.pop(session_id, None)
+    Message._parts_fully_loaded.add(session_id)
+
+    messages = await Message.list(session_id)
+
+    assert [message.id for message in messages] == ["msg_a"]
+    assert session_id in Message._lru
+    assert session_id in Message._messages_cache
     assert session_id not in Message._parts_fully_loaded
 
 
