@@ -1,0 +1,164 @@
+name: Dispatch autotest Windows upgrade
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional Flocks version tag. Defaults to pyproject.toml version."
+        required: false
+        type: string
+      release_url:
+        description: "Optional source URL. Defaults to the release or commit URL."
+        required: false
+        type: string
+      rollback_version:
+        description: "Optional old version for flocks_autotest to prepare an upgradeable baseline."
+        required: false
+        type: string
+      run_force_fallback:
+        description: "Also ask flocks_autotest to run the force fallback reinstall case."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dispatch-autotest-windows-upgrade-${{ github.event_name }}-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch flocks_autotest Windows upgrade
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve dispatch payload
+        id: payload
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_RELEASE_URL: ${{ github.event.release.html_url }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_RELEASE_URL: ${{ inputs.release_url }}
+          INPUT_ROLLBACK_VERSION: ${{ inputs.rollback_version }}
+          INPUT_RUN_FORCE_FALLBACK: ${{ inputs.run_force_fallback }}
+          GITHUB_SERVER_URL_VALUE: ${{ github.server_url }}
+          GITHUB_REPOSITORY_VALUE: ${{ github.repository }}
+          GITHUB_SHA_VALUE: ${{ github.sha }}
+          GITHUB_REF_NAME_VALUE: ${{ github.ref_name }}
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          pyproject_version="$(python3 - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+
+          release_tag="${INPUT_RELEASE_TAG:-}"
+          release_url="${INPUT_RELEASE_URL:-}"
+
+          if [ -z "$release_tag" ] && [ "$EVENT_NAME" = "release" ]; then
+            release_tag="${EVENT_RELEASE_TAG:-}"
+          fi
+          if [ -z "$release_url" ] && [ "$EVENT_NAME" = "release" ]; then
+            release_url="${EVENT_RELEASE_URL:-}"
+          fi
+
+          if [ -z "$release_tag" ]; then
+            release_tag="$pyproject_version"
+          fi
+          if [ -z "$release_url" ]; then
+            release_url="${GITHUB_SERVER_URL_VALUE}/${GITHUB_REPOSITORY_VALUE}/commit/${GITHUB_SHA_VALUE}"
+          fi
+
+          if [ -z "$release_tag" ]; then
+            echo "release_tag is empty" >&2
+            exit 1
+          fi
+
+          {
+            echo "release_tag=$release_tag"
+            echo "release_url=$release_url"
+            echo "rollback_version=${INPUT_ROLLBACK_VERSION:-}"
+            echo "run_force_fallback=${INPUT_RUN_FORCE_FALLBACK:-false}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### flocks_autotest dispatch payload"
+            echo ""
+            echo "- Event: ${EVENT_NAME}"
+            echo "- Release tag: ${release_tag}"
+            echo "- Release URL: ${release_url}"
+            echo "- Source ref: ${GITHUB_REF_NAME_VALUE}"
+            echo "- Source sha: ${GITHUB_SHA_VALUE}"
+            echo "- Rollback version: ${INPUT_ROLLBACK_VERSION:-}"
+            echo "- Run force fallback: ${INPUT_RUN_FORCE_FALLBACK:-false}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create repository_dispatch payload
+        env:
+          RELEASE_TAG: ${{ steps.payload.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.payload.outputs.release_url }}
+          ROLLBACK_VERSION: ${{ steps.payload.outputs.rollback_version }}
+          RUN_FORCE_FALLBACK: ${{ steps.payload.outputs.run_force_fallback }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' > "$RUNNER_TEMP/flocks-autotest-dispatch.json"
+          import json
+          import os
+
+          payload = {
+              "event_type": "flocks_release_published",
+              "client_payload": {
+                  "release_tag": os.environ["RELEASE_TAG"],
+                  "release_url": os.environ["RELEASE_URL"],
+                  "installer_asset_name": "",
+                  "source_repository": os.environ["SOURCE_REPOSITORY"],
+                  "source_run_id": os.environ["SOURCE_RUN_ID"],
+                  "source_sha": os.environ["SOURCE_SHA"],
+                  "source_ref": os.environ["SOURCE_REF"],
+                  "rollback_version": os.environ.get("ROLLBACK_VERSION", ""),
+                  "run_force_fallback": os.environ.get("RUN_FORCE_FALLBACK", "false"),
+              },
+          }
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+
+          cat "$RUNNER_TEMP/flocks-autotest-dispatch.json"
+
+      - name: Dispatch flocks_autotest
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTEST_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Missing AUTOTEST_DISPATCH_TOKEN secret" >&2
+            exit 1
+          fi
+
+          curl --fail-with-body -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary "@${RUNNER_TEMP}/flocks-autotest-dispatch.json" \
+            "https://api.github.com/repos/AgentFlocks/flocks_autotest/dispatches"
