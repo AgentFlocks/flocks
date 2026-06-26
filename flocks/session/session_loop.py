@@ -162,7 +162,7 @@ class SessionLoop:
         """Abort all child loops whose session.parent_id matches, recursively."""
         aborted = 0
         child_ids = [
-            sid for sid, ctx in cls._active_loops.items()
+            sid for sid, ctx in list(cls._active_loops.items())
             if getattr(ctx.session, 'parent_id', None) == parent_session_id
         ]
         for sid in child_ids:

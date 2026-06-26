@@ -1224,7 +1224,7 @@ class Message:
             else:
                 serialized = {
                     mid: cls._serialize_message_parts(mparts)
-                    for mid, mparts in all_parts.items()
+                    for mid, mparts in list(all_parts.items())
                 }
                 cls._parts_serialized_cache[session_id] = serialized
             cls._parts_persisted_mids[session_id] = set(serialized.keys())
@@ -1244,7 +1244,7 @@ class Message:
 
         persisted_mids = cls._parts_persisted_mids.setdefault(session_id, set())
         current_mids = set(all_parts.keys())
-        for mid, mparts in all_parts.items():
+        for mid, mparts in list(all_parts.items()):
             serialized_one = cls._serialize_message_parts(mparts)
             if serialized.get(mid) != serialized_one or mid not in persisted_mids:
                 await Storage.set(
@@ -1433,7 +1433,7 @@ class Message:
         else:
             # Search all sessions for the message
             parts = []
-            for sid in cls._parts_cache:
+            for sid in list(cls._parts_cache):
                 await cls._ensure_cache(sid)
                 if message_id in cls._parts_cache.get(sid, {}):
                     parts = cls._parts_cache[sid][message_id]
@@ -2360,7 +2360,7 @@ class MessageSync:
             parts = Message._parts_cache.get(session_id, {}).get(message_id, [])
         else:
             parts = []
-            for sid in Message._parts_cache:
+            for sid in list(Message._parts_cache):
                 if message_id in Message._parts_cache.get(sid, {}):
                     parts = Message._parts_cache[sid][message_id]
                     break

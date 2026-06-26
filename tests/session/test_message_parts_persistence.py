@@ -233,6 +233,44 @@ async def test_clear_tolerates_cache_invalidation_during_full_parts_load(monkeyp
     assert session_id not in Message._parts_fully_loaded
 
 
+@pytest.mark.asyncio
+async def test_parts_without_session_uses_cache_snapshot(monkeypatch) -> None:
+    session_id = "ses_parts_snapshot_search"
+    Message.invalidate_cache()
+    Message._parts_cache[session_id] = {}
+
+    async def fake_ensure_cache(cls, sid: str) -> None:
+        assert sid == session_id
+        Message._parts_cache["ses_parts_snapshot_added"] = {}
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(Message, "_ensure_cache", classmethod(fake_ensure_cache))
+
+    assert await Message.parts("missing_message_id") == []
+
+
+@pytest.mark.asyncio
+async def test_persist_parts_uses_snapshot_when_cache_changes(monkeypatch) -> None:
+    session_id = "ses_parts_persist_snapshot"
+    Message.invalidate_cache()
+    Message._parts_cache[session_id] = {
+        "msg_a": [_text_part(session_id, "msg_a", "a")],
+    }
+    Message._parts_serialized_cache[session_id] = {}
+    Message._parts_storage_format[session_id] = "per_message"
+    Message._parts_persisted_mids[session_id] = set()
+
+    async def fake_storage_set(key: str, value, value_type: str = "json") -> None:
+        Message._parts_cache[session_id]["msg_b"] = [
+            _text_part(session_id, "msg_b", "b")
+        ]
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(Storage, "set", fake_storage_set)
+
+    await Message._persist_parts(session_id)
+
+
 def test_deserialize_legacy_text_part_normalizes_content_and_time() -> None:
     part = Message.deserialize_part(
         {
