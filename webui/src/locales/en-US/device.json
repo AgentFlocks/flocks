@@ -73,7 +73,7 @@
       "title": "Rex-assisted integration",
       "subtitle": "Choose a guide or example. Rex will confirm the integration path, credential fields, and smoke-test steps to help you connect the device.",
       "customTitle": "Custom device integration",
-      "caseTitle": "Examples",
+      "caseTitle": "Create device",
       "examples": {
         "supported": "I want to connect a supported security device",
         "addressOnly": "I only have the device URL and login method",
@@ -226,7 +226,7 @@
     "toolCount": "Tools",
     "vendor": "Vendor",
     "serviceDesc": "Service description",
-    "viewDocs": "View API docs"
+    "viewDocs": "View setup guide"
   },
 
   "toast": {

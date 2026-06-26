@@ -60,6 +60,7 @@ vi.mock('react-i18next', () => ({
         'config.testBtn': '连通测试',
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
+        'overview.viewDocs': '查看配置指引',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
         'wizard.tabs.rex': 'Rex 接入',
         'wizard.tabs.manual': '手动接入',
@@ -67,7 +68,7 @@ vi.mock('react-i18next', () => ({
         'wizard.guide.title': 'Rex 辅助接入',
         'wizard.guide.subtitle': '选择一个引导或案例',
         'wizard.guide.customTitle': '自定义设备接入',
-        'wizard.guide.caseTitle': '创建案例',
+        'wizard.guide.caseTitle': '创建设备',
         'wizard.guide.examples.supported': '我想接入一台已支持的安全设备',
         'wizard.guide.examples.addressOnly': '我只有设备地址和登录方式',
         'wizard.guide.examples.noApi': '这台设备没有开放 API',
@@ -486,6 +487,7 @@ describe('DeviceIntegrationPage', () => {
           service_id: 'qingteng',
           name: '青藤云安全',
           vendor: 'qingteng',
+          docs_url: 'https://docs.example.com/qingteng',
           credential_schema: [
             {
               key: 'base_url',
@@ -534,6 +536,8 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByDisplayValue('admin')).toBeInTheDocument();
     expect(screen.getByRole('combobox')).toHaveValue('group-1');
     expect(screen.getAllByText('北京机房').length).toBeGreaterThan(0);
+    expect(screen.getByRole('link', { name: /查看配置指引/ })).toHaveAttribute('href', 'https://docs.example.com/qingteng');
+    expect(screen.queryByRole('button', { name: /^工作台$/ })).not.toBeInTheDocument();
     expect(mocks.toastSuccess).toHaveBeenCalledWith('已填充设备配置表单');
   });
 
@@ -620,7 +624,7 @@ describe('DeviceIntegrationPage', () => {
     expect(await screen.findByText('SessionChat:session-1')).toBeInTheDocument();
     await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
       text: expect.stringContaining('设备「青藤万相」已确认接入并保存'),
-      displayText: '设备「青藤万相」已确认接入，请继续引导我测试。',
+      displayText: '设备「青藤万相」已确认接入，请帮我测试。',
       agent: 'rex',
       model: { providerID: 'openai', modelID: 'gpt-4.1' },
     })));
@@ -771,6 +775,44 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.queryByText(/已进入 Rex 对话/)).toBeNull();
   });
 
+  it('localizes known vendor keys in the supported-device list', async () => {
+    const user = userEvent.setup();
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [
+        buildTemplate({
+          plugin_id: 'huorong_v1',
+          storage_key: 'huorong_v1',
+          service_id: 'huorong',
+          name: '火绒终端安全',
+          vendor: 'huorong',
+        }),
+        buildTemplate({
+          plugin_id: 'huawei_cloud_v1',
+          storage_key: 'huawei_cloud_v1',
+          service_id: 'huaweicloud',
+          name: '华为云',
+          vendor: 'huaweicloud',
+        }),
+        buildTemplate({
+          plugin_id: '360_waf_v5_5',
+          storage_key: '360_waf_v5_5',
+          service_id: '360_waf',
+          name: '360 WAF',
+          vendor: '360',
+        }),
+      ],
+    });
+    render(<DeviceIntegrationPage />);
+
+    await openSupportedDeviceList(user);
+
+    expect(screen.getByText('火绒')).toBeInTheDocument();
+    expect(screen.getByText('华为云')).toBeInTheDocument();
+    expect(screen.getAllByText('360').length).toBeGreaterThan(0);
+    expect(screen.queryByText('huorong')).toBeNull();
+    expect(screen.queryByText('huaweicloud')).toBeNull();
+  });
+
   it('sends the selected supported device template to Rex from the vendor accordion', async () => {
     const user = userEvent.setup();
     mocks.listTemplates.mockResolvedValueOnce({
@@ -781,6 +823,7 @@ describe('DeviceIntegrationPage', () => {
           service_id: 'tdp_api',
           name: 'TDP',
           vendor: 'threatbook',
+          docs_url: 'https://docs.example.com/tdp',
           installed: true,
           state: 'installed',
           credential_schema: [
@@ -811,6 +854,7 @@ describe('DeviceIntegrationPage', () => {
     }));
     expect(mocks.createAndSend.mock.calls[0][0].text).toContain('storage_key=tdp_api_v3_3_10');
     expect(mocks.createAndSend.mock.calls[0][0].text).toContain('base_url* (Base URL)');
+    expect(mocks.createAndSend.mock.calls[0][0].text).toContain('https://docs.example.com/tdp');
   });
 
   it('clicking the blank backdrop closes the config panel', async () => {
@@ -842,6 +886,18 @@ describe('DeviceIntegrationPage', () => {
           name: 'TDP',
           tool_count: 21,
           vendor: 'threatbook',
+          docs_url: 'https://docs.example.com/tdp',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
         }),
       ],
     });
@@ -931,6 +987,18 @@ describe('DeviceIntegrationPage', () => {
           name: 'TDP',
           tool_count: 21,
           vendor: 'threatbook',
+          docs_url: 'https://docs.example.com/tdp',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
         }),
       ],
     });
@@ -947,6 +1015,7 @@ describe('DeviceIntegrationPage', () => {
     render(<DeviceIntegrationPage />);
 
     await user.click(await screen.findByText('TDP-test-02'));
+    expect(await screen.findByRole('link', { name: /查看配置指引/ })).toHaveAttribute('href', 'https://docs.example.com/tdp');
     const roomSelect = await screen.findByRole('combobox');
     await user.selectOptions(roomSelect, 'group-2');
     await user.click(screen.getByRole('button', { name: /保存配置/ }));
@@ -1095,6 +1164,26 @@ describe('DeviceIntegrationPage', () => {
           name: 'OneSEC',
           tool_count: 5,
           vendor: 'threatbook',
+          credential_schema: [
+            {
+              key: 'api_key',
+              label: 'API Key',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'api_key',
+            },
+            {
+              key: 'secret',
+              label: 'Secret',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'secret',
+            },
+          ],
         }),
       ],
     });

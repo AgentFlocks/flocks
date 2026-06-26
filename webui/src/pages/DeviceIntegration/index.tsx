@@ -53,14 +53,18 @@ interface DeviceVendor {
   nameCn: string;
   nameEn: string;
   color: string;
+  mark?: string;
 }
 
 const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
-  sangfor:    { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800' },
-  qianxin:    { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800' },
-  threatbook: { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800' },
-  qingteng:   { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800' },
-  nsfocus:    { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800' },
+  '360':       { nameCn: '360',    nameEn: '360',        color: 'bg-zinc-100 text-zinc-700', mark: '360' },
+  huaweicloud: { nameCn: '华为云', nameEn: 'Huawei Cloud', color: 'bg-red-100 text-red-700', mark: '华' },
+  huorong:     { nameCn: '火绒',   nameEn: 'Huorong',    color: 'bg-amber-100 text-amber-700', mark: '火' },
+  sangfor:     { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800', mark: '深' },
+  qianxin:     { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800', mark: '奇' },
+  threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微' },
+  qingteng:    { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800', mark: '青' },
+  nsfocus:     { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800', mark: '绿' },
 };
 
 function vendorPresentation(vendorKey: string): DeviceVendor {
@@ -71,7 +75,24 @@ function vendorPresentation(vendorKey: string): DeviceVendor {
     nameCn: vendorKey,
     nameEn: vendorKey,
     color: 'bg-zinc-100 text-zinc-700',
+    mark: vendorKey[0]?.toUpperCase() || '?',
   };
+}
+
+function VendorMark({ vendor, label, className = 'h-6 w-6 rounded-md text-[11px]' }: {
+  vendor: DeviceVendor;
+  label: string;
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      title={label}
+      className={`flex flex-shrink-0 items-center justify-center font-bold ${vendor.color} ${className}`}
+    >
+      {vendor.mark || label[0]}
+    </span>
+  );
 }
 
 function templateAction(template: DeviceTemplate): 'install' | 'update' | null {
@@ -185,7 +206,8 @@ function buildDeviceAddSessionContext(templates: DeviceTemplate[]): string {
       `vendor=${template.vendor || 'unspecified'}`,
       `state=${template.installed ? 'installed' : template.state}`,
       fields ? `fields=${fields}` : 'fields=none',
-    ].join(' | ');
+      template.docs_url ? `docs_url=${template.docs_url}` : null,
+    ].filter(Boolean).join(' | ');
   });
 
   return [
@@ -338,6 +360,7 @@ function buildTemplateGuidePrompt(template: DeviceTemplate): string {
     `我要接入设备「${template.name}」。`,
     '我已从已支持设备列表选择了这个设备模板，请按该模板继续引导接入。',
     `模板信息：storage_key=${template.storage_key}，service_id=${template.service_id}，plugin_id=${template.plugin_id}，状态=${installed ? 'installed' : template.state}。`,
+    template.docs_url ? `配置指引文档：${template.docs_url}。请优先结合该文档引导用户完成设备侧准备和 Flocks 侧配置。` : null,
     fields ? `该设备表单字段包括：${fields}。` : '该设备模板没有声明额外表单字段。',
     installed
       ? '请直接引导我确认设备名称、所属机房、连接地址、认证字段、SSL 验证和连通测试步骤。'
@@ -345,7 +368,7 @@ function buildTemplateGuidePrompt(template: DeviceTemplate): string {
     installed
       ? '信息足够后，请输出设备配置 JSON 草稿，页面会用它填充表单；不要在 JSON 中写入真实密钥。'
       : '模板安装完成前不要输出设备配置 JSON 草稿。',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceTemplate): CreateAndSendOptions {
@@ -364,7 +387,7 @@ function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceT
   ].join('\n');
   return {
     text,
-    displayText: `设备「${device.name}」已确认接入，请继续引导我测试。`,
+    displayText: `设备「${device.name}」已确认接入，请帮我测试。`,
   };
 }
 
@@ -621,9 +644,7 @@ function DeviceAddRexPanel({
                             className="flex h-10 w-full items-center gap-2 px-3 text-left"
                             aria-expanded={expanded}
                           >
-                            <div className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-[11px] font-bold ${vendor.color}`}>
-                              {vendorName[0]}
-                            </div>
+                            <VendorMark vendor={vendor} label={vendorName} />
                             <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700">{vendorName}</span>
                             <span className="text-[10px] font-medium text-gray-400">
                               {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
@@ -887,44 +908,69 @@ function DeviceConfigPanel({
 
   useEffect(() => {
     if (!serviceId) return;
-    if (template) {
-      const schema = template.credential_schema ?? [];
+    const templateSchema = template?.credential_schema ?? [];
+    const shouldUseTemplateSchema = !!template && (!device || templateSchema.length > 0);
+    if (template && shouldUseTemplateSchema) {
+      const schema = templateSchema;
       setMetadata({
         name: template.name,
         version: template.version ?? undefined,
         description: template.description ?? undefined,
         description_cn: template.description_cn ?? undefined,
+        docs_url: template.docs_url ?? undefined,
       });
       setCredFields(schema);
       const defaults: Record<string, string> = {};
       schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
-      setFields((prev) => ({ ...defaults, ...prev }));
-      return;
-    }
-    providerAPI.getServiceMetadata(serviceId)
-      .then((res) => {
-        const meta = res.data;
-        setMetadata(meta ?? null);
-        const schema: APIServiceCredentialField[] = meta?.credential_schema ?? [];
-        setCredFields(schema);
-        if (device) {
-          const masked: Record<string, string> = {};
-          schema.forEach((f) => {
-            if (f.storage === 'secret' || f.input_type === 'password') {
-              masked[f.key] = device.fields?.[f.key] ?? '';
-            }
-          });
-          originalMasked.current = masked;
-          if (!dirtyRef.current) {
-            setFields({ ...device.fields });
-          }
-        } else {
-          const defaults: Record<string, string> = {};
-          schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
-          setFields((prev) => ({ ...defaults, ...prev }));
+      if (!device) {
+        setFields((prev) => ({ ...defaults, ...prev }));
+        return;
+      }
+      const masked: Record<string, string> = {};
+      schema.forEach((f) => {
+        if (f.storage === 'secret' || f.input_type === 'password') {
+          masked[f.key] = device.fields?.[f.key] ?? '';
         }
-      })
-      .catch(() => {});
+      });
+      originalMasked.current = masked;
+      if (!dirtyRef.current) {
+        setFields({ ...device.fields });
+      }
+    } else {
+      providerAPI.getServiceMetadata(serviceId)
+        .then((res) => {
+          const meta = res.data;
+          setMetadata(meta ? {
+            ...meta,
+            docs_url: meta.docs_url ?? template?.docs_url ?? undefined,
+          } : template ? {
+            name: template.name,
+            version: template.version ?? undefined,
+            description: template.description ?? undefined,
+            description_cn: template.description_cn ?? undefined,
+            docs_url: template.docs_url ?? undefined,
+          } : null);
+          const schema: APIServiceCredentialField[] = meta?.credential_schema ?? [];
+          setCredFields(schema);
+          if (device) {
+            const masked: Record<string, string> = {};
+            schema.forEach((f) => {
+              if (f.storage === 'secret' || f.input_type === 'password') {
+                masked[f.key] = device.fields?.[f.key] ?? '';
+              }
+            });
+            originalMasked.current = masked;
+            if (!dirtyRef.current) {
+              setFields({ ...device.fields });
+            }
+          } else {
+            const defaults: Record<string, string> = {};
+            schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
+            setFields((prev) => ({ ...defaults, ...prev }));
+          }
+        })
+        .catch(() => {});
+    }
 
     if (device) {
       Promise.all([
@@ -1127,6 +1173,18 @@ function DeviceConfigPanel({
             {/* ── 配置 tab ── */}
             {tab === 'config' && (
               <div className="px-5 py-4 space-y-4">
+                {metadata?.docs_url && (
+                  <a
+                    href={metadata.docs_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between gap-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:border-blue-200 hover:bg-blue-100"
+                  >
+                    <span>{t('overview.viewDocs')}</span>
+                    <ChevronRight className="h-4 w-4 flex-shrink-0" />
+                  </a>
+                )}
+
                 <div>
                   <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
                     {t('config.nameLabel')} <span className="text-red-500">*</span>
@@ -2278,11 +2336,14 @@ export default function DeviceIntegrationPage() {
         const panelInitGroupId = panel.kind === 'edit'
           ? panel.device.group_id
           : addDefaultGroupId;
+        const panelTemplate = panel.kind === 'add'
+          ? panel.template
+          : templates.find((template) => template.storage_key === panel.device.storage_key);
         return (
           <DeviceConfigPanel
             key={panel.kind === 'edit' ? panel.device.id : panel.template.storage_key}
             device={panel.kind === 'edit' ? panel.device : undefined}
-            template={panel.kind === 'add' ? panel.template : undefined}
+            template={panelTemplate}
             vendorKey={panelVendorKey}
             initialGroupId={panelInitGroupId}
             groups={groups}

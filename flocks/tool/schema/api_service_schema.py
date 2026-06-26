@@ -148,6 +148,7 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
             "version": extract_provider_version(prov),
             "description": prov.get("description"),
             "description_cn": prov.get("description_cn"),
+            "docs_url": prov.get("docs_url"),
             "auth": prov.get("auth"),
             "credential_fields": prov.get("credential_fields"),
             "defaults": prov.get("defaults", {}),

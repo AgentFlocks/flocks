@@ -13,6 +13,7 @@ description_cn: >
   支持拉取受监控IP、服务器资产、终端资产、安全事件、风险业务/终端
   及脆弱性（弱密码、漏洞、明文传输）等数据。
   使用 auth3（SHA1）签名认证，Token 有有效期，过期后自动重新认证。
+docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/sangfor-sip-integration"
 auth:
   type: custom
   secret: sangfor_sip_password

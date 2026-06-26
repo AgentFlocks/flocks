@@ -71,6 +71,7 @@ def test_device_plugin_index_filters_and_shapes_templates(monkeypatch, tmp_path)
             "version": "1.2.3",
             "integration_type": "device",
             "vendor": "demo",
+            "docs_url": "https://docs.example.com/demo-device",
             "credential_fields": [
                 {"key": "base_url", "label": "Base URL", "storage": "config"},
             ],
@@ -128,6 +129,7 @@ def test_device_plugin_index_filters_and_shapes_templates(monkeypatch, tmp_path)
     assert template.storage_key == "demo_api_v1_2_3"
     assert template.service_id == "demo_api"
     assert template.vendor == "demo"
+    assert template.docs_url == "https://docs.example.com/demo-device"
     assert template.installed is False
     assert template.state == "available"
     assert template.source == "bundled"

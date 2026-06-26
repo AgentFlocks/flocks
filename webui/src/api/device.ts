@@ -109,6 +109,7 @@ export interface DeviceTemplate {
   vendor?: string | null;
   description?: string | null;
   description_cn?: string | null;
+  docs_url?: string | null;
   credential_schema: APIServiceCredentialField[];
   tool_count: number;
   installed: boolean;

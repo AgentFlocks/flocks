@@ -234,6 +234,7 @@ def _template_from_descriptor(
         vendor=_optional_str(provider.get("vendor")),
         description=description,
         description_cn=description_cn,
+        docs_url=_optional_str(provider.get("docs_url")),
         credential_schema=[
             field.model_dump(mode="json")
             for field in _build_api_service_credential_schema(descriptor.storage_key, provider)

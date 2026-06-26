@@ -73,7 +73,7 @@
       "title": "Rex 辅助接入",
       "subtitle": "选择一个引导或案例，Rex 会确认接入方式、凭据字段和冒烟测试步骤，帮助你完成设备接入。",
       "customTitle": "自定义设备接入",
-      "caseTitle": "创建案例",
+      "caseTitle": "创建设备",
       "examples": {
         "supported": "我想接入一台已支持的安全设备",
         "addressOnly": "我只有设备地址和登录方式",
@@ -226,7 +226,7 @@
     "toolCount": "工具数量",
     "vendor": "厂商",
     "serviceDesc": "服务简介",
-    "viewDocs": "查看 API 文档"
+    "viewDocs": "查看配置指引"
   },
 
   "toast": {
