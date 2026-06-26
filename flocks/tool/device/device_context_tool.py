@@ -36,7 +36,10 @@ async def device_context(ctx: ToolContext) -> ToolResult:
         if not content:
             return ToolResult(
                 success=True,
-                output="当前没有已接入的安全设备。请前往「设备接入」页面添加设备后再试。",
+                output=(
+                    "当前没有已接入的安全设备。"
+                    "设备不存在时，请提醒用户前往设备接入页面添加设备。"
+                ),
             )
         return ToolResult(success=True, output=content)
     except Exception as exc:

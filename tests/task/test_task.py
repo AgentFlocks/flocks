@@ -95,6 +95,39 @@ async def test_immediate_scheduler_creates_single_queued_execution(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_list_executions_tolerates_legacy_non_utf8_description(
+    tmp_path: Path,
+):
+    legacy_description = "扫描 Windows 主机 192.168.254.1"
+    scheduler = await TaskManager.create_scheduler(
+        title="legacy encoding",
+        description="placeholder",
+        mode=SchedulerMode.ONCE,
+        priority=TaskPriority.NORMAL,
+        trigger=TaskTrigger(run_immediately=True),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    executions, _ = await TaskManager.list_scheduler_executions(scheduler.id)
+    execution_id = executions[0].id
+
+    db = await TaskStore.raw_db()
+    await db.execute(
+        """
+        UPDATE task_executions
+        SET description = CAST(? AS TEXT)
+        WHERE id = ?
+        """,
+        (legacy_description.encode("gbk"), execution_id),
+    )
+    await db.commit()
+
+    executions, total = await TaskManager.list_executions(limit=20)
+
+    assert total == 1
+    assert executions[0].description == legacy_description
+
+
+@pytest.mark.asyncio
 async def test_once_scheduler_tick_creates_execution_and_disables_scheduler(tmp_path: Path):
     scheduler = await TaskManager.create_scheduler(
         title="单次定时",

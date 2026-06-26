@@ -443,7 +443,7 @@ async def _build_frontend_workspace(
             continue
 
         try:
-            code, _, err = await _run_async(
+            code, out, err = await _run_async(
                 [candidate.npm, "run", "build"],
                 cwd=webui_dir,
                 timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
@@ -464,6 +464,12 @@ async def _build_frontend_workspace(
             continue
 
         if code != 0:
+            from flocks.cli import service_manager
+
+            build_output = "\n".join(value for value in (out, err) if value)
+            if service_manager.windows_frontend_build_assertion_is_recoverable(webui_dir, build_output):
+                final_frontend_error = None
+                break
             final_frontend_error = f"Frontend build failed: {err}"
             if is_last_attempt:
                 break

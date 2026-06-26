@@ -64,6 +64,48 @@
     "step2Custom": "2 Select device / mode",
     "step3Custom": "3 Fill in details / config",
     "selectVendorTitle": "Select {{vendor}} device",
+    "tabs": {
+      "rex": "Rex",
+      "manual": "Manual"
+    },
+    "rex": {
+      "title": "Rex-guided device add",
+      "heading": "Rex-guided integration",
+      "subtitle": "Describe the model, integration path, and materials you have. Rex will help confirm the template, credential fields, and test steps.",
+      "welcome": "Tell me the device vendor, model, version, and any API docs, console URL, or authentication details you already have.\n\nIf the device is already supported, I will organize the values needed for the manual form. Once there is enough information, I will output a ```json configuration draft that the page can detect and use to fill the form. If there is no matching template yet, I will guide you through creating a custom device integration.",
+      "placeholder": "Describe the device, URL, authentication method, or upload related materials",
+      "pending": "Rex is getting ready...",
+      "manualAction": "Switch to manual",
+      "applyDraft": "Apply to form",
+      "applyDone": "Device config form filled",
+      "extracting": "Extracting...",
+      "extractEmpty": "No Rex output is available to extract yet",
+      "extractNoTemplate": "Could not match a device template from Rex output",
+      "extractFailed": "Extraction failed. Ask Rex to output a ```json device configuration draft and try again.",
+      "installFirst": "This template is not installed yet. Install it from FlockHub first.",
+      "detectedDraft": "Detected a device configuration draft",
+      "detectedInstall": "Detected a device template, but it is not installed yet",
+      "applyDetected": "Fill form",
+      "installDetected": "Install",
+      "dismissDraft": "Dismiss",
+      "guides": {
+        "existing": {
+          "title": "Existing template",
+          "desc": "Organize manual-form fields for supported devices",
+          "prompt": "I want to integrate a security device that is already supported by a template. Guide me through confirming the vendor, model, connection URL, credential fields, and connection test steps."
+        },
+        "api": {
+          "title": "Custom API",
+          "desc": "Create a custom device plugin from API docs",
+          "prompt": "I want to integrate an unsupported API device. Help me confirm the API docs, authentication method, device details, and steps for generating a device plugin."
+        },
+        "webcli": {
+          "title": "WebCLI",
+          "desc": "Create integration capability from a web console",
+          "prompt": "I want to integrate a web-console device without an open API. Guide me through preparing the product URL, login method, target pages/actions, and WebCLI integration steps."
+        }
+      }
+    },
     "vendorHint": "Choose a vendor — {{count}} available",
     "chooseVendorOrCustom": "Choose a vendor or create a custom device integration",
     "customCardTitle": "Custom Device",

@@ -10,12 +10,17 @@ import {
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
+import SessionChat from '@/components/common/SessionChat';
+import { useRexComposerControls } from '@/components/common/useRexComposerControls';
+import { useSessionChat } from '@/hooks/useSessionChat';
+import { sessionApi } from '@/api/session';
 import { providerAPI } from '@/api/provider';
 import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
 import type { APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
 import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
+import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
 
 // ============================================================================
 // Constants
@@ -68,6 +73,10 @@ function vendorPresentation(vendorKey: string): DeviceVendor {
     nameEn: vendorKey,
     color: 'bg-zinc-100 text-zinc-700',
   };
+}
+
+function deviceTemplateHubUrl(template: DeviceTemplate): string {
+  return `/hub?type=device&plugin=${encodeURIComponent(template.plugin_id)}&q=${encodeURIComponent(template.plugin_id)}`;
 }
 
 // ============================================================================
@@ -146,16 +155,328 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // Add device wizard panel (step 1: vendor, step 2: product)
 // ============================================================================
 
-function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onClose }: {
+type DeviceAddTab = 'rex' | 'manual';
+
+interface DeviceAddDraft {
+  template: DeviceTemplate;
+  name?: string;
+  groupName?: string;
+  groupId?: string;
+  fields?: Record<string, string>;
+  verifySsl?: boolean;
+}
+
+interface ExtractedDeviceDraft {
+  templateHint?: string;
+  name?: string;
+  groupName?: string;
+  fields: Record<string, string>;
+  verifySsl?: boolean;
+}
+
+function buildDeviceAddSessionContext(templates: DeviceTemplate[]): string {
+  const templateLines = templates.slice(0, 80).map((template) => {
+    const fields = template.credential_schema
+      .map((field) => `${field.key}${field.required ? '*' : ''}`)
+      .join(', ');
+    return [
+      `- ${template.name}`,
+      `storage_key=${template.storage_key}`,
+      `vendor=${template.vendor || 'unspecified'}`,
+      `state=${template.installed ? 'installed' : template.state}`,
+      fields ? `fields=${fields}` : 'fields=none',
+    ].join(' | ');
+  });
+
+  return [
+    '你是 Flocks 的设备接入助手，目标是引导用户把安全设备接入到「设备接入」页面。',
+    '先判断用户要接入的是已有设备模板，还是需要创建自定义设备接入。',
+    '设备模板列表来自 FlockHub catalog 和本地已发现插件；只有 state=installed 的模板可以直接进入设备配置表单，未安装模板需要先引导用户前往 FlockHub 安装。',
+    '如果已有已安装模板可以满足，收集设备名称、Base URL/Host、认证字段、SSL 验证偏好等表单信息。',
+    '不要要求用户在对话里暴露真实密钥；涉及 API Key、Secret、Token、密码时，只说明应填写到设备接入表单的密钥字段。',
+    buildCustomDeviceModeRoutingPrompt(),
+    '信息足够时，不要只输出表格或操作步骤；必须在回复末尾输出一个 ```json 代码块，页面只会读取这个 JSON 草稿用于一键回填。',
+    'JSON 草稿格式为 {"storage_key":"...","device_name":"...","fields":{"base_url":"..."},"verify_ssl":false}。',
+    '不要把真实密码、Token、Secret、API Key 写入 JSON；这些密钥字段留空或省略，并提示用户稍后在设备接入表单中填写。',
+    '',
+    '当前可见设备模板：',
+    templateLines.length ? templateLines.join('\n') : '- 暂无可见设备模板，请先在 FlockHub 安装或通过自定义设备接入创建。',
+  ].join('\n');
+}
+
+function normalizeExtractedValue(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const text = String(value).trim();
+  if (!text || text === '-' || text === '未提供' || text === '待填写') return undefined;
+  return text.replace(/^`|`$/g, '').trim();
+}
+
+function parseJsonDraft(text: string): ExtractedDeviceDraft | null {
+  const trimmed = text.trim();
+  const candidates = Array.from(text.matchAll(/```json\s*([\s\S]*?)```/gi)).map((match) => match[1]);
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    candidates.push(trimmed);
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate.trim()) as Record<string, unknown>;
+      const fields = parsed.fields && typeof parsed.fields === 'object' && !Array.isArray(parsed.fields)
+        ? Object.fromEntries(
+            Object.entries(parsed.fields as Record<string, unknown>)
+              .map(([key, value]) => [key, normalizeExtractedValue(value)])
+              .filter((entry): entry is [string, string] => Boolean(entry[1])),
+          )
+        : {};
+      return {
+        templateHint: normalizeExtractedValue(parsed.storage_key)
+          ?? normalizeExtractedValue(parsed.template)
+          ?? normalizeExtractedValue(parsed.template_key),
+        name: normalizeExtractedValue(parsed.device_name)
+          ?? normalizeExtractedValue(parsed.name),
+        groupName: normalizeExtractedValue(parsed.room)
+          ?? normalizeExtractedValue(parsed.group)
+          ?? normalizeExtractedValue(parsed.group_name),
+        fields,
+        verifySsl: typeof parsed.verify_ssl === 'boolean' ? parsed.verify_ssl : undefined,
+      };
+    } catch {
+      // Continue with the next fenced block; Rex may include non-JSON code.
+    }
+  }
+  return null;
+}
+
+function messagePayloadText(item: { info?: Record<string, unknown>; parts?: Array<{ type?: string; text?: string }> }): string {
+  return (item.parts || [])
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n')
+    .trim();
+}
+
+async function extractDeviceDraftFromSession(sessionId: string): Promise<ExtractedDeviceDraft | null> {
+  const page = await sessionApi.getMessagesPage(sessionId, { limit: 50 });
+  const assistantTexts = (page.items || [])
+    .filter((item) => item.info?.role === 'assistant')
+    .map(messagePayloadText)
+    .filter(Boolean);
+  const latest = assistantTexts[assistantTexts.length - 1];
+  if (!latest) return null;
+  return parseJsonDraft(latest);
+}
+
+function findTemplateForDraft(templates: DeviceTemplate[], draft: ExtractedDeviceDraft): DeviceTemplate | undefined {
+  const hint = draft.templateHint?.trim().toLowerCase();
+  if (hint) {
+    const exact = templates.find((template) => [
+      template.storage_key,
+      template.plugin_id,
+      template.service_id,
+      template.name,
+    ].some((value) => value.trim().toLowerCase() === hint));
+    if (exact) return exact;
+    const fuzzy = templates.find((template) => [
+      template.storage_key,
+      template.plugin_id,
+      template.service_id,
+      template.name,
+    ].some((value) => value.trim().toLowerCase().includes(hint)));
+    if (fuzzy) return fuzzy;
+  }
+  return undefined;
+}
+
+function normalizeDraftFields(template: DeviceTemplate, fields: Record<string, string>): Record<string, string> {
+  const schema = template.credential_schema || [];
+  const allowed = new Set(schema.map((field) => field.key));
+  const labelToKey = new Map(schema.map((field) => [field.label.trim().toLowerCase(), field.key]));
+  const normalized: Record<string, string> = {};
+  for (const [rawKey, value] of Object.entries(fields)) {
+    const key = rawKey.trim();
+    const lower = key.toLowerCase();
+    const resolved = allowed.has(key)
+      ? key
+      : lower === 'url' || lower === 'baseurl'
+        ? (allowed.has('base_url') ? 'base_url' : key)
+        : labelToKey.get(lower) ?? key;
+    if (allowed.size === 0 || allowed.has(resolved)) {
+      normalized[resolved] = value;
+    }
+  }
+  return normalized;
+}
+
+type DetectedDeviceDraftAction =
+  | { kind: 'apply'; draft: DeviceAddDraft }
+  | { kind: 'install'; template: DeviceTemplate };
+
+function buildDeviceDraftAction(
+  templates: DeviceTemplate[],
+  extracted: ExtractedDeviceDraft,
+): DetectedDeviceDraftAction | null {
+  const template = findTemplateForDraft(templates, extracted);
+  if (!template) return null;
+  if (!template.installed) return { kind: 'install', template };
+  return {
+    kind: 'apply',
+    draft: {
+      template,
+      name: extracted.name,
+      groupName: extracted.groupName,
+      fields: normalizeDraftFields(template, extracted.fields),
+      verifySsl: extracted.verifySsl,
+    },
+  };
+}
+
+function DeviceAddRexPanel({
+  templates,
+  onApplyDraft,
+  onInstallTemplate,
+}: {
+  templates: DeviceTemplate[];
+  onApplyDraft: (draft: DeviceAddDraft) => void;
+  onInstallTemplate: (template: DeviceTemplate) => void;
+}) {
+  const { t } = useTranslation('device');
+  const toast = useToast();
+  const [extracting, setExtracting] = useState(false);
+  const [detectedAction, setDetectedAction] = useState<DetectedDeviceDraftAction | null>(null);
+  const rexComposerControls = useRexComposerControls();
+  const contextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
+  const welcomeMessage = t('wizard.rex.welcome');
+  const { sessionId, createAndSend, reset } = useSessionChat({
+    title: t('wizard.rex.title'),
+    category: 'entity-config',
+    contextMessage,
+    welcomeMessage,
+  });
+
+  useEffect(() => reset, [reset]);
+
+  const detectLatestDraft = useCallback(async (silent: boolean) => {
+    if (!sessionId || extracting) return;
+    setExtracting(true);
+    try {
+      const extracted = await extractDeviceDraftFromSession(sessionId);
+      if (!extracted) {
+        setDetectedAction(null);
+        if (!silent) toast.error(t('wizard.rex.extractEmpty'));
+        return;
+      }
+      const action = buildDeviceDraftAction(templates, extracted);
+      if (!action) {
+        setDetectedAction(null);
+        if (!silent) toast.error(t('wizard.rex.extractNoTemplate'));
+        return;
+      }
+      setDetectedAction(action);
+    } catch {
+      setDetectedAction(null);
+      if (!silent) toast.error(t('wizard.rex.extractFailed'));
+    } finally {
+      setExtracting(false);
+    }
+  }, [extracting, sessionId, t, templates, toast]);
+
+  const handleConfirmDetectedDraft = () => {
+    if (!detectedAction) return;
+    if (detectedAction.kind === 'install') {
+      toast.info(t('wizard.rex.installFirst'));
+      onInstallTemplate(detectedAction.template);
+      return;
+    }
+    onApplyDraft(detectedAction.draft);
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <SessionChat
+        sessionId={sessionId}
+        live={!!sessionId}
+        className="flex-1 min-h-0"
+        display={{
+          compact: true,
+          fullWidth: true,
+          collapseIntermediateSteps: true,
+          processGroupsDefaultOpen: false,
+        }}
+        agentName={rexComposerControls.rexAgentName}
+        mentionAgents={rexComposerControls.rexMentionAgents}
+        model={rexComposerControls.rexModel}
+        supportsVision={rexComposerControls.rexSupportsVision}
+        contextWindowTokens={rexComposerControls.rexContextWindowTokens}
+        composerTextareaMinHeight={rexComposerControls.rexComposerTextareaMinHeight}
+        composerTextareaMaxHeight={rexComposerControls.rexComposerTextareaMaxHeight}
+        toolbarSlot={rexComposerControls.rexToolbarSlot}
+        centerToolbarSlot={rexComposerControls.rexCenterToolbarSlot}
+        placeholder={t('wizard.rex.placeholder')}
+        emptyText={t('wizard.rex.pending')}
+        onStreamingDone={() => void detectLatestDraft(true)}
+        welcomeContent={
+          <div className="mx-4 my-4 flex items-start gap-2.5">
+            <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-red-500 text-sm font-bold text-white shadow-sm ring-2 ring-white">
+              R
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1.5 text-xs font-semibold text-zinc-700">Rex</div>
+              <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm leading-relaxed text-zinc-700 shadow-sm whitespace-pre-line">
+                {welcomeMessage}
+              </div>
+            </div>
+          </div>
+        }
+        onCreateAndSend={!sessionId ? (text, imageParts, agentOverride, modelOverride) => createAndSend({
+          text,
+          imageParts,
+          agent: agentOverride || rexComposerControls.rexAgentName,
+          model: modelOverride === undefined ? rexComposerControls.rexModel : modelOverride,
+        }) : undefined}
+      />
+      {detectedAction && (
+        <div className="flex flex-shrink-0 items-center justify-between gap-3 border-t border-blue-100 bg-blue-50 px-4 py-2.5">
+          <div className="min-w-0 text-sm text-blue-800">
+            {detectedAction.kind === 'install'
+              ? t('wizard.rex.detectedInstall')
+              : t('wizard.rex.detectedDraft')}
+          </div>
+          <div className="flex flex-shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={handleConfirmDetectedDraft}
+              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+            >
+              {detectedAction.kind === 'install'
+                ? t('wizard.rex.installDetected')
+                : t('wizard.rex.applyDetected')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDetectedAction(null)}
+              className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
+            >
+              {t('wizard.rex.dismissDraft')}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onApplyRexDraft, onInstallTemplate, onClose }: {
   templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
   initialVendor?: DeviceVendor;
   onSelect: (template: DeviceTemplate) => void;
   onSelectCustom: (mode: CustomDeviceAccessMode) => void;
+  onApplyRexDraft: (draft: DeviceAddDraft) => void;
+  onInstallTemplate: (template: DeviceTemplate) => void;
   onClose: () => void;
 }) {
   const { t, i18n } = useTranslation('device');
   const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState<DeviceAddTab>('rex');
   const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
   const [showCustomModes, setShowCustomModes] = useState(false);
 
@@ -203,10 +524,10 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
 
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
-        <button
-          type="button"
-          aria-label={t('wizard.closeAriaLabel')}
-          onClick={onClose}
+      <button
+        type="button"
+        aria-label={t('wizard.closeAriaLabel')}
+        onClick={onClose}
         className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
         style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
       />
@@ -215,50 +536,80 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
         style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
-          <div className="flex items-center gap-2.5">
-            {(selectedVendor || inModeSelection) && (
+        <div className="px-5 py-4 border-b border-zinc-100 flex-shrink-0">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-zinc-900">{t('wizard.title')}</h3>
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="mt-3 grid w-full grid-cols-2 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
+            {[
+              { key: 'rex' as const, label: t('wizard.tabs.rex') },
+              { key: 'manual' as const, label: t('wizard.tabs.manual') },
+            ].map((tab) => (
               <button
-                onClick={() => {
-                  setSelectedVendor(null);
-                  setShowCustomModes(false);
-                }}
-                className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveTab(tab.key)}
+                className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  activeTab === tab.key
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-700'
+                }`}
               >
-                <ChevronLeft className="w-4 h-4" />
+                {tab.label}
               </button>
-            )}
-            <div>
-              <h3 className="text-sm font-semibold text-zinc-900">
-                {selectedVendor
-                  ? t('wizard.selectVendorTitle', { vendor: i18n.language.startsWith('zh') ? selectedVendor.nameCn : selectedVendor.nameEn })
-                  : inModeSelection
-                    ? t('wizard.modeTitle')
-                    : t('wizard.title')}
-              </h3>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
-                  {t('wizard.step1Custom')}
-                </span>
-                <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
-                  {t('wizard.step2Custom')}
-                </span>
-                <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
-                  {t('wizard.step3Custom')}
-                </span>
+            ))}
+          </div>
+          {activeTab === 'manual' && (
+            <div className="mt-3 flex items-center gap-2.5">
+              {(selectedVendor || inModeSelection) && (
+                <button
+                  onClick={() => {
+                    setSelectedVendor(null);
+                    setShowCustomModes(false);
+                  }}
+                  className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+              )}
+              <div className="min-w-0">
+                {(selectedVendor || inModeSelection) && (
+                  <p className="mb-1 text-xs font-medium text-zinc-600">
+                    {selectedVendor
+                      ? t('wizard.selectVendorTitle', { vendor: i18n.language.startsWith('zh') ? selectedVendor.nameCn : selectedVendor.nameEn })
+                      : t('wizard.modeTitle')}
+                  </p>
+                )}
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
+                    {t('wizard.step1Custom')}
+                  </span>
+                  <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
+                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                    {t('wizard.step2Custom')}
+                  </span>
+                  <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
+                    {t('wizard.step3Custom')}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
-            <X className="w-4 h-4" />
-          </button>
+          )}
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-5">
-          {!selectedVendor && !inModeSelection ? (
+        <div className={`flex-1 min-h-0 ${activeTab === 'rex' ? 'overflow-hidden' : 'overflow-y-auto p-5'}`}>
+          {activeTab === 'rex' ? (
+            <DeviceAddRexPanel
+              templates={templates}
+              onApplyDraft={onApplyRexDraft}
+              onInstallTemplate={onInstallTemplate}
+            />
+          ) : !selectedVendor && !inModeSelection ? (
             <>
               <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
               <div className="grid grid-cols-2 gap-2.5">
@@ -368,7 +719,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                       : tpl.installed
                         ? t('wizard.installState.installed')
                         : t('wizard.installState.available');
-                  const hubUrl = `/hub?type=device&plugin=${encodeURIComponent(tpl.plugin_id)}&q=${encodeURIComponent(tpl.plugin_id)}`;
+                  const hubUrl = deviceTemplateHubUrl(tpl);
                   return (
                     <button
                       key={tpl.storage_key}
@@ -451,6 +802,7 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 
 function DeviceConfigPanel({
   device, template, vendorKey, initialGroupId, groups, groupLocked,
+  initialDraft,
   onSave, onDelete, onClose, onTest, onBack,
 }: {
   device?: DeviceIntegration;
@@ -460,6 +812,7 @@ function DeviceConfigPanel({
   groups: DeviceGroup[];
   /** true = room is determined by the sidebar selection and cannot be changed here */
   groupLocked: boolean;
+  initialDraft?: Omit<DeviceAddDraft, 'template'>;
   onSave: (data: {
     name: string;
     fields: Record<string, string>;
@@ -475,11 +828,13 @@ function DeviceConfigPanel({
   const toast = useToast();
   const { t, i18n } = useTranslation('device');
   const [tab, setTab] = useState<PanelTab>('config');
-  const [name, setName] = useState(device?.name ?? '');
-  const [groupId, setGroupId] = useState(device?.group_id ?? initialGroupId);
-  const [fields, setFields] = useState<Record<string, string>>(() => device ? { ...device.fields } : {});
+  const [name, setName] = useState(device?.name ?? initialDraft?.name ?? '');
+  const [groupId, setGroupId] = useState(device?.group_id ?? initialDraft?.groupId ?? initialGroupId);
+  const [fields, setFields] = useState<Record<string, string>>(() => (
+    device ? { ...device.fields } : { ...(initialDraft?.fields ?? {}) }
+  ));
   const [enabled, setEnabled] = useState(device?.enabled ?? true);
-  const [verifySsl, setVerifySsl] = useState(device?.verify_ssl ?? false);
+  const [verifySsl, setVerifySsl] = useState(device?.verify_ssl ?? initialDraft?.verifySsl ?? false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -1286,7 +1641,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 type PanelMode =
   | { kind: 'pick-group' }
   | { kind: 'wizard'; initialVendor?: DeviceVendor }
-  | { kind: 'add'; template: DeviceTemplate }
+  | { kind: 'add'; template: DeviceTemplate; draft?: Omit<DeviceAddDraft, 'template'> }
   | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
@@ -1294,6 +1649,7 @@ type PanelMode =
 export default function DeviceIntegrationPage() {
   const toast = useToast();
   const { t } = useTranslation('device');
+  const navigate = useNavigate();
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
   const [templates, setTemplates] = useState<DeviceTemplate[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
@@ -1520,6 +1876,35 @@ export default function DeviceIntegrationPage() {
   const addDefaultGroupId = selectedGroupId ?? groups[0]?.id ?? DEFAULT_GROUP_ID;
   // Whether the room field should be locked (read-only) in the config panel.
   const groupLocked = selectedGroupId !== null;
+
+  const handleInstallTemplate = useCallback((template: DeviceTemplate) => {
+    setPanel(null);
+    navigate(deviceTemplateHubUrl(template));
+  }, [navigate]);
+
+  const handleApplyRexDraft = useCallback((draft: DeviceAddDraft) => {
+    const normalizedGroupName = draft.groupName?.trim().toLowerCase();
+    const matchedGroup = normalizedGroupName
+      ? groups.find((group) => {
+          const name = group.name.trim().toLowerCase();
+          return name === normalizedGroupName
+            || name.includes(normalizedGroupName)
+            || normalizedGroupName.includes(name);
+        })
+      : undefined;
+    setPanel({
+      kind: 'add',
+      template: draft.template,
+      draft: {
+        name: draft.name,
+        groupName: draft.groupName,
+        groupId: matchedGroup?.id,
+        fields: draft.fields,
+        verifySsl: draft.verifySsl,
+      },
+    });
+    toast.success(t('wizard.rex.applyDone'));
+  }, [groups, t, toast]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Stats for the main area header
@@ -1802,6 +2187,8 @@ export default function DeviceIntegrationPage() {
           initialVendor={panel.initialVendor}
           onSelect={(tpl) => setPanel({ kind: 'add', template: tpl })}
           onSelectCustom={(mode) => setPanel({ kind: 'custom', mode })}
+          onApplyRexDraft={handleApplyRexDraft}
+          onInstallTemplate={handleInstallTemplate}
           onClose={() => setPanel(null)}
         />
       )}
@@ -1830,7 +2217,8 @@ export default function DeviceIntegrationPage() {
             vendorKey={panelVendorKey}
             initialGroupId={panelInitGroupId}
             groups={groups}
-            groupLocked={panel.kind === 'add' ? groupLocked : false}
+            groupLocked={panel.kind === 'add' ? groupLocked && !panel.draft : false}
+            initialDraft={panel.kind === 'add' ? panel.draft : undefined}
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={() => setPanel(null)}
