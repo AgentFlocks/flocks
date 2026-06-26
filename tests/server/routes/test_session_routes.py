@@ -219,6 +219,61 @@ class TestSessionCRUD:
         assert get_resp.status_code == status.HTTP_404_NOT_FOUND
 
     @pytest.mark.asyncio
+    async def test_delete_session_aborts_and_waits_before_delete(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch,
+    ):
+        """DELETE waits for active processing to stop before clearing messages."""
+        from flocks.server.routes import session as session_routes
+
+        order: list[str] = []
+
+        async def fake_abort_session_processing(_session_id: str) -> bool:
+            order.append("abort")
+            return True
+
+        async def fake_wait_for_session_idle(_session_id: str) -> None:
+            order.append("wait")
+
+        async def fake_interaction_queue_clear(_session_id: str) -> None:
+            order.append("queue_clear")
+
+        async def fake_goal_clear(_session_id: str) -> None:
+            order.append("goal_clear")
+
+        async def fake_session_delete(_project_id: str, _session_id: str) -> bool:
+            order.append("delete")
+            return True
+
+        monkeypatch.setattr(
+            session_routes,
+            "_abort_session_processing",
+            fake_abort_session_processing,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_wait_for_session_idle",
+            fake_wait_for_session_idle,
+        )
+        monkeypatch.setattr(
+            "flocks.session.interaction_queue.InteractionQueue.clear",
+            fake_interaction_queue_clear,
+        )
+        monkeypatch.setattr(
+            "flocks.session.goal.GoalManager.clear",
+            fake_goal_clear,
+        )
+        monkeypatch.setattr(session_routes.Session, "delete", fake_session_delete)
+
+        resp = await client.delete(f"/api/session/{session_id}")
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() is True
+        assert order == ["abort", "queue_clear", "goal_clear", "wait", "delete"]
+
+    @pytest.mark.asyncio
     async def test_delete_session_not_found(self, client: AsyncClient):
         """DELETE for unknown session returns 404."""
         resp = await client.delete("/api/session/ses_nonexistent00000000000000")

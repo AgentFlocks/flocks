@@ -710,6 +710,13 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     if not SessionPolicy.can_delete(session, current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可删除会话")
 
+    from flocks.session.goal import GoalManager
+    from flocks.session.interaction_queue import InteractionQueue
+
+    await _abort_session_processing(sessionID)
+    await InteractionQueue.clear(sessionID)
+    await GoalManager.clear(sessionID)
+    await _wait_for_session_idle(sessionID)
     await Session.delete(session.project_id, sessionID)
 
     # Best-effort cleanup of any image/file uploads materialised for this

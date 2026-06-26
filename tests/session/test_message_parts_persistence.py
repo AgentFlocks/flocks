@@ -1,5 +1,7 @@
 """Persistence tests for message parts storage formats."""
 
+import asyncio
+
 import pytest
 
 from flocks.session.message import (
@@ -195,6 +197,40 @@ async def test_clear_removes_legacy_blob_and_per_message_keys() -> None:
 
     assert await Storage.get(f"message_parts:{per_message_session_id}") is None
     assert await Storage.list_keys(prefix=f"message_parts:{per_message_session_id}:") == []
+
+
+@pytest.mark.asyncio
+async def test_clear_tolerates_cache_invalidation_during_full_parts_load(monkeypatch) -> None:
+    session_id = "ses_parts_clear_lru_race"
+    Message.invalidate_cache()
+    Message._lru[session_id] = True
+    Message._messages_cache[session_id] = []
+    Message._parts_cache[session_id] = {}
+    Message._parts_revision_cache[session_id] = {}
+    Message._parts_serialized_cache[session_id] = {}
+    Message._parts_storage_format[session_id] = "per_message"
+    Message._parts_persisted_mids[session_id] = set()
+    Message._parts_fully_loaded.discard(session_id)
+
+    async def fake_load_all_parts_locked(cls, sid: str, *, message_times: dict) -> None:
+        assert sid == session_id
+        Message.invalidate_cache(sid)
+        await asyncio.sleep(0)
+        Message._parts_cache[sid] = {}
+        Message._parts_revision_cache[sid] = {}
+        Message._parts_serialized_cache[sid] = {}
+        Message._parts_storage_format[sid] = "per_message"
+        Message._parts_persisted_mids[sid] = set()
+
+    monkeypatch.setattr(
+        Message,
+        "_load_all_parts_locked",
+        classmethod(fake_load_all_parts_locked),
+    )
+
+    assert await Message.clear(session_id) == 0
+    assert session_id not in Message._lru
+    assert session_id not in Message._parts_fully_loaded
 
 
 def test_deserialize_legacy_text_part_normalizes_content_and_time() -> None:

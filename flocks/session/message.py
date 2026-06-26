@@ -458,6 +458,31 @@ class Message:
             task.cancel()
 
     @classmethod
+    def _drop_cached_session(cls, session_id: str) -> None:
+        cls._cancel_parts_flush_task(session_id)
+        cls._messages_cache.pop(session_id, None)
+        cls._msg_id_index.pop(session_id, None)
+        cls._parts_cache.pop(session_id, None)
+        cls._parts_revision_cache.pop(session_id, None)
+        cls._parts_serialized_cache.pop(session_id, None)
+        cls._parts_storage_format.pop(session_id, None)
+        cls._parts_persisted_mids.pop(session_id, None)
+        cls._parts_fully_loaded.discard(session_id)
+        _session_locks.discard(session_id)
+
+    @classmethod
+    def _touch_lru(cls, session_id: str) -> None:
+        if session_id in cls._lru:
+            cls._lru.move_to_end(session_id)
+            return
+
+        while len(cls._lru) >= cls._MAX_CACHED_SESSIONS:
+            evict_id, _ = cls._lru.popitem(last=False)
+            cls._drop_cached_session(evict_id)
+            log.debug("message.cache.evicted", {"session_id": evict_id})
+        cls._lru[session_id] = True
+
+    @classmethod
     def _serialize_message_parts(cls, parts: List[PartType]) -> List[Dict[str, Any]]:
         return [p.model_dump() for p in parts]
 
@@ -573,14 +598,18 @@ class Message:
         """
         await cls._ensure_message_cache(session_id)
         if session_id in cls._parts_fully_loaded:
-            cls._lru.move_to_end(session_id)
-            return
+            if session_id in cls._lru:
+                cls._touch_lru(session_id)
+                return
+            cls._parts_fully_loaded.discard(session_id)
 
         lock = _session_locks.get(session_id)
         async with lock:
             if session_id in cls._parts_fully_loaded:
-                cls._lru.move_to_end(session_id)
-                return
+                if session_id in cls._lru:
+                    cls._touch_lru(session_id)
+                    return
+                cls._parts_fully_loaded.discard(session_id)
 
             message_times = {
                 message.id: message.time
@@ -588,7 +617,7 @@ class Message:
             }
             await cls._load_all_parts_locked(session_id, message_times=message_times)
             cls._parts_fully_loaded.add(session_id)
-            cls._lru.move_to_end(session_id)
+            cls._touch_lru(session_id)
             log.debug("message.cache.loaded", {"session_id": session_id, "parts": "all"})
 
     @classmethod
@@ -611,16 +640,7 @@ class Message:
 
             while len(cls._lru) >= cls._MAX_CACHED_SESSIONS:
                 evict_id, _ = cls._lru.popitem(last=False)
-                cls._cancel_parts_flush_task(evict_id)
-                cls._messages_cache.pop(evict_id, None)
-                cls._msg_id_index.pop(evict_id, None)
-                cls._parts_cache.pop(evict_id, None)
-                cls._parts_revision_cache.pop(evict_id, None)
-                cls._parts_serialized_cache.pop(evict_id, None)
-                cls._parts_storage_format.pop(evict_id, None)
-                cls._parts_persisted_mids.pop(evict_id, None)
-                cls._parts_fully_loaded.discard(evict_id)
-                _session_locks.discard(evict_id)
+                cls._drop_cached_session(evict_id)
                 log.debug("message.cache.evicted", {"session_id": evict_id})
 
             storage_key = f"{cls._MESSAGE_PREFIX}:{session_id}"
@@ -1856,17 +1876,8 @@ class Message:
             session_id: Optional session ID, if None invalidates all
         """
         if session_id:
-            cls._cancel_parts_flush_task(session_id)
             cls._lru.pop(session_id, None)
-            cls._messages_cache.pop(session_id, None)
-            cls._msg_id_index.pop(session_id, None)
-            cls._parts_cache.pop(session_id, None)
-            cls._parts_revision_cache.pop(session_id, None)
-            cls._parts_serialized_cache.pop(session_id, None)
-            cls._parts_storage_format.pop(session_id, None)
-            cls._parts_persisted_mids.pop(session_id, None)
-            cls._parts_fully_loaded.discard(session_id)
-            _session_locks.discard(session_id)
+            cls._drop_cached_session(session_id)
         else:
             for sid in list(cls._parts_flush_tasks):
                 cls._cancel_parts_flush_task(sid)
