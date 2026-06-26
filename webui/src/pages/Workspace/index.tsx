@@ -274,6 +274,15 @@ function FilesTab() {
     }
   }, [newDir.name, currentPath, loadDir, toastError, t]);
 
+  const handleReveal = useCallback(async (node: WorkspaceNode) => {
+    try {
+      await workspaceAPI.reveal(node.path);
+      toastSuccess(t('files.toast.revealSuccess'));
+    } catch (e: any) {
+      toastError(t('files.toast.revealFailed'), e?.response?.data?.detail ?? e.message);
+    }
+  }, [toastError, toastSuccess, t]);
+
   const breadcrumbs = currentPath ? ['', ...currentPath.split('/')] : [''];
 
   return (
@@ -410,6 +419,9 @@ function FilesTab() {
                             <Download className="w-3.5 h-3.5" />
                           </a>
                         )}
+                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100">
+                          <FolderOpen className="w-3.5 h-3.5" />
+                        </button>
                         <button onClick={() => handleDelete(item)} title={t('files.delete')} className="p-1 text-gray-400 hover:text-slate-700 rounded hover:bg-slate-100">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -455,6 +467,9 @@ function FilesTab() {
               <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
                 <Download className="w-4 h-4" />
               </a>
+              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                <FolderOpen className="w-4 h-4" />
+              </button>
               <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
                 <X className="w-4 h-4" />
               </button>

@@ -23,6 +23,7 @@ File operations (workspace only)
   GET    /api/workspace/download      download single file
   POST   /api/workspace/download/zip  batch download as zip
   POST   /api/workspace/move          move / rename
+  POST   /api/workspace/reveal        open containing folder in system file manager
 
 Memory view (read-only, points to data/memory/)
   GET /api/workspace/memory/list  list memory files
@@ -39,6 +40,8 @@ import io
 import os
 import shutil
 import stat as stat_module
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from typing import List, Optional, Literal
@@ -157,6 +160,37 @@ def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
     if truncated:
         data = data[:max_bytes]
     return data.decode("utf-8", errors="replace"), truncated
+
+
+def _reveal_in_file_manager(target: Path) -> str:
+    """Open the OS file manager for a workspace file or directory."""
+    if sys.platform == "win32":
+        args = ["explorer", str(target)] if target.is_dir() else ["explorer", f"/select,{target}"]
+        subprocess.Popen(args)
+        return "reveal" if target.is_file() else "open"
+
+    if sys.platform == "darwin":
+        args = ["open", str(target)] if target.is_dir() else ["open", "-R", str(target)]
+        subprocess.Popen(args)
+        return "reveal" if target.is_file() else "open"
+
+    directory = target if target.is_dir() else target.parent
+    opener = shutil.which("xdg-open")
+    if opener:
+        subprocess.Popen([opener, str(directory)])
+        return "open"
+
+    gio = shutil.which("gio")
+    if gio:
+        subprocess.Popen([gio, "open", str(directory)])
+        return "open"
+
+    kde_open = shutil.which("kde-open")
+    if kde_open:
+        subprocess.Popen([kde_open, str(directory)])
+        return "open"
+
+    raise RuntimeError("No file manager opener found for this platform")
 
 
 # ─── directory operations ───────────────────────────────────────────────────
@@ -436,6 +470,10 @@ class MoveRequest(BaseModel):
     dst: str
 
 
+class RevealRequest(BaseModel):
+    path: str
+
+
 @router.post("/move", summary="Move / rename file or directory")
 async def move_item(body: MoveRequest):
     mgr = _get_manager()
@@ -452,6 +490,26 @@ async def move_item(body: MoveRequest):
     shutil.move(str(src), str(dst))
     log.info("workspace.item.moved", {"src": body.src, "dst": body.dst})
     return {"src": body.src, "dst": body.dst, "moved": True}
+
+
+@router.post("/reveal", summary="Open containing folder in system file manager")
+async def reveal_item(body: RevealRequest):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_workspace_path(body.path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {body.path}")
+    target_type = "directory" if target.is_dir() else "file"
+    try:
+        mode = await asyncio.to_thread(_reveal_in_file_manager, target)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to open file manager: {e}")
+    log.info("workspace.item.revealed", {"path": body.path, "target": target_type, "mode": mode})
+    return {"path": body.path, "opened": True, "target": target_type, "mode": mode}
 
 
 # ─── memory view (read-only) ────────────────────────────────────────────────

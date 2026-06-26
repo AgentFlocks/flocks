@@ -19,6 +19,7 @@
       "modified": "Modified"
     },
     "download": "Download",
+    "reveal": "Open containing folder",
     "delete": "Delete",
     "edit": "Edit",
     "save": "Save",
@@ -38,7 +39,9 @@
       "uploadSuccess": "Uploaded {{count}} file(s) successfully",
       "uploadPartialFail": "{{count}} file(s) failed to upload",
       "uploadFailed": "Upload failed",
-      "createDirFailed": "Failed to create folder"
+      "createDirFailed": "Failed to create folder",
+      "revealSuccess": "Opened containing folder",
+      "revealFailed": "Failed to open folder"
     },
     "confirm": {
       "deleteTitle": "Confirm Delete",

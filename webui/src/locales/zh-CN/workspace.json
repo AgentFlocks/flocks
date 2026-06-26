@@ -19,6 +19,7 @@
       "modified": "修改时间"
     },
     "download": "下载",
+    "reveal": "打开所在目录",
     "delete": "删除",
     "edit": "编辑",
     "save": "保存",
@@ -38,7 +39,9 @@
       "uploadSuccess": "上传成功 {{count}} 个文件",
       "uploadPartialFail": "{{count}} 个文件上传失败",
       "uploadFailed": "上传失败",
-      "createDirFailed": "创建目录失败"
+      "createDirFailed": "创建目录失败",
+      "revealSuccess": "已打开所在目录",
+      "revealFailed": "打开目录失败"
     },
     "confirm": {
       "deleteTitle": "确认删除",

@@ -540,6 +540,82 @@ class TestMove:
         assert r.status_code == 400
 
 
+# ─── Reveal in file manager ──────────────────────────────────────────────────
+
+class TestReveal:
+    def test_reveal_file_on_macos_selects_file(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs" / "report.pdf"
+        target.write_bytes(b"%PDF")
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "darwin")
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs/report.pdf"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["opened"] is True
+        assert r.json()["target"] == "file"
+        assert calls == [["open", "-R", str(target)]]
+
+    def test_reveal_directory_on_windows_opens_directory(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs"
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "win32")
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["target"] == "directory"
+        assert calls == [["explorer", str(target)]]
+
+    def test_reveal_file_on_linux_opens_parent_directory(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs" / "report.txt"
+        target.write_text("hello")
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "linux")
+        monkeypatch.setattr(workspace_routes.shutil, "which", lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs/report.txt"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["mode"] == "open"
+        assert calls == [["/usr/bin/xdg-open", str(target.parent)]]
+
+    def test_reveal_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "missing.txt"},
+        )
+        assert r.status_code == 404
+
+    def test_reveal_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "../../etc/passwd"},
+        )
+        assert r.status_code == 400
+
+
 # ─── Memory view (read-only) ─────────────────────────────────────────────────
 
 class TestMemoryView:

@@ -95,6 +95,12 @@ export const workspaceAPI = {
   move: (src: string, dst: string) =>
     client.post<{ src: string; dst: string; moved: boolean }>('/api/workspace/move', { src, dst }),
 
+  reveal: (path: string) =>
+    client.post<{ path: string; opened: boolean; target: 'file' | 'directory'; mode: string }>(
+      '/api/workspace/reveal',
+      { path },
+    ),
+
   // Memory (read-only)
   listMemory: () =>
     client.get<WorkspaceNode[]>('/api/workspace/memory/list'),
