@@ -20,6 +20,7 @@ File operations (workspace only)
   GET    /api/workspace/file          read text file content
   PUT    /api/workspace/file          write / update text file content
   DELETE /api/workspace/file          delete file
+  GET    /api/workspace/preview       preview single file inline
   GET    /api/workspace/download      download single file
   POST   /api/workspace/download/zip  batch download as zip
   POST   /api/workspace/move          move / rename
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import mimetypes
 import os
 import shutil
 import stat as stat_module
@@ -68,6 +70,15 @@ _ALLOWED_UPLOAD_EXTENSIONS = {
 _ALLOWED_UPLOAD_LABEL = (
     "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx"
 )
+_ALLOWED_PREVIEW_MEDIA_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+}
+
+
 def _max_upload_bytes() -> int:
     return int(os.getenv("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))) * 1024 * 1024
 
@@ -418,6 +429,32 @@ async def delete_file(
     target.unlink()
     log.info("workspace.file.deleted", {"path": path})
     return {"path": path, "deleted": True}
+
+
+@router.get("/preview", summary="Preview single file inline")
+async def preview_file(
+    path: str = Query(..., description="Relative path to file"),
+):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_workspace_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if media_type not in _ALLOWED_PREVIEW_MEDIA_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="File type is not supported for inline preview",
+        )
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 @router.get("/download", summary="Download single file")

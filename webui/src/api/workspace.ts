@@ -85,6 +85,9 @@ export const workspaceAPI = {
   downloadUrl: (path: string) =>
     `${client.defaults.baseURL ?? ''}/api/workspace/download?path=${encodeURIComponent(path)}`,
 
+  previewUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/preview?path=${encodeURIComponent(path)}`,
+
   downloadZip: (paths: string[], archiveName = 'workspace_files.zip') =>
     client.post(
       '/api/workspace/download/zip',

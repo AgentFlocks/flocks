@@ -21,6 +21,31 @@ const mocks = vi.hoisted(() => ({
   toastError: vi.fn(),
 }));
 
+const pdfMocks = vi.hoisted(() => {
+  const renderPage = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
+  const getPage = vi.fn(() => Promise.resolve({
+    getViewport: () => ({ width: 600, height: 800 }),
+    render: renderPage,
+  }));
+  const destroyDocument = vi.fn();
+  const destroyTask = vi.fn();
+  const getDocument = vi.fn(() => ({
+    promise: Promise.resolve({
+      numPages: 3,
+      getPage,
+      destroy: destroyDocument,
+    }),
+    destroy: destroyTask,
+  }));
+  return {
+    getDocument,
+    getPage,
+    renderPage,
+    destroyDocument,
+    destroyTask,
+  };
+});
+
 const translations: Record<string, string> = {
   description: 'Workspace files',
   'tabs.files': 'Files',
@@ -34,9 +59,28 @@ const translations: Record<string, string> = {
   'files.back': 'Back',
   'files.delete': 'Delete',
   'files.download': 'Download',
+  'files.reveal': 'Open containing folder',
   'files.downloadFile': 'Download file',
   'files.binaryPreview': 'Binary file cannot be previewed',
   'files.truncatedPreview': 'Preview truncated to first {{limit}}',
+  'files.preview.previewMode': 'Preview',
+  'files.preview.sourceMode': 'Source',
+  'files.preview.fullscreen': 'Fullscreen preview',
+  'files.preview.resize': 'Drag to resize preview',
+  'files.preview.htmlSandbox': 'HTML sandboxed',
+  'files.preview.jsonParseFailed': 'JSON parse failed',
+  'files.preview.jsonlParseFailed': '{{count}} JSONL lines failed',
+  'files.preview.pdfLoading': 'Loading PDF',
+  'files.preview.pdfRendering': 'Rendering page',
+  'files.preview.pdfLoadFailed': 'Failed to load PDF preview',
+  'files.preview.pdfCanvasUnavailable': 'Canvas unavailable',
+  'files.preview.pageIndicator': '{{page}} / {{total}}',
+  'files.preview.previousPage': 'Previous page',
+  'files.preview.nextPage': 'Next page',
+  'files.preview.zoomIn': 'Zoom in',
+  'files.preview.zoomOut': 'Zoom out',
+  'files.preview.unsupportedTitle': 'This file cannot be previewed',
+  'files.preview.unsupportedDesc': 'Download it or open containing folder',
   'files.emptyDir': 'Empty directory',
   'files.dropHere': 'Drop files here',
   'files.uploading': 'Uploading',
@@ -63,10 +107,25 @@ vi.mock('react-i18next', () => ({
       if (key === 'files.truncatedPreview') {
         return `Preview truncated to first ${params?.limit ?? ''}`;
       }
+      if (key === 'files.preview.jsonlParseFailed') {
+        return `${params?.count ?? ''} JSONL lines failed`;
+      }
+      if (key === 'files.preview.pageIndicator') {
+        return `${params?.page ?? ''} / ${params?.total ?? ''}`;
+      }
       return translations[key] ?? key;
     },
     i18n: { language: 'en-US' },
   }),
+}));
+
+vi.mock('pdfjs-dist', () => ({
+  GlobalWorkerOptions: {},
+  getDocument: pdfMocks.getDocument,
+}));
+
+vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({
+  default: '/pdf.worker.min.mjs',
 }));
 
 vi.mock('@/components/common/Toast', () => ({
@@ -75,6 +134,11 @@ vi.mock('@/components/common/Toast', () => ({
     error: mocks.toastError,
   }),
 }));
+
+Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+  configurable: true,
+  value: vi.fn(() => ({})),
+});
 
 vi.mock('@/components/common/ConfirmDialog', () => ({
   useConfirm: () => mocks.confirm,
@@ -110,6 +174,7 @@ vi.mock('@/api/workspace', async () => {
       listMemory: mocks.listMemory,
       readMemoryFile: mocks.readMemoryFile,
       downloadUrl: (path: string) => `/api/workspace/download?path=${encodeURIComponent(path)}`,
+      previewUrl: (path: string) => `/api/workspace/preview?path=${encodeURIComponent(path)}`,
     },
   };
 });
@@ -207,8 +272,123 @@ describe('WorkspacePage', () => {
     await user.click(await screen.findByText('events.jsonl'));
 
     expect(await screen.findByText('Preview truncated to first 16 B')).toBeInTheDocument();
-    expect(screen.getByText('{"id":1}')).toBeInTheDocument();
+    expect(screen.getByText(/"id": 1/)).toBeInTheDocument();
     expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
+  });
+
+  it('Markdown 文件默认渲染预览，并可打开全屏预览', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('README.md', 'README.md')],
+    });
+    mocks.readFile.mockResolvedValue({
+      data: {
+        path: 'README.md',
+        content: '# Hello\n\n**World**',
+        truncated: false,
+      },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('README.md'));
+
+    expect(await screen.findByRole('heading', { name: 'Hello' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Source' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Drag to resize preview' })).toBeInTheDocument();
+
+    await user.click(screen.getByTitle('Fullscreen preview'));
+    expect(screen.getAllByRole('heading', { name: 'Hello' })).toHaveLength(2);
+  });
+
+  it('JSON 文件默认格式化显示，并可切换源码', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('payload.json', 'payload.json')],
+    });
+    mocks.readFile.mockResolvedValue({
+      data: {
+        path: 'payload.json',
+        content: '{"message":"ok","count":2}',
+        truncated: false,
+      },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('payload.json'));
+
+    expect(await screen.findByText(/"message": "ok"/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Source' }));
+    expect(screen.getByText('{"message":"ok","count":2}')).toBeInTheDocument();
+  });
+
+  it('CSV 文件默认展示表格，并可切换源码', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('table.csv', 'table.csv')],
+    });
+    mocks.readFile.mockResolvedValue({
+      data: {
+        path: 'table.csv',
+        content: 'name,count\nalpha,2\n"beta, inc",5',
+        truncated: false,
+      },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('table.csv'));
+
+    expect(await screen.findByRole('columnheader', { name: 'name' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'count' })).toBeInTheDocument();
+    expect(screen.getByText('alpha')).toBeInTheDocument();
+    expect(screen.getByText('beta, inc')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Source' }));
+    expect(screen.getByText(/name,count/)).toBeInTheDocument();
+  });
+
+  it('PDF 文件使用 inline preview 地址展示', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('report.pdf', 'report.pdf', false)],
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('report.pdf'));
+
+    await waitFor(() => {
+      expect(pdfMocks.getDocument).toHaveBeenCalledWith({
+        url: '/api/workspace/preview?path=report.pdf',
+        withCredentials: true,
+      });
+    });
+    expect(await screen.findByText('1 / 3')).toBeInTheDocument();
+    expect(pdfMocks.getPage).toHaveBeenCalledWith(1);
+    expect(pdfMocks.renderPage).toHaveBeenCalled();
+    expect(screen.getByTitle('Previous page')).toBeDisabled();
+    expect(screen.getByTitle('Next page')).toBeEnabled();
+  });
+
+  it('不支持预览的文件显示下载和打开目录入口', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('archive.zip', 'archive.zip', false)],
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('archive.zip'));
+
+    expect(screen.getByText('This file cannot be previewed')).toBeInTheDocument();
+    expect(screen.getByText('Download file')).toBeInTheDocument();
+    const revealButtons = screen.getAllByRole('button', { name: 'Open containing folder' });
+    await user.click(revealButtons[revealButtons.length - 1]);
+    expect(mocks.reveal).toHaveBeenCalledWith('archive.zip');
   });
 
   it('目录内容默认按名称升序，并支持按名称、大小和修改时间切换排序', async () => {

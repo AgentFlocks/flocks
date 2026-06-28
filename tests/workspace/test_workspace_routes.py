@@ -488,6 +488,48 @@ class TestDownload:
         assert zf.namelist() == []
 
 
+# ─── File preview ─────────────────────────────────────────────────────────────
+
+class TestPreview:
+    def test_preview_pdf_inline(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "doc.pdf").write_bytes(b"%PDF-1.4")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/doc.pdf")
+        assert r.status_code == 200
+        assert r.content == b"%PDF-1.4"
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_png_inline(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.png")
+        assert r.status_code == 200
+        assert r.content == b"\x89PNG\r\n\x1a\n"
+        assert r.headers["content-type"].startswith("image/png")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_html_rejected(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "demo.html").write_text("<script>alert(1)</script>")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/demo.html")
+        assert r.status_code == 415
+
+    def test_preview_svg_rejected(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "image.svg").write_text("<svg><script>alert(1)</script></svg>")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.svg")
+        assert r.status_code == 415
+
+    def test_preview_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/preview?path=missing.pdf")
+        assert r.status_code == 404
+
+    def test_preview_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/preview?path=../../etc/passwd")
+        assert r.status_code == 400
+
+
 # ─── Move / rename ────────────────────────────────────────────────────────────
 
 class TestMove:
