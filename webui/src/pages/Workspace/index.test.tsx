@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   deleteDir: vi.fn(),
   upload: vi.fn(),
   createDir: vi.fn(),
+  reveal: vi.fn(),
   listMemory: vi.fn(),
   readMemoryFile: vi.fn(),
   confirm: vi.fn(),
@@ -105,6 +106,7 @@ vi.mock('@/api/workspace', async () => {
       deleteDir: mocks.deleteDir,
       upload: mocks.upload,
       createDir: mocks.createDir,
+      reveal: mocks.reveal,
       listMemory: mocks.listMemory,
       readMemoryFile: mocks.readMemoryFile,
       downloadUrl: (path: string) => `/api/workspace/download?path=${encodeURIComponent(path)}`,
@@ -141,6 +143,7 @@ describe('WorkspacePage', () => {
     mocks.deleteDir.mockResolvedValue({ data: { deleted: true } });
     mocks.upload.mockResolvedValue({ data: { uploaded: [] } });
     mocks.createDir.mockResolvedValue({ data: { created: true } });
+    mocks.reveal.mockResolvedValue({ data: { opened: true } });
     mocks.listMemory.mockResolvedValue({ data: [] });
     mocks.readMemoryFile.mockResolvedValue({ data: { content: '' } });
     mocks.confirm.mockResolvedValue(true);
@@ -206,5 +209,53 @@ describe('WorkspacePage', () => {
     expect(await screen.findByText('Preview truncated to first 16 B')).toBeInTheDocument();
     expect(screen.getByText('{"id":1}')).toBeInTheDocument();
     expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
+  });
+
+  it('目录内容默认按名称升序，并支持按名称、大小和修改时间切换排序', async () => {
+    mocks.list.mockResolvedValue({
+      data: [
+        { ...directory('beta', 'beta'), modified_at: 300 },
+        { ...directory('alpha', 'alpha'), modified_at: 100 },
+        { ...file('gamma.txt', 'gamma.txt'), size: 200, modified_at: 200 },
+        { ...file('delta.txt', 'delta.txt'), size: 40, modified_at: 400 },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    const alpha = await screen.findByText('alpha');
+    const beta = screen.getByText('beta');
+    const delta = screen.getByText('delta.txt');
+    const gamma = screen.getByText('gamma.txt');
+
+    expect(alpha.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(beta.compareDocumentPosition(delta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(delta.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Name' }));
+    expect(gamma.compareDocumentPosition(delta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(delta.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(beta.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Size' }));
+    expect(alpha.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(beta.compareDocumentPosition(delta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(delta.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Size' }));
+    expect(gamma.compareDocumentPosition(delta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(delta.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(beta.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Modified' }));
+    expect(alpha.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(gamma.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(beta.compareDocumentPosition(delta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Modified' }));
+    expect(delta.compareDocumentPosition(beta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(beta.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(gamma.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

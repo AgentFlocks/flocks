@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef, useReducer } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
-  X, ChevronRight, RefreshCw, FolderPlus,
+  X, ChevronRight, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
   Brain, FileText, AlertTriangle, Search, ArrowLeft,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -16,6 +16,13 @@ import {
 // ─── Types ────────────────────────────────────────────────────────────────
 
 type Tab = 'files' | 'memory';
+type SortField = 'name' | 'size' | 'modified';
+type SortDirection = 'asc' | 'desc';
+
+interface SortState {
+  field: SortField;
+  direction: SortDirection;
+}
 
 // Preview/edit panel state consolidated into a single object
 interface PanelState {
@@ -112,6 +119,36 @@ function TabButton({ active, onClick, icon, label }: {
   );
 }
 
+function SortHeaderButton({
+  label,
+  field,
+  sort,
+  onClick,
+  align = 'left',
+}: {
+  label: string;
+  field: SortField;
+  sort: SortState;
+  onClick: (field: SortField) => void;
+  align?: 'left' | 'right';
+}) {
+  const active = sort.field === field;
+  const Icon = sort.direction === 'asc' ? ChevronUp : ChevronDown;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(field)}
+      className={`inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 ${
+        align === 'right' ? 'justify-end' : 'justify-start'
+      }`}
+    >
+      <span>{label}</span>
+      <Icon className={`w-3 h-3 ${active ? 'opacity-100' : 'opacity-0'}`} />
+    </button>
+  );
+}
+
 // ─── Files Tab ────────────────────────────────────────────────────────────
 
 function FilesTab() {
@@ -123,6 +160,7 @@ function FilesTab() {
   const [loading, setLoading] = useState(true);
   const [currentPath, setCurrentPath] = useState('');
   const [items, setItems] = useState<WorkspaceNode[]>([]);
+  const [sort, setSort] = useState<SortState>({ field: 'name', direction: 'asc' });
 
   // Preview/edit panel — consolidated into a reducer
   const [panel, dispatchPanel] = useReducer(panelReducer, PANEL_INIT);
@@ -283,6 +321,31 @@ function FilesTab() {
     }
   }, [toastError, toastSuccess, t]);
 
+  const handleSort = useCallback((field: SortField) => {
+    setSort((current) => ({
+      field,
+      direction: current.field === field && current.direction === 'asc' ? 'desc' : 'asc',
+    }));
+  }, []);
+
+  const sortedItems = useMemo(() => {
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    return [...items].sort((a, b) => {
+      let result = 0;
+      if (sort.field === 'name') {
+        result = collator.compare(a.name, b.name);
+      } else if (sort.field === 'size') {
+        result = (a.type === 'file' ? (a.size ?? 0) : 0) - (b.type === 'file' ? (b.size ?? 0) : 0);
+      } else {
+        result = (a.modified_at ?? 0) - (b.modified_at ?? 0);
+      }
+      if (result === 0) {
+        result = collator.compare(a.name, b.name);
+      }
+      return sort.direction === 'asc' ? result : -result;
+    });
+  }, [items, sort]);
+
   const breadcrumbs = currentPath ? ['', ...currentPath.split('/')] : [''];
 
   return (
@@ -385,14 +448,20 @@ function FilesTab() {
               <thead className="sticky top-0 bg-gray-50 dark:bg-zinc-900/95">
                 <tr>
                   <th className="w-8 px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500"></th>
-                  <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500">{t('files.columns.name')}</th>
-                  <th className="w-24 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500">{t('files.columns.size')}</th>
-                  <th className="w-36 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500">{t('files.columns.modified')}</th>
+                  <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'name' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <SortHeaderButton label={t('files.columns.name')} field="name" sort={sort} onClick={handleSort} />
+                  </th>
+                  <th className="w-24 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'size' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <SortHeaderButton label={t('files.columns.size')} field="size" sort={sort} onClick={handleSort} align="right" />
+                  </th>
+                  <th className="w-36 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'modified' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <SortHeaderButton label={t('files.columns.modified')} field="modified" sort={sort} onClick={handleSort} align="right" />
+                  </th>
                   <th className="w-20"></th>
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => (
+                {sortedItems.map((item) => (
                   <tr
                     key={item.path}
                     onClick={() => handleSelectNode(item)}
