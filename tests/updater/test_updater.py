@@ -2110,6 +2110,46 @@ async def test_build_frontend_workspace_retries_npm_ci_before_switching_candidat
 
 
 @pytest.mark.asyncio
+async def test_build_frontend_workspace_tolerates_windows_node_assertion_after_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    bundled_npm = str(tmp_path / "npm.cmd")
+    run_calls: list[list[str]] = []
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        run_calls.append(list(cmd))
+        if cmd == [bundled_npm, "install"]:
+            return 0, "", ""
+        if cmd == [bundled_npm, "run", "build"]:
+            dist_dir = webui_dir / "dist"
+            dist_dir.mkdir()
+            (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            return (
+                3221226505,
+                "built in 6.83s",
+                "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 76",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(
+        updater,
+        "_resolve_frontend_npm_candidates",
+        lambda *, npm_registry=None: [
+            updater._FrontendNpmCandidate(npm=bundled_npm, env=None, source="bundled"),
+        ],
+    )
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+
+    assert await updater._build_frontend_workspace(webui_dir) is None
+    assert run_calls == [[bundled_npm, "install"], [bundled_npm, "run", "build"]]
+
+
+@pytest.mark.asyncio
 async def test_perform_update_retries_windows_frontend_with_full_timeout_after_bundled_install_and_ci_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

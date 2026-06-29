@@ -71,6 +71,8 @@ async def build_device_context_section() -> Optional[str]:
 
     lines: List[str] = [
         "<DeviceAssetContext>",
+        "设备不存在时，请提醒用户前往设备接入页面添加设备。",
+        "",
     ]
 
     # --- Section 1: device list (references tool_set_id only) ---
