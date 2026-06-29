@@ -16,7 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
@@ -1131,6 +1131,44 @@ function writeDismissedGoalKey(sessionId: string | null | undefined, goalKey: st
   }
 }
 
+export type ProcessGroupOpenState = Record<string, boolean>;
+
+function getProcessGroupOpenStorageKey(sessionId?: string | null): string | null {
+  return sessionId ? `flocks:session:${sessionId}:processGroupsOpen` : null;
+}
+
+function readProcessGroupOpenState(sessionId?: string | null): ProcessGroupOpenState {
+  const storageKey = getProcessGroupOpenStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, boolean] => (
+        typeof entry[0] === 'string' && typeof entry[1] === 'boolean'
+      )),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeProcessGroupOpenState(sessionId: string | null | undefined, state: ProcessGroupOpenState): void {
+  const storageKey = getProcessGroupOpenStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return;
+  try {
+    if (Object.keys(state).length > 0) {
+      window.localStorage.setItem(storageKey, JSON.stringify(state));
+    } else {
+      window.localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Ignore unavailable storage; process groups still work for this render.
+  }
+}
+
 function toGoalBannerState(goal: SessionGoalState | null | undefined): GoalBannerState | null {
   const objective = typeof goal?.objective === 'string' ? goal.objective.trim() : '';
   const status = typeof goal?.status === 'string' ? goal.status : '';
@@ -1453,6 +1491,9 @@ export default function SessionChat({
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
   const [editingQueueText, setEditingQueueText] = useState('');
   const [queueActionId, setQueueActionId] = useState<string | null>(null);
+  const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
+    readProcessGroupOpenState(sessionId)
+  ));
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -2067,7 +2108,17 @@ export default function SessionChat({
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
     setInput(readChatDraft(sessionId));
+    setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
   }, [sessionId, agentName, clearPendingQuestions]);
+
+  const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
+    setProcessGroupOpenState(prev => {
+      if (prev[key] === open) return prev;
+      const next = { ...prev, [key]: open };
+      writeProcessGroupOpenState(sessionId, next);
+      return next;
+    });
+  }, [sessionId]);
 
   useEffect(() => {
     fetchPromptQueue();
@@ -3120,6 +3171,8 @@ export default function SessionChat({
                   collapseIntermediateSteps={collapseIntermediateSteps}
                   processGroupsDefaultOpen={processGroupsDefaultOpen}
                   processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+                  processGroupOpenState={processGroupOpenState}
+                  onProcessGroupOpenChange={handleProcessGroupOpenChange}
                   compact={compact}
                   onCopy={handleCopy}
                   editingMessageId={editingMessageId}
@@ -3666,6 +3719,8 @@ export interface ChatMessageBubbleProps {
   collapseIntermediateSteps?: boolean;
   processGroupsDefaultOpen?: boolean;
   processGroupsOpenWhileActive?: boolean;
+  processGroupOpenState?: ProcessGroupOpenState;
+  onProcessGroupOpenChange?: (key: string, open: boolean) => void;
   compact?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
@@ -3682,25 +3737,49 @@ export interface ChatMessageBubbleProps {
 
 function ProcessGroupDetails({
   defaultOpen,
+  open,
+  onOpenChange,
+  summary,
   children,
 }: {
   defaultOpen: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  summary: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const isControlled = typeof open === 'boolean';
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
 
-  useLayoutEffect(() => {
-    if (detailsRef.current) {
-      detailsRef.current.open = defaultOpen;
+  useEffect(() => {
+    if (!isControlled) {
+      setInternalOpen(defaultOpen);
     }
-  }, [defaultOpen]);
+  }, [defaultOpen, isControlled]);
+
+  const effectiveOpen = isControlled ? open : internalOpen;
+  const handleSummaryClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    const nextOpen = !effectiveOpen;
+    if (!isControlled) {
+      setInternalOpen(nextOpen);
+    }
+    onOpenChange?.(nextOpen);
+  }, [effectiveOpen, isControlled, onOpenChange]);
 
   return (
     <details
-      ref={detailsRef}
+      open={effectiveOpen}
       data-testid="chat-process-group"
       className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
     >
+      <summary
+        onClick={handleSummaryClick}
+        className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50"
+      >
+        {summary}
+        <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
+      </summary>
       {children}
     </details>
   );
@@ -3717,6 +3796,8 @@ function ChatMessageBubbleInner({
   collapseIntermediateSteps = false,
   processGroupsDefaultOpen = false,
   processGroupsOpenWhileActive = false,
+  processGroupOpenState,
+  onProcessGroupOpenChange,
   compact = true,
   onCopy,
   editingMessageId,
@@ -3978,23 +4059,32 @@ function ChatMessageBubbleInner({
               textCount > 0 ? t('chat.process.textCount', { count: textCount }) : '',
             ].filter(Boolean).join(' · ');
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
+            const processGroupKey = `${message.id}:process:${groupIndex}`;
+            const hasStoredOpenState = !!processGroupOpenState
+              && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
+            const effectiveProcessGroupOpen = hasStoredOpenState
+              ? processGroupOpenState[processGroupKey]
+              : processGroupOpen;
             return (
               <ProcessGroupDetails
                 key={`process-${groupIndex}`}
                 defaultOpen={processGroupOpen}
-              >
-                <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50">
-                  <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
-                  <span className="flex-shrink-0 font-semibold text-zinc-700">
-                    {t('chat.process.title', { count: group.length })}
-                  </span>
-                  {summary && (
-                    <span className="min-w-0 truncate text-zinc-500">
-                      {summary}
+                open={effectiveProcessGroupOpen}
+                onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
+                summary={(
+                  <>
+                    <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
+                    <span className="flex-shrink-0 font-semibold text-zinc-700">
+                      {t('chat.process.title', { count: group.length })}
                     </span>
-                  )}
-                  <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
-                </summary>
+                    {summary && (
+                      <span className="min-w-0 truncate text-zinc-500">
+                        {summary}
+                      </span>
+                    )}
+                  </>
+                )}
+              >
                 <div className="border-t border-zinc-200/70 px-2.5 py-2">
                   {group.map(({ part, index }) => renderPart(part, index))}
                 </div>
@@ -5046,6 +5136,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
   if (prev.processGroupsOpenWhileActive !== next.processGroupsOpenWhileActive) return false;
+  if (prev.processGroupOpenState !== next.processGroupOpenState) return false;
   if (prev.editingMessageId !== next.editingMessageId) return false;
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;

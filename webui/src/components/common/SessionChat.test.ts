@@ -1060,6 +1060,81 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByText('write')).toBeVisible();
   });
 
+  it('restores a user-opened process group after switching away from a keyed session chat', async () => {
+    const user = userEvent.setup();
+    const processMessage = makeMessage({
+      id: 'assistant-switch-process',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'reason-switch',
+          messageID: 'assistant-switch-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查上下文',
+        } as any,
+        {
+          id: 'tool-switch',
+          messageID: 'assistant-switch-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-switch',
+          state: {
+            status: 'completed',
+            input: { filePath: 'workflow.md' },
+            output: 'workflow content',
+          },
+        } as any,
+      ],
+    });
+    const otherSessionMessage = makeMessage({
+      id: 'assistant-other-session',
+      sessionID: 'sess-2',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'text-other-session',
+          messageID: 'assistant-other-session',
+          sessionID: 'sess-2',
+          type: 'text',
+          text: '另一个 session。',
+        } as any,
+      ],
+    });
+    useSessionMessagesMock.mockImplementation((currentSessionId: string | null) => ({
+      messages: currentSessionId === 'sess-1' ? [processMessage] : [otherSessionMessage],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    }));
+
+    const renderKeyedChat = (currentSessionId: string) => React.createElement(SessionChat, {
+      key: currentSessionId,
+      sessionId: currentSessionId,
+      display: { collapseIntermediateSteps: true },
+    });
+    const { rerender } = render(renderKeyedChat('sess-1'));
+
+    await user.click(screen.getByText('过程（2 项）'));
+    expect(screen.getByTestId('chat-process-group')).toHaveProperty('open', true);
+
+    rerender(renderKeyedChat('sess-2'));
+    expect(screen.getByText('另一个 session。')).toBeVisible();
+
+    rerender(renderKeyedChat('sess-1'));
+
+    const restoredProcessGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(restoredProcessGroup.open).toBe(true);
+    expect(screen.getByText('read')).toBeVisible();
+  });
+
   it('keeps pending questions visible and folds answered questions into the process group', async () => {
     const user = userEvent.setup();
     const makeQuestionMessage = (status: 'running' | 'completed', includeFinalText = false) => makeMessage({
