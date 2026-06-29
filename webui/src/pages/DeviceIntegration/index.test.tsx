@@ -61,10 +61,9 @@ vi.mock('react-i18next', () => ({
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
         'config.aiAssistTitle': 'Rex 辅助配置',
-        'config.aiAssistHint': '结合当前配置、模板字段和配置指引，帮你补全配置、测试设备或排查连接问题。',
-        'config.aiAssistComplete': '帮我补全',
-        'config.aiAssistTest': '帮我测试',
-        'config.aiAssistTroubleshoot': '排查失败',
+        'config.aiAssistHint': '结合当前表单和配置指引，让 Rex 帮你继续完成配置。',
+        'config.aiAssistTest': '测试设备',
+        'config.aiAssistTroubleshoot': '排查问题',
         'config.aiAssistSaveFirst': '保存设备后可让 Rex 调用设备工具测试',
         'overview.viewDocs': '查看配置指引',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
@@ -1150,7 +1149,7 @@ describe('DeviceIntegrationPage', () => {
     });
   });
 
-  it('tests connectivity with draft fields without replacing the form', async () => {
+  it('does not show the legacy page connectivity test button', async () => {
     const user = userEvent.setup();
     const initialDevice = {
       id: 'device-1',
@@ -1233,24 +1232,12 @@ describe('DeviceIntegrationPage', () => {
     const baseUrl = await screen.findByDisplayValue('https://persisted.example.com');
     await user.clear(baseUrl);
     await user.type(baseUrl, 'https://draft.example.com');
-    await user.click(screen.getByRole('button', { name: /连通测试/ }));
 
-    await waitFor(() => {
-      expect(mocks.testDevice).toHaveBeenCalledWith('device-1', {
-        fields: expect.objectContaining({
-          base_url: 'https://draft.example.com',
-          api_prefix: '/api',
-          username: 'admin',
-          password: 'p***word',
-        }),
-        verify_ssl: false,
-        base_url: 'https://draft.example.com',
-      });
-    });
+    expect(screen.queryByRole('button', { name: /连通测试/ })).not.toBeInTheDocument();
+    expect(mocks.testDevice).not.toHaveBeenCalled();
     expect(mocks.getDevice).not.toHaveBeenCalled();
     expect(mocks.listDevices).toHaveBeenCalledTimes(1);
     expect(screen.getByDisplayValue('https://draft.example.com')).toBeInTheDocument();
-    expect(await screen.findByText('HTTP 200, 163ms')).toBeInTheDocument();
   });
 
   it('sends current config context to Rex for assisted device testing', async () => {
@@ -1321,7 +1308,8 @@ describe('DeviceIntegrationPage', () => {
 
     await user.click(await screen.findByText('onesig-02'));
     expect(await screen.findByText('Rex 辅助配置')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /帮我测试/ }));
+    expect(screen.queryByRole('button', { name: /帮我补全/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /测试设备/ }));
 
     await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
       displayText: '设备「onesig-02」请帮我测试。',

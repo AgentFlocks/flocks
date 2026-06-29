@@ -12,7 +12,7 @@ import aiohttp
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
 
-SERVICE_ID = "onesig_v2_5_3_api"
+SERVICE_ID = "onesig_api"
 DEFAULT_TIMEOUT = 60
 
 

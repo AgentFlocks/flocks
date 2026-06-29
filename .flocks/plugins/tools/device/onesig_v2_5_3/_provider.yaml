@@ -1,6 +1,6 @@
 name: onesig
 vendor: threatbook
-service_id: onesig_v2_5_3_api
+service_id: onesig_api
 version: "2.5.3"
 integration_type: device
 description: >

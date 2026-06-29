@@ -392,7 +392,7 @@ function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceT
   };
 }
 
-type DeviceRexAssistAction = 'complete' | 'test' | 'troubleshoot';
+type DeviceRexAssistAction = 'test' | 'troubleshoot';
 
 interface DeviceConfigRexAssistInput {
   action: DeviceRexAssistAction;
@@ -406,7 +406,6 @@ interface DeviceConfigRexAssistInput {
   credentialSchema: APIServiceCredentialField[];
   verifySsl: boolean;
   enabled: boolean;
-  testResult?: { success: boolean; message: string } | null;
 }
 
 function summarizeDeviceFormFields(input: DeviceConfigRexAssistInput): string {
@@ -450,10 +449,6 @@ function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): Cr
   const statusLine = device
     ? `当前状态=${device.status}，message=${device.message || '无'}，latency_ms=${device.latency_ms ?? '无'}`
     : '当前状态=尚未保存到设备列表';
-  const testLine = input.testResult
-    ? `最近页面连通测试=${input.testResult.success ? '成功' : '失败'}，消息=${input.testResult.message}`
-    : '最近页面连通测试=无';
-
   const common = [
     '你是 Flocks 的设备接入助手，请基于当前设备配置上下文继续工作。',
     '不要要求我在 API 接入、浏览器接入、Workflow 接入之间重新选择；不要索要或复述真实密钥。',
@@ -462,7 +457,6 @@ function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): Cr
     '设备上下文：',
     identityLines,
     statusLine,
-    testLine,
     '',
     '当前表单字段：',
     fieldSummary,
@@ -482,29 +476,15 @@ function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): Cr
     };
   }
 
-  if (input.action === 'troubleshoot') {
-    return {
-      text: [
-        ...common,
-        '',
-        '任务：请帮我排查这台设备的连接或配置问题。',
-        '请先根据当前状态、最近测试结果和表单字段判断最可能原因，再给出按优先级排序的排查步骤。',
-        '如果需要验证，请优先调用只读工具；如果信息不足，只问一个最关键问题。',
-      ].join('\n'),
-      displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我排查连接问题。`,
-    };
-  }
-
   return {
     text: [
       ...common,
       '',
-      '任务：请帮我检查并补全当前设备配置。',
-      '请结合模板字段和配置指引，指出缺失项、格式问题和建议值。',
-      '如果信息足够，请在回复末尾输出一个 ```json 代码块用于回填表单，格式为 {"storage_key":"...","device_name":"...","fields":{"base_url":"..."},"verify_ssl":false}。',
-      '不要在 JSON 中写入真实密钥；敏感字段请留空或省略，并提示我在页面表单中填写。',
+      '任务：请帮我排查这台设备的连接或配置问题。',
+      '请先根据当前状态、最近测试结果和表单字段判断最可能原因，再给出按优先级排序的排查步骤。',
+      '如果需要验证，请优先调用只读工具；如果信息不足，只问一个最关键问题。',
     ].join('\n'),
-    displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我补全配置。`,
+    displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我排查连接问题。`,
   };
 }
 
@@ -1008,7 +988,7 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function DeviceConfigPanel({
   device, template, vendorKey, initialGroupId, groups, groupLocked,
   initialDraft,
-  onSave, onDelete, onClose, onTest, onBack, onRexAssist,
+  onSave, onDelete, onClose, onBack, onRexAssist,
 }: {
   device?: DeviceIntegration;
   template?: DeviceTemplate;
@@ -1027,7 +1007,6 @@ function DeviceConfigPanel({
   }) => Promise<void>;
   onDelete?: () => Promise<void>;
   onClose: () => void;
-  onTest?: (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
   onBack?: () => void;
   onRexAssist?: (input: DeviceConfigRexAssistInput) => Promise<void>;
 }) {
@@ -1042,8 +1021,6 @@ function DeviceConfigPanel({
   const [enabled, setEnabled] = useState(device?.enabled ?? true);
   const [verifySsl, setVerifySsl] = useState(device?.verify_ssl ?? initialDraft?.verifySsl ?? false);
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [rexAssistAction, setRexAssistAction] = useState<DeviceRexAssistAction | null>(null);
@@ -1168,31 +1145,6 @@ function DeviceConfigPanel({
     }
   };
 
-  const handleTest = async () => {
-    if (!onTest) return;
-    setTesting(true);
-    setTestResult(null);
-    try {
-      let candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
-      if (!candidateBaseUrl) {
-        const host = (fields.host ?? '').trim();
-        const port = (fields.port ?? '').trim();
-        if (host) {
-          const hasScheme = host.includes('://');
-          const prefix = hasScheme ? host : `https://${host}`;
-          candidateBaseUrl = port ? `${prefix}:${port}` : prefix;
-        }
-      }
-      setTestResult(await onTest({
-        fields,
-        verify_ssl: verifySsl,
-        base_url: candidateBaseUrl || undefined,
-      }));
-    } finally {
-      setTesting(false);
-    }
-  };
-
   const handleToggleSsl = () => {
     const next = !verifySsl;
     dirtyRef.current = true;
@@ -1276,7 +1228,6 @@ function DeviceConfigPanel({
         credentialSchema: credFields,
         verifySsl,
         enabled,
-        testResult,
       });
     } catch {
       toast.error(t('toast.actionFailed'));
@@ -1366,47 +1317,49 @@ function DeviceConfigPanel({
                   </a>
                 )}
 
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
-                    {t('config.nameLabel')} <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={name}
-                    onChange={(e) => {
-                      dirtyRef.current = true;
-                      setName(e.target.value);
-                    }}
-                    placeholder={t('config.namePlaceholder')}
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
-                    {t('config.roomLabel')} <span className="text-red-500">*</span>
-                  </label>
-                  {groupLocked ? (
-                    <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
-                      <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
-                      <span className="text-sm text-zinc-600">
-                        {groups.find((g) => g.id === groupId)?.name ?? groupId}
-                      </span>
-                    </div>
-                  ) : (
-                    <select
-                      value={groupId}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="min-w-0">
+                    <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
+                      {t('config.nameLabel')} <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={name}
                       onChange={(e) => {
                         dirtyRef.current = true;
-                        setGroupId(e.target.value);
+                        setName(e.target.value);
                       }}
+                      placeholder={t('config.namePlaceholder')}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    >
-                      {groups.map((g) => (
-                        <option key={g.id} value={g.id}>{g.name}</option>
-                      ))}
-                    </select>
-                  )}
+                    />
+                  </div>
+
+                  <div className="min-w-0">
+                    <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
+                      {t('config.roomLabel')} <span className="text-red-500">*</span>
+                    </label>
+                    {groupLocked ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
+                        <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+                        <span className="truncate text-sm text-zinc-600">
+                          {groups.find((g) => g.id === groupId)?.name ?? groupId}
+                        </span>
+                      </div>
+                    ) : (
+                      <select
+                        value={groupId}
+                        onChange={(e) => {
+                          dirtyRef.current = true;
+                          setGroupId(e.target.value);
+                        }}
+                        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      >
+                        {groups.map((g) => (
+                          <option key={g.id} value={g.id}>{g.name}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
                 </div>
 
                 {visibleCredFields.length > 0 && (
@@ -1477,69 +1430,47 @@ function DeviceConfigPanel({
                 </div>
 
                 {onRexAssist && (
-                  <div className="rounded-xl border border-red-100 bg-red-50/40 p-3">
-                    <div className="flex items-start gap-2.5">
-                      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-red-100 bg-white text-red-500">
-                        <Sparkles className="h-4 w-4" />
+                  <div className="rounded-xl border border-zinc-100 bg-white px-3 py-2.5">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-500">
+                          <Sparkles className="h-3.5 w-3.5" />
+                        </div>
+                        <p className="truncate text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
-                        <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{t('config.aiAssistHint')}</p>
+                      <div className="grid grid-cols-2 gap-1.5 sm:w-auto sm:flex sm:flex-shrink-0">
+                        {([
+                          ['test', t('config.aiAssistTest'), Activity],
+                          ['troubleshoot', t('config.aiAssistTroubleshoot'), AlertTriangle],
+                        ] as const).map(([action, label, Icon]) => {
+                          const disabled = action === 'test' && !device;
+                          const loading = rexAssistAction === action;
+                          return (
+                            <button
+                              key={action}
+                              type="button"
+                              onClick={() => handleRexAssist(action)}
+                              disabled={disabled || !!rexAssistAction}
+                              title={disabled ? t('config.aiAssistSaveFirst') : undefined}
+                              className="flex h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
+                            >
+                              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5 flex-shrink-0" />}
+                              <span className="truncate">{label}</span>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
-                    <div className="mt-3 grid grid-cols-3 gap-2">
-                      {([
-                        ['complete', t('config.aiAssistComplete'), Settings],
-                        ['test', t('config.aiAssistTest'), Activity],
-                        ['troubleshoot', t('config.aiAssistTroubleshoot'), AlertTriangle],
-                      ] as const).map(([action, label, Icon]) => {
-                        const disabled = action === 'test' && !device;
-                        const loading = rexAssistAction === action;
-                        return (
-                          <button
-                            key={action}
-                            type="button"
-                            onClick={() => handleRexAssist(action)}
-                            disabled={disabled || !!rexAssistAction}
-                            title={disabled ? t('config.aiAssistSaveFirst') : undefined}
-                            className="flex min-h-[34px] items-center justify-center gap-1.5 rounded-lg border border-red-100 bg-white px-2 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
-                          >
-                            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
-                            <span className="truncate">{label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {testResult && (
-                  <div className={`rounded-lg px-4 py-3 text-sm flex items-start gap-2 ${
-                    testResult.success ? 'bg-green-50 text-green-700 border border-green-100' : 'bg-red-50 text-red-600 border border-red-100'
-                  }`}>
-                    {testResult.success
-                      ? <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                      : <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
-                    <span>{testResult.message}</span>
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">{t('config.aiAssistHint')}</p>
                   </div>
                 )}
 
                 <div className="space-y-2 pt-1">
                   <div className="flex gap-2">
-                    {device && onTest && (
-                      <button
-                        onClick={handleTest}
-                        disabled={testing}
-                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
-                      >
-                        {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
-                        {t('config.testBtn')}
-                      </button>
-                    )}
                     <button
                       onClick={handleSave}
                       disabled={saving}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                      className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                     >
                       {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                       {device ? t('config.saveBtn') : t('config.addBtn')}
@@ -2186,23 +2117,6 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
   };
 
-  const handleTest = async (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => {
-    if (panel?.kind !== 'edit') return { success: false, message: '' };
-    const res = await deviceAPI.test(panel.device.id, overrides);
-    setDevices((current) => current.map((device) => (
-      device.id === panel.device.id
-        ? {
-            ...device,
-            status: res.data.success ? 'ok' : 'error',
-            message: res.data.message,
-            latency_ms: res.data.latency_ms ?? null,
-            checked_at: Date.now(),
-          }
-        : device
-    )));
-    return res.data;
-  };
-
   const handleConfigRexAssist = useCallback(async (input: DeviceConfigRexAssistInput) => {
     const prompt = buildDeviceConfigRexAssistPrompt(input);
     await createAndSendRex({
@@ -2581,7 +2495,6 @@ export default function DeviceIntegrationPage() {
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
             onClose={panel.kind === 'add' ? closeAddWorkbench : () => setPanel(null)}
-            onTest={panel.kind === 'edit' ? handleTest : undefined}
             onBack={panel.kind === 'add' ? () => setPanel({ kind: 'wizard' }) : undefined}
             onRexAssist={handleConfigRexAssist}
           />

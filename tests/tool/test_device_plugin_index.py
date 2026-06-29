@@ -181,6 +181,37 @@ def test_device_plugin_index_normalizes_plugin_id_name(monkeypatch, tmp_path):
     assert templates[0].version == "2.5.3 D20250710"
 
 
+def test_onesig_strategy_api_template_uses_unversioned_service_id(monkeypatch, tmp_path):
+    from flocks.tool.device import plugin_index
+
+    _reset_env(monkeypatch, tmp_path)
+    root = Path.cwd() / ".flocks" / "plugins" / "tools" / "device" / "onesig_v2_5_3"
+    _write_provider(
+        root,
+        {
+            "name": "onesig",
+            "service_id": "onesig_api",
+            "version": "2.5.3",
+            "integration_type": "device",
+            "vendor": "threatbook",
+            "credential_fields": [
+                {"key": "base_url", "label": "Base URL", "storage": "config"},
+            ],
+        },
+    )
+    _write_tool(root, "onesig_strategy_api_query")
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(plugin_index.ToolRegistry, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "list_tools", classmethod(lambda cls: []))
+
+    templates = plugin_index.list_device_templates(refresh=True)
+
+    assert len(templates) == 1
+    assert templates[0].service_id == "onesig_api"
+    assert templates[0].storage_key == "onesig_api_v2_5_3"
+
+
 def test_device_template_refresh_reloads_plugin_tools(monkeypatch, tmp_path):
     from flocks.tool.device import plugin_index
 

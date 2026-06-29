@@ -9,7 +9,7 @@ description_cn: >
 category: custom
 enabled: true
 requires_confirmation: true
-provider: onesig_v2_5_3_api
+provider: onesig_api
 inputSchema:
   type: object
   properties:
