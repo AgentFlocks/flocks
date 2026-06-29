@@ -1739,6 +1739,32 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 
+_TOOL_WATCH_SUBDIRS = ("api", "device", "python")
+
+
+def _tool_event_paths(event: object) -> List[str]:
+    candidate_paths: List[str] = []
+    src = getattr(event, "src_path", "") or ""
+    if src:
+        candidate_paths.append(src)
+    dest = getattr(event, "dest_path", "") or ""
+    if dest:
+        candidate_paths.append(dest)
+    return candidate_paths
+
+
+def _tool_path_matches_watch_scope(path: str, subdir: str | None = None) -> bool:
+    """Return whether ``path`` is under ``plugins/tools/<type>/``."""
+    parts = Path(path).parts
+    allowed = {subdir} if subdir else set(_TOOL_WATCH_SUBDIRS)
+    for idx, part in enumerate(parts):
+        if part != "tools":
+            continue
+        if idx + 1 < len(parts) and parts[idx + 1] in allowed:
+            return True
+    return False
+
+
 def _tool_event_should_reload(event: object) -> bool:
     """Return True if a watchdog filesystem event should trigger a plugin reload.
 
@@ -1753,17 +1779,13 @@ def _tool_event_should_reload(event: object) -> bool:
     Exposed at module scope so it can be unit-tested without spinning up
     ``watchdog.observers.Observer`` against a temp directory.
     """
-    candidate_paths: List[str] = []
-    src = getattr(event, "src_path", "") or ""
-    if src:
-        candidate_paths.append(src)
-    dest = getattr(event, "dest_path", "") or ""
-    if dest:
-        candidate_paths.append(dest)
+    candidate_paths = _tool_event_paths(event)
     if not candidate_paths:
         return False
 
     for path in candidate_paths:
+        if not _tool_path_matches_watch_scope(path):
+            continue
         if not (path.endswith(".yaml") or path.endswith(".py")):
             continue
         fname = os.path.basename(path)
@@ -1773,6 +1795,11 @@ def _tool_event_should_reload(event: object) -> bool:
             continue
         return True
     return False
+
+
+def _tool_event_touches_device_plugin(event: object) -> bool:
+    """Return True when a reload event targets ``tools/device``."""
+    return any(_tool_path_matches_watch_scope(path, "device") for path in _tool_event_paths(event))
 
 
 class ToolFileWatcher:
@@ -1788,7 +1815,7 @@ class ToolFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 1.0
-    _WATCH_SUBDIRS = ("api", "device", "python")
+    _WATCH_SUBDIRS = _TOOL_WATCH_SUBDIRS
 
     def __init__(self) -> None:
         self._observer: Optional[object] = None
@@ -1842,7 +1869,7 @@ class ToolFileWatcher:
                     return
                 if not _tool_event_should_reload(event):
                     return
-                watcher._schedule_refresh()
+                watcher._schedule_refresh(device_changed=_tool_event_touches_device_plugin(event))
 
         handler = _Handler()
         observer = Observer()
@@ -1874,11 +1901,12 @@ class ToolFileWatcher:
 
     # ---- internal ----
 
-    def _schedule_refresh(self) -> None:
+    def _schedule_refresh(self, *, device_changed: bool = False) -> None:
         """Debounced plugin tool reload."""
         with self._lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
+            self._device_changed = getattr(self, "_device_changed", False) or device_changed
             self._debounce_timer = threading.Timer(
                 self._DEBOUNCE_SECONDS, self._do_refresh
             )
@@ -1895,31 +1923,38 @@ class ToolFileWatcher:
 
     def _run_refresh(self) -> None:
         try:
+            if getattr(self, "_device_changed", False):
+                try:
+                    from flocks.config.api_versioning import discover_api_service_descriptors
+                    from flocks.tool.device.plugin_index import clear_device_template_cache
+
+                    clear_device_template_cache()
+                    discover_api_service_descriptors(refresh=True)
+                except Exception as exc:
+                    log.debug("tool.watcher.device_cache_clear_failed", {"error": str(exc)})
+                finally:
+                    self._device_changed = False
             ToolRegistry.refresh_plugin_tools()
             log.debug("tool.watcher.reloaded", {"reason": "plugin tool file changed on disk"})
         except Exception as e:
             log.warn("tool.watcher.reload_failed", {"error": str(e)})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Return the api/ and python/ subdirectories that exist and should be watched."""
+        """Return plugin roots that exist and should be watched."""
         dirs: Set[str] = set()
         try:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-            tools_root = DEFAULT_PLUGIN_ROOT / "tools"
+            user_plugin_root = DEFAULT_PLUGIN_ROOT
         except Exception:
-            tools_root = Path.home() / ".flocks" / "plugins" / "tools"
+            user_plugin_root = Path.home() / ".flocks" / "plugins"
 
-        for subdir in self._WATCH_SUBDIRS:
-            d = str(tools_root / subdir)
-            if os.path.isdir(d):
-                dirs.add(d)
+        if os.path.isdir(user_plugin_root):
+            dirs.add(str(user_plugin_root))
 
         try:
-            project_tools_root = Path.cwd() / ".flocks" / "plugins" / "tools"
-            for subdir in self._WATCH_SUBDIRS:
-                d = str(project_tools_root / subdir)
-                if d not in dirs and os.path.isdir(d):
-                    dirs.add(d)
+            project_plugin_root = Path.cwd() / ".flocks" / "plugins"
+            if os.path.isdir(project_plugin_root):
+                dirs.add(str(project_plugin_root))
         except Exception:
             pass
 

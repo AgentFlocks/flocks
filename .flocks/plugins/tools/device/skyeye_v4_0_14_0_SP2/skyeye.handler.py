@@ -5,7 +5,7 @@ import random
 import re
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -30,6 +30,20 @@ def _get_custom_setting(raw_service: dict[str, Any], key: str, default: Any = No
     if not isinstance(custom_settings, dict):
         return default
     return custom_settings.get(key, default)
+
+
+def _ensure_skyeye_base_path(base_url: str) -> str:
+    cleaned = base_url.strip().rstrip("/")
+    if not cleaned:
+        return ""
+
+    parts = urlsplit(cleaned)
+    path = parts.path.rstrip("/")
+    if path.lower() == "/skyeye" or path.lower().endswith("/skyeye"):
+        return urlunsplit(parts._replace(path=path))
+
+    next_path = f"{path}/skyeye" if path else "/skyeye"
+    return urlunsplit(parts._replace(path=next_path))
 
 
 def _resolve_login_key(raw_service: dict[str, Any]) -> str:
@@ -59,15 +73,15 @@ def _resolve_base_url(raw_service: dict[str, Any]) -> str:
     if base_url:
         resolved = security.resolve_value(base_url)
         if isinstance(resolved, str) and resolved.strip():
-            return resolved.rstrip("/")
+            return _ensure_skyeye_base_path(resolved)
 
     secret_manager = security.get_secret_manager()
     host = secret_manager.get("skyeye_host") or security.resolve_value("{env:SKYEYE_HOST}")
     if isinstance(host, str) and host.strip():
         host = host.strip().rstrip("/")
         if host.startswith("http://") or host.startswith("https://"):
-            return host
-        return f"https://{host}:443"
+            return _ensure_skyeye_base_path(host)
+        return _ensure_skyeye_base_path(f"https://{host}:443")
 
     return ""
 

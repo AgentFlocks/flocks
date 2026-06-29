@@ -11,6 +11,7 @@ description: >
 description_cn: >
   NGTIP 威胁情报平台 API 服务，覆盖情报查询（端口 8090）和平台功能（管理写入）两类接口。
   可分别配置情报查询 APIKEY、平台功能 APIKEY、平台功能 Base URL 和情报查询 Base URL。
+docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/ngtip-integration"
 auth:
   type: custom
   secret: ngtip_query_apikey

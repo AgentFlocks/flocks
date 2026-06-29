@@ -215,6 +215,7 @@ class TestBundledCatalogEntryState:
         entries = catalog.list_catalog(plugin_type="tool")
         match = next((e for e in entries if e.id == "onesig_v2_5_3_D20250710"), None)
         assert match is not None, "bundled tool should appear in catalog"
+        assert match.version == "2.5.3 D20250710"
         assert match.state == "available"
         assert match.installedVersion is None
         assert match.source == "bundled"

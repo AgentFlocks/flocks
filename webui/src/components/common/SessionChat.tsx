@@ -38,6 +38,7 @@ import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { copyText } from '@/utils/clipboard';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -2941,7 +2942,7 @@ export default function SessionChat({
 
   // Copy text to clipboard
   const handleCopy = useCallback((text: string) => {
-    navigator.clipboard.writeText(text).catch(() => {});
+    void copyText(text).catch(() => {});
   }, []);
 
   const resetEditingState = useCallback(() => {

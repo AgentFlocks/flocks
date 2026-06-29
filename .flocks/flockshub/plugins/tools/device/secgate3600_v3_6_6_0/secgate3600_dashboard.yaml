@@ -1,0 +1,32 @@
+name: secgate3600_dashboard
+description: SecGate 3600 dashboard statistics and monitor queries.
+description_cn: SecGate 3600 首页统计和监控查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: secgate3600_api
+version: "3.6.6.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - notice_num_day
+        - threats_last_day
+        - focus_last_day
+        - connection_monitor
+        - interface_info
+        - test
+    page_index:
+      type: integer
+    page_size:
+      type: integer
+    body:
+      type: object
+  required:
+    - action
+handler:
+  type: script
+  script_file: secgate3600.handler.py
+  function: dashboard
