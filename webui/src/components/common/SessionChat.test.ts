@@ -482,6 +482,52 @@ describe('getMessageGroupClassName', () => {
   });
 });
 
+describe('SessionChat copy action', () => {
+  it('falls back when async clipboard is unavailable', async () => {
+    const user = userEvent.setup();
+    const execCommand = vi.fn().mockReturnValue(true);
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-copy',
+          role: 'assistant',
+          parts: [{ id: 'text-1', type: 'text', text: 'copy this result' }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+
+    expect(execCommand).toHaveBeenCalledWith('copy');
+  });
+});
+
 describe('getCompactionDividerClassName', () => {
   it('insets the divider into the assistant content column in full layout', () => {
     const className = getCompactionDividerClassName(false);
