@@ -139,6 +139,13 @@ describe('WebUIContractWorkspaceHost', () => {
     await userEvent.click(screen.getByTitle('workspace.collapseSidebar'));
 
     expect(screen.getByTitle('workspace.expandSidebar')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
+    expect(screen.getByText('page:soc-alerts')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTitle('workspace.expandSidebar'));
+
+    expect(screen.getByTitle('workspace.collapseSidebar')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
   });
 
   it('temporarily uses dark theme for the posture dashboard when the user preference is light', async () => {

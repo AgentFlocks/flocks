@@ -6,26 +6,21 @@ import {
   Workflow,
   ListTodo,
   Wrench,
-  Brain,
   BookOpen,
   X,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Menu,
-  Radio,
   FolderOpen,
   Sparkles,
-  ArrowUpCircle,
-  UserCog,
   Archive,
   ServerCog,
-  ScrollText,
-  ShieldCheck,
+  LogOut,
+  Settings,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
-import LanguageSwitcher from '@/components/common/LanguageSwitcher';
-import ThemeToggle from '@/components/common/ThemeToggle';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
 // the home page never needs. To keep the lazy split effective, we don't
@@ -91,13 +86,16 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
 
 export default function Layout() {
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showUpdate, setShowUpdate] = useState(false);
   const { t, i18n } = useTranslation('nav');
+  const { t: tAuth } = useTranslation('auth');
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -112,12 +110,24 @@ export default function Layout() {
   const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
-  const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
   const [isFlocksproActive, setIsFlocksproActive] = useState(false);
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
+
+  useEffect(() => {
+    if (!accountMenuOpen) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (accountMenuRef.current?.contains(event.target as Node)) return;
+      setAccountMenuOpen(false);
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [accountMenuOpen]);
+
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -215,35 +225,6 @@ export default function Layout() {
       window.removeEventListener('focus', handleWindowFocus);
     };
   }, [flocksproStatusReady, refreshUpdateStatus]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!user?.id || user.role !== 'admin') {
-      setHasFlocksproCapability(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-    const refreshCapability = () => {
-      void flocksproUsersApi.hasCapability()
-        .then((ok) => {
-          if (!cancelled) {
-            setHasFlocksproCapability(ok);
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setHasFlocksproCapability(false);
-          }
-        });
-    };
-    refreshCapability();
-    window.addEventListener('flockspro-license-status-changed', refreshCapability);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('flockspro-license-status-changed', refreshCapability);
-    };
-  }, [user?.id, user?.role]);
 
   useEffect(() => {
     let cancelled = false;
@@ -449,8 +430,6 @@ export default function Layout() {
             { name: t('skills'), href: '/skills', icon: BookOpen },
             { name: t('tools'), href: '/tools', icon: Wrench },
             { name: t('hub'), href: '/hub', icon: Archive },
-            { name: t('models'), href: '/models', icon: Brain },
-            { name: t('channels'), href: '/channels', icon: Radio },
           ],
         },
         {
@@ -460,22 +439,9 @@ export default function Layout() {
             { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
           ],
         },
-        {
-          name: t('systemCenter'),
-          items: [
-            { name: t('accountManagement'), href: '/config', icon: UserCog },
-            { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
-            ...(hasFlocksproCapability && user?.role === 'admin'
-              ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
-              : []),
-            ...(user?.role === 'admin'
-              ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
-              : []),
-          ],
-        },
       ];
     },
-    [hasFlocksproCapability, webuiContractPages, webuiContractWorkspaces, t, user?.role],
+    [webuiContractPages, webuiContractWorkspaces, t],
   );
 
   const isFullScreenPage =
@@ -489,11 +455,18 @@ export default function Layout() {
   const displayVersion = isFlocksproActive
     ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
     : currentVersion ? `v${currentVersion}` : null;
-  const currentVersionLabel = isFlocksproActive
-    ? t('currentProductVersionLabel', { version: displayVersion || productName })
-    : currentVersion
-    ? t('currentVersionLabel', { version: currentVersion })
-    : productName;
+  const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
+  const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
+  const versionButtonTitle = hasUpdate && canManageUpdates
+    ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' })
+    : t('versionInfo');
+  const settingsReturnState = {
+    from: {
+      pathname: location.pathname,
+      search: location.search,
+      hash: location.hash,
+    },
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -541,7 +514,7 @@ export default function Layout() {
           ${collapsed ? 'w-16' : 'w-52'}
         `}
       >
-        <div className="flex flex-col h-full overflow-hidden">
+        <div className="flex flex-col h-full overflow-visible">
           {/* Logo */}
           <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
             {collapsed ? (
@@ -553,7 +526,24 @@ export default function Layout() {
               </div>
             ) : (
               <>
-                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
+                <div className="flex min-w-0 flex-1 items-baseline gap-2">
+                  <span className="min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowUpdate(true)}
+                    title={versionButtonTitle}
+                    className={`relative shrink-0 rounded px-1 py-0.5 text-[11px] font-semibold leading-none transition-colors ${
+                      hasUpdate && canManageUpdates
+                        ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/60'
+                        : 'text-zinc-400 hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200'
+                    }`}
+                  >
+                    {hasUpdate && canManageUpdates ? t('newVersion') : displayVersion || '...'}
+                    {hasUpdate && canManageUpdates && (
+                      <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    )}
+                  </button>
+                </div>
                 <button
                   onClick={() => setSidebarOpen(false)}
                   className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0 dark:hover:text-zinc-100"
@@ -607,66 +597,72 @@ export default function Layout() {
             ))}
           </nav>
 
-          {/* Bottom: Language switcher + version */}
-          <div className={`border-t border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
-            <div className={`flex ${collapsed ? 'flex-col items-center gap-2' : 'items-center gap-2'}`}>
-              <LanguageSwitcher collapsed={collapsed} />
-              <ThemeToggle collapsed={collapsed} />
-            </div>
-            {!collapsed && (
-              <>
-                {hasUpdate && canManageUpdates ? (
-                  <button
-                    onClick={() => setShowUpdate(true)}
-                    className="mt-3 w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md dark:border-amber-500/30 dark:from-amber-950/60 dark:via-orange-950/50 dark:to-rose-950/50"
-                  >
-                    <div className="flex items-center gap-2 text-sm">
-                      <span className="min-w-0 flex-1 truncate font-semibold text-amber-900 dark:text-amber-100">
-                        {t('newVersion')} {formatUpdateVersion(latestVersion) || ''}
-                      </span>
-                      <span className="inline-flex flex-shrink-0 items-center rounded-full bg-amber-500 px-2 py-0.5 text-xs font-semibold text-white shadow-sm">
-                        {t('updateNow')}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                      {currentVersionLabel}
-                    </div>
-                    <div className="mt-0.5 text-xs font-medium text-amber-900 dark:text-amber-100">
-                      AI Native SecOps Platform
-                    </div>
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowUpdate(true)}
-                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors dark:hover:bg-zinc-900"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors dark:text-zinc-400 dark:group-hover:text-zinc-100">
-                        {productName} {displayVersion || '...'}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">AI Native SecOps Platform</div>
-                  </button>
-                )}
-              </>
+          {/* Bottom account entry */}
+          <div
+            ref={accountMenuRef}
+            className={`relative border-t border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'p-2' : 'p-3'}`}
+          >
+            {accountMenuOpen && (
+              <div className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
+                collapsed ? 'bottom-2 left-full ml-2 w-48' : 'bottom-full left-3 right-3 mb-2'
+              }`}>
+                <Link
+                  to="/settings/preferences"
+                  state={settingsReturnState}
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    setSidebarOpen(false);
+                  }}
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                >
+                  <Settings className="h-4 w-4 text-zinc-400" />
+                  {t('settings')}
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    void logout();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                >
+                  <LogOut className="h-4 w-4 text-zinc-400" />
+                  {t('logout')}
+                </button>
+              </div>
             )}
-            {collapsed && (
+            {collapsed ? (
               <button
-                onClick={() => setShowUpdate(true)}
-                title={hasUpdate && canManageUpdates ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }) : t('versionInfo')}
-                className={`relative rounded-xl p-2 transition-colors ${
-                  hasUpdate && canManageUpdates
-                    ? 'bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/60'
-                    : 'text-zinc-400 hover:text-zinc-600 hover:bg-white/60 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
-                }`}
+                type="button"
+                onClick={() => setAccountMenuOpen((value) => !value)}
+                title={user?.username || t('settings')}
+                aria-label={user?.username ? `${user.username} ${t('settings')}` : t('settings')}
+                className="flex h-9 w-full items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/70 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
               >
-                {hasUpdate && canManageUpdates ? <ArrowUpCircle className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
-                {hasUpdate && canManageUpdates && (
-                  <>
-                    <span className="absolute inset-0 rounded-xl border border-amber-200 animate-pulse" />
-                    <span className="absolute top-1 right-1 w-2 h-2 bg-amber-400 rounded-full" />
-                  </>
-                )}
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-200 text-xs font-bold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                  {accountInitial}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAccountMenuOpen((value) => !value)}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-white/70 dark:hover:bg-zinc-900"
+                aria-expanded={accountMenuOpen}
+                aria-label={user?.username ? `${user.username} ${t('settings')}` : t('settings')}
+              >
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-xs font-bold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                  {accountInitial}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+                    {user?.username || productName}
+                  </span>
+                  <span className="block truncate text-xs text-zinc-400 dark:text-zinc-500">
+                    {accountRoleLabel}
+                  </span>
+                </span>
+                <ChevronUp className={`h-4 w-4 shrink-0 text-zinc-400 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
               </button>
             )}
           </div>

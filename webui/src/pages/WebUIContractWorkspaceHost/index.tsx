@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Activity, AlertCircle, ChevronLeft, ChevronRight, Loader2, ShieldCheck } from 'lucide-react';
+import { Activity, AlertCircle, Loader2, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
 import {
   webuiContractPagesAPI,
   type WebUIContractPageListItem,
@@ -205,22 +205,11 @@ export default function WebUIContractWorkspaceHost() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        {currentSection?.showSidebar && (
+        {currentSection?.showSidebar && !sectionSidebarCollapsed && (
           <aside
-            className={`relative z-10 shrink-0 border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 lg:border-b-0 lg:border-r ${
-              sectionSidebarCollapsed ? 'lg:w-16' : 'lg:w-56'
-            }`}
+            className="relative z-10 shrink-0 border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 lg:w-56 lg:border-b-0 lg:border-r"
           >
-            <button
-              type="button"
-              onClick={() => setSectionSidebarCollapsed((value) => !value)}
-              className="absolute -right-3 top-5 z-10 hidden h-11 w-6 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:border-zinc-300 hover:bg-zinc-50 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-red-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 lg:flex"
-              title={sectionSidebarCollapsed ? t('workspace.expandSidebar') : t('workspace.collapseSidebar')}
-              aria-label={sectionSidebarCollapsed ? t('workspace.expandSidebar') : t('workspace.collapseSidebar')}
-            >
-              {sectionSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-            </button>
-            <nav className={`flex gap-1 overflow-x-auto px-4 py-4 lg:flex-col lg:overflow-visible ${sectionSidebarCollapsed ? 'lg:px-2' : ''}`}>
+            <nav className="flex gap-1 overflow-x-auto px-4 py-4 lg:flex-col lg:overflow-visible">
               {currentSection.pages.map((page) => {
                 const PageIcon = resolveWebUIContractPageIcon(page.icon);
                 const isActive = page.id === currentPage.id;
@@ -230,15 +219,13 @@ export default function WebUIContractWorkspaceHost() {
                     to={`${workspace.route}/${page.id}`}
                     aria-label={page.title}
                     className={`flex min-w-36 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors lg:min-w-0 ${
-                      sectionSidebarCollapsed ? 'lg:justify-center lg:px-2' : ''
-                    } ${
                       isActive
                         ? 'bg-zinc-100 text-zinc-950 dark:bg-zinc-900 dark:text-zinc-50'
                         : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
                     }`}
                   >
                     <PageIcon className={`h-4 w-4 flex-shrink-0 ${isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                    <span className={`truncate ${sectionSidebarCollapsed ? 'lg:hidden' : ''}`}>{page.title}</span>
+                    <span className="truncate">{page.title}</span>
                   </Link>
                 );
               })}
@@ -247,8 +234,21 @@ export default function WebUIContractWorkspaceHost() {
         )}
 
         <section className="min-w-0 flex-1 overflow-hidden">
-          <div className="h-full min-w-0 overflow-x-auto">
-            <PageRuntimeHost key={currentPage.id} pageId={currentPage.id} />
+          <div className="relative h-full min-w-0 overflow-x-auto">
+            {currentSection?.showSidebar && (
+              <button
+                type="button"
+                onClick={() => setSectionSidebarCollapsed((value) => !value)}
+                className="absolute left-3 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-red-100 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-100 dark:focus:ring-zinc-700"
+                title={sectionSidebarCollapsed ? t('workspace.expandSidebar') : t('workspace.collapseSidebar')}
+                aria-label={sectionSidebarCollapsed ? t('workspace.expandSidebar') : t('workspace.collapseSidebar')}
+              >
+                {sectionSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+              </button>
+            )}
+            <div className={currentSection?.showSidebar ? 'h-full min-w-0 pl-12' : 'h-full min-w-0'}>
+              <PageRuntimeHost key={currentPage.id} pageId={currentPage.id} />
+            </div>
           </div>
         </section>
       </div>

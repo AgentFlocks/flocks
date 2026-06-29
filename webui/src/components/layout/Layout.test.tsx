@@ -242,6 +242,7 @@ describe('Layout onboarding entry', () => {
         status: 'active',
         must_reset_password: false,
       },
+      logout: vi.fn(),
     });
 
     useStats.mockReturnValue({
@@ -391,6 +392,7 @@ describe('Layout onboarding entry', () => {
         status: 'active',
         must_reset_password: false,
       },
+      logout: vi.fn(),
     });
     flocksproUsersApi.getLicenseStatus.mockResolvedValue({
       pro_enabled: true,
@@ -407,9 +409,70 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
-    expect(await screen.findByText('Flocks Pro pro-v2026.05.22')).toBeInTheDocument();
+    expect(await screen.findByText('pro-v2026.05.22')).toBeInTheDocument();
+    expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
     expect(checkUpdate).not.toHaveBeenCalled();
+  });
+
+  it('opens the account menu with settings and logout actions', async () => {
+    const user = userEvent.setup();
+    const logout = vi.fn().mockResolvedValue(undefined);
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-1',
+        username: 'admin',
+        role: 'admin',
+        status: 'active',
+        must_reset_password: false,
+      },
+      logout,
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('admin.roleAdmin')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+
+    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+
+    await user.click(screen.getByRole('button', { name: 'logout' }));
+    expect(logout).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps desktop layout animation while collapsing the sidebar', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    const aside = container.querySelector('aside');
+    const contentShell = container.querySelector('main')?.parentElement;
+    expect(aside).toHaveClass('transition-all');
+    expect(contentShell).toHaveClass('transition-all');
+
+    await user.click(screen.getByTitle('collapseNav'));
+
+    expect(aside).toHaveClass('w-16');
+    expect(aside).toHaveClass('transition-all');
+    expect(contentShell).toHaveClass('lg:pl-16');
+    expect(contentShell).toHaveClass('transition-all');
+  });
+
+  it('keeps the collapsed account menu selectable outside the sidebar width', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    await user.click(screen.getByTitle('collapseNav'));
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+
+    expect(container.querySelector('aside > div')).toHaveClass('overflow-visible');
+    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    expect(screen.getByRole('button', { name: 'logout' })).toBeInTheDocument();
   });
 
   it('enforces a ten-minute minimum gap for focus-triggered update checks', async () => {
@@ -594,6 +657,7 @@ describe('Layout WebUI contract pages navigation', () => {
         status: 'active',
         must_reset_password: false,
       },
+      logout: vi.fn(),
     });
     useStats.mockReturnValue({
       stats: {
@@ -705,7 +769,7 @@ describe('Layout WebUI contract pages navigation', () => {
     const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
     expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
     expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThan(sectionHeadings.indexOf('agentHub'));
-    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeLessThan(sectionHeadings.indexOf('systemCenter'));
+    expect(sectionHeadings).not.toContain('systemCenter');
 
     const sceneSection = Array.from(container.querySelectorAll('h3'))
       .find((heading) => heading.textContent === 'sceneWorkspaces')
@@ -717,5 +781,7 @@ describe('Layout WebUI contract pages navigation', () => {
       .find((heading) => heading.textContent === 'agentHub')
       ?.parentElement;
     expect(agentSection?.querySelector('a[href="/devices"]')).toBeNull();
+    expect(agentSection?.querySelector('a[href="/models"]')).toBeNull();
+    expect(agentSection?.querySelector('a[href="/channels"]')).toBeNull();
   });
 });
