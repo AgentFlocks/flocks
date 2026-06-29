@@ -739,8 +739,12 @@ def _raise_console_service_error(exc: Exception) -> None:
             if isinstance(payload, dict):
                 detail = str(payload.get("detail") or payload.get("message") or detail)
         except Exception:
-            if exc.response.text:
-                detail = exc.response.text
+            response_text = str(exc.response.text or "").strip()
+            content_type = str(exc.response.headers.get("content-type", "")).lower()
+            if response_text and "html" not in content_type and not response_text.lower().startswith("<html"):
+                detail = response_text[:500]
+            else:
+                detail = f"console 升级服务暂不可用（HTTP {exc.response.status_code}），请稍后重试"
     raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
 
@@ -884,6 +888,7 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
     account_key = _console_session_account_key(console_session)
     synced_license_ids: list[str] = []
+    inactive_synced_license_ids: set[str] = set()
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{console_base}/v1/licenses/revocations", headers=headers)
@@ -908,6 +913,8 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
                 if isinstance(license_data, dict):
                     _apply_console_license_data(raw, license_data)
                     synced_license_ids.append(license_id)
+                    if _record_license_status(raw) in _INACTIVE_LICENSE_STATUSES:
+                        inactive_synced_license_ids.add(license_id)
                     await Storage.set(_request_key(request_id), raw, "json")
     except httpx.HTTPError as exc:
         _raise_console_service_error(exc)
@@ -916,14 +923,16 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
     if not isinstance(revoked_license_ids, list):
         revoked_license_ids = []
 
+    effective_revoked_license_ids = sorted({str(item) for item in revoked_license_ids} | inactive_synced_license_ids)
     imported = False
     activated_license_id: str | None = None
     refreshed_license_id: str | None = None
     if not _is_pro_component_installed():
         return {
-            "revoked_license_ids": [str(item) for item in revoked_license_ids],
+            "revoked_license_ids": effective_revoked_license_ids,
             "imported": imported,
             "synced_license_ids": synced_license_ids,
+            "inactive_synced_license_ids": sorted(inactive_synced_license_ids),
             "activated_license_id": activated_license_id,
             "refreshed_license_id": refreshed_license_id,
             "inactive_reason": "flockspro_not_installed",
@@ -934,10 +943,10 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
         checker = get_license_checker()
         import_fn = getattr(checker, "import_revocation", None)
         if callable(import_fn):
-            import_fn([str(item) for item in revoked_license_ids])
+            import_fn(effective_revoked_license_ids)
             imported = True
 
-        revoked_set = {str(item) for item in revoked_license_ids}
+        revoked_set = set(effective_revoked_license_ids)
         current_status = _get_pro_capability_status()
         current_license_id = str(current_status.get("license_id") or "")
         target = await _latest_usable_issued_record(
@@ -956,9 +965,10 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
     return {
-        "revoked_license_ids": [str(item) for item in revoked_license_ids],
+        "revoked_license_ids": effective_revoked_license_ids,
         "imported": imported,
         "synced_license_ids": synced_license_ids,
+        "inactive_synced_license_ids": sorted(inactive_synced_license_ids),
         "activated_license_id": activated_license_id,
         "refreshed_license_id": refreshed_license_id,
     }

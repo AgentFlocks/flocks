@@ -392,6 +392,101 @@ async def test_sync_console_license_revocations_imports_into_checker(
     assert imported == ["lic_revoked"]
 
 
+async def test_sync_console_license_revocations_imports_revoked_license_from_detail(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    await Storage.set("console:upgrade_request_ids", ["req_current"], "json")
+    await Storage.set(
+        "console:upgrade_request:req_current",
+        {
+            "request_id": "req_current",
+            "status": "activated",
+            "activate_key": "current_token",
+            "license_id": "lic_current",
+            "license_status": "poc",
+            "details": {"license_id": "lic_current"},
+            "created_at": "2026-05-15T10:00:00+00:00",
+            "updated_at": "2026-05-15T10:00:00+00:00",
+        },
+        "json",
+    )
+
+    class _FakeResponse:
+        def __init__(self, payload: dict, status_code: int = status.HTTP_200_OK) -> None:
+            self._payload = payload
+            self.status_code = status_code
+
+        def json(self) -> dict:
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            assert headers == {"Authorization": "Bearer token_abc"}
+            if url == "http://console.local/v1/licenses/revocations":
+                return _FakeResponse({"revoked_license_ids": []})
+            if url == "http://console.local/v1/licenses/lic_current":
+                return _FakeResponse(
+                    {
+                        "license_id": "lic_current",
+                        "revoked": True,
+                        "license_status": "revoked",
+                        "effective_status": "revoked",
+                    }
+                )
+            raise AssertionError(url)
+
+    imported: list[str] = []
+
+    class _Checker:
+        def import_revocation(self, revoked_license_ids):
+            imported.extend(revoked_license_ids)
+
+        def status(self):
+            return {
+                "license_id": "lic_current",
+                "license_status": "revoked",
+                "active": False,
+            }
+
+    runtime_module = ModuleType("flockspro.license.runtime")
+    flockspro_module = ModuleType("flockspro")
+    license_module = ModuleType("flockspro.license")
+    runtime_module.get_license_checker = lambda: _Checker()  # type: ignore[attr-defined]
+    runtime_module.get_pro_capability_status = lambda: {"license_id": "lic_current", "pro_enabled": False, "active": False}  # type: ignore[attr-defined]
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
+
+    resp = await client.post("/api/console/licenses/sync-revocations")
+
+    assert resp.status_code == status.HTTP_200_OK
+    payload = resp.json()
+    assert payload["revoked_license_ids"] == ["lic_current"]
+    assert payload["inactive_synced_license_ids"] == ["lic_current"]
+    assert imported == ["lic_current"]
+    stored = await Storage.get("console:upgrade_request:req_current")
+    assert stored["license_status"] == "revoked"
+    assert stored["details"]["license_status"] == "revoked"
+
+
 async def test_sync_console_license_revocations_switches_from_revoked_runtime_license(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -508,7 +603,7 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
             self.refreshed = False
 
         def import_revocation(self, revoked_license_ids):
-            assert revoked_license_ids == ["lic_old"]
+            assert revoked_license_ids == ["lic_later_revoked", "lic_old"]
 
         def status(self):
             return {
@@ -808,6 +903,59 @@ async def test_create_upgrade_request_maps_console_failure_to_502(
 
     assert resp.status_code == status.HTTP_502_BAD_GATEWAY
     assert "console unavailable" in resp.text
+
+
+async def test_create_upgrade_request_sanitizes_html_console_failure(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+
+    class _FakeResponse:
+        status_code = status.HTTP_502_BAD_GATEWAY
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "http://console.local/v1/upgrade-requests")
+            response = httpx.Response(
+                self.status_code,
+                request=request,
+                text="<html><head><title>502 Bad Gateway</title></head><body>bad gateway</body></html>",
+                headers={"content-type": "text/html"},
+            )
+            raise httpx.HTTPStatusError("console call failed", request=request, response=response)
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            assert url == "http://console.local/v1/upgrade-requests"
+            return _FakeResponse()
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+
+    resp = await client.post(
+        "/api/console/upgrade-requests",
+        json={
+            "product": "Flocks Pro",
+            "license_type": "poc",
+            "company": "acme",
+            "applicant_name": "alice",
+            "applicant_email": "alice@example.com",
+            "applicant_phone": "+1 415 555 0100",
+        },
+    )
+
+    assert resp.status_code == status.HTTP_502_BAD_GATEWAY
+    assert "console 升级服务暂不可用" in resp.text
+    assert "<html>" not in resp.text
 
 
 async def test_cancel_approved_request_falls_back_to_local_cancel_when_console_rejects(

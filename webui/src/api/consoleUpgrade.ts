@@ -93,6 +93,7 @@ export const consoleUpgradeApi = {
     revoked_license_ids: string[];
     imported: boolean;
     synced_license_ids?: string[];
+    inactive_synced_license_ids?: string[];
     activated_license_id?: string | null;
     refreshed_license_id?: string | null;
   }> => {
@@ -163,4 +164,3 @@ export const consoleUpgradeApi = {
     });
   },
 };
-

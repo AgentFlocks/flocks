@@ -701,7 +701,7 @@ export default function FlocksproUpgradePage() {
     setRefreshingInstalled(true);
     setRequestError(null);
     try {
-      await consoleUpgradeApi.syncRevocations().catch(() => undefined);
+      await consoleUpgradeApi.syncRevocations();
       await refreshRequests();
       const packageStatus = await consoleUpgradeApi.getProPackageStatus();
       setProPackageStatus(packageStatus);
@@ -738,7 +738,7 @@ export default function FlocksproUpgradePage() {
   ]);
 
   const cancelActiveRequest = async () => {
-    if (!activeRequest) {
+    if (!activeRequest || proUpgrading || proRestarting) {
       return;
     }
     try {
@@ -828,6 +828,7 @@ export default function FlocksproUpgradePage() {
   };
 
   const canApplyUpgrade = consoleLoginStatus?.logged_in === true;
+  const upgradeInProgress = proUpgrading || proRestarting;
   const hasOpenRequest = accountScopedRequests.some((item) => {
     const status = (item.status || '').toLowerCase();
     if (['pending', 'reviewing'].includes(status)) {
@@ -838,13 +839,16 @@ export default function FlocksproUpgradePage() {
       canInstallProPackageFromRequest(item)
     );
   });
-  const canOpenApplyDialog = canApplyUpgrade && !hasOpenRequest;
+  const canOpenApplyDialog = canApplyUpgrade && !hasOpenRequest && !upgradeInProgress;
   const showApprovedActions = Boolean(activeRequest && canInstallProPackageFromRequest(activeRequest));
   const showRejectedFeedback = activeRequest?.status === 'rejected';
   const canCancel =
-    activeRequest?.status === 'pending' ||
-    activeRequest?.status === 'reviewing' ||
-    activeRequest?.status === 'approved';
+    !upgradeInProgress &&
+    (
+      activeRequest?.status === 'pending' ||
+      activeRequest?.status === 'reviewing' ||
+      activeRequest?.status === 'approved'
+    );
   const primaryActionLabel = t('upgrade.applyNewLicenseAction');
   const activeRequestIsCurrentLicense =
     Boolean(activeRequest && currentIssuedRequest) &&
@@ -1355,15 +1359,16 @@ export default function FlocksproUpgradePage() {
           <div className="w-full max-w-md rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.startUpgrade')}</h3>
-              <button
-                type="button"
-                onClick={() => setShowUpdateModal(false)}
-                disabled={proUpgrading || proRestarting}
-                className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
-                aria-label={t('actions.cancel')}
-              >
-                <X className="w-4 h-4" />
-              </button>
+              {!upgradeInProgress && (
+                <button
+                  type="button"
+                  onClick={() => setShowUpdateModal(false)}
+                  className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                  aria-label={t('actions.cancel')}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
             <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
               {proRestarting ? t('upgrade.waitingRestart') : t('upgrade.installingHint')}
@@ -1440,7 +1445,7 @@ export default function FlocksproUpgradePage() {
               </div>
             )}
             <div className="flex justify-end gap-2">
-              {!proUpgrading && !proRestarting && (
+              {!upgradeInProgress && (
                 <button
                   type="button"
                   onClick={() => setShowUpdateModal(false)}
