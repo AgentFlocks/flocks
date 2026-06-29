@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from fastapi import status
+from fastapi import FastAPI, status
 import httpx
 from types import ModuleType
 from httpx import AsyncClient
@@ -260,524 +260,81 @@ async def test_pro_package_status_reports_installed_marker(
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
     assert payload["installed"] is True
+    assert payload["runtime_importable"] is True
+    assert payload["install_marker_present"] is True
     assert payload["flockspro_component_version"] == "1.2.3"
 
 
-async def test_sync_console_license_revocations_without_pro_package_only_syncs_console_records(
+async def test_pro_package_status_treats_install_marker_as_installed(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from flocks.server.routes import console_upgrade as console_routes
-    from flocks.storage.storage import Storage
 
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
-    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
     monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: False)
-    await _set_bound_console_session()
-    await Storage.set("console:upgrade_request_ids", ["req_install"], "json")
-    await Storage.set(
-        "console:upgrade_request:req_install",
-        {
-            "request_id": "req_install",
-            "status": "approved",
-            "activate_key": "install_token",
-            "license_id": "lic_install",
-            "license_status": "poc",
-            "details": {"console_account_name": "alice", "license_id": "lic_install"},
-            "created_at": "2026-05-15T10:00:00+00:00",
-            "updated_at": "2026-05-15T10:00:00+00:00",
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {
+            "installed_version": "pro-v2026.6.23",
+            "flockspro_component_version": "2026.6.23",
+            "installed_at": "2026-06-29T04:00:00+00:00",
         },
-        "json",
     )
 
-    class _FakeResponse:
-        def __init__(self, payload: dict, status_code: int = status.HTTP_200_OK) -> None:
-            self._payload = payload
-            self.status_code = status_code
-
-        def json(self) -> dict:
-            return self._payload
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            assert headers == {"Authorization": "Bearer token_abc"}
-            if url == "http://console.local/v1/licenses/revocations":
-                return _FakeResponse({"revoked_license_ids": ["lic_revoked"]})
-            if url == "http://console.local/v1/licenses/lic_install":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_install",
-                        "license_status": "poc",
-                        "effective_status": "poc",
-                        "effective_expires_at": 1781417933,
-                        "effective_max_admins": 3,
-                        "effective_max_members": 9,
-                    }
-                )
-            raise AssertionError(url)
-
-    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
-
-    resp = await client.post("/api/console/licenses/sync-revocations")
+    resp = await client.get("/api/console/pro-package-status")
 
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
-    assert payload["imported"] is False
+    assert payload["installed"] is True
+    assert payload["runtime_importable"] is False
+    assert payload["install_marker_present"] is True
     assert payload["inactive_reason"] == "flockspro_not_installed"
-    assert payload["synced_license_ids"] == ["lic_install"]
-    stored = await Storage.get("console:upgrade_request:req_install")
-    assert stored["max_admins"] == 3
-    assert stored["max_members"] == 9
 
 
-async def test_sync_console_license_revocations_imports_into_checker(
-    client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from flocks.server.routes import console_upgrade as console_routes
+async def test_flockspro_license_status_fallback_reports_uninstalled(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import flockspro_license as license_routes
 
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
-    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_console_session()
+    app = FastAPI()
+    app.include_router(license_routes.router, prefix="/api/flockspro/license")
+    monkeypatch.setattr(license_routes, "_is_pro_component_installed", lambda: False)
+    monkeypatch.setattr(license_routes, "require_user", lambda _req: _mock_admin())
 
-    class _FakeResponse:
-        def json(self) -> dict:
-            return {"revoked_license_ids": ["lic_revoked"]}
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            assert url == "http://console.local/v1/licenses/revocations"
-            assert headers == {"Authorization": "Bearer token_abc"}
-            return _FakeResponse()
-
-    imported: list[str] = []
-
-    class _Checker:
-        def import_revocation(self, revoked_license_ids):
-            imported.extend(revoked_license_ids)
-
-    runtime_module = ModuleType("flockspro.license.runtime")
-    flockspro_module = ModuleType("flockspro")
-    license_module = ModuleType("flockspro.license")
-    runtime_module.get_license_checker = lambda: _Checker()  # type: ignore[attr-defined]
-    runtime_module.get_pro_capability_status = lambda: {"pro_enabled": False, "active": False}  # type: ignore[attr-defined]
-    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
-    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
-
-    resp = await client.post("/api/console/licenses/sync-revocations")
-
-    assert resp.status_code == status.HTTP_200_OK
-    assert resp.json()["imported"] is True
-    assert imported == ["lic_revoked"]
-
-
-async def test_sync_console_license_revocations_imports_revoked_license_from_detail(
-    client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from flocks.server.routes import console_upgrade as console_routes
-    from flocks.storage.storage import Storage
-
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
-    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_console_session()
-    await Storage.set("console:upgrade_request_ids", ["req_current"], "json")
-    await Storage.set(
-        "console:upgrade_request:req_current",
-        {
-            "request_id": "req_current",
-            "status": "activated",
-            "activate_key": "current_token",
-            "license_id": "lic_current",
-            "license_status": "poc",
-            "details": {"license_id": "lic_current"},
-            "created_at": "2026-05-15T10:00:00+00:00",
-            "updated_at": "2026-05-15T10:00:00+00:00",
-        },
-        "json",
-    )
-
-    class _FakeResponse:
-        def __init__(self, payload: dict, status_code: int = status.HTTP_200_OK) -> None:
-            self._payload = payload
-            self.status_code = status_code
-
-        def json(self) -> dict:
-            return self._payload
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            assert headers == {"Authorization": "Bearer token_abc"}
-            if url == "http://console.local/v1/licenses/revocations":
-                return _FakeResponse({"revoked_license_ids": []})
-            if url == "http://console.local/v1/licenses/lic_current":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_current",
-                        "revoked": True,
-                        "license_status": "revoked",
-                        "effective_status": "revoked",
-                    }
-                )
-            raise AssertionError(url)
-
-    imported: list[str] = []
-
-    class _Checker:
-        def import_revocation(self, revoked_license_ids):
-            imported.extend(revoked_license_ids)
-
-        def status(self):
-            return {
-                "license_id": "lic_current",
-                "license_status": "revoked",
-                "active": False,
-            }
-
-    runtime_module = ModuleType("flockspro.license.runtime")
-    flockspro_module = ModuleType("flockspro")
-    license_module = ModuleType("flockspro.license")
-    runtime_module.get_license_checker = lambda: _Checker()  # type: ignore[attr-defined]
-    runtime_module.get_pro_capability_status = lambda: {"license_id": "lic_current", "pro_enabled": False, "active": False}  # type: ignore[attr-defined]
-    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
-    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
-
-    resp = await client.post("/api/console/licenses/sync-revocations")
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
+        resp = await local_client.get("/api/flockspro/license/status")
 
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
-    assert payload["revoked_license_ids"] == ["lic_current"]
-    assert payload["inactive_synced_license_ids"] == ["lic_current"]
-    assert imported == ["lic_current"]
-    stored = await Storage.get("console:upgrade_request:req_current")
-    assert stored["license_status"] == "revoked"
-    assert stored["details"]["license_status"] == "revoked"
+    assert payload["active"] is False
+    assert payload["pro_enabled"] is False
+    assert payload["license_status"] == "uninstalled"
+    assert payload["inactive_reason"] == "flockspro_not_installed"
 
 
-async def test_sync_console_license_revocations_switches_from_revoked_runtime_license(
-    client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from flocks.server.routes import console_upgrade as console_routes
-    from flocks.storage.storage import Storage
+async def test_flockspro_license_status_delegates_to_pro_runtime(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import flockspro_license as license_routes
 
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
-    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_console_session()
-    await Storage.set("console:upgrade_request_ids", ["req_old", "req_new", "req_later_revoked"], "json")
-    await Storage.set(
-        "console:upgrade_request:req_old",
-        {
-            "request_id": "req_old",
-            "status": "activated",
-            "activate_key": "old_token",
-            "license_id": "lic_old",
-            "license_status": "poc",
-            "details": {"license_id": "lic_old"},
-            "created_at": "2026-05-15T10:00:00+00:00",
-            "updated_at": "2026-05-15T10:00:00+00:00",
-        },
-        "json",
+    app = FastAPI()
+    app.include_router(license_routes.router, prefix="/api/flockspro/license")
+    monkeypatch.setattr(license_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(
+        license_routes,
+        "_get_pro_capability_status",
+        lambda: {"active": True, "pro_enabled": True, "license_status": "poc", "license_id": "lic_1"},
     )
-    await Storage.set(
-        "console:upgrade_request:req_new",
-        {
-            "request_id": "req_new",
-            "status": "approved",
-            "activate_key": "new_token",
-            "license_id": "lic_new",
-            "license_status": "poc",
-            "details": {"license_id": "lic_new"},
-            "created_at": "2026-05-15T11:00:00+00:00",
-            "updated_at": "2026-05-15T11:00:00+00:00",
-        },
-        "json",
-    )
-    await Storage.set(
-        "console:upgrade_request:req_later_revoked",
-        {
-            "request_id": "req_later_revoked",
-            "status": "approved",
-            "activate_key": "later_revoked_token",
-            "license_id": "lic_later_revoked",
-            "license_status": "revoked",
-            "details": {"license_id": "lic_later_revoked"},
-            "created_at": "2026-05-15T12:00:00+00:00",
-            "updated_at": "2026-05-15T12:00:00+00:00",
-        },
-        "json",
-    )
+    monkeypatch.setattr(license_routes, "require_user", lambda _req: _mock_admin())
 
-    class _FakeResponse:
-        def __init__(self, payload: dict, status_code: int = status.HTTP_200_OK) -> None:
-            self._payload = payload
-            self.status_code = status_code
-
-        def json(self) -> dict:
-            return self._payload
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            if url == "http://console.local/v1/licenses/revocations":
-                return _FakeResponse({"revoked_license_ids": ["lic_old"]})
-            if url == "http://console.local/v1/licenses/lic_old":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_old",
-                        "revoked": True,
-                        "license_status": "revoked",
-                        "effective_status": "revoked",
-                        "effective_expires_at": 1778825933,
-                    }
-                )
-            if url == "http://console.local/v1/licenses/lic_new":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_new",
-                        "license_status": "poc",
-                        "effective_status": "poc",
-                        "effective_expires_at": 1781417933,
-                        "effective_max_admins": 2,
-                        "effective_max_members": 6,
-                    }
-                )
-            if url == "http://console.local/v1/licenses/lic_later_revoked":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_later_revoked",
-                        "revoked": True,
-                        "license_status": "revoked",
-                        "effective_status": "revoked",
-                        "effective_expires_at": 1781417933,
-                    }
-                )
-            raise AssertionError(url)
-
-    class _Checker:
-        def __init__(self) -> None:
-            self.license_id = "lic_old"
-            self.active = False
-            self.activated_tokens: list[str] = []
-            self.refreshed = False
-
-        def import_revocation(self, revoked_license_ids):
-            assert revoked_license_ids == ["lic_later_revoked", "lic_old"]
-
-        def status(self):
-            return {
-                "license_id": self.license_id,
-                "license_status": "revoked" if not self.active else "poc",
-                "active": self.active,
-            }
-
-        def activate(self, token: str):
-            self.activated_tokens.append(token)
-            self.license_id = "lic_new"
-            self.active = True
-            return self.status()
-
-        async def refresh(self):
-            self.refreshed = True
-            return self.status()
-
-    checker = _Checker()
-    runtime_module = ModuleType("flockspro.license.runtime")
-    flockspro_module = ModuleType("flockspro")
-    license_module = ModuleType("flockspro.license")
-    runtime_module.get_license_checker = lambda: checker  # type: ignore[attr-defined]
-    runtime_module.get_pro_capability_status = lambda: {  # type: ignore[attr-defined]
-        **checker.status(),
-        "pro_enabled": checker.active,
-    }
-    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
-    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
-
-    resp = await client.post("/api/console/licenses/sync-revocations")
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
+        resp = await local_client.get("/api/flockspro/license/status")
 
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
-    assert payload["activated_license_id"] == "lic_new"
-    assert payload["refreshed_license_id"] == "lic_new"
-    assert checker.activated_tokens == ["new_token"]
-    assert checker.refreshed is True
-
-
-async def test_sync_console_license_revocations_switches_to_newer_active_license(
-    client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from flocks.server.routes import console_upgrade as console_routes
-    from flocks.storage.storage import Storage
-
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
-    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_console_session()
-    await Storage.set("console:upgrade_request_ids", ["req_old", "req_new"], "json")
-    await Storage.set(
-        "console:upgrade_request:req_old",
-        {
-            "request_id": "req_old",
-            "status": "activated",
-            "activate_key": "old_token",
-            "license_id": "lic_old",
-            "license_status": "poc",
-            "details": {"license_id": "lic_old"},
-            "created_at": "2026-05-15T10:00:00+00:00",
-            "updated_at": "2026-05-15T10:00:00+00:00",
-        },
-        "json",
-    )
-    await Storage.set(
-        "console:upgrade_request:req_new",
-        {
-            "request_id": "req_new",
-            "status": "approved",
-            "activate_key": "new_token",
-            "license_id": "lic_new",
-            "license_status": "poc",
-            "details": {"license_id": "lic_new"},
-            "created_at": "2026-05-15T11:00:00+00:00",
-            "updated_at": "2026-05-15T11:00:00+00:00",
-        },
-        "json",
-    )
-
-    class _FakeResponse:
-        def __init__(self, payload: dict, status_code: int = status.HTTP_200_OK) -> None:
-            self._payload = payload
-            self.status_code = status_code
-
-        def json(self) -> dict:
-            return self._payload
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            if url == "http://console.local/v1/licenses/revocations":
-                return _FakeResponse({"revoked_license_ids": []})
-            if url == "http://console.local/v1/licenses/lic_old":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_old",
-                        "license_status": "poc",
-                        "effective_status": "poc",
-                        "effective_max_admins": 3,
-                        "effective_max_members": 20,
-                    }
-                )
-            if url == "http://console.local/v1/licenses/lic_new":
-                return _FakeResponse(
-                    {
-                        "license_id": "lic_new",
-                        "license_status": "poc",
-                        "effective_status": "poc",
-                        "effective_max_admins": 3,
-                        "effective_max_members": 21,
-                    }
-                )
-            raise AssertionError(url)
-
-    class _Checker:
-        def __init__(self) -> None:
-            self.license_id = "lic_old"
-            self.activated_tokens: list[str] = []
-            self.refreshed = False
-
-        def import_revocation(self, revoked_license_ids):
-            assert revoked_license_ids == []
-
-        def status(self):
-            return {
-                "license_id": self.license_id,
-                "license_status": "poc",
-                "active": True,
-            }
-
-        def activate(self, token: str):
-            self.activated_tokens.append(token)
-            self.license_id = "lic_new"
-            return self.status()
-
-        async def refresh(self):
-            self.refreshed = True
-            return self.status()
-
-    checker = _Checker()
-    runtime_module = ModuleType("flockspro.license.runtime")
-    flockspro_module = ModuleType("flockspro")
-    license_module = ModuleType("flockspro.license")
-    runtime_module.get_license_checker = lambda: checker  # type: ignore[attr-defined]
-    runtime_module.get_pro_capability_status = lambda: {  # type: ignore[attr-defined]
-        **checker.status(),
-        "pro_enabled": True,
-    }
-    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
-    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
-    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
-
-    resp = await client.post("/api/console/licenses/sync-revocations")
-
-    assert resp.status_code == status.HTTP_200_OK
-    payload = resp.json()
-    assert payload["activated_license_id"] == "lic_new"
-    assert payload["refreshed_license_id"] == "lic_new"
-    assert checker.activated_tokens == ["new_token"]
-    assert checker.refreshed is True
+    assert payload["active"] is True
+    assert payload["pro_enabled"] is True
+    assert payload["activated"] is True
+    assert payload["license_id"] == "lic_1"
 
 
 async def test_create_upgrade_request_does_not_link_previous_request_when_omitted(
@@ -1066,6 +623,95 @@ async def test_refresh_approved_request_does_not_auto_activate_install(
     payload = resp.json()
     assert payload["status"] == "approved"
     assert "auto_install_task_scheduled_at" not in payload["details"]
+
+
+async def test_refresh_request_remote_form_data_overwrites_stale_local_details(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    request_id = "req_refresh_remote_details"
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "approved",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "old_key",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "license_id": "lic_old",
+            "license_status": "poc",
+            "max_admins": 1,
+            "max_members": 2,
+            "expires_at": 100,
+            "details": {
+                "company": "acme",
+                "license_id": "lic_old",
+                "license_effective_expires_at": 100,
+                "local_only": "keep",
+            },
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "request_id": request_id,
+                "status": "activated",
+                "activate_key": "new_key",
+                "license_id": "lic_new",
+                "license_status": "poc",
+                "max_admins": 3,
+                "max_members": 20,
+                "expires_at": 1782532851,
+                "form_data": {
+                    "company": "acme",
+                    "license_id": "lic_new",
+                    "license_effective_expires_at": 1782532851,
+                },
+            }
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            assert url == f"http://console.local/v1/upgrade-requests/{request_id}"
+            assert headers == {"Authorization": "Bearer token_abc"}
+            return _FakeResponse()
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/refresh")
+
+    assert resp.status_code == status.HTTP_200_OK
+    payload = resp.json()
+    assert payload["status"] == "activated"
+    assert payload["license_id"] == "lic_new"
+    assert payload["max_admins"] == 3
+    assert payload["max_members"] == 20
+    assert payload["details"]["license_id"] == "lic_new"
+    assert payload["details"]["license_effective_expires_at"] == 1782532851
+    assert payload["details"]["license_refreshed_at"]
+    assert payload["details"]["license_refreshed_at"] == payload["updated_at"]
+    assert payload["details"]["license_refreshed_at"] != "2026-05-08T08:00:00+00:00"
+    assert payload["details"]["local_only"] == "keep"
 
 
 async def test_start_approved_request_streams_restart_without_marking_activated(

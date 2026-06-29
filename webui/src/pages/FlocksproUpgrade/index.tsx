@@ -295,6 +295,7 @@ export default function FlocksproUpgradePage() {
   const [consoleLoginSuccess, setConsoleLoginSuccess] = useState<string | null>(null);
   const [requests, setRequests] = useState<UpgradeRequestStatus[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [licenseSyncWarning, setLicenseSyncWarning] = useState<string | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [showApplyDialog, setShowApplyDialog] = useState(false);
   const [submittingApply, setSubmittingApply] = useState(false);
@@ -409,8 +410,16 @@ export default function FlocksproUpgradePage() {
       latestActivatedRequest?.details?.auto_install_version ||
       latestActivatedRequest?.details?.auto_install_target,
   );
-  const isProRuntimeActive = licenseStatus?.pro_enabled === true || proPackageStatus?.pro_enabled === true;
-  const canUseProFeatures = isProPackageInstalled && isProRuntimeActive;
+  const isProRuntimeActive =
+    licenseStatus?.pro_enabled === true ||
+    licenseStatus?.active === true ||
+    proPackageStatus?.pro_enabled === true;
+  const hasProInstallSignal =
+    isProPackageInstalled ||
+    proPackageStatus?.runtime_importable === true ||
+    proPackageStatus?.install_marker_present === true ||
+    licenseStatus?.active === true;
+  const canUseProFeatures = hasProInstallSignal && isProRuntimeActive;
   const isProLoaded = canUseProFeatures;
   const hasRuntimeLicense = Boolean(licenseStatus?.license_id);
   const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
@@ -447,9 +456,9 @@ export default function FlocksproUpgradePage() {
   const displayedLastSyncedAt =
     preferRequestLicense && currentIssuedRequest
       ? currentIssuedRequest.details?.license_refreshed_at || currentIssuedRequest.updated_at
-      : licenseStatus?.last_sync_at ||
-        currentDisplayLicenseRequest?.details?.license_refreshed_at ||
+      : currentDisplayLicenseRequest?.details?.license_refreshed_at ||
         currentDisplayLicenseRequest?.updated_at ||
+        licenseStatus?.last_sync_at ||
         licenseStatus?.last_heartbeat_ok_at ||
         latestActivatedRequest?.details?.license_refreshed_at ||
         latestActivatedRequest?.updated_at;
@@ -700,9 +709,42 @@ export default function FlocksproUpgradePage() {
   const refreshInstalledStatus = useCallback(async () => {
     setRefreshingInstalled(true);
     setRequestError(null);
+    setLicenseSyncWarning(null);
     try {
-      await consoleUpgradeApi.syncRevocations();
-      await refreshRequests();
+      const targetRequestIds = [
+        currentDisplayLicenseRequest?.request_id,
+        currentIssuedRequest?.request_id,
+        activeRequest?.request_id,
+      ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+
+      let consoleWarning: string | null = null;
+      for (const requestId of targetRequestIds) {
+        try {
+          const latest = await consoleUpgradeApi.refreshRequest(requestId);
+          setRequests((prev) => {
+            const exists = prev.some((item) => item.request_id === latest.request_id);
+            return exists
+              ? prev.map((item) => (item.request_id === latest.request_id ? latest : item))
+              : [latest, ...prev];
+          });
+        } catch (err) {
+          consoleWarning = extractErrorMessage(err, t('errors.refreshRequest'));
+        }
+      }
+
+      try {
+        await refreshRequests();
+      } catch (err) {
+        consoleWarning = extractErrorMessage(err, t('errors.fetchRequests'));
+      }
+
+      if (consoleWarning) {
+        setLicenseSyncWarning(
+          t('upgrade.consoleSyncWarning', {
+            message: consoleWarning,
+          }),
+        );
+      }
       const packageStatus = await consoleUpgradeApi.getProPackageStatus();
       setProPackageStatus(packageStatus);
       if (!packageStatus.installed) {
@@ -718,7 +760,7 @@ export default function FlocksproUpgradePage() {
     } finally {
       setRefreshingInstalled(false);
     }
-  }, [refreshRequests, t]);
+  }, [activeRequest?.request_id, currentDisplayLicenseRequest?.request_id, currentIssuedRequest?.request_id, refreshRequests, t]);
 
   useEffect(() => {
     if (autoSyncTriggeredRef.current) {
@@ -997,6 +1039,11 @@ export default function FlocksproUpgradePage() {
         {!canApplyUpgrade && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {t('upgrade.loginFirst')}
+          </div>
+        )}
+        {licenseSyncWarning && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {licenseSyncWarning}
           </div>
         )}
         {requestError && (

@@ -560,6 +560,15 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _marker_indicates_pro_bundle_installed(marker: dict[str, Any]) -> bool:
+    if not marker:
+        return False
+    return any(
+        str(marker.get(key) or "").strip()
+        for key in ("installed_at", "installed_version", "bundle_version", "flockspro_component_version", "build_id")
+    )
+
+
 async def _report_pro_bundle_installation(
     record: dict[str, Any],
     *,
@@ -861,9 +870,13 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
     require_user(request)
     marker = _read_pro_bundle_install_marker()
     capability = _get_pro_capability_status()
-    installed = _is_pro_component_installed()
+    runtime_importable = _is_pro_component_installed()
+    install_marker_present = _marker_indicates_pro_bundle_installed(marker)
+    installed = runtime_importable or install_marker_present
     return {
         "installed": installed,
+        "runtime_importable": runtime_importable,
+        "install_marker_present": install_marker_present,
         "installed_version": marker.get("installed_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),
@@ -871,106 +884,6 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
         "pro_enabled": bool(capability.get("pro_enabled")),
         "license_status": capability.get("license_status"),
         "inactive_reason": capability.get("inactive_reason"),
-    }
-
-
-@router.post("/licenses/sync-revocations")
-async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    console_base = _console_base_url()
-    if not console_base:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="FLOCKS_CONSOLE_BASE_URL 未配置")
-    try:
-        console_session = await ConsoleLoginService.require_console_session()
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
-    account_key = _console_session_account_key(console_session)
-    synced_license_ids: list[str] = []
-    inactive_synced_license_ids: set[str] = set()
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{console_base}/v1/licenses/revocations", headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-            for request_id in await _list_request_ids():
-                raw = await Storage.get(_request_key(request_id))
-                if not isinstance(raw, dict):
-                    continue
-                record_account_key = _record_account_key(raw)
-                if account_key and record_account_key and record_account_key != account_key:
-                    continue
-                license_id = _record_license_id(raw)
-                if not license_id:
-                    continue
-                license_resp = await client.get(f"{console_base}/v1/licenses/{license_id}", headers=headers)
-                if license_resp.status_code == status.HTTP_404_NOT_FOUND:
-                    continue
-                license_resp.raise_for_status()
-                license_data = license_resp.json()
-                if isinstance(license_data, dict):
-                    _apply_console_license_data(raw, license_data)
-                    synced_license_ids.append(license_id)
-                    if _record_license_status(raw) in _INACTIVE_LICENSE_STATUSES:
-                        inactive_synced_license_ids.add(license_id)
-                    await Storage.set(_request_key(request_id), raw, "json")
-    except httpx.HTTPError as exc:
-        _raise_console_service_error(exc)
-
-    revoked_license_ids = data.get("revoked_license_ids", [])
-    if not isinstance(revoked_license_ids, list):
-        revoked_license_ids = []
-
-    effective_revoked_license_ids = sorted({str(item) for item in revoked_license_ids} | inactive_synced_license_ids)
-    imported = False
-    activated_license_id: str | None = None
-    refreshed_license_id: str | None = None
-    if not _is_pro_component_installed():
-        return {
-            "revoked_license_ids": effective_revoked_license_ids,
-            "imported": imported,
-            "synced_license_ids": synced_license_ids,
-            "inactive_synced_license_ids": sorted(inactive_synced_license_ids),
-            "activated_license_id": activated_license_id,
-            "refreshed_license_id": refreshed_license_id,
-            "inactive_reason": "flockspro_not_installed",
-        }
-    try:
-        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
-
-        checker = get_license_checker()
-        import_fn = getattr(checker, "import_revocation", None)
-        if callable(import_fn):
-            import_fn(effective_revoked_license_ids)
-            imported = True
-
-        revoked_set = set(effective_revoked_license_ids)
-        current_status = _get_pro_capability_status()
-        current_license_id = str(current_status.get("license_id") or "")
-        target = await _latest_usable_issued_record(
-            revoked_set,
-            account_key=_console_session_account_key(console_session),
-        )
-        target_license_id = _record_license_id(target) if target else ""
-        if target and target_license_id:
-            if target_license_id != current_license_id:
-                await _maybe_activate_pro_license(target, force=True)
-                activated_license_id = target_license_id
-            await _maybe_refresh_pro_license(target)
-            refreshed_license_id = target_license_id
-            await Storage.set(_request_key(str(target["request_id"])), target, "json")
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-
-    return {
-        "revoked_license_ids": effective_revoked_license_ids,
-        "imported": imported,
-        "synced_license_ids": synced_license_ids,
-        "inactive_synced_license_ids": sorted(inactive_synced_license_ids),
-        "activated_license_id": activated_license_id,
-        "refreshed_license_id": refreshed_license_id,
     }
 
 
@@ -1012,6 +925,7 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
         else:
             remote_details = data.get("form_data") if isinstance(data.get("form_data"), dict) else {}
             local_details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            refreshed_at = datetime.now(UTC).isoformat()
             raw.update(
                 {
                     "status": data.get("status", raw["status"]),
@@ -1024,8 +938,8 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
                     "max_admins": data.get("max_admins", raw.get("max_admins")),
                     "max_members": data.get("max_members", raw.get("max_members")),
                     "expires_at": data.get("expires_at", raw.get("expires_at")),
-                    "details": {**remote_details, **local_details},
-                    "updated_at": datetime.now(UTC).isoformat(),
+                    "details": {**local_details, **remote_details, "license_refreshed_at": refreshed_at},
+                    "updated_at": refreshed_at,
                 }
             )
     else:
