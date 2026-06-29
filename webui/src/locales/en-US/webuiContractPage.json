@@ -22,6 +22,7 @@
     "loadFailed": "Failed to load workspace",
     "notFound": "Workspace not found",
     "empty": "No pages in this workspace",
+    "selectPage": "Select a page from the workspace menu",
     "pageNotFound": "Page not found",
     "sectionNavigation": "Workspace page sections",
     "collapseSidebar": "Collapse sidebar",

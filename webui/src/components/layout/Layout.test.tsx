@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Layout from './Layout';
@@ -736,23 +736,53 @@ describe('Layout WebUI contract pages navigation', () => {
   });
 
   it('renders WebUI workspaces and device integration in the scene workspace group', async () => {
+    const user = userEvent.setup();
+    const socWorkspacePages = [
+      {
+        id: 'alert-denoise-triage-dashboard',
+        title: '告警态势',
+        route: '/contracts/webui/alert-denoise-triage-dashboard',
+        icon: 'Activity',
+        order: 30,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'soc_ui',
+        workspaceTitle: 'SOC 工作区',
+        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+      },
+      {
+        id: 'soc-overview',
+        title: 'SOC 总览',
+        route: '/contracts/webui/soc-overview',
+        icon: 'ShieldCheck',
+        order: 10,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'soc_ui',
+        workspaceTitle: 'SOC 工作区',
+        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+      },
+      {
+        id: 'soc-alerts',
+        title: '告警运营',
+        route: '/contracts/webui/soc-alerts',
+        icon: 'AlertTriangle',
+        order: 20,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'soc_ui',
+        workspaceTitle: 'SOC 工作区',
+        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+      },
+    ];
     useWebUIContractPages.mockReturnValue({
-      pages: [
-        {
-          id: 'soc-alerts',
-          title: '告警运营',
-          route: '/contracts/webui/soc-alerts',
-          icon: 'AlertTriangle',
-          order: 20,
-          enabled: true,
-          placement: 'home.after',
-          buildHash: 'ready',
-          buildStatus: 'ready',
-          workspaceId: 'soc_ui',
-          workspaceTitle: 'SOC 工作区',
-          workspaceRoute: '/contracts/webui/workspaces/soc_ui',
-        },
-      ],
+      pages: socWorkspacePages,
       workspaces: [
         {
           id: 'soc_ui',
@@ -762,8 +792,8 @@ describe('Layout WebUI contract pages navigation', () => {
           order: 10,
           enabled: true,
           placement: 'sceneWorkspace',
-          defaultPageId: 'soc-alerts',
-          pages: [],
+          defaultPageId: 'soc-overview',
+          pages: socWorkspacePages,
         },
       ],
       loading: false,
@@ -773,7 +803,8 @@ describe('Layout WebUI contract pages navigation', () => {
 
     const { container } = renderHomeWithLayout();
 
-    expect(await screen.findByRole('link', { name: 'SOC 工作区' })).toHaveAttribute(
+    const socWorkspaceLink = await screen.findByRole('link', { name: 'SOC 工作区' });
+    expect(socWorkspaceLink).toHaveAttribute(
       'href',
       '/contracts/webui/workspaces/soc_ui',
     );
@@ -796,5 +827,38 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(agentSection?.querySelector('a[href="/devices"]')).toBeNull();
     expect(agentSection?.querySelector('a[href="/models"]')).toBeNull();
     expect(agentSection?.querySelector('a[href="/channels"]')).toBeNull();
+
+    await user.click(socWorkspaceLink);
+
+    const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
+    expect(workspaceMenu).toBeInTheDocument();
+    expect(workspaceMenu).toHaveClass('w-52');
+    expect(workspaceMenu).toHaveClass('bg-zinc-100');
+    expect(screen.getByRole('link', { name: '态势' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/soc_ui/alert-denoise-triage-dashboard',
+    );
+    expect(screen.getByRole('link', { name: 'SOC 总览' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/soc_ui/soc-overview',
+    );
+    expect(screen.getAllByRole('link', { name: '告警运营' }).find((link) => link.getAttribute('href')?.endsWith('/soc-alerts'))).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/soc_ui/soc-alerts',
+    );
+
+    const workspaceMenuScope = within(workspaceMenu);
+    const collapseButtons = workspaceMenuScope.getAllByTitle('workspace.collapseSidebar');
+    await user.click(collapseButtons[collapseButtons.length - 1]);
+    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
+
+    await user.click(workspaceMenuScope.getByTitle('workspace.expandSidebar'));
+    expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
+
+    await user.unhover(socWorkspaceLink);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
+    });
   });
 });

@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Activity, AlertCircle, Loader2, PanelLeftClose, PanelLeftOpen, ShieldCheck } from 'lucide-react';
+import { AlertCircle, Loader2 } from 'lucide-react';
 import {
   webuiContractPagesAPI,
   type WebUIContractPageListItem,
@@ -9,7 +9,6 @@ import {
 } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
 import { ThemeContext } from '@/contexts/ThemeContext';
-import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
 
 interface WorkspaceSection {
@@ -17,7 +16,6 @@ interface WorkspaceSection {
   label: string;
   pages: WebUIContractPageListItem[];
   defaultPageId: string;
-  showSidebar: boolean;
 }
 
 function buildWorkspaceSections(
@@ -35,7 +33,6 @@ function buildWorkspaceSections(
             label: '态势',
             pages: posturePages,
             defaultPageId: posturePages[0].id,
-            showSidebar: false,
           }
         : null,
       operationPages.length > 0
@@ -44,7 +41,6 @@ function buildWorkspaceSections(
             label: '告警运营',
             pages: operationPages,
             defaultPageId: operationPages.find((page) => page.id === 'soc-overview')?.id ?? operationPages[0].id,
-            showSidebar: true,
           }
         : null,
     ].filter((section): section is WorkspaceSection => section !== null);
@@ -60,7 +56,6 @@ function buildWorkspaceSections(
       label: '页面',
       pages,
       defaultPageId,
-      showSidebar: true,
     },
   ];
 }
@@ -71,7 +66,6 @@ export default function WebUIContractWorkspaceHost() {
   const [workspaces, setWorkspaces] = useState<WebUIContractWorkspaceListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sectionSidebarCollapsed, setSectionSidebarCollapsed] = useState(false);
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
 
   const fetchWorkspaces = useCallback(async (silent = false) => {
@@ -114,9 +108,10 @@ export default function WebUIContractWorkspaceHost() {
     () => buildWorkspaceSections(workspaceId, pages, workspace?.defaultPageId),
     [pages, workspace?.defaultPageId, workspaceId],
   );
-  const defaultPageId = sections[0]?.defaultPageId ?? null;
   const currentPage = pages.find((page) => page.id === pageId);
-  const currentSection = sections.find((section) => section.pages.some((page) => page.id === currentPage?.id)) ?? sections[0];
+  const currentSection = currentPage
+    ? sections.find((section) => section.pages.some((page) => page.id === currentPage.id))
+    : undefined;
   const shouldUsePostureDarkTheme = workspaceId === 'soc_ui' && currentSection?.id === 'posture' && theme === 'light';
 
   useEffect(() => {
@@ -165,92 +160,30 @@ export default function WebUIContractWorkspaceHost() {
     return <div className="text-sm text-zinc-500">{t('workspace.notFound')}</div>;
   }
 
-  if (!pageId && defaultPageId) {
-    return <Navigate to={`${workspace.route}/${defaultPageId}`} replace />;
-  }
-
   if (pages.length === 0) {
     return <div className="text-sm text-zinc-500">{t('workspace.empty')}</div>;
+  }
+
+  if (!pageId) {
+    return (
+      <div className="flex h-full items-center justify-center bg-zinc-50 text-sm text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400">
+        {t('workspace.selectPage')}
+      </div>
+    );
   }
 
   if (!currentPage) {
     return <div className="text-sm text-zinc-500">{t('workspace.pageNotFound')}</div>;
   }
 
+  const pageContentClassName = currentSection?.id === 'posture'
+    ? 'h-full min-w-0 overflow-x-auto'
+    : 'h-full min-w-0 overflow-x-auto p-6';
+
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
-      <div className="border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex justify-center px-4">
-          <nav className="flex min-h-14 items-stretch" aria-label={t('workspace.sectionNavigation')}>
-            {sections.map((section) => {
-              const isActive = section.id === currentSection?.id;
-              const SectionIcon = section.id === 'posture' ? Activity : ShieldCheck;
-              return (
-                <Link
-                  key={section.id}
-                  to={`${workspace.route}/${section.defaultPageId}`}
-                  className={`relative inline-flex min-w-32 items-center justify-center gap-2 border-x border-transparent px-7 text-sm font-semibold transition-colors ${
-                    isActive
-                      ? 'border-zinc-200 bg-zinc-50 text-zinc-950 before:absolute before:inset-x-0 before:top-0 before:h-0.5 before:bg-red-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-50'
-                      : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
-                  }`}
-                >
-                  <SectionIcon className={`h-4 w-4 ${isActive ? 'text-red-500' : 'text-zinc-400'}`} />
-                  <span>{section.label}</span>
-                </Link>
-              );
-            })}
-          </nav>
-        </div>
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        {currentSection?.showSidebar && !sectionSidebarCollapsed && (
-          <aside
-            className="relative z-10 shrink-0 border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 lg:w-56 lg:border-b-0 lg:border-r"
-          >
-            <nav className="flex gap-1 overflow-x-auto px-4 py-4 lg:flex-col lg:overflow-visible">
-              {currentSection.pages.map((page) => {
-                const PageIcon = resolveWebUIContractPageIcon(page.icon);
-                const isActive = page.id === currentPage.id;
-                return (
-                  <Link
-                    key={page.id}
-                    to={`${workspace.route}/${page.id}`}
-                    aria-label={page.title}
-                    className={`flex min-w-36 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors lg:min-w-0 ${
-                      isActive
-                        ? 'bg-zinc-100 text-zinc-950 dark:bg-zinc-900 dark:text-zinc-50'
-                        : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
-                    }`}
-                  >
-                    <PageIcon className={`h-4 w-4 flex-shrink-0 ${isActive ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                    <span className="truncate">{page.title}</span>
-                  </Link>
-                );
-              })}
-            </nav>
-          </aside>
-        )}
-
-        <section className="min-w-0 flex-1 overflow-hidden">
-          <div className="relative h-full min-w-0 overflow-x-auto">
-            {currentSection?.showSidebar && (
-              <button
-                type="button"
-                onClick={() => setSectionSidebarCollapsed((value) => !value)}
-                className="absolute left-3 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-red-100 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-100 dark:focus:ring-zinc-700"
-                title={sectionSidebarCollapsed ? t('workspace.expandSidebar') : t('workspace.collapseSidebar')}
-                aria-label={sectionSidebarCollapsed ? t('workspace.expandSidebar') : t('workspace.collapseSidebar')}
-              >
-                {sectionSidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-              </button>
-            )}
-            <div className={currentSection?.showSidebar ? 'h-full min-w-0 pl-12' : 'h-full min-w-0'}>
-              <PageRuntimeHost key={currentPage.id} pageId={currentPage.id} />
-            </div>
-          </div>
-        </section>
+    <div className="h-full min-h-0 overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+      <div className={pageContentClassName}>
+        <PageRuntimeHost key={currentPage.id} pageId={currentPage.id} />
       </div>
     </div>
   );

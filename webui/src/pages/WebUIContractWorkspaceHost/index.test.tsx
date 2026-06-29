@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
@@ -92,7 +91,7 @@ describe('WebUIContractWorkspaceHost', () => {
     });
   });
 
-  it('redirects the SOC workspace root to posture and renders top section filters', async () => {
+  it('waits for an explicit page selection on the SOC workspace root', async () => {
     render(
       <MemoryRouter initialEntries={['/contracts/webui/workspaces/soc_ui']}>
         <Routes>
@@ -102,20 +101,13 @@ describe('WebUIContractWorkspaceHost', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('page:alert-denoise-triage-dashboard')).toBeInTheDocument();
+      expect(screen.getByText('workspace.selectPage')).toBeInTheDocument();
     });
-    expect(screen.getByRole('link', { name: '态势' })).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/soc_ui/alert-denoise-triage-dashboard',
-    );
-    expect(screen.getByRole('link', { name: '告警运营' })).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/soc_ui/soc-overview',
-    );
-    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
+    expect(screen.queryByText('page:alert-denoise-triage-dashboard')).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
   });
 
-  it('shows collapsible operation sidebar inside the operation section', async () => {
+  it('renders a selected operation page without a fixed workspace sidebar', async () => {
     render(
       <MemoryRouter initialEntries={['/contracts/webui/workspaces/soc_ui/soc-alerts']}>
         <Routes>
@@ -127,25 +119,8 @@ describe('WebUIContractWorkspaceHost', () => {
     await waitFor(() => {
       expect(screen.getByText('page:soc-alerts')).toBeInTheDocument();
     });
-    expect(screen.getByRole('link', { name: 'SOC 总览' })).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/soc_ui/soc-overview',
-    );
-    expect(screen.getAllByRole('link', { name: '告警运营' }).find((link) => link.getAttribute('href')?.endsWith('/soc-alerts'))).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/soc_ui/soc-alerts',
-    );
-
-    await userEvent.click(screen.getByTitle('workspace.collapseSidebar'));
-
-    expect(screen.getByTitle('workspace.expandSidebar')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
-    expect(screen.getByText('page:soc-alerts')).toBeInTheDocument();
-
-    await userEvent.click(screen.getByTitle('workspace.expandSidebar'));
-
-    expect(screen.getByTitle('workspace.collapseSidebar')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
+    expect(screen.getByText('page:soc-alerts').parentElement).toHaveClass('p-6');
+    expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
   });
 
   it('temporarily uses dark theme for the posture dashboard when the user preference is light', async () => {
@@ -171,6 +146,7 @@ describe('WebUIContractWorkspaceHost', () => {
     await waitFor(() => {
       expect(screen.getByText('page:alert-denoise-triage-dashboard')).toBeInTheDocument();
     });
+    expect(screen.getByText('page:alert-denoise-triage-dashboard').parentElement).not.toHaveClass('p-6');
     await waitFor(() => {
       expect(setTemporaryThemeOverride).toHaveBeenCalledWith('dark');
     });

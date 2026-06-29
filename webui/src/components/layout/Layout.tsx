@@ -16,8 +16,10 @@ import {
   Sparkles,
   Archive,
   ServerCog,
+  ShieldCheck,
   LogOut,
   Settings,
+  type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -49,9 +51,71 @@ import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
+import type { WebUIContractPageListItem, WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+
+interface LayoutNavItem {
+  name: string;
+  href: string;
+  icon: LucideIcon;
+  opensWorkspaceMenu?: boolean;
+  workspaceId?: string;
+}
+
+interface LayoutNavSection {
+  name: string;
+  items: LayoutNavItem[];
+}
+
+interface LayoutWorkspaceSection {
+  id: string;
+  label: string;
+  pages: WebUIContractPageListItem[];
+  defaultPageId: string;
+}
+
+function buildLayoutWorkspaceSections(workspace: WebUIContractWorkspaceListItem): LayoutWorkspaceSection[] {
+  const pages = [...workspace.pages].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
+
+  if (workspace.id === 'soc_ui') {
+    const posturePages = pages.filter((page) => page.id === 'alert-denoise-triage-dashboard');
+    const operationPages = pages.filter((page) => page.id === 'soc-overview' || page.id === 'soc-alerts');
+    return [
+      posturePages.length > 0
+        ? {
+            id: 'posture',
+            label: '态势',
+            pages: posturePages,
+            defaultPageId: posturePages[0].id,
+          }
+        : null,
+      operationPages.length > 0
+        ? {
+            id: 'operations',
+            label: '告警运营',
+            pages: operationPages,
+            defaultPageId: operationPages.find((page) => page.id === 'soc-overview')?.id ?? operationPages[0].id,
+          }
+        : null,
+    ].filter((section): section is LayoutWorkspaceSection => section !== null);
+  }
+
+  if (pages.length === 0) return [];
+  const defaultPageId = workspace.defaultPageId && pages.some((page) => page.id === workspace.defaultPageId)
+    ? workspace.defaultPageId
+    : pages.find((page) => page.buildStatus === 'ready')?.id ?? pages[0].id;
+
+  return [
+    {
+      id: 'pages',
+      label: '页面',
+      pages,
+      defaultPageId,
+    },
+  ];
+}
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
@@ -95,6 +159,7 @@ export default function Layout() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showUpdate, setShowUpdate] = useState(false);
   const { t, i18n } = useTranslation('nav');
+  const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
@@ -115,6 +180,9 @@ export default function Layout() {
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
+  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
+  const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
+  const workspaceMenuCloseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!accountMenuOpen) return undefined;
@@ -390,7 +458,7 @@ export default function Layout() {
   // stable as long as the language doesn't change. Without this, every route
   // switch rebuilt the whole nav structure and cascaded re-renders down to
   // every <Link>, contributing to perceptible navigation lag.
-  const navigation = useMemo(
+  const navigation = useMemo<LayoutNavSection[]>(
     () => {
       const sceneWorkspaceItems = webuiContractWorkspaces
         .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
@@ -398,6 +466,8 @@ export default function Layout() {
           name: workspace.title,
           href: workspace.route,
           icon: resolveWebUIContractPageIcon(workspace.icon),
+          opensWorkspaceMenu: true,
+          workspaceId: workspace.id,
         }));
 
       return [
@@ -467,6 +537,58 @@ export default function Layout() {
       hash: location.hash,
     },
   };
+  const activeWorkspaceMenu = useMemo(
+    () => webuiContractWorkspaces.find((workspace) => workspace.id === openWorkspaceMenuId && workspace.enabled) ?? null,
+    [openWorkspaceMenuId, webuiContractWorkspaces],
+  );
+  const activeWorkspaceSections = useMemo(
+    () => (activeWorkspaceMenu ? buildLayoutWorkspaceSections(activeWorkspaceMenu) : []),
+    [activeWorkspaceMenu],
+  );
+
+  const cancelWorkspaceMenuClose = useCallback(() => {
+    if (workspaceMenuCloseTimerRef.current === null) return;
+    window.clearTimeout(workspaceMenuCloseTimerRef.current);
+    workspaceMenuCloseTimerRef.current = null;
+  }, []);
+
+  const openWorkspaceMenu = useCallback((workspaceId?: string) => {
+    if (!workspaceId) return;
+    cancelWorkspaceMenuClose();
+    setOpenWorkspaceMenuId(workspaceId);
+  }, [cancelWorkspaceMenuClose]);
+
+  const scheduleWorkspaceMenuClose = useCallback(() => {
+    cancelWorkspaceMenuClose();
+    workspaceMenuCloseTimerRef.current = window.setTimeout(() => {
+      setOpenWorkspaceMenuId(null);
+      workspaceMenuCloseTimerRef.current = null;
+    }, 120);
+  }, [cancelWorkspaceMenuClose]);
+
+  useEffect(() => () => cancelWorkspaceMenuClose(), [cancelWorkspaceMenuClose]);
+
+  useEffect(() => {
+    setCollapsedWorkspaceSectionIds(new Set());
+  }, [openWorkspaceMenuId]);
+
+  useEffect(() => {
+    if (openWorkspaceMenuId && !activeWorkspaceMenu) {
+      setOpenWorkspaceMenuId(null);
+    }
+  }, [activeWorkspaceMenu, openWorkspaceMenuId]);
+
+  const toggleWorkspaceSection = useCallback((sectionId: string) => {
+    setCollapsedWorkspaceSectionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sectionId)) {
+        next.delete(sectionId);
+      } else {
+        next.add(sectionId);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -572,7 +694,27 @@ export default function Layout() {
                       <Link
                         key={item.href}
                         to={item.href}
-                        onClick={() => setSidebarOpen(false)}
+                        onMouseEnter={() => {
+                          if (item.opensWorkspaceMenu) {
+                            openWorkspaceMenu(item.workspaceId);
+                          } else {
+                            scheduleWorkspaceMenuClose();
+                          }
+                        }}
+                        onMouseLeave={() => {
+                          if (item.opensWorkspaceMenu) {
+                            scheduleWorkspaceMenuClose();
+                          }
+                        }}
+                        onClick={(event) => {
+                          if (item.opensWorkspaceMenu) {
+                            event.preventDefault();
+                            openWorkspaceMenu(item.workspaceId);
+                            return;
+                          }
+                          setOpenWorkspaceMenuId(null);
+                          setSidebarOpen(false);
+                        }}
                         title={collapsed ? item.name : undefined}
                         className={`
                           flex items-center rounded-lg transition-all duration-150
@@ -684,6 +826,106 @@ export default function Layout() {
           {collapsed ? <ChevronRight className="w-2.5 h-2.5" /> : <ChevronLeft className="w-2.5 h-2.5" />}
         </button>
       </aside>
+
+      {activeWorkspaceMenu && (
+        <nav
+          aria-label={tWebUIContractPage('workspace.sectionNavigation')}
+          onMouseEnter={cancelWorkspaceMenuClose}
+          onMouseLeave={scheduleWorkspaceMenuClose}
+          className={`fixed inset-y-0 z-40 flex w-52 max-w-[calc(100vw-4rem)] flex-col border-r border-zinc-200 bg-zinc-100 text-zinc-600 shadow-2xl shadow-zinc-900/10 transition-[left] duration-300 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:shadow-black/30 ${
+            collapsed ? 'left-16' : 'left-52'
+          }`}
+        >
+          <div className="flex h-16 items-center gap-3 border-b border-zinc-200 px-4 dark:border-white/10">
+            <ShieldCheck className="h-5 w-5 shrink-0 text-red-500 dark:text-red-300" />
+            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenu.title}>
+              {activeWorkspaceMenu.title}
+            </div>
+            <button
+              type="button"
+              onClick={() => setOpenWorkspaceMenuId(null)}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/70 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-red-100 dark:hover:bg-white/10 dark:hover:text-white dark:focus:ring-red-400/40"
+              title={tWebUIContractPage('workspace.collapseSidebar')}
+              aria-label={tWebUIContractPage('workspace.collapseSidebar')}
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-2 overflow-y-auto px-3 py-4">
+            {activeWorkspaceSections.length > 0 ? (
+              activeWorkspaceSections.map((workspaceSection) => {
+                const sectionActive = workspaceSection.pages.some((page) => location.pathname === `${activeWorkspaceMenu.route}/${page.id}`);
+                const showPageChildren = workspaceSection.pages.length > 1;
+                const sectionCollapsed = collapsedWorkspaceSectionIds.has(workspaceSection.id);
+                return (
+                  <div key={workspaceSection.id} className="space-y-1">
+                    <div
+                      className={`flex h-8 items-center rounded-md px-3 text-xs font-semibold uppercase tracking-wider transition-colors ${
+                        sectionActive
+                          ? 'text-zinc-500 dark:text-zinc-400'
+                          : 'text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300'
+                      }`}
+                    >
+                      <Link
+                        to={`${activeWorkspaceMenu.route}/${workspaceSection.defaultPageId}`}
+                        onClick={() => {
+                          setOpenWorkspaceMenuId(null);
+                          setSidebarOpen(false);
+                        }}
+                        title={workspaceSection.label}
+                        className="min-w-0 flex-1 truncate"
+                      >
+                        {workspaceSection.label}
+                      </Link>
+                      {showPageChildren ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleWorkspaceSection(workspaceSection.id)}
+                          className="ml-2 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-white/10 dark:hover:text-zinc-200"
+                          aria-label={sectionCollapsed ? tWebUIContractPage('workspace.expandSidebar') : tWebUIContractPage('workspace.collapseSidebar')}
+                          title={sectionCollapsed ? tWebUIContractPage('workspace.expandSidebar') : tWebUIContractPage('workspace.collapseSidebar')}
+                        >
+                          <ChevronRight className={`h-3.5 w-3.5 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {showPageChildren && !sectionCollapsed ? (
+                      <div className="space-y-1">
+                        {workspaceSection.pages.map((page) => {
+                          const pageActive = location.pathname === `${activeWorkspaceMenu.route}/${page.id}`;
+                          return (
+                            <Link
+                              key={page.id}
+                              to={`${activeWorkspaceMenu.route}/${page.id}`}
+                              onClick={() => {
+                                setOpenWorkspaceMenuId(null);
+                                setSidebarOpen(false);
+                              }}
+                              className={`flex h-10 items-center rounded-md px-3 text-sm font-semibold transition-colors ${
+                                pageActive
+                                  ? 'bg-white text-zinc-950 shadow-sm dark:bg-white/10 dark:text-white'
+                                  : 'text-zinc-500 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100'
+                              }`}
+                            >
+                              <span className="truncate">{page.title}</span>
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })
+            ) : (
+              <div className="px-3 py-2 text-sm text-zinc-400 dark:text-zinc-500">
+                {tWebUIContractPage('workspace.empty')}
+              </div>
+            )}
+          </div>
+        </nav>
+      )}
 
       {/* Mobile top menu button */}
       <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>

@@ -22,6 +22,7 @@
     "loadFailed": "加载工作区失败",
     "notFound": "工作区不存在",
     "empty": "工作区暂无页面",
+    "selectPage": "请从工作区菜单选择页面",
     "pageNotFound": "页面不存在",
     "sectionNavigation": "工作区页面分类",
     "collapseSidebar": "折叠侧边栏",
