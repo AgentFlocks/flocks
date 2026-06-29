@@ -423,7 +423,7 @@ export default function FlocksproUpgradePage() {
   const isProLoaded = canUseProFeatures;
   const hasRuntimeLicense = Boolean(licenseStatus?.license_id);
   const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
-  const preferRequestLicense = Boolean(currentIssuedRequest) && !runtimeLicenseUsable;
+  const preferRequestLicense = Boolean(currentIssuedRequest) && !hasRuntimeLicense;
   const currentDisplayLicenseId = preferRequestLicense
     ? currentIssuedRequestLicenseId
     : runtimeLicenseUsable
