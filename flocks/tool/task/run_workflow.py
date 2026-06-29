@@ -13,10 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional, Dict, Any, Union
 
-from flocks.tool.registry import (
-    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
-)
-from flocks.storage.storage import Storage
+from flocks.tool.registry import ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 from flocks.utils.log import Log
 from flocks.session.recorder import Recorder
 from flocks.workflow.execution_store import (
@@ -30,9 +27,9 @@ from flocks.workflow.execution_store import (
     record_execution_step,
     record_execution_result,
     resolve_execution_outcome,
-    workflow_execution_key,
 )
 from flocks.workflow.fs_store import read_workflow_from_fs, resolve_workflow_id_from_source
+from flocks.workflow.store import WorkflowStore
 
 
 log = Log.create(service="tool.run_workflow")
@@ -178,6 +175,7 @@ async def _build_description() -> str:
 
     try:
         from flocks.workflow.center import scan_skill_workflows
+
         entries = await scan_skill_workflows()
         if not entries:
             result = _BASE_DESCRIPTION
@@ -212,93 +210,93 @@ def _format_workflow_result(result: Any, *, include_history: bool = False) -> st
     session tool output stays concise. The structured history remains
     available in metadata and persisted execution records.
     """
-    if hasattr(result, '__dict__'):
+    if hasattr(result, "__dict__"):
         # RunWorkflowResult object
         data = result.__dict__
     elif isinstance(result, dict):
         data = result
     else:
         return str(result)
-    
+
     output_lines = []
     output_lines.append(f"Status: {data.get('status', 'UNKNOWN')}")
-    
-    if data.get('run_id'):
+
+    if data.get("run_id"):
         output_lines.append(f"Run ID: {data.get('run_id')}")
-    
-    if data.get('steps'):
+
+    if data.get("steps"):
         output_lines.append(f"Steps executed: {data.get('steps')}")
-    
-    if data.get('last_node_id'):
+
+    if data.get("last_node_id"):
         output_lines.append(f"Last node: {data.get('last_node_id')}")
-    
-    if data.get('error'):
+
+    if data.get("error"):
         output_lines.append(f"\nError: {data.get('error')}")
-    
-    if data.get('outputs'):
+
+    if data.get("outputs"):
         output_lines.append("\nFinal Outputs:")
         try:
-            outputs_str = json.dumps(data.get('outputs'), indent=2, ensure_ascii=False)
+            outputs_str = json.dumps(data.get("outputs"), indent=2, ensure_ascii=False)
             output_lines.append(outputs_str)
         except Exception:
-            output_lines.append(str(data.get('outputs')))
-    
-    if include_history and data.get('history'):
-        history = data.get('history', [])
+            output_lines.append(str(data.get("outputs")))
+
+    if include_history and data.get("history"):
+        history = data.get("history", [])
         if history:
-            output_lines.append(f"\n{'='*80}")
+            output_lines.append(f"\n{'=' * 80}")
             output_lines.append(f"Execution History ({len(history)} steps):")
-            output_lines.append('='*80)
-            
+            output_lines.append("=" * 80)
+
             for i, step in enumerate(history, 1):
-                node_id = step.get('node_id', 'unknown')
-                duration_ms = step.get('duration_ms')
-                error = step.get('error')
-                
+                node_id = step.get("node_id", "unknown")
+                duration_ms = step.get("duration_ms")
+                error = step.get("error")
+
                 output_lines.append(f"\n[Step {i}] Node: {node_id}")
                 if duration_ms is not None:
                     output_lines.append(f"  Duration: {duration_ms:.2f}ms")
-                
+
                 # Show inputs
-                inputs = step.get('inputs', {})
+                inputs = step.get("inputs", {})
                 if inputs:
                     output_lines.append("  Inputs:")
                     try:
                         inputs_str = json.dumps(inputs, indent=4, ensure_ascii=False)
-                        for line in inputs_str.split('\n'):
+                        for line in inputs_str.split("\n"):
                             output_lines.append(f"    {line}")
                     except Exception:
                         output_lines.append(f"    {str(inputs)}")
-                
+
                 # Show outputs
-                outputs = step.get('outputs', {})
+                outputs = step.get("outputs", {})
                 if outputs:
                     output_lines.append("  Outputs:")
                     try:
                         outputs_str = json.dumps(outputs, indent=4, ensure_ascii=False)
-                        for line in outputs_str.split('\n'):
+                        for line in outputs_str.split("\n"):
                             output_lines.append(f"    {line}")
                     except Exception:
                         output_lines.append(f"    {str(outputs)}")
-                
+
                 # Show stdout if present
-                stdout = step.get('stdout', '')
+                stdout = step.get("stdout", "")
                 if stdout:
                     output_lines.append("  Stdout:")
-                    for line in stdout.split('\n'):
+                    for line in stdout.split("\n"):
                         output_lines.append(f"    {line}")
-                
+
                 # Show error if present
                 if error:
                     output_lines.append(f"  Error: {error}")
-                    traceback_info = step.get('traceback', '')
+                    traceback_info = step.get("traceback", "")
                     if traceback_info:
                         output_lines.append("  Traceback:")
-                        for line in traceback_info.split('\n'):
+                        for line in traceback_info.split("\n"):
                             output_lines.append(f"    {line}")
-            
-            output_lines.append(f"\n{'='*80}")
-    
+
+            output_lines.append(f"\n{'=' * 80}")
+
     return "\n".join(output_lines)
 
 
@@ -356,7 +354,7 @@ async def _record_workflow_tool_result(workflow_id: str, result: Any) -> None:
             name="use_llm",
             type=ParameterType.BOOLEAN,
             description=(
-                "Enable LLM-backed code generation for `type=\"logic\"` nodes (when code is missing). "
+                'Enable LLM-backed code generation for `type="logic"` nodes (when code is missing). '
                 "Recommended to keep enabled for logic-node workflows."
             ),
             required=False,
@@ -367,22 +365,22 @@ async def _record_workflow_tool_result(workflow_id: str, result: Any) -> None:
             type=ParameterType.BOOLEAN,
             description="Whether to automatically install requirements declared in workflow metadata",
             required=False,
-            default=True
+            default=True,
         ),
         ToolParameter(
             name="timeout_s",
             type=ParameterType.NUMBER,
             description="Execution timeout in seconds (optional)",
-            required=False
+            required=False,
         ),
         ToolParameter(
             name="trace",
             type=ParameterType.BOOLEAN,
             description="Enable execution tracing for debugging",
             required=False,
-            default=False
+            default=False,
         ),
-    ]
+    ],
 )
 async def run_workflow_tool(
     ctx: ToolContext,
@@ -395,7 +393,7 @@ async def run_workflow_tool(
 ) -> ToolResult:
     """
     Execute a workflow using flocks-workflow runtime
-    
+
     Args:
         ctx: Tool context
         workflow: Workflow definition (dict), JSON string, or a workflow JSON file path
@@ -404,7 +402,7 @@ async def run_workflow_tool(
         ensure_requirements: Whether to install requirements automatically
         timeout_s: Execution timeout in seconds
         trace: Enable execution tracing
-        
+
     Returns:
         ToolResult with workflow execution results
     """
@@ -415,18 +413,12 @@ async def run_workflow_tool(
 
     req_installer, _run_workflow_fn, RunWorkflowResultCls = _get_workflow_runtime()
     if _run_workflow_fn is None or RunWorkflowResultCls is None:
-        return ToolResult(
-            success=False,
-            error="flocks-workflow package is not available. Please check code"
-        )
-    
+        return ToolResult(success=False, error="flocks-workflow package is not available. Please check code")
+
     # Validate workflow parameter
     if not workflow:
-        return ToolResult(
-            success=False,
-            error="workflow parameter is required"
-        )
-    
+        return ToolResult(success=False, error="workflow parameter is required")
+
     # Accept workflow as dict, JSON string, or file path.
     workflow_source: Union[Dict[str, Any], Path]
     if isinstance(workflow, str):
@@ -454,7 +446,7 @@ async def run_workflow_tool(
                     error=(
                         f"Workflow file not found: {parsed!r}. "
                         "Provide a valid workflow JSON file path or a workflow dict."
-                    )
+                    ),
                 )
         elif parsed is None:
             # json.loads raised JSONDecodeError — raw is not JSON.
@@ -473,7 +465,7 @@ async def run_workflow_tool(
                         error=(
                             "Unsupported workflow string. Provide a workflow ID, workflow JSON string, "
                             "or a valid workflow JSON file path."
-                        )
+                        ),
                     )
         else:
             # json.loads returned list / int / bool — not a valid workflow parameter.
@@ -482,16 +474,15 @@ async def run_workflow_tool(
                 error=(
                     f"Invalid workflow parameter: expected a workflow dict or a file path string, "
                     f"got JSON-decoded {type(parsed).__name__} ({parsed!r})."
-                )
+                ),
             )
     elif isinstance(workflow, dict):
         workflow_source = workflow
     else:
         return ToolResult(
-            success=False,
-            error=f"workflow must be a dictionary or string, got {type(workflow).__name__}"
+            success=False, error=f"workflow must be a dictionary or string, got {type(workflow).__name__}"
         )
-    
+
     # Sanity-check dict workflows: must have at least a `start` field so we
     # surface a clear error instead of a confusing Pydantic validation message.
     if isinstance(workflow_source, dict) and "start" not in workflow_source:
@@ -501,7 +492,7 @@ async def run_workflow_tool(
                 "Invalid workflow definition: the `start` field is required. "
                 "Make sure you pass the workflow JSON (with `start`, `nodes`, `edges`) "
                 "as the `workflow` parameter, not the execution inputs."
-            )
+            ),
         )
 
     # Request permission (workflow execution can run arbitrary code)
@@ -518,7 +509,6 @@ async def run_workflow_tool(
     display_workflow_id = canonical_workflow_id or workflow_id
     tracked_execution: Optional[Dict[str, Any]] = None
     tracked_step_count = 0
-    tracked_exec_key: Optional[str] = None
     pending_step_index: Optional[int] = None
     pending_step: Optional[Dict[str, Any]] = None
     loop = asyncio.get_running_loop()
@@ -527,22 +517,23 @@ async def run_workflow_tool(
         loop.call_soon_threadsafe(ctx.metadata, metadata)
 
     def _update_execution_progress(update_fields: Dict[str, Any]) -> None:
-        if not tracked_exec_key:
-            return
         try:
             if tracked_execution is None:
                 return
             tracked_execution.update(update_fields)
             asyncio.run_coroutine_threadsafe(
-                Storage.write(tracked_exec_key, compact_execution_summary(tracked_execution)),
+                WorkflowStore.upsert_execution(compact_execution_summary(tracked_execution)),
                 loop,
             ).result(timeout=5)
         except Exception as exc:
-            log.warning("run_workflow.execution_progress.write_failed", {
-                "workflow_id": display_workflow_id,
-                "exec_id": tracked_execution["id"] if tracked_execution else None,
-                "error": str(exc),
-            })
+            log.warning(
+                "run_workflow.execution_progress.write_failed",
+                {
+                    "workflow_id": display_workflow_id,
+                    "exec_id": tracked_execution["id"] if tracked_execution else None,
+                    "error": str(exc),
+                },
+            )
 
     def _on_step_start(
         run_id: Optional[str],
@@ -568,30 +559,34 @@ async def run_workflow_tool(
             "error": "Run cancelled before node completed",
         }
         if tracked_execution is not None:
-            tracked_execution.update({
-                "currentNodeId": current_node_id,
-                "currentNodeType": current_node_type,
-                "currentPhase": "running",
-                "currentStepIndex": step_index,
-                "loopProgress": loop_progress,
-                "updatedAt": int(time.time() * 1000),
-            })
-        _emit_metadata({
-            "title": f"Running workflow: {workflow_name}",
-            "metadata": {
-                "workflow_id": display_workflow_id,
-                "workflow_name": workflow_name,
-                "total_nodes": workflow_total_nodes,
-                "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-                "run_id": run_id,
-                "status": "running",
-                "phase": "running",
-                "current_node_id": current_node_id,
-                "current_node_type": current_node_type,
-                "step_index": step_index,
-                "loop_progress": loop_progress,
-            },
-        })
+            _update_execution_progress(
+                {
+                    "currentNodeId": current_node_id,
+                    "currentNodeType": current_node_type,
+                    "currentPhase": "running",
+                    "currentStepIndex": step_index,
+                    "loopProgress": loop_progress,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
+        _emit_metadata(
+            {
+                "title": f"Running workflow: {workflow_name}",
+                "metadata": {
+                    "workflow_id": display_workflow_id,
+                    "workflow_name": workflow_name,
+                    "total_nodes": workflow_total_nodes,
+                    "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
+                    "run_id": run_id,
+                    "status": "running",
+                    "phase": "running",
+                    "current_node_id": current_node_id,
+                    "current_node_type": current_node_type,
+                    "step_index": step_index,
+                    "loop_progress": loop_progress,
+                },
+            }
+        )
         return step_index
 
     def _on_step_complete(step_result: Any) -> None:
@@ -614,15 +609,17 @@ async def run_workflow_tool(
         )
         tracked_step_count = step_index
         if tracked_execution is not None:
-            tracked_execution.update({
-                "stepCount": tracked_step_count,
-                "currentNodeId": step_dict.get("node_id"),
-                "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
-                "currentPhase": "running",
-                "currentStepIndex": tracked_step_count,
-                "loopProgress": loop_progress,
-                "updatedAt": int(time.time() * 1000),
-            })
+            tracked_execution.update(
+                {
+                    "stepCount": tracked_step_count,
+                    "currentNodeId": step_dict.get("node_id"),
+                    "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+                    "currentPhase": "running",
+                    "currentStepIndex": tracked_step_count,
+                    "loopProgress": loop_progress,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
         if tracked_execution is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -630,46 +627,49 @@ async def run_workflow_tool(
                     loop,
                 ).result(timeout=5)
             except Exception as exc:
-                log.warning("run_workflow.execution_step.write_failed", {
-                    "workflow_id": display_workflow_id,
-                    "exec_id": tracked_execution["id"],
-                    "step_index": step_index,
-                    "error": str(exc),
-                })
+                log.warning(
+                    "run_workflow.execution_step.write_failed",
+                    {
+                        "workflow_id": display_workflow_id,
+                        "exec_id": tracked_execution["id"],
+                        "step_index": step_index,
+                        "error": str(exc),
+                    },
+                )
         if tracked_step_count % _PROGRESS_FLUSH_EVERY_STEPS == 0:
-            _update_execution_progress({
-                "stepCount": tracked_step_count,
-                "currentNodeId": step_dict.get("node_id"),
-                "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
-                "currentPhase": "running",
-                "currentStepIndex": tracked_step_count,
-                "loopProgress": loop_progress,
-                "updatedAt": int(time.time() * 1000),
-            })
-        _emit_metadata({
-            "title": f"Running workflow: {workflow_name}",
-            "metadata": {
-                "workflow_id": display_workflow_id,
-                "workflow_name": workflow_name,
-                "total_nodes": workflow_total_nodes,
-                "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-                "status": "running",
-                "phase": "running",
-                "current_node_id": step_dict.get("node_id"),
-                "current_node_type": step_dict.get("node_type") or step_dict.get("type"),
-                "step_index": tracked_step_count,
-                "step_count": tracked_step_count,
-                "loop_progress": loop_progress,
-            },
-        })
+            _update_execution_progress(
+                {
+                    "stepCount": tracked_step_count,
+                    "currentNodeId": step_dict.get("node_id"),
+                    "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+                    "currentPhase": "running",
+                    "currentStepIndex": tracked_step_count,
+                    "loopProgress": loop_progress,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
+        _emit_metadata(
+            {
+                "title": f"Running workflow: {workflow_name}",
+                "metadata": {
+                    "workflow_id": display_workflow_id,
+                    "workflow_name": workflow_name,
+                    "total_nodes": workflow_total_nodes,
+                    "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
+                    "status": "running",
+                    "phase": "running",
+                    "current_node_id": step_dict.get("node_id"),
+                    "current_node_type": step_dict.get("node_type") or step_dict.get("type"),
+                    "step_index": tracked_step_count,
+                    "step_count": tracked_step_count,
+                    "loop_progress": loop_progress,
+                },
+            }
+        )
         return
 
     async def _flush_pending_step() -> None:
-        if (
-            tracked_execution is None
-            or pending_step_index is None
-            or pending_step is None
-        ):
+        if tracked_execution is None or pending_step_index is None or pending_step is None:
             return
         try:
             await record_execution_step(
@@ -678,13 +678,16 @@ async def run_workflow_tool(
                 pending_step,
             )
         except Exception as exc:
-            log.warning("run_workflow.pending_step.write_failed", {
-                "workflow_id": display_workflow_id,
-                "exec_id": tracked_execution["id"],
-                "step_index": pending_step_index,
-                "error": str(exc),
-            })
-    
+            log.warning(
+                "run_workflow.pending_step.write_failed",
+                {
+                    "workflow_id": display_workflow_id,
+                    "exec_id": tracked_execution["id"],
+                    "step_index": pending_step_index,
+                    "error": str(exc),
+                },
+            )
+
     await ctx.ask(
         permission="run_workflow",
         patterns=[workflow_id, workflow_name],
@@ -694,37 +697,41 @@ async def run_workflow_tool(
             "workflow_name": workflow_name,
             "ensure_requirements": ensure_requirements,
             "use_llm": use_llm,
-        }
+        },
     )
-    
+
     if canonical_workflow_id:
         tracked_execution = await create_execution_record(
             canonical_workflow_id,
             input_params=workflow_inputs,
         )
-        tracked_exec_key = workflow_execution_key(tracked_execution["id"])
 
     # Update metadata to show workflow is running
-    _emit_metadata({
-        "title": f"Running workflow: {workflow_name}",
-        "metadata": {
-            "workflow_id": display_workflow_id,
-            "workflow_name": workflow_name,
-            "total_nodes": workflow_total_nodes,
-            "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-            "status": "running",
-            "phase": "queued",
-            "step_index": 0,
-        },
-    })
+    _emit_metadata(
+        {
+            "title": f"Running workflow: {workflow_name}",
+            "metadata": {
+                "workflow_id": display_workflow_id,
+                "workflow_name": workflow_name,
+                "total_nodes": workflow_total_nodes,
+                "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
+                "status": "running",
+                "phase": "queued",
+                "step_index": 0,
+            },
+        }
+    )
 
     try:
         # Execute workflow
-        log.info("run_workflow.execute.start", {
-            "workflow_id": workflow_id,
-            "workflow_name": workflow_name,
-            "ensure_requirements": ensure_requirements,
-        })
+        log.info(
+            "run_workflow.execute.start",
+            {
+                "workflow_id": workflow_id,
+                "workflow_name": workflow_name,
+                "ensure_requirements": ensure_requirements,
+            },
+        )
         execution_started_at = time.time()
 
         nested_tool_ctx = _create_nested_tool_context(ctx)
@@ -746,17 +753,14 @@ async def run_workflow_tool(
         supports_cancel = False
         try:
             sig = inspect.signature(_run_workflow_fn)
-            supports_use_llm = (
-                "use_llm" in sig.parameters
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            supports_use_llm = "use_llm" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
-            supports_step_start = (
-                "on_step_start" in sig.parameters
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            supports_step_start = "on_step_start" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
-            supports_cancel = (
-                "cancel" in sig.parameters
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            supports_cancel = "cancel" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
         except Exception:
             # Best-effort: assume supported.
@@ -787,7 +791,7 @@ async def run_workflow_tool(
                 result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             else:
                 raise
-        
+
         # Format result
         if RunWorkflowResultCls and isinstance(result, RunWorkflowResultCls):
             result_dict = result.__dict__
@@ -795,19 +799,22 @@ async def run_workflow_tool(
             result_dict = result
         else:
             result_dict = {"status": "UNKNOWN", "output": str(result)}
-        
+
         status = result_dict.get("status", "UNKNOWN")
         success = status == "SUCCEEDED"
         error = result_dict.get("error")
-        
+
         output = _format_workflow_result(result_dict)
-        
-        log.info("run_workflow.execute.complete", {
-            "workflow_id": workflow_id,
-            "status": status,
-            "success": success,
-            "steps": result_dict.get("steps", 0),
-        })
+
+        log.info(
+            "run_workflow.execute.complete",
+            {
+                "workflow_id": workflow_id,
+                "status": status,
+                "success": success,
+                "steps": result_dict.get("steps", 0),
+            },
+        )
 
         # Append-only recording for audit/replay
         await _record_workflow_tool_result(display_workflow_id, result_dict)
@@ -822,7 +829,7 @@ async def run_workflow_tool(
             final_step_count = tracked_step_count
         if pending_step_index is not None:
             final_step_count = max(final_step_count, pending_step_index)
-        if tracked_execution and canonical_workflow_id and tracked_exec_key:
+        if tracked_execution and canonical_workflow_id:
             current_data = dict(tracked_execution)
             outcome_result = result
             if not hasattr(outcome_result, "status"):
@@ -832,40 +839,44 @@ async def run_workflow_tool(
                     error=result_dict.get("error"),
                 )
             status_value, error_message = resolve_execution_outcome(outcome_result)  # type: ignore[arg-type]
-            current_data.update({
-                "outputResults": compact_outputs_for_storage(result_dict.get("outputs")),
-                "status": status_value,
-                "finishedAt": int(time.time() * 1000),
-                "duration": time.time() - execution_started_at,
-                "executionLog": compacted_history,
-                "stepCount": final_step_count,
-                "errorMessage": error_message,
-                "currentNodeId": result_dict.get("last_node_id"),
-                "currentPhase": status_value,
-                "currentStepIndex": final_step_count,
-                "updatedAt": int(time.time() * 1000),
-            })
+            current_data.update(
+                {
+                    "outputResults": compact_outputs_for_storage(result_dict.get("outputs")),
+                    "status": status_value,
+                    "finishedAt": int(time.time() * 1000),
+                    "duration": time.time() - execution_started_at,
+                    "executionLog": compacted_history,
+                    "stepCount": final_step_count,
+                    "errorMessage": error_message,
+                    "currentNodeId": result_dict.get("last_node_id"),
+                    "currentPhase": status_value,
+                    "currentStepIndex": final_step_count,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
             await record_execution_result(
                 canonical_workflow_id,
                 tracked_execution["id"],
                 current_data,
             )
-            _emit_metadata({
-                "title": f"Workflow: {workflow_name}",
-                "metadata": {
-                    "workflow_id": canonical_workflow_id,
-                    "workflow_name": workflow_name,
-                    "total_nodes": workflow_total_nodes,
-                    "workflow_execution_id": tracked_execution["id"],
-                    "run_id": result_dict.get("run_id"),
-                    "status": status_value,
-                    "phase": status_value,
-                    "current_node_id": result_dict.get("last_node_id"),
-                    "step_index": final_step_count,
-                    "step_count": final_step_count,
-                    "loop_progress": current_data.get("loopProgress"),
-                },
-            })
+            _emit_metadata(
+                {
+                    "title": f"Workflow: {workflow_name}",
+                    "metadata": {
+                        "workflow_id": canonical_workflow_id,
+                        "workflow_name": workflow_name,
+                        "total_nodes": workflow_total_nodes,
+                        "workflow_execution_id": tracked_execution["id"],
+                        "run_id": result_dict.get("run_id"),
+                        "status": status_value,
+                        "phase": status_value,
+                        "current_node_id": result_dict.get("last_node_id"),
+                        "step_index": final_step_count,
+                        "step_count": final_step_count,
+                        "loop_progress": current_data.get("loopProgress"),
+                    },
+                }
+            )
 
         compacted_outputs = compact_outputs_for_storage(result_dict.get("outputs"))
 
@@ -888,9 +899,9 @@ async def run_workflow_tool(
                     "outputs": compacted_outputs,
                     "history": [],
                     "history_count": history_count,
-                }
+                },
             )
-        
+
         return ToolResult(
             success=success,
             output=output,
@@ -907,45 +918,52 @@ async def run_workflow_tool(
                 "outputs": compacted_outputs,
                 "history": [],
                 "history_count": history_count,
-            }
+            },
         )
-        
+
     except Exception as e:
         error_msg = str(e)
-        log.error("run_workflow.execute.error", {
-            "workflow_id": workflow_id,
-            "error": error_msg,
-        })
-        if tracked_execution and canonical_workflow_id and tracked_exec_key:
+        log.error(
+            "run_workflow.execute.error",
+            {
+                "workflow_id": workflow_id,
+                "error": error_msg,
+            },
+        )
+        if tracked_execution and canonical_workflow_id:
             current_data = dict(tracked_execution)
-            current_data.update({
-                "status": "error",
-                "finishedAt": int(time.time() * 1000),
-                "errorMessage": error_msg,
-                "executionLog": [],
-                "stepCount": tracked_step_count,
-                "currentPhase": "error",
-                "currentStepIndex": tracked_step_count,
-                "updatedAt": int(time.time() * 1000),
-            })
+            current_data.update(
+                {
+                    "status": "error",
+                    "finishedAt": int(time.time() * 1000),
+                    "errorMessage": error_msg,
+                    "executionLog": [],
+                    "stepCount": tracked_step_count,
+                    "currentPhase": "error",
+                    "currentStepIndex": tracked_step_count,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
             await record_execution_result(
                 canonical_workflow_id,
                 tracked_execution["id"],
                 current_data,
             )
-            _emit_metadata({
-                "title": f"Workflow: {workflow_name}",
-                "metadata": {
-                    "workflow_id": canonical_workflow_id,
-                    "workflow_name": workflow_name,
-                    "total_nodes": workflow_total_nodes,
-                    "workflow_execution_id": tracked_execution["id"],
-                    "status": "error",
-                    "phase": "error",
-                    "step_index": tracked_step_count,
-                },
-            })
-        
+            _emit_metadata(
+                {
+                    "title": f"Workflow: {workflow_name}",
+                    "metadata": {
+                        "workflow_id": canonical_workflow_id,
+                        "workflow_name": workflow_name,
+                        "total_nodes": workflow_total_nodes,
+                        "workflow_execution_id": tracked_execution["id"],
+                        "status": "error",
+                        "phase": "error",
+                        "step_index": tracked_step_count,
+                    },
+                }
+            )
+
         return ToolResult(
             success=False,
             error=f"Workflow execution failed: {error_msg}",
@@ -956,5 +974,5 @@ async def run_workflow_tool(
                 "total_nodes": workflow_total_nodes,
                 "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
                 "status": "FAILED",
-            }
+            },
         )

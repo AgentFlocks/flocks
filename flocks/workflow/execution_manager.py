@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_execution_summary,
@@ -19,7 +18,6 @@ from flocks.workflow.execution_store import (
     record_execution_step,
     record_execution_result,
     resolve_execution_outcome,
-    workflow_execution_key,
 )
 from flocks.workflow.process_executor import (
     StepCompleteHook,
@@ -28,6 +26,7 @@ from flocks.workflow.process_executor import (
     run_workflow_process,
 )
 from flocks.workflow.runner import RunWorkflowResult
+from flocks.workflow.store import WorkflowStore
 
 log = Log.create(service="workflow.execution_manager")
 
@@ -75,7 +74,7 @@ class WorkflowExecutionManager:
             try:
                 exec_data.update(update_fields)
                 asyncio.run_coroutine_threadsafe(
-                    Storage.write(workflow_execution_key(str(exec_data["id"])), compact_execution_summary(exec_data)),
+                    WorkflowStore.upsert_execution(compact_execution_summary(exec_data)),
                     loop,
                 ).result(timeout=5)
             except Exception as exc:

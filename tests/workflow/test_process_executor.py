@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from flocks.tool import ToolContext
 from flocks.workflow.events import WorkflowWorkerLimits, WorkflowWorkerRequest, workflow_event
-from flocks.workflow.process_executor import _serialize_tool_context, run_workflow_process
+from flocks.workflow.process_executor import ProcessWorkflowExecutor, _serialize_tool_context, run_workflow_process
+from flocks.workflow.runner import RunWorkflowResult
 
 
 def _simple_workflow() -> dict:
@@ -142,6 +145,36 @@ async def test_process_executor_preserves_explicit_workflow_id_without_payload_i
 
 
 @pytest.mark.asyncio
+async def test_process_executor_uses_workflow_metadata_memory_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, WorkflowWorkerRequest] = {}
+
+    async def _fake_run_request(
+        self: ProcessWorkflowExecutor,
+        request: WorkflowWorkerRequest,
+        **_: object,
+    ) -> RunWorkflowResult:
+        captured["request"] = request
+        return RunWorkflowResult(status="SUCCEEDED", outputs={})
+
+    monkeypatch.setattr(ProcessWorkflowExecutor, "_run_request", _fake_run_request)
+    workflow = {
+        **_simple_workflow(),
+        "metadata": {
+            "runtime": {
+                "memory_limit_mb": 512,
+                "soft_memory_budget_mb": 384,
+            }
+        },
+    }
+
+    result = await run_workflow_process(workflow=workflow, ensure_requirements=False)
+
+    assert result.status == "SUCCEEDED"
+    assert captured["request"].limits.memory_limit_mb == 512
+    assert captured["request"].limits.soft_memory_budget_mb == 384
+
+
+@pytest.mark.asyncio
 async def test_process_executor_times_out_worker_without_crashing_parent() -> None:
     workflow = {
         "name": "process_timeout_test",
@@ -164,6 +197,41 @@ async def test_process_executor_times_out_worker_without_crashing_parent() -> No
 
     assert result.status == "TIMED_OUT"
     assert "timeout" in str(result.error).lower()
+
+
+@pytest.mark.asyncio
+async def test_process_executor_returns_final_result_when_worker_process_lingers() -> None:
+    workflow = {
+        "name": "process_lingering_thread_test",
+        "start": "spawn_thread",
+        "nodes": [
+            {
+                "id": "spawn_thread",
+                "type": "python",
+                "code": "\n".join(
+                    [
+                        "import threading",
+                        "import time",
+                        "threading.Thread(target=lambda: time.sleep(10)).start()",
+                        "outputs['done'] = True",
+                    ]
+                ),
+            }
+        ],
+        "edges": [],
+    }
+
+    result = await asyncio.wait_for(
+        run_workflow_process(
+            workflow=workflow,
+            ensure_requirements=False,
+            timeout_s=5,
+        ),
+        timeout=3,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs == {"done": True}
 
 
 @pytest.mark.asyncio

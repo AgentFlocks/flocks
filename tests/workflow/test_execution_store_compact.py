@@ -29,11 +29,9 @@ from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
     compact_step_for_storage,
     record_execution_result,
-    workflow_execution_index_key,
-    workflow_execution_step_prefix,
     workflow_execution_step_key,
 )
-from flocks.storage.storage import Storage
+from flocks.workflow.store import WorkflowStore
 
 
 def _make_alerts(n: int) -> List[Dict[str, Any]]:
@@ -157,7 +155,7 @@ def test_compact_outputs_drastically_reduces_serialised_size() -> None:
     after = len(json.dumps(compact_outputs_for_storage(outputs)).encode())
 
     assert before > 1_000_000  # ≥ 1 MB before
-    assert after < 1_000        # < 1 KB after
+    assert after < 1_000  # < 1 KB after
     assert before / after > 1_000
 
 
@@ -267,15 +265,13 @@ def test_compact_execution_summary_drops_execution_log() -> None:
 
 
 def test_workflow_execution_step_key_is_append_only_namespaced() -> None:
-    assert (
-        workflow_execution_step_key("exec-1", 12)
-        == "workflow_execution_step/exec-1/00000012"
-    )
+    assert workflow_execution_step_key("exec-1", 12) == "workflow_execution_step/exec-1/00000012"
 
 
 @pytest.mark.asyncio
 async def test_record_execution_result_backfills_execution_log_steps() -> None:
-    storage_write = AsyncMock(return_value=None)
+    record_step = AsyncMock(return_value=None)
+    upsert_execution = AsyncMock(return_value=None)
     update_stats = AsyncMock(return_value=None)
     exec_data = {
         "id": "exec-1",
@@ -292,22 +288,25 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
         coro.close()
         raise RuntimeError
 
-    with patch.object(Storage, "write", storage_write), \
-         patch("flocks.workflow.execution_store._update_workflow_stats", update_stats), \
-         patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)), \
-         patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task), \
-         patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)):
+    with (
+        patch.object(WorkflowStore, "record_step", record_step),
+        patch.object(WorkflowStore, "upsert_execution", upsert_execution),
+        patch("flocks.workflow.execution_store._update_workflow_stats", update_stats),
+        patch("flocks.session.recorder.Recorder.record_workflow_execution", AsyncMock(return_value=None)),
+        patch("flocks.workflow.execution_store.asyncio.create_task", side_effect=raise_create_task),
+        patch("flocks.workflow.execution_store._trim_execution_history", AsyncMock(return_value=None)),
+    ):
         await record_execution_result("wf", "exec-1", exec_data)
 
-    write_calls = storage_write.await_args_list
-    assert write_calls[0].args[0] == "workflow_execution_step/exec-1/00000001"
-    assert write_calls[0].args[1]["outputs"] == {"_raw_alerts_count": 150}
-    assert write_calls[1].args[0] == "workflow_execution_step/exec-1/00000002"
-    assert write_calls[1].args[1]["inputs"] == {"_filtered_alerts_count": 150}
-    assert write_calls[2].args[0] == "workflow_execution/exec-1"
-    assert write_calls[2].args[1]["executionLog"] == []
-    assert write_calls[2].args[1]["stepCount"] == 2
-    assert write_calls[3].args[0].startswith("workflow_execution_index/wf/")
+    step_calls = record_step.await_args_list
+    assert step_calls[0].args[:2] == ("exec-1", 1)
+    assert step_calls[0].args[2]["outputs"] == {"_raw_alerts_count": 150}
+    assert step_calls[1].args[:2] == ("exec-1", 2)
+    assert step_calls[1].args[2]["inputs"] == {"_filtered_alerts_count": 150}
+    upsert_execution.assert_awaited_once()
+    summary = upsert_execution.await_args.args[0]
+    assert summary["executionLog"] == []
+    assert summary["stepCount"] == 2
 
 
 def test_compact_history_compacts_each_step_inputs() -> None:
@@ -398,19 +397,8 @@ async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
     tmp_path,
 ) -> None:
     workflow_id = "wf-trim"
-    indexed_rows = []
     for idx in range(32):
         exec_id = f"exec-{idx:02d}"
-        index_key = workflow_execution_index_key(workflow_id, idx, exec_id)
-        indexed_rows.append((
-            index_key,
-            {
-                "workflowId": workflow_id,
-                "execId": exec_id,
-                "executionKey": f"workflow_execution/{exec_id}",
-                "startedAt": idx,
-            },
-        ))
         workflow_record = tmp_path / "workflow" / f"{exec_id}.jsonl"
         workflow_record.parent.mkdir(parents=True, exist_ok=True)
         workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
@@ -421,28 +409,15 @@ async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
     other_record.parent.mkdir(parents=True, exist_ok=True)
     other_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
 
-    remove_mock = AsyncMock(return_value=None)
-    clear_mock = AsyncMock(return_value=2)
-    list_raw_mock = AsyncMock(return_value=[])
+    trim_mock = AsyncMock(return_value=["exec-00", "exec-01"])
 
-    with patch.object(Storage, "list_entries", AsyncMock(return_value=indexed_rows)), \
-         patch.object(Storage, "list_raw", list_raw_mock), \
-         patch.object(Storage, "clear", clear_mock), \
-         patch.object(Storage, "remove", remove_mock), \
-         patch("flocks.session.recorder._record_dir", return_value=tmp_path):
+    with (
+        patch.object(WorkflowStore, "trim_executions", trim_mock),
+        patch("flocks.session.recorder._record_dir", return_value=tmp_path),
+    ):
         await _trim_execution_history(workflow_id)
 
-    list_raw_mock.assert_not_awaited()
-    removed_keys = [call.args[0] for call in remove_mock.await_args_list]
-    assert "workflow_execution/exec-00" in removed_keys
-    assert "workflow_execution/exec-01" in removed_keys
-    assert workflow_execution_index_key(workflow_id, 0, "exec-00") in removed_keys
-    assert workflow_execution_index_key(workflow_id, 1, "exec-01") in removed_keys
-    cleared_prefixes = [call.args[0] for call in clear_mock.await_args_list]
-    assert cleared_prefixes == [
-        workflow_execution_step_prefix("exec-00"),
-        workflow_execution_step_prefix("exec-01"),
-    ]
+    trim_mock.assert_awaited_once_with(workflow_id, keep=30)
     assert not (tmp_path / "workflow" / "exec-00.jsonl").exists()
     assert not (tmp_path / "workflow" / "exec-01.jsonl").exists()
     assert (tmp_path / "workflow" / "exec-02.jsonl").exists()
@@ -452,64 +427,28 @@ async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
 @pytest.mark.asyncio
 async def test_trim_execution_history_uses_index_without_full_scan(tmp_path) -> None:
     workflow_id = "wf-indexed"
-    indexed_rows = []
     for idx in range(32):
         exec_id = f"exec-{idx:02d}"
-        index_key = workflow_execution_index_key(workflow_id, idx, exec_id)
-        indexed_rows.append((
-            index_key,
-            {
-                "workflowId": workflow_id,
-                "execId": exec_id,
-                "executionKey": f"workflow_execution/{exec_id}",
-                "startedAt": idx,
-            },
-        ))
         workflow_record = tmp_path / "workflow" / f"{exec_id}.jsonl"
         workflow_record.parent.mkdir(parents=True, exist_ok=True)
         workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
 
-    list_raw_mock = AsyncMock(return_value=[])
-    clear_mock = AsyncMock(return_value=1)
-    remove_mock = AsyncMock(return_value=True)
+    trim_mock = AsyncMock(return_value=["exec-00", "exec-01"])
 
-    with patch.object(Storage, "list_entries", AsyncMock(return_value=indexed_rows)), \
-         patch.object(Storage, "list_raw", list_raw_mock), \
-         patch.object(Storage, "clear", clear_mock), \
-         patch.object(Storage, "remove", remove_mock), \
-         patch("flocks.session.recorder._record_dir", return_value=tmp_path):
+    with (
+        patch.object(WorkflowStore, "trim_executions", trim_mock),
+        patch("flocks.session.recorder._record_dir", return_value=tmp_path),
+    ):
         await _trim_execution_history(workflow_id)
 
-    list_raw_mock.assert_not_awaited()
-    assert [call.args[0] for call in clear_mock.await_args_list] == [
-        workflow_execution_step_prefix("exec-00"),
-        workflow_execution_step_prefix("exec-01"),
-    ]
-    removed = [call.args[0] for call in remove_mock.await_args_list]
-    assert "workflow_execution/exec-00" in removed
-    assert workflow_execution_index_key(workflow_id, 0, "exec-00") in removed
+    trim_mock.assert_awaited_once_with(workflow_id, keep=30)
+    assert not (tmp_path / "workflow" / "exec-00.jsonl").exists()
+    assert not (tmp_path / "workflow" / "exec-01.jsonl").exists()
 
 
 @pytest.mark.asyncio
 async def test_trim_execution_history_surfaces_delete_failures() -> None:
     workflow_id = "wf-trim-fail"
-    indexed_rows = [
-        (
-            workflow_execution_index_key(workflow_id, idx, f"exec-{idx:02d}"),
-            {
-                "workflowId": workflow_id,
-                "execId": f"exec-{idx:02d}",
-                "executionKey": f"workflow_execution/exec-{idx:02d}",
-                "startedAt": idx,
-            },
-        )
-        for idx in range(31)
-    ]
-    list_raw_mock = AsyncMock(return_value=[])
-
-    with patch.object(Storage, "list_entries", AsyncMock(return_value=indexed_rows)), \
-         patch.object(Storage, "list_raw", list_raw_mock), \
-         patch.object(Storage, "clear", AsyncMock(side_effect=RuntimeError("locked"))):
-        with pytest.raises(RuntimeError, match="Failed to trim workflow execution history"):
+    with patch.object(WorkflowStore, "trim_executions", AsyncMock(side_effect=RuntimeError("locked"))):
+        with pytest.raises(RuntimeError, match="locked"):
             await _trim_execution_history(workflow_id)
-    list_raw_mock.assert_not_awaited()

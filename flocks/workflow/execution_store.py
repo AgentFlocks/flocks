@@ -8,9 +8,9 @@ import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from flocks.session.recorder import Recorder
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult
+from flocks.workflow.store import WorkflowStore
 
 log = Log.create(service="workflow.execution_store")
 
@@ -63,11 +63,7 @@ def compact_outputs_for_storage(
     key_set = frozenset(keys)
     compacted: Dict[str, Any] = {}
     for k, v in outputs.items():
-        if (
-            k in key_set
-            and isinstance(v, (list, tuple))
-            and len(v) > size_threshold
-        ):
+        if k in key_set and isinstance(v, (list, tuple)) and len(v) > size_threshold:
             compacted[f"_{k}_count"] = len(v)
         else:
             compacted[k] = v
@@ -89,9 +85,7 @@ def compact_step_for_storage(
     for field in ("inputs", "outputs"):
         raw_value = step_copy.get(field)
         if isinstance(raw_value, dict):
-            step_copy[field] = compact_outputs_for_storage(
-                raw_value, keys=keys, size_threshold=size_threshold
-            )
+            step_copy[field] = compact_outputs_for_storage(raw_value, keys=keys, size_threshold=size_threshold)
     return step_copy
 
 
@@ -109,10 +103,7 @@ def compact_history_for_storage(
     """
     if not history:
         return []
-    return [
-        compact_step_for_storage(step, keys=keys, size_threshold=size_threshold)
-        for step in history
-    ]
+    return [compact_step_for_storage(step, keys=keys, size_threshold=size_threshold) for step in history]
 
 
 def _first_value(data: Dict[str, Any], keys: Iterable[str]) -> Any:
@@ -159,23 +150,27 @@ def derive_loop_progress(
     if isinstance(outputs, dict):
         merged.update(outputs)
 
-    iteration = _as_positive_int(_first_value(
-        merged,
-        ("iteration", "loop_index", "current_index", "item_idx", "item_index", "host_idx"),
-    ))
-    total = _as_positive_int(_first_value(
-        merged,
-        (
-            "total_iterations",
-            "total_items",
-            "item_count",
-            "items_count",
-            "total_hosts",
-            "host_count",
-            "hosts_count",
-            "hosts_total",
-        ),
-    ))
+    iteration = _as_positive_int(
+        _first_value(
+            merged,
+            ("iteration", "loop_index", "current_index", "item_idx", "item_index", "host_idx"),
+        )
+    )
+    total = _as_positive_int(
+        _first_value(
+            merged,
+            (
+                "total_iterations",
+                "total_items",
+                "item_count",
+                "items_count",
+                "total_hosts",
+                "host_count",
+                "hosts_count",
+                "hosts_total",
+            ),
+        )
+    )
     if total is None:
         hosts = merged.get("hosts")
         if isinstance(hosts, list):
@@ -197,6 +192,7 @@ def derive_loop_progress(
         "current_inner_node_id": node_id,
         "global_step_index": global_step_index,
     }
+
 
 # Maximum number of execution history records retained per workflow.
 # Keep this intentionally small so high-frequency workflows do not keep
@@ -254,26 +250,15 @@ async def _update_workflow_stats(workflow_id: str, success: bool, duration: floa
     lock = _get_stats_lock(workflow_id)
     async with lock:
         try:
-            key = _workflow_stats_key(workflow_id)
-            try:
-                stats: Dict[str, Any] = await Storage.read(key) or dict(_DEFAULT_STATS)
-            except Exception:
-                stats = dict(_DEFAULT_STATS)
-            stats["callCount"] = stats.get("callCount", 0) + 1
-            if success:
-                stats["successCount"] = stats.get("successCount", 0) + 1
-            else:
-                stats["errorCount"] = stats.get("errorCount", 0) + 1
-            total = stats.get("totalRuntime", 0.0) + duration
-            stats["totalRuntime"] = total
-            call_count = stats["callCount"]
-            stats["avgRuntime"] = (total / call_count) if call_count > 0 else 0.0
-            await Storage.write(key, stats)
+            await WorkflowStore.increment_stats(workflow_id, success=success, duration=duration)
         except Exception as exc:
-            log.warning("workflow.stats.update_failed", {
-                "workflow_id": workflow_id,
-                "error": str(exc),
-            })
+            log.warning(
+                "workflow.stats.update_failed",
+                {
+                    "workflow_id": workflow_id,
+                    "error": str(exc),
+                },
+            )
 
 
 def workflow_execution_key(exec_id: str) -> str:
@@ -324,7 +309,7 @@ async def record_execution_step(
 ) -> Dict[str, Any]:
     """Persist one compacted execution step and return the stored payload."""
     step_payload = compact_step_for_storage(step)
-    await Storage.write(workflow_execution_step_key(exec_id, step_index), step_payload)
+    await WorkflowStore.record_step(exec_id, step_index, step_payload)
     return step_payload
 
 
@@ -363,26 +348,31 @@ class ExecutionStepRecorder:
             inputs=step_dict.get("inputs"),
             outputs=step_dict.get("outputs"),
         )
-        self.summary.update({
-            "stepCount": self.step_count,
-            "currentNodeId": step_dict.get("node_id"),
-            "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
-            "currentPhase": "running",
-            "currentStepIndex": self.step_count,
-            "loopProgress": loop_progress,
-            "updatedAt": int(time.time() * 1000),
-        })
+        self.summary.update(
+            {
+                "stepCount": self.step_count,
+                "currentNodeId": step_dict.get("node_id"),
+                "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+                "currentPhase": "running",
+                "currentStepIndex": self.step_count,
+                "loopProgress": loop_progress,
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
         try:
             asyncio.run_coroutine_threadsafe(
                 record_execution_step(self.exec_id, self.step_count, step_dict),
                 self.loop,
             ).result(timeout=self.write_timeout_s)
         except Exception as exc:
-            self.logger.warning(self.log_event, {
-                "exec_id": self.exec_id,
-                "step_index": self.step_count,
-                "error": str(exc),
-            })
+            self.logger.warning(
+                self.log_event,
+                {
+                    "exec_id": self.exec_id,
+                    "step_index": self.step_count,
+                    "error": str(exc),
+                },
+            )
 
 
 async def _backfill_execution_steps(
@@ -399,14 +389,17 @@ async def _backfill_execution_steps(
         if not isinstance(step_payload, dict):
             continue
         try:
-            await Storage.write(workflow_execution_step_key(exec_id, step_index), step_payload)
+            await WorkflowStore.record_step(exec_id, step_index, step_payload)
             written += 1
         except Exception as exc:
-            log.warning("workflow.execution_step.backfill_failed", {
-                "exec_id": exec_id,
-                "step_index": step_index,
-                "error": str(exc),
-            })
+            log.warning(
+                "workflow.execution_step.backfill_failed",
+                {
+                    "exec_id": exec_id,
+                    "step_index": step_index,
+                    "error": str(exc),
+                },
+            )
     return written
 
 
@@ -418,14 +411,11 @@ async def load_execution_steps(
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Load persisted step logs for an execution, sorted by step key."""
     page_limit = 500 if limit is None else max(limit, 0)
-    selected, total = await Storage.list_entries_page(
-        workflow_execution_step_prefix(exec_id),
+    return await WorkflowStore.list_steps(
+        exec_id,
         offset=max(offset, 0),
         limit=page_limit,
     )
-    return [
-        value for _key, value in selected if isinstance(value, dict)
-    ], total
 
 
 def normalize_execution_status(status: str) -> str:
@@ -462,9 +452,7 @@ def resolve_execution_outcome(result: RunWorkflowResult) -> tuple[str, Optional[
     if result.outputs.get("workflow_success") is False:
         return (
             "error",
-            error_message
-            or _extract_business_failure_message(result.outputs)
-            or "Workflow reported business failure.",
+            error_message or _extract_business_failure_message(result.outputs) or "Workflow reported business failure.",
         )
 
     return status_value, error_message
@@ -510,14 +498,7 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    exec_key = workflow_execution_key(exec_data["id"])
-    await Storage.write(exec_key, compact_execution_summary(exec_data))
-    await _write_execution_index(
-        workflow_id=workflow_id,
-        exec_id=str(exec_data["id"]),
-        execution_key=exec_key,
-        started_at=int(exec_data.get("startedAt") or 0),
-    )
+    await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
     return exec_data
 
 
@@ -533,13 +514,7 @@ async def record_execution_result(
     if backfilled_steps and (existing_step_count is None or existing_step_count < backfilled_steps):
         summary_data["stepCount"] = backfilled_steps
 
-    await Storage.write(workflow_execution_key(exec_id), compact_execution_summary(summary_data))
-    await _write_execution_index(
-        workflow_id=workflow_id,
-        exec_id=exec_id,
-        execution_key=workflow_execution_key(exec_id),
-        started_at=int(summary_data.get("startedAt") or 0),
-    )
+    await WorkflowStore.upsert_execution(compact_execution_summary(summary_data))
 
     # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
     # are reflected in the UI stats panel.
@@ -556,6 +531,7 @@ async def record_execution_result(
     # Run it as a background task so the syslog/HTTP dispatcher can release the
     # concurrency slot immediately instead of waiting on session-history I/O.
     try:
+
         async def _record_audit() -> None:
             try:
                 await Recorder.record_workflow_execution(
@@ -564,10 +540,13 @@ async def record_execution_result(
                     run_result=exec_data,
                 )
             except Exception as exc:
-                log.debug("workflow.audit.record_failed", {
-                    "exec_id": exec_id,
-                    "error": str(exc),
-                })
+                log.debug(
+                    "workflow.audit.record_failed",
+                    {
+                        "exec_id": exec_id,
+                        "error": str(exc),
+                    },
+                )
 
         asyncio.create_task(_record_audit(), name=f"audit-{exec_id}")
     except RuntimeError:
@@ -587,51 +566,14 @@ async def record_execution_result(
     try:
         await _trim_execution_history(workflow_id)
     except Exception as exc:
-        log.error("workflow.history.trim_failed", {
-            "workflow_id": workflow_id,
-            "exec_id": exec_id,
-            "error": str(exc),
-        })
-
-
-async def _write_execution_index(
-    *,
-    workflow_id: str,
-    exec_id: str,
-    execution_key: str,
-    started_at: int,
-) -> str:
-    index_key = workflow_execution_index_key(workflow_id, started_at, exec_id)
-    await Storage.write(
-        index_key,
-        {
-            "workflowId": workflow_id,
-            "execId": exec_id,
-            "executionKey": execution_key,
-            "startedAt": started_at,
-        },
-    )
-    return index_key
-
-
-async def _list_workflow_execution_entries(
-    workflow_id: str,
-) -> List[Tuple[str, int, Optional[str]]]:
-    """Return indexed ``(execution_key, started_at, index_key)`` rows for one workflow."""
-    indexed_rows = await Storage.list_entries(workflow_execution_index_prefix(workflow_id))
-    entries: List[Tuple[str, int, Optional[str]]] = []
-    for index_key, value in indexed_rows:
-        if not isinstance(value, dict):
-            continue
-        exec_key = value.get("executionKey")
-        exec_id = value.get("execId")
-        if not isinstance(exec_key, str) and isinstance(exec_id, str):
-            exec_key = workflow_execution_key(exec_id)
-        if not isinstance(exec_key, str):
-            continue
-        started_at = _as_positive_int(value.get("startedAt")) or 0
-        entries.append((exec_key, started_at, index_key))
-    return entries
+        log.error(
+            "workflow.history.trim_failed",
+            {
+                "workflow_id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(exc),
+            },
+        )
 
 
 async def _delete_execution_history_record(
@@ -640,18 +582,19 @@ async def _delete_execution_history_record(
     index_key: Optional[str] = None,
 ) -> None:
     exec_id = execution_key.rsplit("/", 1)[-1]
-    deleted_steps = await Storage.clear(workflow_execution_step_prefix(exec_id))
-    removed_execution = await Storage.remove(execution_key)
-    if index_key:
-        await Storage.remove(index_key)
+    deleted_steps = await WorkflowStore.clear_steps(exec_id)
+    removed_execution = await WorkflowStore.delete_execution(exec_id)
     record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
     await asyncio.to_thread(record_path.unlink, missing_ok=True)
-    log.debug("workflow.history.trim_deleted", {
-        "exec_id": exec_id,
-        "execution_key": execution_key,
-        "steps": deleted_steps,
-        "removed_execution": removed_execution,
-    })
+    log.debug(
+        "workflow.history.trim_deleted",
+        {
+            "exec_id": exec_id,
+            "execution_key": execution_key,
+            "steps": deleted_steps,
+            "removed_execution": removed_execution,
+        },
+    )
 
 
 async def _trim_execution_history(workflow_id: str) -> None:
@@ -668,27 +611,24 @@ async def _trim_execution_history(workflow_id: str) -> None:
     """
     lock = _get_trim_lock(workflow_id)
     async with lock:
-        wf_entries = await _list_workflow_execution_entries(workflow_id)
-        if len(wf_entries) <= _MAX_EXECUTION_HISTORY_PER_WORKFLOW:
-            return
-
-        # Sort ascending by startedAt and remove the oldest excess records.
-        wf_entries.sort(key=lambda kd: kd[1])
-        excess = len(wf_entries) - _MAX_EXECUTION_HISTORY_PER_WORKFLOW
         failures: List[str] = []
-        for key, _started_at, index_key in wf_entries[:excess]:
+        for exec_id in await WorkflowStore.trim_executions(
+            workflow_id,
+            keep=_MAX_EXECUTION_HISTORY_PER_WORKFLOW,
+        ):
             try:
-                await _delete_execution_history_record(key, index_key=index_key)
+                record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
+                await asyncio.to_thread(record_path.unlink, missing_ok=True)
             except Exception as exc:
-                failures.append(f"{key}: {exc}")
-                log.warning("workflow.history.trim_delete_failed", {
-                    "workflow_id": workflow_id,
-                    "key": key,
-                    "error": str(exc),
-                })
+                failures.append(f"{exec_id}: {exc}")
+                log.warning(
+                    "workflow.history.trim_delete_failed",
+                    {
+                        "workflow_id": workflow_id,
+                        "exec_id": exec_id,
+                        "error": str(exc),
+                    },
+                )
 
         if failures:
-            raise RuntimeError(
-                "Failed to trim workflow execution history: "
-                + "; ".join(failures[:3])
-            )
+            raise RuntimeError("Failed to trim workflow execution history: " + "; ".join(failures[:3]))

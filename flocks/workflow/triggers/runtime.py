@@ -7,7 +7,6 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_history_for_storage,
@@ -18,6 +17,7 @@ from flocks.workflow.execution_store import (
 )
 from flocks.workflow.fs_store import read_workflow_dir, workflow_scan_dirs
 from flocks.workflow.execution_manager import run_workflow_managed
+from flocks.workflow.store import WorkflowStore
 
 from .compat import (
     LEGACY_KAFKA_CONFIG_PREFIX,
@@ -45,6 +45,16 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _config_kind_from_legacy_key(key: str) -> Optional[str]:
+    if key.startswith(LEGACY_POLLER_CONFIG_PREFIX):
+        return "workflow_poller_config"
+    if key.startswith(LEGACY_SYSLOG_CONFIG_PREFIX):
+        return "workflow_syslog_config"
+    if key.startswith(LEGACY_KAFKA_CONFIG_PREFIX):
+        return "workflow_kafka_config"
+    return None
+
+
 class TriggerRuntime:
     """Unified trigger runtime that wraps legacy managers and custom adapters."""
 
@@ -70,17 +80,20 @@ class TriggerRuntime:
 
     async def _write_disabled_legacy_configs(self, workflow_id: str) -> None:
         now_ms = _now_ms()
-        await Storage.write(
-            f"{LEGACY_POLLER_CONFIG_PREFIX}{workflow_id}",
+        await WorkflowStore.put_config(
+            workflow_id,
             {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+            kind="workflow_poller_config",
         )
-        await Storage.write(
-            f"{LEGACY_SYSLOG_CONFIG_PREFIX}{workflow_id}",
+        await WorkflowStore.put_config(
+            workflow_id,
             {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+            kind="workflow_syslog_config",
         )
-        await Storage.write(
-            f"{LEGACY_KAFKA_CONFIG_PREFIX}{workflow_id}",
+        await WorkflowStore.put_config(
+            workflow_id,
             {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+            kind="workflow_kafka_config",
         )
 
     @staticmethod
@@ -88,7 +101,9 @@ class TriggerRuntime:
         payload = trigger.model_dump(mode="json", exclude_none=True)
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
-    async def _sync_legacy_configs_from_workflow(self, workflow_id: str, workflow_json: Dict[str, Any]) -> List[TriggerDefinition]:
+    async def _sync_legacy_configs_from_workflow(
+        self, workflow_id: str, workflow_json: Dict[str, Any]
+    ) -> List[TriggerDefinition]:
         triggers = workflow_trigger_definitions_from_json(workflow_json)
         if not triggers:
             if workflow_json_declares_triggers(workflow_json):
@@ -99,22 +114,27 @@ class TriggerRuntime:
         for trigger in triggers:
             key, value = trigger_to_legacy_config(workflow_id, trigger)
             if key and value is not None:
-                await Storage.write(key, value)
+                kind = _config_kind_from_legacy_key(key)
+                if kind:
+                    await WorkflowStore.put_config(workflow_id, value, kind=kind)
 
         if "schedule" not in by_type:
-            await Storage.write(
-                f"{LEGACY_POLLER_CONFIG_PREFIX}{workflow_id}",
+            await WorkflowStore.put_config(
+                workflow_id,
                 {"workflowId": workflow_id, "enabled": False, "updatedAt": _now_ms()},
+                kind="workflow_poller_config",
             )
         if "syslog" not in by_type:
-            await Storage.write(
-                f"{LEGACY_SYSLOG_CONFIG_PREFIX}{workflow_id}",
+            await WorkflowStore.put_config(
+                workflow_id,
                 {"workflowId": workflow_id, "enabled": False, "updatedAt": _now_ms()},
+                kind="workflow_syslog_config",
             )
         if "kafka" not in by_type:
-            await Storage.write(
-                f"{LEGACY_KAFKA_CONFIG_PREFIX}{workflow_id}",
+            await WorkflowStore.put_config(
+                workflow_id,
                 {"workflowId": workflow_id, "enabled": False, "updatedAt": _now_ms()},
+                kind="workflow_kafka_config",
             )
         return triggers
 
@@ -306,12 +326,11 @@ class TriggerRuntime:
                 continue
             key = (workflow_id, trigger.id or "")
             trigger_signature = desired_signatures[key]
-            if (
-                key in self._custom_adapter_tasks
-                and self._custom_adapter_signatures.get(key) == trigger_signature
-            ):
+            if key in self._custom_adapter_tasks and self._custom_adapter_signatures.get(key) == trigger_signature:
                 continue
-            plugin_id = str((trigger.source or {}).get("adapterId") or (trigger.source or {}).get("pluginId") or "").strip()
+            plugin_id = str(
+                (trigger.source or {}).get("adapterId") or (trigger.source or {}).get("pluginId") or ""
+            ).strip()
             plugin_spec = next((item for item in list_trigger_plugins() if item.get("id") == plugin_id), None)
             if plugin_spec is None:
                 self._custom_status[key] = {
@@ -351,11 +370,15 @@ class TriggerRuntime:
                 continue
 
             async def _emit(payload: Any, *, _trigger: TriggerDefinition = trigger) -> Dict[str, Any]:
-                event = payload if isinstance(payload, TriggerEvent) else build_trigger_event(
-                    workflow_id=workflow_id,
-                    trigger=_trigger,
-                    body=payload,
-                    raw=payload,
+                event = (
+                    payload
+                    if isinstance(payload, TriggerEvent)
+                    else build_trigger_event(
+                        workflow_id=workflow_id,
+                        trigger=_trigger,
+                        body=payload,
+                        raw=payload,
+                    )
                 )
                 try:
                     result = await self.dispatch_event(

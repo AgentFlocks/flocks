@@ -135,9 +135,11 @@ class ProcessWorkflowExecutor:
                 if cancel is not None and _safe_bool(cancel):
                     killed_reason = "RunCancelledError: cancellation requested"
                     _terminate(proc)
+                    break
                 if request.timeout_s and time.monotonic() - started > float(request.timeout_s):
                     killed_reason = f"RunTimeoutError: timeout_s={request.timeout_s}"
                     _terminate(proc)
+                    break
                 now = time.monotonic()
                 if now - last_rss_check >= 1.0:
                     last_rss_check = now
@@ -148,6 +150,7 @@ class ProcessWorkflowExecutor:
                             f"MemoryLimitExceeded: worker rss {rss} exceeded {request.limits.memory_limit_mb}MB"
                         )
                         _terminate(proc)
+                        break
 
                 try:
                     line = await asyncio.wait_for(proc.stdout.readline(), timeout=0.2)
@@ -183,9 +186,10 @@ class ProcessWorkflowExecutor:
                 else:
                     status = "FAILED"
                 return RunWorkflowResult(status=status, error=killed_reason)
-            await proc.wait()
             if final_result is not None:
+                await _kill_after_grace(proc, min(float(request.limits.cancel_grace_s), 0.5))
                 return final_result
+            await _wait_for_process_exit(proc, timeout_s=1.0)
             stderr = await stderr_task
             return RunWorkflowResult(
                 status="FAILED",
@@ -219,8 +223,8 @@ async def run_workflow_process(
     on_event: Optional[WorkerEventHook] = None,
     **_: Any,
 ) -> RunWorkflowResult:
-    executor = ProcessWorkflowExecutor()
     workflow_payload = _workflow_to_payload(workflow)
+    executor = ProcessWorkflowExecutor(limits=_workflow_limits_from_metadata(workflow_payload))
     workflow_id_value = str(workflow_id or workflow_payload.get("id") or workflow_payload.get("name") or "workflow")
     return await executor.run(
         workflow=workflow_payload,
@@ -252,6 +256,40 @@ def _workflow_to_payload(workflow: Any) -> Dict[str, Any]:
         if isinstance(payload, dict):
             return payload
     raise TypeError("workflow must be a dict, Workflow model, or workflow file path")
+
+
+def _workflow_limits_from_metadata(workflow_payload: Dict[str, Any]) -> WorkflowWorkerLimits:
+    metadata = workflow_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return WorkflowWorkerLimits()
+    runtime = metadata.get("runtime")
+    if not isinstance(runtime, dict):
+        return WorkflowWorkerLimits()
+
+    memory_limit_mb = _positive_int_or_none(runtime.get("memory_limit_mb", runtime.get("memoryLimitMb")))
+    soft_memory_budget_mb = _positive_int_or_none(
+        runtime.get("soft_memory_budget_mb", runtime.get("softMemoryBudgetMb"))
+    )
+    if memory_limit_mb is None and soft_memory_budget_mb is None:
+        return WorkflowWorkerLimits()
+    if memory_limit_mb is None:
+        return WorkflowWorkerLimits(soft_memory_budget_mb=soft_memory_budget_mb or 0)
+    if soft_memory_budget_mb is None:
+        return WorkflowWorkerLimits(memory_limit_mb=memory_limit_mb)
+    return WorkflowWorkerLimits(
+        memory_limit_mb=memory_limit_mb,
+        soft_memory_budget_mb=min(soft_memory_budget_mb, memory_limit_mb),
+    )
+
+
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _serialize_tool_context(tool_context: Any, *, workflow_id: Optional[str]) -> Dict[str, Any]:
@@ -531,16 +569,23 @@ def _terminate(proc: asyncio.subprocess.Process) -> None:
 async def _kill_after_grace(proc: asyncio.subprocess.Process, grace_s: float) -> None:
     if proc.returncode is not None:
         return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=max(grace_s, 0.1))
+    if await _wait_for_process_exit(proc, timeout_s=max(grace_s, 0.1)):
         return
-    except asyncio.TimeoutError:
-        pass
     try:
         proc.kill()
     except ProcessLookupError:
         return
-    await proc.wait()
+    await _wait_for_process_exit(proc, timeout_s=1.0)
+
+
+async def _wait_for_process_exit(proc: asyncio.subprocess.Process, *, timeout_s: float) -> bool:
+    if proc.returncode is not None:
+        return True
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=max(float(timeout_s), 0.1))
+        return True
+    except asyncio.TimeoutError:
+        return proc.returncode is not None
 
 
 def _safe_bool(fn: Callable[[], bool]) -> bool:

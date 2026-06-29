@@ -16,8 +16,8 @@ async def test_save_poller_config_restarts_manager(
 ) -> None:
     writes: list[tuple[str, dict[str, Any]]] = []
 
-    async def _fake_write(key: Any, value: dict[str, Any]) -> None:
-        writes.append((key, value))
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        writes.append((f"{kind}/{workflow_id}", config))
 
     async def _fake_restart(workflow_id: str) -> dict[str, Any]:
         assert workflow_id == "wf-1"
@@ -26,9 +26,11 @@ async def test_save_poller_config_restarts_manager(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None
+        ),
     )
-    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
     monkeypatch.setattr(
         "flocks.workflow.poller_manager.default_manager",
         SimpleNamespace(restart_workflow=_fake_restart),
@@ -64,8 +66,8 @@ async def test_save_poller_config_preserves_cron_schedule(
     writes: list[tuple[str, dict[str, Any]]] = []
     persisted_sources: list[dict[str, Any]] = []
 
-    async def _fake_write(key: Any, value: dict[str, Any]) -> None:
-        writes.append((key, value))
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        writes.append((f"{kind}/{workflow_id}", config))
 
     async def _fake_persist(
         _workflow_id: str,
@@ -81,9 +83,11 @@ async def test_save_poller_config_preserves_cron_schedule(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None
+        ),
     )
-    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
     monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist)
     monkeypatch.setattr(
         "flocks.workflow.poller_manager.default_manager",
@@ -119,8 +123,8 @@ async def test_get_poller_config_returns_saved_data(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _fake_read(_key: Any, *_args: Any, **_kwargs: Any) -> dict[str, Any] | None:
-        if _key != "workflow_poller_config/wf-1":
+    async def _fake_get_config(workflow_id: str, *, kind: str = "workflow.integration-config") -> dict[str, Any] | None:
+        if workflow_id != "wf-1" or kind != "workflow_poller_config":
             return None
         return {
             "workflowId": "wf-1",
@@ -131,7 +135,7 @@ async def test_get_poller_config_returns_saved_data(
             "inputs": {"dedup_source_workflow_name": "stream_alert_denoise_gt_fast"},
         }
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", _fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "get_config", _fake_get_config)
 
     response = await client.get("/api/workflow/wf-1/poller-config")
     assert response.status_code == 200, response.text
@@ -178,7 +182,9 @@ async def test_run_poller_once_returns_latest_status(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {"workflowJson": {"start": "n1", "nodes": [], "edges": []}} if workflow_id == "wf-1" else None
+        ),
     )
     monkeypatch.setattr(
         "flocks.workflow.poller_manager.default_manager",
