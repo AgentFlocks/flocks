@@ -21,10 +21,6 @@ import {
   ServerCog,
   ScrollText,
   ShieldCheck,
-  Shield,
-  AlertTriangle,
-  CircleUserRound,
-  type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -56,14 +52,11 @@ import {
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
-import { useUserDefinedPages } from '@/hooks/useUserDefinedPages';
-import { resolveUserDefinedPageIcon } from '@/utils/userDefinedPageIcons';
+import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
+import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
-type WorkspaceId = 'agent' | 'soc' | 'system';
-type NavItem = { name: string; href: string; icon: LucideIcon };
-type NavSection = { id: string; name: string; items: NavItem[] };
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
@@ -124,7 +117,7 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
-  const { pages: userDefinedPages } = useUserDefinedPages();
+  const { pages: webuiContractPages } = useWebUIContractPages();
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -411,126 +404,63 @@ export default function Layout() {
   }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
 
-  const isNavigationItemActive = useCallback((href: string) => {
-    if (href === '/') return location.pathname === '/';
-    return location.pathname === href || location.pathname.startsWith(`${href}/`);
-  }, [location.pathname]);
-
-  const socPageLinks = useMemo<NavItem[]>(
-    () => userDefinedPages
-      .filter((page) => page.enabled && page.buildStatus === 'ready')
-      .map((page) => ({
-        name: page.title,
-        href: `/soc/pages/${page.id}`,
-        icon: resolveUserDefinedPageIcon(page.icon),
-      })),
-    [userDefinedPages],
-  );
-
-  const systemPaths = [
-    '/config',
-    '/channels',
-    '/permissions',
-    '/monitoring',
-    '/audit-logs',
-    '/flockspro-upgrade',
-    '/system-logs',
-  ];
-  const isSystemPath = systemPaths.some((path) =>
-    location.pathname === path || location.pathname.startsWith(`${path}/`),
-  );
-  const currentWorkspace: WorkspaceId = location.pathname === '/soc'
-    || location.pathname.startsWith('/soc/')
-    ? 'soc'
-    : isSystemPath
-      ? 'system'
-      : 'agent';
-
-  const workspaceTabs = useMemo(
+  // Stable across re-renders triggered by location changes (sidebar nav clicks)
+  // — the array only depends on the i18n translation function, which itself is
+  // stable as long as the language doesn't change. Without this, every route
+  // switch rebuilt the whole nav structure and cascaded re-renders down to
+  // every <Link>, contributing to perceptible navigation lag.
+  const navigation = useMemo(
     () => [
-      { id: 'agent' as const, name: t('agentWorkspace'), href: '/', icon: Bot },
-      { id: 'soc' as const, name: t('socWorkspace'), href: '/soc', icon: Shield },
-      { id: 'system' as const, name: t('systemConfig'), href: '/config', icon: UserCog },
+      {
+        name: '',
+        items: [
+          { name: t('flocksHome'), href: '/', icon: Home },
+          ...webuiContractPages
+            .filter((page) => page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
+            .map((page) => ({
+              name: page.title,
+              href: page.route,
+              icon: resolveWebUIContractPageIcon(page.icon),
+            })),
+        ],
+      },
+      {
+        name: t('aiWorkbench'),
+        items: [
+          { name: t('sessions'), href: '/sessions', icon: MessageSquare },
+          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+          { name: t('tasks'), href: '/tasks', icon: ListTodo },
+          { name: t('workflows'), href: '/workflows', icon: Workflow },
+        ],
+      },
+      {
+        name: t('agentHub'),
+        items: [
+          { name: t('agents'), href: '/agents', icon: Bot },
+          { name: t('skills'), href: '/skills', icon: BookOpen },
+          { name: t('tools'), href: '/tools', icon: Wrench },
+          { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+          { name: t('hub'), href: '/hub', icon: Archive },
+          { name: t('models'), href: '/models', icon: Brain },
+          { name: t('channels'), href: '/channels', icon: Radio },
+        ],
+      },
+      {
+        name: t('systemCenter'),
+        items: [
+          { name: t('accountManagement'), href: '/config', icon: UserCog },
+          { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
+          ...(hasFlocksproCapability && user?.role === 'admin'
+            ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
+            : []),
+          ...(user?.role === 'admin'
+            ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
+            : []),
+        ],
+      },
     ],
-    [t],
+    [hasFlocksproCapability, webuiContractPages, t, user?.role],
   );
-
-  // Stable across re-renders triggered by location changes (sidebar nav clicks).
-  // The active item is computed separately from location.pathname while rendering.
-  const workspaceNavigation = useMemo<Record<WorkspaceId, NavSection[]>>(
-    () => ({
-      agent: [
-        {
-          id: 'home',
-          name: t('home'),
-          items: [
-            { name: t('flocksHome'), href: '/', icon: Home },
-            ...userDefinedPages
-              .filter((page) => page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
-              .map((page) => ({
-                name: page.title,
-                href: page.route,
-                icon: resolveUserDefinedPageIcon(page.icon),
-              })),
-          ],
-        },
-        {
-          id: 'aiWorkbench',
-          name: t('aiWorkbench'),
-          items: [
-            { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-            { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-            { name: t('tasks'), href: '/tasks', icon: ListTodo },
-            { name: t('workflows'), href: '/workflows', icon: Workflow },
-          ],
-        },
-        {
-          id: 'agentHub',
-          name: t('agentHub'),
-          items: [
-            { name: t('agents'), href: '/agents', icon: Bot },
-            { name: t('skills'), href: '/skills', icon: BookOpen },
-            { name: t('tools'), href: '/tools', icon: Wrench },
-            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-            { name: t('hub'), href: '/hub', icon: Archive },
-            { name: t('models'), href: '/models', icon: Brain },
-          ],
-        },
-      ],
-      soc: [
-        {
-          id: 'socWorkspace',
-          name: t('socWorkspace'),
-          items: [
-            { name: t('socOverview'), href: '/soc', icon: Shield },
-            { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
-            ...socPageLinks,
-          ],
-        },
-      ],
-      system: [
-        {
-          id: 'systemConfig',
-          name: t('systemConfig'),
-          items: [
-            { name: t('accountManagement'), href: '/config', icon: UserCog },
-            { name: t('channels'), href: '/channels', icon: Radio },
-            { name: t('permissions'), href: '/permissions', icon: ShieldCheck },
-            { name: t('monitoring'), href: '/monitoring', icon: ServerCog },
-            { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
-            ...(hasFlocksproCapability && user?.role === 'admin'
-              ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
-              : []),
-            ...(user?.role === 'admin'
-              ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
-              : []),
-          ],
-        },
-      ],
-    }),
-    [hasFlocksproCapability, socPageLinks, t, user?.role, userDefinedPages],
-  );
-  const navigation = workspaceNavigation[currentWorkspace];
 
   const isFullScreenPage =
     matchPath('/workflows/create', location.pathname) ||
@@ -585,68 +515,9 @@ export default function Layout() {
         />
       )}
 
-      <header className="fixed inset-x-0 top-0 z-50 h-14 border-b border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex h-full items-stretch justify-between">
-          <div className={`flex w-52 shrink-0 items-center border-r border-zinc-200 transition-all duration-300 dark:border-zinc-800 ${collapsed ? 'lg:w-16' : 'lg:w-52'}`}>
-            <button
-              type="button"
-              onClick={() => setSidebarOpen(true)}
-              className="ml-3 rounded-md p-2 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 lg:hidden"
-              aria-label={t('openNav')}
-            >
-              <Menu className="h-5 w-5" />
-            </button>
-            <Link
-              to="/"
-              className={`flex min-w-0 flex-1 items-center px-3 ${collapsed ? 'lg:justify-center lg:px-0' : 'lg:px-6'}`}
-              title={productName}
-            >
-              {collapsed ? (
-                <Sparkles className="hidden h-5 w-5 text-red-500 lg:block" />
-              ) : null}
-              <span className={`truncate text-xl font-bold text-zinc-950 dark:text-zinc-50 ${collapsed ? 'lg:hidden' : ''}`}>
-                {productName}
-              </span>
-            </Link>
-          </div>
-          <nav className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
-            {workspaceTabs.map((tab) => {
-              const isActive = tab.id === currentWorkspace;
-              return (
-                <Link
-                  key={tab.id}
-                  to={tab.href}
-                  className={`relative inline-flex min-w-28 items-center justify-center gap-2 border-r border-zinc-200 px-6 text-sm font-semibold whitespace-nowrap transition-colors dark:border-zinc-800 ${
-                    isActive
-                      ? 'bg-zinc-100 text-zinc-950 dark:bg-zinc-900 dark:text-zinc-50'
-                      : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
-                  }`}
-                >
-                  {isActive ? <span className="absolute inset-x-0 top-0 h-0.5 bg-red-500" /> : null}
-                  <tab.icon className={`h-4 w-4 ${isActive ? 'text-red-600' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                  {tab.name}
-                </Link>
-              );
-            })}
-          </nav>
-          <div className="hidden shrink-0 items-center gap-2 border-l border-zinc-200 px-4 dark:border-zinc-800 md:flex">
-            <LanguageSwitcher />
-            <ThemeToggle />
-            <Link
-              to="/config"
-              className="inline-flex max-w-56 items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900 dark:hover:text-zinc-50"
-              title={user?.username || t('accountManagement')}
-            >
-              <CircleUserRound className="h-4 w-4 text-zinc-500" />
-              <span className="truncate">{user?.username || t('accountManagement')}</span>
-            </Link>
-          </div>
-        </div>
-      </header>
-
       <aside
         className={`
-          fixed bottom-0 left-0 top-14 z-40 bg-zinc-100 border-r border-zinc-200 dark:bg-zinc-950 dark:border-zinc-800
+          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200 dark:bg-zinc-950 dark:border-zinc-800
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
@@ -654,10 +525,32 @@ export default function Layout() {
         `}
       >
         <div className="flex flex-col h-full overflow-hidden">
+          {/* Logo */}
+          <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
+            {collapsed ? (
+              <div
+                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+                title={productName}
+              >
+                <Sparkles className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
+              </div>
+            ) : (
+              <>
+                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
+                <button
+                  onClick={() => setSidebarOpen(false)}
+                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0 dark:hover:text-zinc-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </>
+            )}
+          </div>
+
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
             {navigation.map((section) => (
-              <div key={section.id} className="mb-6">
+              <div key={section.name} className="mb-6">
                 {!collapsed && section.name && (
                   <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
                     {section.name}
@@ -666,7 +559,8 @@ export default function Layout() {
                 {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
-                    const isActive = isNavigationItemActive(item.href);
+                    const isActive = location.pathname === item.href
+                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
                     return (
                       <Link
                         key={item.href}
@@ -696,9 +590,9 @@ export default function Layout() {
             ))}
           </nav>
 
-          {/* Bottom: mobile controls + version */}
+          {/* Bottom: Language switcher + version */}
           <div className={`border-t border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
-            <div className={`flex md:hidden ${collapsed ? 'flex-col items-center gap-2' : 'items-center gap-2'}`}>
+            <div className={`flex ${collapsed ? 'flex-col items-center gap-2' : 'items-center gap-2'}`}>
               <LanguageSwitcher collapsed={collapsed} />
               <ThemeToggle collapsed={collapsed} />
             </div>
@@ -778,19 +672,19 @@ export default function Layout() {
         </button>
       </aside>
 
-      {/* Mobile close button */}
-      <div className={`lg:hidden fixed left-44 top-2 z-50 flex items-center ${sidebarOpen ? '' : 'hidden'}`}>
+      {/* Mobile top menu button */}
+      <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>
         <button
-          onClick={() => setSidebarOpen(false)}
-          className="rounded-md border border-white/10 bg-[#101218] p-2 text-zinc-400 shadow-sm transition-colors hover:bg-white/5 hover:text-zinc-100"
+          onClick={() => setSidebarOpen(true)}
+          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
         >
-          <X className="w-5 h-5" />
+          <Menu className="w-5 h-5" />
         </button>
       </div>
 
       {/* Main content area */}
       <div
-        className={`flex flex-col h-screen pt-14 transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
+        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
         <main className="flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           {isFullScreenPage ? (
