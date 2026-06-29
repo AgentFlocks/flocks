@@ -461,6 +461,19 @@ describe('Layout onboarding entry', () => {
     expect(contentShell).toHaveClass('transition-all');
   });
 
+  it('only keeps the account divider in the sidebar chrome', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild;
+    const accountRow = sidebarShell?.children.item(2);
+
+    expect(logoRow).not.toHaveClass('border-b');
+    expect(accountRow).toHaveClass('border-t');
+  });
+
   it('keeps the collapsed account menu selectable outside the sidebar width', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
