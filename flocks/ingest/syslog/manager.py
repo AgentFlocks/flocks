@@ -535,6 +535,7 @@ class SyslogManager:
                 result = await run_workflow_managed(
                     workflow=workflow_json,
                     inputs=mapped_inputs,
+                    exec_id=exec_id,
                     trace=False,
                     on_step_complete=step_recorder.on_step_complete,
                 )

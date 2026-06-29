@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -115,16 +116,27 @@ class ProcessWorkflowExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
+            limit=_subprocess_stream_limit(request.limits),
         )
         assert proc.stdin is not None
         assert proc.stdout is not None
-        proc.stdin.write((json.dumps(request.to_dict(), ensure_ascii=False, default=str) + "\n").encode())
-        await proc.stdin.drain()
-
         stderr_task = asyncio.create_task(
             _drain_stderr(proc, max_bytes=request.limits.stdout_max_bytes),
             name=f"wf-worker-stderr-{request.request_id}",
         )
+        try:
+            proc.stdin.write((json.dumps(request.to_dict(), ensure_ascii=False, default=str) + "\n").encode())
+            await proc.stdin.drain()
+        except OSError as exc:
+            if not _is_pipe_closed_error(exc):
+                raise
+            await _wait_for_process_exit(proc, timeout_s=1.0)
+            stderr = await stderr_task
+            return RunWorkflowResult(
+                status="FAILED",
+                error=f"WorkerPipeClosed: {exc} stderr={stderr[-1000:]}",
+            )
+
         started = time.monotonic()
         last_rss_check = 0.0
         final_result: Optional[RunWorkflowResult] = None
@@ -155,6 +167,10 @@ class ProcessWorkflowExecutor:
                     if proc.returncode is not None:
                         break
                     continue
+                except OSError as exc:
+                    if not _is_pipe_closed_error(exc):
+                        raise
+                    break
                 if not line:
                     if proc.returncode is not None:
                         break
@@ -193,7 +209,11 @@ class ProcessWorkflowExecutor:
             )
         finally:
             if proc.stdin is not None and not proc.stdin.is_closing():
-                proc.stdin.close()
+                try:
+                    proc.stdin.close()
+                except OSError as exc:
+                    if not _is_pipe_closed_error(exc):
+                        raise
             if proc.returncode is None:
                 _terminate(proc)
                 await _kill_after_grace(proc, request.limits.cancel_grace_s)
@@ -449,8 +469,18 @@ async def _send_control_response(
     try:
         proc.stdin.write((json.dumps(message, ensure_ascii=False, default=str) + "\n").encode())
         await proc.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
+    except OSError as exc:
+        if not _is_pipe_closed_error(exc):
+            raise
         return
+
+
+def _is_pipe_closed_error(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    return getattr(exc, "errno", None) in {errno.EPIPE, errno.ECONNRESET} or getattr(exc, "winerror", None) == 109
 
 
 def _result_from_event(event: Dict[str, Any]) -> Optional[RunWorkflowResult]:
@@ -482,13 +512,27 @@ def _parse_event(line: bytes) -> Optional[Dict[str, Any]]:
     return event if isinstance(event, dict) else None
 
 
+def _subprocess_stream_limit(limits: WorkflowWorkerLimits) -> int:
+    max_event_bytes = max(
+        int(limits.result_max_bytes or 0),
+        int(limits.stdout_max_bytes or 0),
+        64 * 1024,
+    )
+    return max_event_bytes + 64 * 1024
+
+
 async def _drain_stderr(proc: asyncio.subprocess.Process, *, max_bytes: int) -> str:
     if proc.stderr is None:
         return ""
     chunks: list[str] = []
     max_capture = max(int(max_bytes or 0), 0) or 64 * 1024
     while True:
-        line = await proc.stderr.readline()
+        try:
+            line = await proc.stderr.readline()
+        except OSError as exc:
+            if _is_pipe_closed_error(exc):
+                break
+            raise
         if not line:
             break
         chunks.append(line.decode("utf-8", errors="replace"))

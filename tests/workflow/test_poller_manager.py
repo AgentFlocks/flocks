@@ -57,11 +57,13 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         *,
         workflow: Any,
         inputs: dict[str, Any],
+        exec_id: str,
         timeout_s: int,
         trace: bool,
         cancel,
         on_step_complete,
     ):
+        assert exec_id == "exec-wf-run-once"
         captured_inputs.update(inputs)
         assert workflow == {"start": "n1", "nodes": [], "edges": []}
         assert timeout_s == 9
@@ -173,11 +175,13 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         *,
         workflow: Any,
         inputs: dict[str, Any],
+        exec_id: str,
         timeout_s: int,
         trace: bool,
         cancel,
         on_step_complete,
     ):
+        assert exec_id == "exec-1"
         assert workflow == {"start": "n1", "nodes": [], "edges": []}
         assert timeout_s == 9
         assert trace is False
@@ -254,11 +258,13 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         *,
         workflow: Any,
         inputs: dict[str, Any],
+        exec_id: str,
         timeout_s: int,
         trace: bool,
         cancel,
         on_step_complete,
     ):
+        assert exec_id == "exec-wf-overlap"
         _ = workflow, inputs, timeout_s, trace, cancel
         _ = on_step_complete
         # Keep the run active until the test releases it so a second tick skips.
@@ -338,11 +344,13 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         *,
         workflow: Any,
         inputs: dict[str, Any],
+        exec_id: str,
         timeout_s: int,
         trace: bool,
         cancel,
         on_step_complete,
     ):
+        assert exec_id == "exec-wf-stop"
         _ = workflow, inputs, timeout_s, trace, cancel
         _ = on_step_complete
         await asyncio.to_thread(release_run.wait, 0.2)

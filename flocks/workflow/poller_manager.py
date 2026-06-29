@@ -432,6 +432,7 @@ class WorkflowPollerManager:
             result = await run_workflow_managed(
                 workflow=workflow_json,
                 inputs=inputs,
+                exec_id=exec_id,
                 timeout_s=config["timeoutSeconds"],
                 trace=False,
                 cancel=cancel_event.is_set,

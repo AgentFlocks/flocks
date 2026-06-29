@@ -202,6 +202,7 @@ class TriggerRuntime:
             result = await run_workflow_managed(
                 workflow=workflow_json,
                 inputs=mapped_inputs,
+                exec_id=exec_id,
                 trace=False,
             )
             status_value, error_message = resolve_execution_outcome(result)
