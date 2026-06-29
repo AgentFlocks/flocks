@@ -112,6 +112,7 @@ def create_service_app(
                 action_name="invoke",
             )
             result: RunWorkflowResult = await run_workflow_managed(
+                workflow_id=app.state.workflow_id,
                 workflow=app.state.workflow_json,
                 inputs=req.inputs,
                 timeout_s=req.timeout_s,

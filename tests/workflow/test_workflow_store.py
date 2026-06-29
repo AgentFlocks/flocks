@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -86,3 +87,24 @@ async def test_workflow_store_records_execution_steps_config_and_kv() -> None:
     await WorkflowStore.kv_put("workflow_runtime/wf-1", {"status": "active"})
     assert await WorkflowStore.kv_get("workflow_runtime/wf-1") == {"status": "active"}
     assert await WorkflowStore.kv_list_keys("workflow_runtime/") == ["workflow_runtime/wf-1"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_increment_stats_is_atomic_for_concurrent_updates() -> None:
+    await WorkflowStore.init()
+    updates = [(idx % 3 != 0, 1.0) for idx in range(60)]
+
+    await asyncio.gather(
+        *(
+            WorkflowStore.increment_stats("wf-concurrent", success=success, duration=duration)
+            for success, duration in updates
+        )
+    )
+
+    stats = await WorkflowStore.get_stats("wf-concurrent")
+    assert stats is not None
+    assert stats["callCount"] == 60
+    assert stats["successCount"] == sum(1 for success, _ in updates if success)
+    assert stats["errorCount"] == sum(1 for success, _ in updates if not success)
+    assert stats["totalRuntime"] == pytest.approx(60.0)
+    assert stats["avgRuntime"] == pytest.approx(1.0)

@@ -691,6 +691,7 @@ class KafkaManager:
             )
             try:
                 result = await run_workflow_managed(
+                    workflow_id=workflow_id,
                     workflow=workflow_json,
                     inputs=mapped_inputs,
                     trace=False,

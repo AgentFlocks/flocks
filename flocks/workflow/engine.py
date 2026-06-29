@@ -97,19 +97,25 @@ class ExecutionResult(BaseModel):
 
 
 def _default_workflow_loader(workflow_id: str) -> "Workflow":
-    """Default loader: resolves workflow from Storage by ID (sync wrapper)."""
+    """Default loader: resolves workflow by ID from disk, then legacy KV."""
     import asyncio
 
     async def _load():
+        from flocks.workflow.fs_store import read_workflow_from_fs
         from flocks.storage.storage import Storage
 
-        data = await Storage.read(f"workflow/{workflow_id}")
+        data = read_workflow_from_fs(workflow_id)
+        if data is None:
+            data = await Storage.read(f"workflow/{workflow_id}")
         if data is None:
             raise NodeExecutionError(
                 node_id="<subworkflow>",
                 message=f"Workflow not found: {workflow_id!r}",
             )
         wf_json = data.get("workflowJson") or data
+        if isinstance(wf_json, dict):
+            wf_json = dict(wf_json)
+            wf_json.setdefault("id", workflow_id)
         return Workflow.from_dict(wf_json)
 
     try:

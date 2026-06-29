@@ -1152,6 +1152,7 @@ async def _run_workflow_execution_task(
 
     try:
         result: RunWorkflowResult = await run_workflow_managed(
+            workflow_id=workflow_id,
             workflow=workflow_json,
             inputs=req.inputs or {},
             timeout_s=req.timeout_s,

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from flocks.tool import Tool, ToolCategory, ToolContext, ToolInfo, ToolRegistry,
 from flocks.workflow.errors import WorkflowValidationError
 from flocks.workflow.models import Workflow
 from flocks.workflow.engine import WorkflowEngine
+from flocks.workflow import fs_store
 from flocks.workflow.repl_runtime import PythonExecRuntime
 from flocks.workflow.runner import run_workflow
 from flocks.workflow import tools_adapter as tools_adapter_module
@@ -52,6 +54,54 @@ class _MockToolAdapter(FlocksToolAdapter):
                 raise NodeExecutionError(node_id="<tool>", message=str(val))
             return val
         return f"mock_output_for_{name}"
+
+
+def test_subworkflow_loader_reads_filesystem_workflow_without_legacy_kv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workflow_id = "child-filesystem-workflow"
+    workflow_dir = tmp_path / ".flocks" / "plugins" / "workflows" / workflow_id
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "workflow.json").write_text(
+        json.dumps(
+            {
+                "name": "Child Filesystem Workflow",
+                "start": "child_node",
+                "nodes": [
+                    {
+                        "id": "child_node",
+                        "type": "python",
+                        "code": "outputs['child_result'] = inputs.get('value', 'missing')",
+                    }
+                ],
+                "edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fs_store, "_workspace_root", None)
+
+    result = run_workflow(
+        workflow={
+            "id": "parent-filesystem-workflow",
+            "start": "call_child",
+            "nodes": [
+                {
+                    "id": "call_child",
+                    "type": "subworkflow",
+                    "workflow_id": workflow_id,
+                }
+            ],
+            "edges": [],
+        },
+        inputs={"value": "ok"},
+        ensure_requirements=False,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs == {"output": {"child_result": "ok"}}
 
 
 # ===================================================================

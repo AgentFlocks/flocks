@@ -181,6 +181,7 @@ class TaskExecutor:
             _workflow_done_events[execution.id] = done_event
         try:
             result = await run_workflow_managed(
+                workflow_id=execution.workflow_id,
                 workflow=workflow_data["workflowJson"],
                 inputs=inputs,
                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,

@@ -65,6 +65,27 @@ def _real_workflow() -> dict[str, Any]:
     }
 
 
+def _context_workflow_without_payload_id() -> dict[str, Any]:
+    return {
+        "name": "Context Workflow Without Payload ID",
+        "start": "inspect_context",
+        "nodes": [
+            {
+                "id": "inspect_context",
+                "type": "python",
+                "code": "\n".join(
+                    [
+                        "ctx = getattr(getattr(tool, 'registry', None), '_ctx', None)",
+                        "extra = getattr(ctx, 'extra', {}) or {}",
+                        "outputs['workflow_id'] = extra.get('workflowId')",
+                    ]
+                ),
+            }
+        ],
+        "edges": [],
+    }
+
+
 @pytest.fixture
 def lifecycle_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     state: dict[str, list[Any]] = {"created": [], "results": [], "steps": []}
@@ -250,6 +271,40 @@ async def test_task_executor_runs_real_workflow(monkeypatch: pytest.MonkeyPatch)
     result = await TaskExecutor._trigger_workflow(execution, scheduler)
 
     assert "processed:task" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_task_executor_passes_scheduler_workflow_id_to_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.workflow import fs_store
+
+    monkeypatch.setattr(
+        fs_store,
+        "read_workflow_from_fs",
+        lambda workflow_id: (
+            {"workflowJson": _context_workflow_without_payload_id()}
+            if workflow_id == "wf-task-explicit-worker-id"
+            else None
+        ),
+    )
+    scheduler = TaskScheduler(
+        title="workflow task",
+        executionMode=ExecutionMode.WORKFLOW,
+        workflowID="wf-task-explicit-worker-id",
+        context={},
+    )
+    execution = TaskExecution(
+        schedulerID=scheduler.id,
+        title=scheduler.title,
+        executionMode=ExecutionMode.WORKFLOW,
+        workflowID="wf-task-explicit-worker-id",
+        executionInputSnapshot={"context": {}},
+    )
+
+    result = await TaskExecutor._trigger_workflow(execution, scheduler)
+
+    assert "wf-task-explicit-worker-id" in str(result)
 
 
 @pytest.mark.asyncio

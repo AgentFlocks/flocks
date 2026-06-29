@@ -518,23 +518,45 @@ class WorkflowStore:
 
     @classmethod
     async def increment_stats(cls, workflow_id: str, *, success: bool, duration: float) -> None:
-        current = await cls.get_stats(workflow_id) or {}
-        call_count = int(current.get("callCount") or 0) + 1
-        success_count = int(current.get("successCount") or 0) + (1 if success else 0)
-        error_count = int(current.get("errorCount") or 0) + (0 if success else 1)
-        total_runtime = float(current.get("totalRuntime") or 0.0) + float(duration)
-        await cls.put_stats(
-            workflow_id,
-            {
-                "callCount": call_count,
-                "successCount": success_count,
-                "errorCount": error_count,
-                "totalRuntime": total_runtime,
-                "avgRuntime": total_runtime / call_count if call_count else 0.0,
-                "thumbsUp": int(current.get("thumbsUp") or 0),
-                "thumbsDown": int(current.get("thumbsDown") or 0),
-            },
+        db = await cls._db()
+        runtime = float(duration)
+        success_delta = 1 if success else 0
+        error_delta = 0 if success else 1
+        updated_at = cls._now_ms()
+        await db.execute(
+            """
+            INSERT INTO workflow_stats (
+                workflow_id,
+                call_count,
+                success_count,
+                error_count,
+                total_runtime,
+                avg_runtime,
+                thumbs_up,
+                thumbs_down,
+                updated_at
+            )
+            VALUES (?, 1, ?, ?, ?, ?, 0, 0, ?)
+            ON CONFLICT(workflow_id) DO UPDATE SET
+                call_count = workflow_stats.call_count + 1,
+                success_count = workflow_stats.success_count + excluded.success_count,
+                error_count = workflow_stats.error_count + excluded.error_count,
+                total_runtime = workflow_stats.total_runtime + excluded.total_runtime,
+                avg_runtime = (
+                    workflow_stats.total_runtime + excluded.total_runtime
+                ) / (workflow_stats.call_count + 1),
+                updated_at = excluded.updated_at
+            """,
+            (
+                workflow_id,
+                success_delta,
+                error_delta,
+                runtime,
+                runtime,
+                updated_at,
+            ),
         )
+        await db.commit()
 
     @classmethod
     async def put_config(

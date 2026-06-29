@@ -531,6 +531,7 @@ class SyslogManager:
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             try:
                 result = await run_workflow_managed(
+                    workflow_id=workflow_id,
                     workflow=workflow_json,
                     inputs=mapped_inputs,
                     trace=False,

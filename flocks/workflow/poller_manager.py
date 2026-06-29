@@ -422,6 +422,7 @@ class WorkflowPollerManager:
 
         try:
             result = await run_workflow_managed(
+                workflow_id=workflow_id,
                 workflow=workflow_json,
                 inputs=inputs,
                 timeout_s=config["timeoutSeconds"],

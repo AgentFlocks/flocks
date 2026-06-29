@@ -748,11 +748,15 @@ async def run_workflow_tool(
         }
 
         # Backward-compatibility: older runtimes may not accept `use_llm`.
+        supports_workflow_id = False
         supports_use_llm = False
         supports_step_start = False
         supports_cancel = False
         try:
             sig = inspect.signature(_run_workflow_fn)
+            supports_workflow_id = "workflow_id" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
             supports_use_llm = "use_llm" in sig.parameters or any(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
@@ -764,10 +768,13 @@ async def run_workflow_tool(
             )
         except Exception:
             # Best-effort: assume supported.
+            supports_workflow_id = True
             supports_use_llm = True
             supports_step_start = True
             supports_cancel = True
 
+        if supports_workflow_id:
+            call_kwargs["workflow_id"] = display_workflow_id
         if supports_use_llm:
             call_kwargs["use_llm"] = use_llm
         if supports_step_start:
@@ -780,7 +787,10 @@ async def run_workflow_tool(
             result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
         except TypeError as te:
             # Fallback if the runtime rejects `use_llm` (unexpected keyword).
-            if supports_use_llm and "use_llm" in str(te):
+            if supports_workflow_id and "workflow_id" in str(te):
+                call_kwargs.pop("workflow_id", None)
+                result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
+            elif supports_use_llm and "use_llm" in str(te):
                 call_kwargs.pop("use_llm", None)
                 result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             elif supports_step_start and "on_step_start" in str(te):
