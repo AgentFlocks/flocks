@@ -9,3 +9,4 @@ export * from './tool';
 export * from './provider';
 export * from './mcp';
 export * from './hub';
+export * from './webuiContractPages';

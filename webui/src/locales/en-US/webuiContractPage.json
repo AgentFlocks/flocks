@@ -1,0 +1,18 @@
+{
+  "host": {
+    "missingPageId": "Page ID is missing",
+    "loading": "Loading WebUI contract page...",
+    "unavailableTitle": "Page unavailable",
+    "notBuilt": "This page has not been built yet",
+    "loadFailed": "Failed to load page",
+    "buildFailed": "Page build failed",
+    "retry": "Retry",
+    "emptyComponent": "Page component is empty",
+    "renderFailedTitle": "WebUI contract page failed to run",
+    "renderFailed": "Page render failed",
+    "bundleMissingExport": "Page bundle does not export a default component"
+  },
+  "nav": {
+    "fetchFailed": "Failed to load WebUI contract page navigation"
+  }
+}

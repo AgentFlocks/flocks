@@ -52,8 +52,8 @@ import {
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
-import { useUserDefinedPages } from '@/hooks/useUserDefinedPages';
-import { resolveUserDefinedPageIcon } from '@/utils/userDefinedPageIcons';
+import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
+import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -117,7 +117,7 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
-  const { pages: userDefinedPages } = useUserDefinedPages();
+  const { pages: webuiContractPages } = useWebUIContractPages();
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -415,12 +415,12 @@ export default function Layout() {
         name: '',
         items: [
           { name: t('flocksHome'), href: '/', icon: Home },
-          ...userDefinedPages
+          ...webuiContractPages
             .filter((page) => page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
             .map((page) => ({
               name: page.title,
               href: page.route,
-              icon: resolveUserDefinedPageIcon(page.icon),
+              icon: resolveWebUIContractPageIcon(page.icon),
             })),
         ],
       },
@@ -459,7 +459,7 @@ export default function Layout() {
         ],
       },
     ],
-    [hasFlocksproCapability, userDefinedPages, t, user?.role],
+    [hasFlocksproCapability, webuiContractPages, t, user?.role],
   );
 
   const isFullScreenPage =
