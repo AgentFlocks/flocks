@@ -14,5 +14,17 @@
   },
   "nav": {
     "fetchFailed": "Failed to load WebUI contract page navigation"
+  },
+  "workspace": {
+    "missingWorkspaceId": "Workspace ID is missing",
+    "loading": "Loading workspace...",
+    "unavailableTitle": "Workspace unavailable",
+    "loadFailed": "Failed to load workspace",
+    "notFound": "Workspace not found",
+    "empty": "No pages in this workspace",
+    "pageNotFound": "Page not found",
+    "sectionNavigation": "Workspace page sections",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar"
   }
 }

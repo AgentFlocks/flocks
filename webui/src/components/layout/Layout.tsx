@@ -117,7 +117,7 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
-  const { pages: webuiContractPages } = useWebUIContractPages();
+  const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -410,56 +410,72 @@ export default function Layout() {
   // switch rebuilt the whole nav structure and cascaded re-renders down to
   // every <Link>, contributing to perceptible navigation lag.
   const navigation = useMemo(
-    () => [
-      {
-        name: '',
-        items: [
-          { name: t('flocksHome'), href: '/', icon: Home },
-          ...webuiContractPages
-            .filter((page) => page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
-            .map((page) => ({
-              name: page.title,
-              href: page.route,
-              icon: resolveWebUIContractPageIcon(page.icon),
-            })),
-        ],
-      },
-      {
-        name: t('aiWorkbench'),
-        items: [
-          { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-          { name: t('tasks'), href: '/tasks', icon: ListTodo },
-          { name: t('workflows'), href: '/workflows', icon: Workflow },
-        ],
-      },
-      {
-        name: t('agentHub'),
-        items: [
-          { name: t('agents'), href: '/agents', icon: Bot },
-          { name: t('skills'), href: '/skills', icon: BookOpen },
-          { name: t('tools'), href: '/tools', icon: Wrench },
-          { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-          { name: t('hub'), href: '/hub', icon: Archive },
-          { name: t('models'), href: '/models', icon: Brain },
-          { name: t('channels'), href: '/channels', icon: Radio },
-        ],
-      },
-      {
-        name: t('systemCenter'),
-        items: [
-          { name: t('accountManagement'), href: '/config', icon: UserCog },
-          { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
-          ...(hasFlocksproCapability && user?.role === 'admin'
-            ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
-            : []),
-          ...(user?.role === 'admin'
-            ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
-            : []),
-        ],
-      },
-    ],
-    [hasFlocksproCapability, webuiContractPages, t, user?.role],
+    () => {
+      const sceneWorkspaceItems = webuiContractWorkspaces
+        .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
+        .map((workspace) => ({
+          name: workspace.title,
+          href: workspace.route,
+          icon: resolveWebUIContractPageIcon(workspace.icon),
+        }));
+
+      return [
+        {
+          name: '',
+          items: [
+            { name: t('flocksHome'), href: '/', icon: Home },
+            ...webuiContractPages
+              .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
+              .map((page) => ({
+                name: page.title,
+                href: page.route,
+                icon: resolveWebUIContractPageIcon(page.icon),
+              })),
+          ],
+        },
+        {
+          name: t('aiWorkbench'),
+          items: [
+            { name: t('sessions'), href: '/sessions', icon: MessageSquare },
+            { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+            { name: t('tasks'), href: '/tasks', icon: ListTodo },
+            { name: t('workflows'), href: '/workflows', icon: Workflow },
+          ],
+        },
+        {
+          name: t('agentHub'),
+          items: [
+            { name: t('agents'), href: '/agents', icon: Bot },
+            { name: t('skills'), href: '/skills', icon: BookOpen },
+            { name: t('tools'), href: '/tools', icon: Wrench },
+            { name: t('hub'), href: '/hub', icon: Archive },
+            { name: t('models'), href: '/models', icon: Brain },
+            { name: t('channels'), href: '/channels', icon: Radio },
+          ],
+        },
+        {
+          name: t('sceneWorkspaces'),
+          items: [
+            ...sceneWorkspaceItems,
+            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+          ],
+        },
+        {
+          name: t('systemCenter'),
+          items: [
+            { name: t('accountManagement'), href: '/config', icon: UserCog },
+            { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
+            ...(hasFlocksproCapability && user?.role === 'admin'
+              ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
+              : []),
+            ...(user?.role === 'admin'
+              ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
+              : []),
+          ],
+        },
+      ];
+    },
+    [hasFlocksproCapability, webuiContractPages, webuiContractWorkspaces, t, user?.role],
   );
 
   const isFullScreenPage =
@@ -467,7 +483,8 @@ export default function Layout() {
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
     matchPath('/sessions', location.pathname) ||
-    matchPath('/devices', location.pathname);
+    matchPath('/devices', location.pathname) ||
+    matchPath('/contracts/webui/*', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
     ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)

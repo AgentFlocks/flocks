@@ -657,4 +657,65 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(await screen.findByRole('link', { name: '可用页面' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '失败页面' })).not.toBeInTheDocument();
   });
+
+  it('renders WebUI workspaces and device integration in the scene workspace group', async () => {
+    useWebUIContractPages.mockReturnValue({
+      pages: [
+        {
+          id: 'soc-alerts',
+          title: '告警运营',
+          route: '/contracts/webui/soc-alerts',
+          icon: 'AlertTriangle',
+          order: 20,
+          enabled: true,
+          placement: 'home.after',
+          buildHash: 'ready',
+          buildStatus: 'ready',
+          workspaceId: 'soc_ui',
+          workspaceTitle: 'SOC 工作区',
+          workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+        },
+      ],
+      workspaces: [
+        {
+          id: 'soc_ui',
+          title: 'SOC 工作区',
+          route: '/contracts/webui/workspaces/soc_ui',
+          icon: 'ShieldCheck',
+          order: 10,
+          enabled: true,
+          placement: 'sceneWorkspace',
+          defaultPageId: 'soc-alerts',
+          pages: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    expect(await screen.findByRole('link', { name: 'SOC 工作区' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/soc_ui',
+    );
+    expect(screen.queryByRole('link', { name: '告警运营' })).not.toBeInTheDocument();
+
+    const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThan(sectionHeadings.indexOf('agentHub'));
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeLessThan(sectionHeadings.indexOf('systemCenter'));
+
+    const sceneSection = Array.from(container.querySelectorAll('h3'))
+      .find((heading) => heading.textContent === 'sceneWorkspaces')
+      ?.parentElement;
+    expect(sceneSection?.querySelector('a[href="/contracts/webui/workspaces/soc_ui"]')).not.toBeNull();
+    expect(sceneSection?.querySelector('a[href="/devices"]')).not.toBeNull();
+
+    const agentSection = Array.from(container.querySelectorAll('h3'))
+      .find((heading) => heading.textContent === 'agentHub')
+      ?.parentElement;
+    expect(agentSection?.querySelector('a[href="/devices"]')).toBeNull();
+  });
 });

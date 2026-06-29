@@ -37,6 +37,7 @@ const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
 const WebUIContractPageHost = lazy(() => import('@/pages/WebUIContractPageHost'));
+const WebUIContractWorkspaceHost = lazy(() => import('@/pages/WebUIContractWorkspaceHost'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -132,6 +133,7 @@ export function Routes() {
       <Route path="/setup-admin" element={<Navigate to="/" replace />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
+        <Route path="contracts/webui/workspaces/:workspaceId/:pageId?" element={<LazyRoute><WebUIContractWorkspaceHost /></LazyRoute>} />
         <Route path="contracts/webui/:pageId/*" element={<LazyRoute><WebUIContractPageHost /></LazyRoute>} />
         <Route path="user-defined-pages/:pageId/*" element={<LegacyWebUIContractPageRedirect />} />
 

@@ -1,19 +1,23 @@
 import { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
 
-type Theme = 'light' | 'dark';
+export type Theme = 'light' | 'dark';
 
 interface ThemeContextValue {
   theme: Theme;
+  effectiveTheme: Theme;
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
+  setTemporaryThemeOverride: (theme: Theme | null) => void;
 }
 
 const THEME_STORAGE_KEY = 'flocks_theme';
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: 'light',
+  effectiveTheme: 'light',
   toggleTheme: () => undefined,
   setTheme: () => undefined,
+  setTemporaryThemeOverride: () => undefined,
 });
 
 function getInitialTheme(): Theme {
@@ -34,10 +38,12 @@ function applyTheme(theme: Theme) {
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(getInitialTheme);
+  const [temporaryThemeOverride, setTemporaryThemeOverride] = useState<Theme | null>(null);
+  const effectiveTheme = temporaryThemeOverride ?? theme;
 
   useLayoutEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
+    applyTheme(effectiveTheme);
+  }, [effectiveTheme]);
 
   useEffect(() => {
     if (typeof window.localStorage?.setItem === 'function') {
@@ -53,7 +59,16 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setThemeState((current) => (current === 'dark' ? 'light' : 'dark'));
   }, []);
 
-  const value = useMemo(() => ({ theme, toggleTheme, setTheme }), [setTheme, theme, toggleTheme]);
+  const value = useMemo(
+    () => ({
+      theme,
+      effectiveTheme,
+      toggleTheme,
+      setTheme,
+      setTemporaryThemeOverride,
+    }),
+    [effectiveTheme, setTheme, theme, toggleTheme],
+  );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }

@@ -14,5 +14,17 @@
   },
   "nav": {
     "fetchFailed": "加载 WebUI 契约页面导航失败"
+  },
+  "workspace": {
+    "missingWorkspaceId": "未指定工作区 ID",
+    "loading": "正在加载工作区...",
+    "unavailableTitle": "工作区暂不可用",
+    "loadFailed": "加载工作区失败",
+    "notFound": "工作区不存在",
+    "empty": "工作区暂无页面",
+    "pageNotFound": "页面不存在",
+    "sectionNavigation": "工作区页面分类",
+    "collapseSidebar": "折叠侧边栏",
+    "expandSidebar": "展开侧边栏"
   }
 }

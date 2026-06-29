@@ -16,15 +16,19 @@ from flocks.contracts.webui.models import (
     WebUIPageDetail,
     WebUIPageListItem,
     WebUIPageManifest,
+    WebUIWorkspaceListItem,
+    WebUIWorkspaceManifest,
 )
 from flocks.utils.log import Log
 
 log = Log.create(service="webui-pages-store")
 
 PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+WORKSPACE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 MAX_SOURCE_FILE_BYTES = 512_000
 ALLOWED_WRITE_PREFIXES = ("src/", "assets/", "api/")
 ALLOWED_WRITE_FILES = frozenset({"manifest.json"})
+WORKSPACE_MANIFEST_FILE = "workspace.json"
 _SOURCE_SUFFIXES = {".tsx", ".ts", ".jsx", ".js", ".css", ".json"}
 _API_SUFFIXES = {".py", ".yaml", ".yml"}
 _MIGRATION_TEXT_SUFFIXES = _SOURCE_SUFFIXES | _API_SUFFIXES
@@ -66,6 +70,11 @@ export default Page;
 
 def webui_contract_page_route(page_id: str) -> str:
     return f"{WEBUI_CONTRACT_ROUTE_PREFIX}/{page_id}"
+
+
+def webui_contract_workspace_route(workspace_id: str, page_id: Optional[str] = None) -> str:
+    base = f"{WEBUI_CONTRACT_ROUTE_PREFIX}/workspaces/{workspace_id}"
+    return f"{base}/{page_id}" if page_id else base
 
 
 def get_webui_pages_root() -> Path:
@@ -133,6 +142,13 @@ class WebUIPagesStore:
             raise ValueError("invalid page id: use lowercase letters, numbers, and hyphens")
         return normalized
 
+    @staticmethod
+    def validate_workspace_id(workspace_id: str) -> str:
+        normalized = (workspace_id or "").strip().lower()
+        if not WORKSPACE_ID_RE.fullmatch(normalized):
+            raise ValueError("invalid workspace id: use lowercase letters, numbers, and underscores")
+        return normalized
+
     def page_dir(self, page_id: str) -> Path:
         page_id = self.validate_page_id(page_id)
         existing = self._find_page_dir(page_id)
@@ -153,6 +169,12 @@ class WebUIPagesStore:
             return target
 
         source = self._find_page_dir(page_id)
+        if source is not None:
+            try:
+                source.resolve().relative_to(self._root.resolve())
+                return source
+            except ValueError:
+                pass
         if source is not None and source != target:
             shutil.copytree(source, target)
             self._normalize_migrated_page(target, page_id)
@@ -184,20 +206,19 @@ class WebUIPagesStore:
         for root in self._read_roots:
             if not root.is_dir():
                 continue
-            for child in sorted(root.iterdir()):
-                if not child.is_dir():
+            for page_dir, page_id in self._iter_page_dirs(root):
+                if page_id in seen_keys:
                     continue
-                if child.name in seen_keys:
-                    continue
-                manifest = self._read_manifest(child.name)
+                manifest = self._read_manifest_at(page_dir, page_id)
                 if manifest is None:
                     continue
-                if child.name in seen_keys or manifest.id in seen_keys:
+                if page_id in seen_keys or manifest.id in seen_keys:
                     continue
-                seen_keys.update({child.name, manifest.id})
+                seen_keys.update({page_id, manifest.id})
                 if enabled_only and not manifest.enabled:
                     continue
-                build = self._read_build_meta(child.name)
+                build = self._read_build_meta_at(page_dir)
+                workspace = self._workspace_for_page_dir(root, page_dir)
                 items.append(
                     WebUIPageListItem(
                         id=manifest.id,
@@ -209,10 +230,72 @@ class WebUIPagesStore:
                         placement=manifest.placement,
                         buildHash=build.hash,
                         buildStatus=build.status,
+                        workspaceId=workspace.id if workspace else None,
+                        workspaceTitle=workspace.title if workspace else None,
+                        workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
                     )
                 )
         items.sort(key=lambda item: (item.order, item.title))
         return items
+
+    def list_workspaces(self, *, enabled_only: bool = False) -> list[WebUIWorkspaceListItem]:
+        self.ensure_root()
+        workspaces: list[WebUIWorkspaceListItem] = []
+        seen_workspace_ids: set[str] = set()
+        for root in self._read_roots:
+            if not root.is_dir():
+                continue
+            for workspace_dir, manifest in self._iter_workspace_dirs(root):
+                if manifest.id in seen_workspace_ids:
+                    continue
+                seen_workspace_ids.add(manifest.id)
+                if enabled_only and not manifest.enabled:
+                    continue
+
+                pages: list[WebUIPageListItem] = []
+                seen_page_ids: set[str] = set()
+                for page_dir, page_id in self._iter_page_dirs(workspace_dir):
+                    if page_id in seen_page_ids:
+                        continue
+                    page_manifest = self._read_manifest_at(page_dir, page_id)
+                    if page_manifest is None:
+                        continue
+                    seen_page_ids.add(page_manifest.id)
+                    if enabled_only and not page_manifest.enabled:
+                        continue
+                    build = self._read_build_meta_at(page_dir)
+                    pages.append(
+                        WebUIPageListItem(
+                            id=page_manifest.id,
+                            title=page_manifest.title,
+                            route=page_manifest.route,
+                            icon=page_manifest.icon,
+                            order=page_manifest.order,
+                            enabled=page_manifest.enabled,
+                            placement=page_manifest.placement,
+                            buildHash=build.hash,
+                            buildStatus=build.status,
+                            workspaceId=manifest.id,
+                            workspaceTitle=manifest.title,
+                            workspaceRoute=webui_contract_workspace_route(manifest.id),
+                        )
+                    )
+                pages.sort(key=lambda item: (item.order, item.title))
+                workspaces.append(
+                    WebUIWorkspaceListItem(
+                        id=manifest.id,
+                        title=manifest.title,
+                        route=webui_contract_workspace_route(manifest.id),
+                        icon=manifest.icon,
+                        order=manifest.order,
+                        enabled=manifest.enabled,
+                        placement=manifest.placement,
+                        defaultPageId=manifest.defaultPageId,
+                        pages=pages,
+                    )
+                )
+        workspaces.sort(key=lambda item: (item.order, item.title))
+        return workspaces
 
     def get_page(self, page_id: str) -> WebUIPageDetail:
         self.ensure_root()
@@ -374,7 +457,10 @@ class WebUIPagesStore:
         return self.page_dir(page_id) / "dist" / "api-meta.json"
 
     def _read_manifest(self, page_id: str) -> Optional[WebUIPageManifest]:
-        path = self._manifest_path(page_id)
+        return self._read_manifest_at(self.page_dir(page_id), page_id)
+
+    def _read_manifest_at(self, page_dir: Path, page_id: str) -> Optional[WebUIPageManifest]:
+        path = page_dir / "manifest.json"
         if not path.is_file():
             return None
         try:
@@ -392,7 +478,11 @@ class WebUIPagesStore:
         self._write_manifest_at(self.writable_page_dir(page_id), manifest)
 
     def _read_build_meta(self, page_id: str) -> WebUIPageBuildMeta:
-        path = self._build_meta_path(page_id)
+        return self._read_build_meta_at(self.page_dir(page_id))
+
+    @staticmethod
+    def _read_build_meta_at(page_dir: Path) -> WebUIPageBuildMeta:
+        path = page_dir / "dist" / "meta.json"
         if not path.is_file():
             return WebUIPageBuildMeta()
         try:
@@ -441,7 +531,7 @@ class WebUIPagesStore:
                 target = self._page_dir_in_root(self._root, page_id)
             except ValueError:
                 continue
-            if target.exists():
+            if target.exists() or self._find_page_dir_in_root(self._root, page_id) is not None:
                 continue
             try:
                 shutil.copytree(child, target)
@@ -506,10 +596,141 @@ class WebUIPagesStore:
 
     def _find_page_dir(self, page_id: str) -> Optional[Path]:
         for root in self._read_roots:
-            candidate = self._page_dir_in_root(root, page_id)
-            if candidate.is_dir():
-                return candidate
+            page_dir = self._find_page_dir_in_root(root, page_id)
+            if page_dir is not None:
+                return page_dir
         return None
+
+    def _find_page_dir_in_root(self, root: Path, page_id: str) -> Optional[Path]:
+        candidate = self._page_dir_in_root(root, page_id)
+        if candidate.is_dir():
+            return candidate
+        if not root.is_dir():
+            return None
+        for page_dir, manifest_page_id in self._iter_page_dirs(root):
+            if manifest_page_id == page_id:
+                return page_dir
+        return None
+
+    def page_id_for_path(self, path: Path) -> Optional[str]:
+        resolved_path = path.resolve(strict=False)
+        for root in self._read_roots:
+            if not root.is_dir():
+                continue
+            resolved_root = root.resolve()
+            try:
+                resolved_path.relative_to(resolved_root)
+            except ValueError:
+                continue
+
+            probe = resolved_path if resolved_path.is_dir() else resolved_path.parent
+            while True:
+                try:
+                    probe.relative_to(resolved_root)
+                except ValueError:
+                    break
+                page_id = self._manifest_page_id_at(probe / "manifest.json")
+                if page_id is not None:
+                    return page_id
+                if probe == resolved_root:
+                    break
+                probe = probe.parent
+        return None
+
+    def workspace_id_for_path(self, path: Path) -> Optional[str]:
+        resolved_path = path.resolve(strict=False)
+        for root in self._read_roots:
+            if not root.is_dir():
+                continue
+            resolved_root = root.resolve()
+            try:
+                resolved_path.relative_to(resolved_root)
+            except ValueError:
+                continue
+
+            probe = resolved_path if resolved_path.is_dir() else resolved_path.parent
+            while True:
+                try:
+                    probe.relative_to(resolved_root)
+                except ValueError:
+                    break
+                manifest = self._read_workspace_manifest_at(probe)
+                if manifest is not None:
+                    return manifest.id
+                if probe == resolved_root:
+                    break
+                probe = probe.parent
+        return None
+
+    def _iter_page_dirs(self, root: Path) -> list[tuple[Path, str]]:
+        page_dirs: list[tuple[Path, str]] = []
+        for manifest_path in sorted(
+            root.rglob("manifest.json"),
+            key=lambda path: (len(path.relative_to(root).parts), str(path.relative_to(root))),
+        ):
+            page_dir = manifest_path.parent
+            if page_dir == root:
+                continue
+            page_id = self._manifest_page_id_at(manifest_path)
+            if page_id is None:
+                continue
+            page_dirs.append((page_dir, page_id))
+        return page_dirs
+
+    def _manifest_page_id_at(self, manifest_path: Path) -> Optional[str]:
+        if not manifest_path.is_file():
+            return None
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            return self.validate_page_id(str(raw.get("id", "")))
+        except Exception:
+            return None
+
+    def _iter_workspace_dirs(self, root: Path) -> list[tuple[Path, WebUIWorkspaceManifest]]:
+        workspaces: list[tuple[Path, WebUIWorkspaceManifest]] = []
+        for manifest_path in sorted(
+            root.rglob(WORKSPACE_MANIFEST_FILE),
+            key=lambda path: (len(path.relative_to(root).parts), str(path.relative_to(root))),
+        ):
+            workspace_dir = manifest_path.parent
+            if workspace_dir == root:
+                continue
+            manifest = self._read_workspace_manifest_at(workspace_dir)
+            if manifest is None:
+                continue
+            workspaces.append((workspace_dir, manifest))
+        return workspaces
+
+    def _workspace_for_page_dir(self, root: Path, page_dir: Path) -> Optional[WebUIWorkspaceManifest]:
+        resolved_root = root.resolve()
+        probe = page_dir.resolve().parent
+        while True:
+            try:
+                probe.relative_to(resolved_root)
+            except ValueError:
+                return None
+            manifest = self._read_workspace_manifest_at(probe)
+            if manifest is not None:
+                return manifest
+            if probe == resolved_root:
+                return None
+            probe = probe.parent
+
+    def _read_workspace_manifest_at(self, workspace_dir: Path) -> Optional[WebUIWorkspaceManifest]:
+        path = workspace_dir / WORKSPACE_MANIFEST_FILE
+        if not path.is_file():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            manifest = WebUIWorkspaceManifest.model_validate(raw)
+            workspace_id = self.validate_workspace_id(manifest.id)
+            default_page_id = self.validate_page_id(manifest.defaultPageId) if manifest.defaultPageId else None
+            if manifest.id != workspace_id or manifest.defaultPageId != default_page_id:
+                return manifest.model_copy(update={"id": workspace_id, "defaultPageId": default_page_id})
+            return manifest
+        except Exception as exc:
+            log.warning("webui_pages.workspace_manifest.invalid", {"path": str(path), "error": str(exc)})
+            return None
 
     def _page_dir_in_root(self, root: Path, page_id: str) -> Path:
         page_path = (root / page_id).resolve()

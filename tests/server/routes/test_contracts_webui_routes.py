@@ -57,6 +57,96 @@ async def test_create_and_list_webui_pages(client: AsyncClient, webui_pages_env:
 
 
 @pytest.mark.asyncio
+async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, webui_pages_env: WebUIPagesStore):
+    root = webui_pages_env.root
+    workspace_dir = root / "soc_ui"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "workspace.json").write_text(
+        json.dumps(
+            {
+                "id": "soc_ui",
+                "title": "SOC 工作区",
+                "icon": "ShieldCheck",
+                "order": 10,
+                "enabled": True,
+                "placement": "sceneWorkspace",
+                "defaultPageId": "soc-overview",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for page_id, page_dir_name, title, order in [
+        ("soc-overview", "soc_overview", "SOC 总览", 10),
+        ("soc-alerts", "soc_alerts", "告警运营", 20),
+    ]:
+        page_dir = workspace_dir / page_dir_name
+        (page_dir / "src").mkdir(parents=True, exist_ok=True)
+        (page_dir / "dist").mkdir(parents=True, exist_ok=True)
+        (page_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "id": page_id,
+                    "title": title,
+                    "route": f"/contracts/webui/{page_id}",
+                    "icon": "LayoutDashboard",
+                    "order": order,
+                    "enabled": True,
+                    "placement": "home.after",
+                    "entry": "src/index.tsx",
+                    "updatedAt": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    resp = await client.get("/api/contracts/webui/workspaces", params={"enabledOnly": True})
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "id": "soc_ui",
+            "title": "SOC 工作区",
+            "route": "/contracts/webui/workspaces/soc_ui",
+            "icon": "ShieldCheck",
+            "order": 10,
+            "enabled": True,
+            "placement": "sceneWorkspace",
+            "defaultPageId": "soc-overview",
+            "pages": [
+                {
+                    "id": "soc-overview",
+                    "title": "SOC 总览",
+                    "route": "/contracts/webui/soc-overview",
+                    "icon": "LayoutDashboard",
+                    "order": 10,
+                    "enabled": True,
+                    "placement": "home.after",
+                    "buildHash": "",
+                    "buildStatus": "idle",
+                    "workspaceId": "soc_ui",
+                    "workspaceTitle": "SOC 工作区",
+                    "workspaceRoute": "/contracts/webui/workspaces/soc_ui",
+                },
+                {
+                    "id": "soc-alerts",
+                    "title": "告警运营",
+                    "route": "/contracts/webui/soc-alerts",
+                    "icon": "LayoutDashboard",
+                    "order": 20,
+                    "enabled": True,
+                    "placement": "home.after",
+                    "buildHash": "",
+                    "buildStatus": "idle",
+                    "workspaceId": "soc_ui",
+                    "workspaceTitle": "SOC 工作区",
+                    "workspaceRoute": "/contracts/webui/workspaces/soc_ui",
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_legacy_user_defined_pages_api_alias_uses_contract_routes(
     client: AsyncClient,
     webui_pages_env: WebUIPagesStore,
