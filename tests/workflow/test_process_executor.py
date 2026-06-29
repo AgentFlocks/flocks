@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +11,12 @@ import pytest
 from flocks.tool import ToolContext
 from flocks.workflow import process_executor, worker_runtime
 from flocks.workflow.events import WorkflowWorkerLimits, WorkflowWorkerRequest, workflow_event
-from flocks.workflow.process_executor import ProcessWorkflowExecutor, _serialize_tool_context, run_workflow_process
+from flocks.workflow.process_executor import (
+    ProcessWorkflowExecutor,
+    _encode_stdin_message,
+    _serialize_tool_context,
+    run_workflow_process,
+)
 from flocks.workflow.runner import RunWorkflowResult
 
 
@@ -96,6 +103,28 @@ def test_workflow_event_uses_jsonl_schema_shape() -> None:
         "step": 1,
         "step_result": {"node_id": "produce"},
     }
+
+
+def test_worker_stdin_frame_round_trips_large_special_character_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = {
+        "request_id": "req-frame",
+        "workflow": {
+            "code": "outputs['x'] = \"value, with comma\"\n# 中文\n" + ("x" * 100_000),
+            "text": "quote \" comma, colon: brace } bracket ]",
+        },
+        "inputs": {"ip": "45.142.212.100"},
+    }
+    monkeypatch.setattr(worker_runtime.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(_encode_stdin_message(message))))
+
+    assert worker_runtime._read_stdin_message() == message  # noqa: SLF001
+
+
+def test_worker_stdin_reader_keeps_legacy_json_line_compatibility(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = {"type": "permission_response", "control_id": "control-1", "ok": True}
+    raw = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+    monkeypatch.setattr(worker_runtime.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+
+    assert worker_runtime._read_stdin_message() == message  # noqa: SLF001
 
 
 @pytest.mark.asyncio

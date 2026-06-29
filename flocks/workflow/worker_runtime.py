@@ -29,6 +29,7 @@ _ABORT_EVENT = asyncio.Event()
 _CONTROL_REQUEST_ID = ""
 _PENDING_CONTROL: dict[str, concurrent.futures.Future[Dict[str, Any]]] = {}
 _PENDING_LOCK = threading.Lock()
+_MAX_STDIN_MESSAGE_BYTES = 64 * 1024 * 1024
 
 
 def _handle_signal(_signum: int, _frame: Optional[FrameType]) -> None:
@@ -203,19 +204,15 @@ def _start_control_reader() -> None:
 def _read_control_responses() -> None:
     while True:
         try:
-            raw = sys.stdin.readline()
+            message = _read_stdin_message()
         except OSError as exc:
             if _is_pipe_closed_error(exc):
                 return
             raise
-        if not raw:
-            return
-        try:
-            message = json.loads(raw)
         except Exception:
             continue
-        if not isinstance(message, dict):
-            continue
+        if message is None:
+            return
         control_id = str(message.get("control_id") or "")
         if not control_id:
             continue
@@ -392,16 +389,56 @@ def _is_pipe_closed_error(exc: BaseException) -> bool:
 def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
-    raw = sys.stdin.readline()
-    if not raw:
-        return 2
     try:
-        request = json.loads(raw)
+        request = _read_stdin_message()
     except Exception as exc:
         _write_event(workflow_event("run_failed", "", status="FAILED", error=f"InvalidRequest: {exc}"))
         return 2
-    asyncio.run(_run(request if isinstance(request, dict) else {}))
+    if request is None:
+        return 2
+    asyncio.run(_run(request))
     return 0
+
+
+def _read_stdin_message() -> Optional[Dict[str, Any]]:
+    raw = _read_stdin_payload()
+    if raw is None:
+        return None
+    message = json.loads(raw.decode("utf-8"))
+    if not isinstance(message, dict):
+        raise ValueError("stdin message must be a JSON object")
+    return message
+
+
+def _read_stdin_payload() -> Optional[bytes]:
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    first_line = stream.readline()
+    if not first_line:
+        return None
+    if isinstance(first_line, str):
+        first_line_bytes = first_line.encode("utf-8")
+    else:
+        first_line_bytes = first_line
+    if not first_line_bytes.lower().startswith(b"content-length:"):
+        return first_line_bytes
+
+    try:
+        length = int(first_line_bytes.split(b":", 1)[1].strip())
+    except Exception as exc:
+        raise ValueError(f"invalid Content-Length header: {first_line_bytes!r}") from exc
+    if length < 0 or length > _MAX_STDIN_MESSAGE_BYTES:
+        raise ValueError(f"invalid Content-Length value: {length}")
+
+    separator = stream.readline()
+    separator_bytes = separator.encode("utf-8") if isinstance(separator, str) else separator
+    if separator_bytes not in {b"\n", b"\r\n"}:
+        raise ValueError("missing stdin frame separator")
+
+    payload = stream.read(length)
+    payload_bytes = payload.encode("utf-8") if isinstance(payload, str) else payload
+    if len(payload_bytes) != length:
+        raise EOFError(f"incomplete stdin frame: expected {length} bytes, got {len(payload_bytes)}")
+    return payload_bytes
 
 
 if __name__ == "__main__":
