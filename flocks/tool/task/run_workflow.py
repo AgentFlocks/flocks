@@ -421,6 +421,7 @@ async def run_workflow_tool(
 
     # Accept workflow as dict, JSON string, or file path.
     workflow_source: Union[Dict[str, Any], Path]
+    registered_workflow_id: Optional[str] = None
     if isinstance(workflow, str):
         raw = workflow.strip()
         # Try to parse as JSON first (handles JSON-encoded dicts or strings).
@@ -453,8 +454,10 @@ async def run_workflow_tool(
             # First try to resolve as a registered workflow ID, then fall back to file path.
             existing_workflow = read_workflow_from_fs(raw)
             if existing_workflow is not None:
-                workflow_source = existing_workflow["workflowJson"]
-                raw = existing_workflow["id"]
+                workflow_source = dict(existing_workflow["workflowJson"])
+                registered_workflow_id = str(existing_workflow["id"])
+                workflow_source["id"] = registered_workflow_id
+                raw = registered_workflow_id
             else:
                 p = Path(raw).expanduser()
                 if p.exists() and p.is_file():
@@ -505,7 +508,7 @@ async def run_workflow_tool(
         workflow_id = str(workflow_source)
 
     workflow_inputs = inputs or {}
-    canonical_workflow_id = resolve_workflow_id_from_source(workflow_source)
+    canonical_workflow_id = registered_workflow_id or resolve_workflow_id_from_source(workflow_source)
     display_workflow_id = canonical_workflow_id or workflow_id
     tracked_execution: Optional[Dict[str, Any]] = None
     tracked_step_count = 0

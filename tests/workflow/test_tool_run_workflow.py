@@ -351,6 +351,68 @@ class TestRunWorkflowToolExecution:
         assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
 
     @pytest.mark.anyio
+    async def test_run_workflow_registered_id_overrides_missing_workflow_json_id(
+        self,
+        tool_context_with_permission,
+    ):
+        workflow_without_id = {
+            "name": "Display Name Only",
+            "start": "node-1",
+            "nodes": [{"id": "node-1", "type": "python", "code": "outputs['ok'] = True"}],
+            "edges": [],
+        }
+        captured_kwargs: dict[str, Any] = {}
+
+        def run_side_effect(**kwargs):
+            captured_kwargs.update(kwargs)
+            return FakeRunWorkflowResult(
+                status="SUCCEEDED",
+                run_id="run-directory-id",
+                steps=1,
+                last_node_id="node-1",
+                outputs={"workflow_id": kwargs.get("workflow_id")},
+                history=[],
+                error=None,
+            )
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-directory-id",
+                "workflowId": "wf-directory-id",
+                "inputParams": {},
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(
+                run_workflow_module,
+                "read_workflow_from_fs",
+                return_value={"id": "wf-directory-id", "workflowJson": workflow_without_id},
+            ),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", AsyncMock(return_value=None)),
+            patch.object(run_workflow_module, "record_execution_result", AsyncMock(return_value=None)),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow="wf-directory-id",
+                inputs={},
+            )
+
+        assert result.success is True
+        assert result.metadata["workflow_id"] == "wf-directory-id"
+        assert captured_kwargs["workflow_id"] == "wf-directory-id"
+        assert captured_kwargs["workflow"]["id"] == "wf-directory-id"
+        create_execution.assert_awaited_once()
+        assert create_execution.await_args.args[0] == "wf-directory-id"
+
+    @pytest.mark.anyio
     async def test_run_workflow_compacts_large_outputs_for_progress_and_final_record(
         self,
         tool_context_with_permission,
