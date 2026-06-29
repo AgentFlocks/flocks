@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { Routes as RouterRoutes, Route, Navigate, useParams } from 'react-router-dom';
+import { Routes as RouterRoutes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
@@ -54,12 +54,18 @@ function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function LegacyWebUIContractPageRedirect() {
+export function LegacyWebUIContractPageRedirect() {
   const params = useParams();
+  const location = useLocation();
   const pageId = params.pageId;
   const rest = params['*'];
   if (!pageId) return <Navigate to="/" replace />;
-  return <Navigate to={`/contracts/webui/${pageId}${rest ? `/${rest}` : ''}`} replace />;
+  return (
+    <Navigate
+      to={`/contracts/webui/${pageId}${rest ? `/${rest}` : ''}${location.search}${location.hash}`}
+      replace
+    />
+  );
 }
 
 export function Routes() {

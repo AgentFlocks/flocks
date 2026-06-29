@@ -74,6 +74,80 @@ async def test_legacy_user_defined_pages_api_alias_uses_contract_routes(
 
 
 @pytest.mark.asyncio
+async def test_legacy_user_defined_pages_runtime_aliases(
+    client: AsyncClient,
+    webui_pages_env: WebUIPagesStore,
+):
+    create_resp = await client.post(
+        "/api/user-defined-pages",
+        json={"id": "legacy-runtime", "title": "旧运行时"},
+    )
+    assert create_resp.status_code == 201, create_resp.text
+
+    bundle_path = webui_pages_env.bundle_path("legacy-runtime")
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text("export default function Page(){return null;}", encoding="utf-8")
+    webui_pages_env.write_build_meta(
+        "legacy-runtime",
+        WebUIPageBuildMeta(status="ready", hash="legacy-hash", builtAt=1),
+    )
+    bundle_resp = await client.get("/api/user-defined-pages/legacy-runtime/bundle.js")
+    assert bundle_resp.status_code == 200
+    assert "application/javascript" in bundle_resp.headers.get("content-type", "")
+
+    asset_path = webui_pages_env.asset_path("legacy-runtime", "logo.txt")
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    asset_path.write_text("asset-ok", encoding="utf-8")
+    asset_resp = await client.get("/api/user-defined-pages/legacy-runtime/assets/logo.txt")
+    assert asset_resp.status_code == 200
+    assert asset_resp.text == "asset-ok"
+
+    webui_pages_env.save_source_file(
+        "legacy-runtime",
+        "api/routes.yaml",
+        "routes:\n  - method: GET\n    path: /stats\n    handler: handlers.get_stats\n",
+    )
+    webui_pages_env.save_source_file(
+        "legacy-runtime",
+        "api/handlers.py",
+        "def get_stats(ctx, request):\n    return {'ok': True}\n",
+    )
+    list_api_resp = await client.get("/api/user-defined-pages/legacy-runtime/api")
+    assert list_api_resp.status_code == 200
+    assert list_api_resp.json()[0]["path"] == "/stats"
+    reload_resp = await client.post("/api/user-defined-pages/legacy-runtime/api/reload")
+    assert reload_resp.status_code == 200
+    dispatch_resp = await client.get("/api/user-defined-pages/legacy-runtime/api/stats")
+    assert dispatch_resp.status_code == 200
+    assert dispatch_resp.json()["ok"] is True
+
+    export_resp = await client.get("/api/user-defined-pages/legacy-runtime/export")
+    assert export_resp.status_code == 200
+    assert export_resp.headers.get("content-type", "").startswith("application/zip")
+
+    archive = _make_page_archive(
+        "legacy-imported",
+        {
+            "id": "legacy-imported",
+            "title": "旧导入",
+            "route": "/user-defined-pages/legacy-imported",
+            "icon": "LayoutDashboard",
+            "order": 10,
+            "enabled": True,
+            "placement": "home.after",
+            "entry": "src/index.tsx",
+            "updatedAt": 1,
+        },
+    )
+    import_resp = await client.post(
+        "/api/user-defined-pages/import",
+        files={"file": ("legacy-imported.zip", archive, "application/zip")},
+    )
+    assert import_resp.status_code == 200, import_resp.text
+    assert import_resp.json()["manifest"]["route"] == "/contracts/webui/legacy-imported"
+
+
+@pytest.mark.asyncio
 async def test_save_source_triggers_build_and_event(client: AsyncClient, webui_pages_env: WebUIPagesStore):
     await client.post("/api/contracts/webui/pages", json={"id": "live-page", "title": "实时页"})
     source = webui_pages_env.read_source_file("live-page", "src/Page.tsx")
