@@ -867,17 +867,27 @@ export default function Layout() {
                           : 'text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300'
                       }`}
                     >
-                      <Link
-                        to={`${activeWorkspaceMenu.route}/${workspaceSection.defaultPageId}`}
-                        onClick={() => {
-                          setOpenWorkspaceMenuId(null);
-                          setSidebarOpen(false);
-                        }}
-                        title={workspaceSection.label}
-                        className="min-w-0 flex-1 truncate"
-                      >
-                        {workspaceSection.label}
-                      </Link>
+                      {showPageChildren ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleWorkspaceSection(workspaceSection.id)}
+                          className="min-w-0 flex-1 truncate text-left"
+                        >
+                          {workspaceSection.label}
+                        </button>
+                      ) : (
+                        <Link
+                          to={`${activeWorkspaceMenu.route}/${workspaceSection.defaultPageId}`}
+                          onClick={() => {
+                            setOpenWorkspaceMenuId(null);
+                            setSidebarOpen(false);
+                          }}
+                          title={workspaceSection.label}
+                          className="min-w-0 flex-1 truncate"
+                        >
+                          {workspaceSection.label}
+                        </Link>
+                      )}
                       {showPageChildren ? (
                         <button
                           type="button"

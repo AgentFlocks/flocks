@@ -855,6 +855,12 @@ describe('Layout WebUI contract pages navigation', () => {
     await user.click(workspaceMenuScope.getByTitle('workspace.expandSidebar'));
     expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
 
+    await user.click(workspaceMenuScope.getByRole('button', { name: '告警运营' }));
+    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
+
+    await user.click(workspaceMenuScope.getByRole('button', { name: '告警运营' }));
+    expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
+
     await user.unhover(socWorkspaceLink);
 
     await waitFor(() => {
