@@ -125,8 +125,7 @@ class ProcessWorkflowExecutor:
             name=f"wf-worker-stderr-{request.request_id}",
         )
         try:
-            proc.stdin.write((json.dumps(request.to_dict(), ensure_ascii=False, default=str) + "\n").encode())
-            await proc.stdin.drain()
+            await _write_stdin_message(proc, request.to_dict())
         except OSError as exc:
             if not _is_pipe_closed_error(exc):
                 raise
@@ -467,12 +466,23 @@ async def _send_control_response(
     if error:
         message["error"] = error
     try:
-        proc.stdin.write((json.dumps(message, ensure_ascii=False, default=str) + "\n").encode())
-        await proc.stdin.drain()
+        await _write_stdin_message(proc, message)
     except OSError as exc:
         if not _is_pipe_closed_error(exc):
             raise
         return
+
+
+async def _write_stdin_message(proc: asyncio.subprocess.Process, message: Dict[str, Any]) -> None:
+    if proc.stdin is None:
+        return
+    proc.stdin.write(_encode_stdin_message(message))
+    await proc.stdin.drain()
+
+
+def _encode_stdin_message(message: Dict[str, Any]) -> bytes:
+    payload = json.dumps(message, ensure_ascii=False, default=str).encode("utf-8")
+    return f"Content-Length: {len(payload)}\n\n".encode("ascii") + payload
 
 
 def _is_pipe_closed_error(exc: BaseException) -> bool:
