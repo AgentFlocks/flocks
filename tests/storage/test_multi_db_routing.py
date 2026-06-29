@@ -111,6 +111,60 @@ async def test_clear_without_prefix_clears_flocks_db_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workflow_prefix_clear_does_not_invalidate_session_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    await Storage.init()
+    await Storage.write("workflow_execution_step/exec-1/00000001", {"ok": True})
+    calls: list[str] = []
+
+    monkeypatch.setattr(Session, "invalidate_cache", lambda: calls.append("session"))
+    monkeypatch.setattr(
+        Message,
+        "invalidate_cache",
+        lambda session_id=None: calls.append(f"message:{session_id}"),
+    )
+
+    assert await Storage.clear("workflow_execution_step/exec-1/") == 1
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_session_and_message_prefix_clear_invalidate_matching_runtime_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    await Storage.init()
+    await Storage.write("session:proj:ses-1", {"id": "ses-1"})
+    await Storage.write("message:ses-1", [])
+    await Storage.write("message_parts:ses-1/msg-1", [])
+    calls: list[str] = []
+
+    monkeypatch.setattr(Session, "invalidate_cache", lambda: calls.append("session"))
+    monkeypatch.setattr(
+        Message,
+        "invalidate_cache",
+        lambda session_id=None: calls.append(f"message:{session_id}"),
+    )
+
+    assert await Storage.clear("session:") == 1
+    assert calls == ["session"]
+
+    calls.clear()
+    assert await Storage.clear("message:") == 1
+    assert calls == ["message:None"]
+
+    calls.clear()
+    assert await Storage.clear("message_parts:") == 1
+    assert calls == ["message:None"]
+
+
+@pytest.mark.asyncio
 async def test_list_without_prefix_reads_flocks_db_only() -> None:
     await Storage.init()
 

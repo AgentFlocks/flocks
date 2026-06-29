@@ -136,13 +136,13 @@ async def test_execution_manager_persists_real_workflow_lifecycle(monkeypatch: p
     async def _record_execution_step(exec_id: str, step_index: int, step_data: dict[str, Any]) -> None:
         state["steps"].append((exec_id, step_index, dict(step_data)))
 
-    async def _storage_write(key: str, data: dict[str, Any]) -> None:
-        state["progress"].append((key, dict(data)))
+    async def _upsert_execution(data: dict[str, Any]) -> None:
+        state["progress"].append(dict(data))
 
     monkeypatch.setattr("flocks.workflow.execution_manager.create_execution_record", _create_execution_record)
     monkeypatch.setattr("flocks.workflow.execution_manager.record_execution_result", _record_execution_result)
     monkeypatch.setattr("flocks.workflow.execution_manager.record_execution_step", _record_execution_step)
-    monkeypatch.setattr("flocks.workflow.execution_manager.Storage.write", _storage_write)
+    monkeypatch.setattr("flocks.workflow.execution_manager.WorkflowStore.upsert_execution", _upsert_execution)
 
     result = await WorkflowExecutionManager().run(
         workflow_id="wf-manager-real",
@@ -160,7 +160,7 @@ async def test_execution_manager_persists_real_workflow_lifecycle(monkeypatch: p
     assert state["steps"][0][2]["node_id"] == "normalize"
     assert state["steps"][1][2]["node_id"] == "finish"
     assert state["results"][0][2]["stepCount"] == 2
-    assert any(progress[1].get("currentNodeId") == "normalize" for progress in state["progress"])
+    assert any(progress.get("currentNodeId") == "normalize" for progress in state["progress"])
 
 
 @pytest.mark.asyncio

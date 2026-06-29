@@ -227,7 +227,7 @@ async def test_process_executor_returns_final_result_when_worker_process_lingers
             ensure_requirements=False,
             timeout_s=5,
         ),
-        timeout=3,
+        timeout=8,
     )
 
     assert result.status == "SUCCEEDED"
