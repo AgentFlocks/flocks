@@ -8,7 +8,6 @@ import contextlib
 import errno
 import json
 import os
-import resource
 import signal
 import sys
 import threading
@@ -332,13 +331,54 @@ async def _run(request: Dict[str, Any]) -> None:
 
 
 def _current_rss_mb() -> Optional[float]:
+    if sys.platform == "win32":
+        return _windows_current_rss_mb()
+    return _resource_rss_mb()
+
+
+def _resource_rss_mb() -> Optional[float]:
     try:
+        import resource
+
         rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     except Exception:
         return None
     if sys.platform == "darwin":
         return rss / 1024 / 1024
     return rss / 1024
+
+
+def _windows_current_rss_mb() -> Optional[float]:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = _ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+        process = ctypes.windll.kernel32.GetCurrentProcess()
+        if not ctypes.windll.psapi.GetProcessMemoryInfo(
+            process,
+            ctypes.byref(counters),
+            counters.cb,
+        ):
+            return None
+        return float(counters.WorkingSetSize) / 1024 / 1024
+    except Exception:
+        return None
 
 
 def _is_pipe_closed_error(exc: BaseException) -> bool:

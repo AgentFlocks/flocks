@@ -582,6 +582,8 @@ async def _drain_stderr(proc: asyncio.subprocess.Process, *, max_bytes: int) -> 
 async def _worker_rss_bytes(pid: Optional[int]) -> Optional[int]:
     if not pid:
         return None
+    if sys.platform == "win32":
+        return _windows_process_rss_bytes(pid)
     try:
         proc = await asyncio.create_subprocess_exec(
             "ps",
@@ -597,6 +599,50 @@ async def _worker_rss_bytes(pid: Optional[int]) -> Optional[int]:
         if not text:
             return None
         return int(text.splitlines()[-1].strip()) * 1024
+    except Exception:
+        return None
+
+
+def _windows_process_rss_bytes(pid: int) -> Optional[int]:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        process_query_information = 0x0400
+        process_vm_read = 0x0010
+        process = ctypes.windll.kernel32.OpenProcess(
+            process_query_information | process_vm_read,
+            False,
+            int(pid),
+        )
+        if not process:
+            return None
+        try:
+            counters = _ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+            if not ctypes.windll.psapi.GetProcessMemoryInfo(
+                process,
+                ctypes.byref(counters),
+                counters.cb,
+            ):
+                return None
+            return int(counters.WorkingSetSize)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process)
     except Exception:
         return None
 

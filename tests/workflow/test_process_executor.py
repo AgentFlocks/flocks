@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -136,6 +137,28 @@ def test_worker_event_write_ignores_windows_pipe_closed(monkeypatch: pytest.Monk
     monkeypatch.setattr(worker_runtime, "_ORIGINAL_STDOUT", ClosedStdout())
 
     worker_runtime._write_event(workflow_event("run_started", "req-closed"))  # noqa: SLF001
+
+
+def test_worker_runtime_does_not_import_unix_resource_at_module_load() -> None:
+    source = Path(worker_runtime.__file__).read_text(encoding="utf-8")
+
+    assert "\nimport resource\n" not in source
+
+
+def test_worker_runtime_uses_windows_rss_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker_runtime.sys, "platform", "win32")
+    monkeypatch.setattr(worker_runtime, "_windows_current_rss_mb", lambda: 12.5)
+    monkeypatch.setattr(worker_runtime, "_resource_rss_mb", lambda: 99.0)
+
+    assert worker_runtime._current_rss_mb() == 12.5  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_process_executor_uses_windows_worker_rss_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(process_executor.sys, "platform", "win32")
+    monkeypatch.setattr(process_executor, "_windows_process_rss_bytes", lambda pid: int(pid) + 1)
+
+    assert await process_executor._worker_rss_bytes(41) == 42  # noqa: SLF001
 
 
 @pytest.mark.asyncio
