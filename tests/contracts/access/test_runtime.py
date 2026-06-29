@@ -21,7 +21,7 @@ from flocks.contracts.access.models import (
 )
 from flocks.contracts.access.pipeline import OverlayStore
 from flocks.contracts.access.plans import FieldDependencyPlanCompiler, PolicyPlanCompiler
-from flocks.contracts.access.runtime import BindingTestHarness, OperationRuntime, PolicyContextResolver
+from flocks.contracts.access.runtime import BindingTestHarness, NO_POLICY_SCOPE, OperationRuntime, PolicyContextResolver
 from flocks.contracts.webui.store import WebUIPagesStore
 from flocks.plugin.loader import PluginLoader
 
@@ -240,6 +240,70 @@ def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, 
             principal=None,
         )
     assert idempotency_error.value.code == "forbidden_request_field"
+
+
+def test_default_policy_resolver_filters_member_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = _store(tmp_path, monkeypatch)
+    _write_alert_assets(
+        store,
+        [
+            _alert_record(id="allowed", tenant="tenant-a", asset_group="core"),
+            _alert_record(id="blocked", tenant="tenant-b", asset_group="core"),
+        ],
+    )
+    runtime = OperationRuntime(plugins=(_plugin(store),))
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"limit": 10}},
+        principal=AuthUser(
+            id="u1",
+            username="analyst",
+            role="member",
+            tenant_ids=("tenant-a",),
+            asset_groups=("core",),
+        ),
+    )
+
+    assert [item["id"] for item in response.body["items"]] == ["allowed"]
+    assert response.body["meta"]["filterStagesApplied"][:2] == [
+        {
+            "field": "tenant",
+            "source": "policy.tenantIds",
+            "stage": "driver-native",
+            "enforcement": "driver-required",
+        },
+        {
+            "field": "asset_group",
+            "source": "policy.assetGroups",
+            "stage": "driver-native",
+            "enforcement": "driver-required",
+        },
+    ]
+
+
+def test_default_policy_resolver_fails_closed_for_unscoped_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = _store(tmp_path, monkeypatch)
+    _write_alert_assets(store, [_alert_record(id="hidden", tenant="tenant-a", asset_group="core")])
+    runtime = OperationRuntime(plugins=(_plugin(store),))
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"limit": 10}},
+        principal=AuthUser(id="u1", username="analyst", role="member"),
+    )
+
+    assert response.body["items"] == []
+    assert response.body["meta"]["filterStagesApplied"][0]["source"] == "policy.tenantIds"
+    assert response.body["meta"]["filterStagesApplied"][0]["field"] == "tenant"
+    assert response.body["meta"]["filterStagesApplied"][0]["stage"] == "driver-native"
+    assert PolicyContextResolver().resolve(AuthUser(id="u1", username="analyst", role="member")).tenant_ids == (
+        NO_POLICY_SCOPE,
+    )
 
 
 def test_policy_and_field_dependency_plans_drive_query_projection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
+import { Routes as RouterRoutes, Route, Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
@@ -52,6 +52,14 @@ function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/" replace />;
   }
   return <>{children}</>;
+}
+
+function LegacyWebUIContractPageRedirect() {
+  const params = useParams();
+  const pageId = params.pageId;
+  const rest = params['*'];
+  if (!pageId) return <Navigate to="/" replace />;
+  return <Navigate to={`/contracts/webui/${pageId}${rest ? `/${rest}` : ''}`} replace />;
 }
 
 export function Routes() {
@@ -119,6 +127,7 @@ export function Routes() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="contracts/webui/:pageId/*" element={<LazyRoute><WebUIContractPageHost /></LazyRoute>} />
+        <Route path="user-defined-pages/:pageId/*" element={<LegacyWebUIContractPageRedirect />} />
 
         {/* AI 工作台 */}
         <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />

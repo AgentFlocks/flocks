@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -26,9 +27,15 @@ ALLOWED_WRITE_PREFIXES = ("src/", "assets/", "api/")
 ALLOWED_WRITE_FILES = frozenset({"manifest.json"})
 _SOURCE_SUFFIXES = {".tsx", ".ts", ".jsx", ".js", ".css", ".json"}
 _API_SUFFIXES = {".py", ".yaml", ".yml"}
+_MIGRATION_TEXT_SUFFIXES = _SOURCE_SUFFIXES | _API_SUFFIXES
 _PROJECT_ROOT_UNSET = object()
+_LEGACY_ROOT_UNSET = object()
 WEBUI_CONTRACT_ROUTE_PREFIX = "/contracts/webui"
 WEBUI_CONTRACT_SDK_IMPORT = "@flocks/webui-contract-sdk"
+LEGACY_WEBUI_PAGE_ROUTE_PREFIX = "/user-defined-pages"
+LEGACY_WEBUI_PAGE_SDK_IMPORT = "@flocks/user-defined-page-sdk"
+LEGACY_WEBUI_PAGE_SDK_GLOBAL = "__FLOCKS_USER_DEFINED_PAGE_SDK__"
+WEBUI_CONTRACT_SDK_GLOBAL = "__FLOCKS_WEBUI_CONTRACT_SDK__"
 
 
 def _default_page_tsx(title: str) -> str:
@@ -69,6 +76,14 @@ def get_webui_pages_root() -> Path:
     return (Path.home() / ".flocks" / "plugins" / "contracts" / "webui").resolve()
 
 
+def get_legacy_webui_pages_root() -> Path:
+    """Return the legacy user-space root used before WebUI contracts."""
+    override = os.environ.get("FLOCKS_USER_DEFINED_PAGES_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".flocks" / "plugins" / "user_defined_pages").resolve()
+
+
 def get_project_webui_pages_root(project_dir: Optional[Path] = None) -> Path:
     """Return the project-space read root for checked-in WebUI pages."""
     base = project_dir or Path.cwd()
@@ -83,14 +98,20 @@ class WebUIPagesStore:
         root: Optional[Path] = None,
         *,
         project_root: Optional[Path] | object = _PROJECT_ROOT_UNSET,
+        legacy_root: Optional[Path] | object = _LEGACY_ROOT_UNSET,
         project_dir: Optional[Path] = None,
     ) -> None:
         env_override = os.environ.get("FLOCKS_CONTRACTS_WEBUI_ROOT")
         self._root = (root or get_webui_pages_root()).resolve()
         if project_root is _PROJECT_ROOT_UNSET:
             project_root = None if root is not None or env_override else get_project_webui_pages_root(project_dir)
+        if legacy_root is _LEGACY_ROOT_UNSET:
+            legacy_env = os.environ.get("FLOCKS_USER_DEFINED_PAGES_ROOT")
+            legacy_root = get_legacy_webui_pages_root() if legacy_env or (root is None and not env_override) else None
         self._project_root = project_root.resolve() if isinstance(project_root, Path) else None
-        self._read_roots = self._dedupe_roots(self._root, self._project_root)
+        self._legacy_root = legacy_root.resolve() if isinstance(legacy_root, Path) else None
+        self._read_roots = self._dedupe_roots(self._root, self._legacy_root, self._project_root)
+        self._legacy_migration_done = False
 
     @property
     def root(self) -> Path:
@@ -102,6 +123,7 @@ class WebUIPagesStore:
 
     def ensure_root(self) -> Path:
         self._root.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_pages()
         return self._root
 
     @staticmethod
@@ -117,6 +139,28 @@ class WebUIPagesStore:
         if existing is not None:
             return existing
         return self._page_dir_in_root(self._root, page_id)
+
+    def root_page_dir(self, page_id: str) -> Path:
+        """Return the canonical user-root path for a page without copying."""
+        return self._page_dir_in_root(self._root, self.validate_page_id(page_id))
+
+    def writable_page_dir(self, page_id: str) -> Path:
+        """Return a writable page directory, copying read-only pages on write."""
+        page_id = self.validate_page_id(page_id)
+        self.ensure_root()
+        target = self._page_dir_in_root(self._root, page_id)
+        if target.is_dir():
+            return target
+
+        source = self._find_page_dir(page_id)
+        if source is not None and source != target:
+            shutil.copytree(source, target)
+            self._normalize_migrated_page(target, page_id)
+            log.info("webui_pages.materialized", {"pageId": page_id, "source": str(source), "target": str(target)})
+        return target
+
+    def page_exists(self, page_id: str) -> bool:
+        return self._find_page_dir(self.validate_page_id(page_id)) is not None
 
     def _assert_writable_relative(self, relative_path: str) -> Path:
         if not relative_path or Path(relative_path).is_absolute():
@@ -171,6 +215,7 @@ class WebUIPagesStore:
         return items
 
     def get_page(self, page_id: str) -> WebUIPageDetail:
+        self.ensure_root()
         page_dir = self.page_dir(page_id)
         if not page_dir.is_dir():
             raise FileNotFoundError(f"page not found: {page_id}")
@@ -194,9 +239,9 @@ class WebUIPagesStore:
         order: int = 100,
     ) -> WebUIPageDetail:
         page_id = self.validate_page_id(page_id)
-        page_dir = self._page_dir_in_root(self._root, page_id)
-        if page_dir.exists():
+        if self.page_exists(page_id):
             raise FileExistsError(f"page already exists: {page_id}")
+        page_dir = self._page_dir_in_root(self._root, page_id)
 
         now_ms = int(time.time() * 1000)
         manifest = WebUIPageManifest(
@@ -257,6 +302,7 @@ class WebUIPagesStore:
         self._write_source_file(page_id, rel_str, content)
 
     def read_source_file(self, page_id: str, relative_path: str) -> str:
+        self.ensure_root()
         rel = self._assert_writable_relative(relative_path)
         path = self.page_dir(page_id) / rel
         if not path.is_file():
@@ -264,9 +310,11 @@ class WebUIPagesStore:
         return path.read_text(encoding="utf-8")
 
     def bundle_path(self, page_id: str) -> Path:
+        self.ensure_root()
         return self.page_dir(page_id) / "dist" / "page.js"
 
     def asset_path(self, page_id: str, relative_path: str) -> Path:
+        self.ensure_root()
         rel = relative_path.replace("\\", "/").lstrip("/")
         if ".." in rel.split("/"):
             raise ValueError("path traversal is not allowed")
@@ -285,9 +333,11 @@ class WebUIPagesStore:
         return self._read_build_meta(page_id)
 
     def routes_path(self, page_id: str) -> Path:
+        self.ensure_root()
         return self.page_dir(page_id) / "api" / "routes.yaml"
 
     def api_handlers_path(self, page_id: str) -> Path:
+        self.ensure_root()
         return self.page_dir(page_id) / "api" / "handlers.py"
 
     def read_api_routes(self, page_id: str) -> Optional[str]:
@@ -339,12 +389,7 @@ class WebUIPagesStore:
             return None
 
     def _write_manifest(self, page_id: str, manifest: WebUIPageManifest) -> None:
-        path = self._manifest_path(page_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(manifest.model_dump(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_manifest_at(self.writable_page_dir(page_id), manifest)
 
     def _read_build_meta(self, page_id: str) -> WebUIPageBuildMeta:
         path = self._build_meta_path(page_id)
@@ -357,18 +402,93 @@ class WebUIPagesStore:
             return WebUIPageBuildMeta()
 
     def _write_build_meta(self, page_id: str, meta: WebUIPageBuildMeta) -> None:
-        path = self._build_meta_path(page_id)
+        self._write_build_meta_at(self.writable_page_dir(page_id), meta)
+
+    @staticmethod
+    def _write_manifest_at(page_dir: Path, manifest: WebUIPageManifest) -> None:
+        path = page_dir / "manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(meta.model_dump(), ensure_ascii=False, indent=2),
+            json.dumps(manifest.model_dump(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _write_build_meta_at(page_dir: Path, meta: WebUIPageBuildMeta) -> None:
+        path = page_dir / "dist" / "meta.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+
     def _write_source_file(self, page_id: str, relative_path: str, content: str) -> None:
         rel = self._assert_writable_relative(relative_path)
-        target = self.page_dir(page_id) / rel
+        target = self.writable_page_dir(page_id) / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+    def _migrate_legacy_pages(self) -> None:
+        if self._legacy_migration_done:
+            return
+        self._legacy_migration_done = True
+        legacy_root = self._legacy_root
+        if legacy_root is None or not legacy_root.is_dir() or legacy_root == self._root:
+            return
+
+        for child in sorted(legacy_root.iterdir()):
+            if not child.is_dir():
+                continue
+            try:
+                page_id = self.validate_page_id(child.name)
+                target = self._page_dir_in_root(self._root, page_id)
+            except ValueError:
+                continue
+            if target.exists():
+                continue
+            try:
+                shutil.copytree(child, target)
+                self._normalize_migrated_page(target, page_id)
+                log.info("webui_pages.legacy_migrated", {"pageId": page_id, "source": str(child), "target": str(target)})
+            except Exception as exc:
+                log.warning("webui_pages.legacy_migration_failed", {"pageId": child.name, "error": str(exc)})
+
+    def _normalize_migrated_page(self, page_dir: Path, page_id: str) -> None:
+        manifest_path = page_dir / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest = WebUIPageManifest.model_validate(raw).model_copy(
+                    update={
+                        "id": page_id,
+                        "route": webui_contract_page_route(page_id),
+                        "updatedAt": int(time.time() * 1000),
+                    }
+                )
+                self._write_manifest_at(page_dir, manifest)
+            except Exception as exc:
+                log.warning("webui_pages.legacy_manifest_normalize_failed", {"pageId": page_id, "error": str(exc)})
+
+        replacements = {
+            LEGACY_WEBUI_PAGE_SDK_IMPORT: WEBUI_CONTRACT_SDK_IMPORT,
+            LEGACY_WEBUI_PAGE_SDK_GLOBAL: WEBUI_CONTRACT_SDK_GLOBAL,
+            f"{LEGACY_WEBUI_PAGE_ROUTE_PREFIX}/": f"{WEBUI_CONTRACT_ROUTE_PREFIX}/",
+            "/api/user-defined-pages/": "/api/contracts/webui/pages/",
+        }
+        for path in page_dir.rglob("*"):
+            if not path.is_file() or path.suffix not in _MIGRATION_TEXT_SUFFIXES:
+                continue
+            rel = str(path.relative_to(page_dir)).replace("\\", "/")
+            if not (rel.startswith("src/") or rel.startswith("api/") or rel == "dist/page.js"):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            updated = content
+            for old, new in replacements.items():
+                updated = updated.replace(old, new)
+            if updated != content:
+                path.write_text(updated, encoding="utf-8")
+
+        self._write_build_meta_at(page_dir, WebUIPageBuildMeta(status="idle", hash="", builtAt=0, error=None))
 
     @staticmethod
     def _dedupe_roots(*roots: Optional[Path]) -> tuple[Path, ...]:

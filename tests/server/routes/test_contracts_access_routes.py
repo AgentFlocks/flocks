@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
 
+from flocks.auth.context import AuthUser
 from flocks.server.routes import contracts as contracts_routes
 from flocks.contracts.access.runtime import OperationRuntime
 from flocks.contracts.webui.store import WebUIPagesStore
@@ -61,6 +63,28 @@ async def test_contract_operation_route(client: AsyncClient, contract_pages: Web
     body = resp.json()
     assert body["summary"]["totalRaw"] == 1
     assert body["items"][0]["id"] == "alert-route-1"
+
+
+@pytest.mark.asyncio
+async def test_contract_operation_route_applies_default_member_policy(contract_pages: WebUIPagesStore):
+    response = await contracts_routes.execute_webui_contract_operation(
+        PAGE_ID,
+        CONTRACT_ID,
+        "list",
+        {"params": {"limit": 10}},
+        AuthUser(
+            id="u1",
+            username="analyst",
+            role="member",
+            tenant_ids=("tenant-a",),
+            asset_groups=("core",),
+        ),
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["items"][0]["id"] == "alert-route-1"
+    assert body["meta"]["filterStagesApplied"][0]["source"] == "policy.tenantIds"
 
 
 @pytest.mark.asyncio

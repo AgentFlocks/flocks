@@ -64,7 +64,7 @@ def _should_rebuild_page(store: WebUIPagesStore, page_id: str) -> bool:
     build_meta = store.read_build_meta(page_id)
     if not bundle_path.is_file():
         return True
-    if build_meta.status == "failed":
+    if build_meta.status != "ready":
         return True
     if build_meta.runtime != RUNTIME_NAME or build_meta.runtimeVersion != RUNTIME_VERSION:
         return True

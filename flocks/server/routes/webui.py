@@ -381,10 +381,10 @@ async def import_webui_page(
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(zf.read(member))
             _normalize_import_manifest(extracted_root, page_id)
-            target = _store.page_dir(page_id)
+            if _store.page_exists(page_id) and not overwrite:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"page already exists: {page_id}")
+            target = _store.root_page_dir(page_id)
             if target.exists():
-                if not overwrite:
-                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"page already exists: {page_id}")
                 shutil.rmtree(target)
             shutil.move(str((temp_root / page_id).resolve()), str(target))
         try:
@@ -412,6 +412,89 @@ async def import_webui_page(
         raise
     except zipfile.BadZipFile as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid zip archive") from exc
+
+
+@router.get("/user-defined-pages", response_model=list[WebUIPageListItem])
+async def list_legacy_user_defined_pages(enabled_only: bool = Query(False, alias="enabledOnly")):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await list_webui_pages(enabled_only=enabled_only)
+
+
+@router.post("/user-defined-pages", response_model=WebUIPageDetail, status_code=status.HTTP_201_CREATED)
+async def create_legacy_user_defined_page(req: WebUIPageCreateRequest, _admin: object = Depends(require_admin)):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await create_webui_page(req, _admin)
+
+
+@router.get("/user-defined-pages/{page_id}", response_model=WebUIPageDetail)
+async def get_legacy_user_defined_page(page_id: str):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await get_webui_page(page_id)
+
+
+@router.put("/user-defined-pages/{page_id}", response_model=WebUIPageSaveResponse)
+async def save_legacy_user_defined_page(
+    page_id: str,
+    req: WebUIPageSaveRequest,
+    _admin: object = Depends(require_admin),
+):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await save_webui_page(page_id, req, _admin)
+
+
+@router.post("/user-defined-pages/{page_id}/build", response_model=WebUIPageBuildMeta)
+async def build_legacy_user_defined_page(page_id: str, _admin: object = Depends(require_admin)):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await build_webui_page(page_id, _admin)
+
+
+@router.get("/user-defined-pages/{page_id}/bundle.js")
+async def get_legacy_user_defined_page_bundle(page_id: str, v: Optional[str] = Query(None)):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await get_webui_page_bundle(page_id, v)
+
+
+@router.get("/user-defined-pages/{page_id}/assets/{asset_path:path}")
+async def get_legacy_user_defined_page_asset(page_id: str, asset_path: str):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await get_webui_page_asset(page_id, asset_path)
+
+
+@router.get("/user-defined-pages/{page_id}/api")
+async def list_legacy_user_defined_page_api_routes(page_id: str):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await list_webui_page_api_routes(page_id)
+
+
+@router.post("/user-defined-pages/{page_id}/api/reload")
+async def reload_legacy_user_defined_page_api(page_id: str, _admin: object = Depends(require_admin)):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await reload_webui_page_api(page_id, _admin)
+
+
+@router.api_route(
+    "/user-defined-pages/{page_id}/api/{api_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def dispatch_legacy_user_defined_page_api(page_id: str, api_path: str, request: Request):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await dispatch_webui_page_api(page_id, api_path, request)
+
+
+@router.get("/user-defined-pages/{page_id}/export")
+async def export_legacy_user_defined_page(page_id: str, _admin: object = Depends(require_admin)):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await export_webui_page(page_id, _admin)
+
+
+@router.post("/user-defined-pages/import")
+async def import_legacy_user_defined_page(
+    file: UploadFile = File(...),
+    overwrite: bool = Query(False),
+    _admin: object = Depends(require_admin),
+):
+    """Compatibility alias for pre-contract WebUI page clients."""
+    return await import_webui_page(file, overwrite, _admin)
 
 
 def reset_route_dependencies(

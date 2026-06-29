@@ -32,9 +32,22 @@ from flocks.contracts.access.registry import (
 )
 
 
+NO_POLICY_SCOPE = "__flocks_no_policy_scope__"
+
+
 class PolicyContextResolver:
-    def resolve(self, _principal: AuthUser | None) -> PolicyContext:
-        return PolicyContext()
+    def resolve(self, principal: AuthUser | None) -> PolicyContext:
+        if principal is not None and principal.role == "admin":
+            return PolicyContext()
+        if principal is None:
+            return PolicyContext(tenant_ids=(NO_POLICY_SCOPE,), asset_groups=(NO_POLICY_SCOPE,))
+
+        tenant_ids = _clean_policy_values(principal.tenant_ids)
+        asset_groups = _clean_policy_values(principal.asset_groups)
+        return PolicyContext(
+            tenant_ids=tenant_ids or (NO_POLICY_SCOPE,),
+            asset_groups=asset_groups or (NO_POLICY_SCOPE,),
+        )
 
 
 class OperationRuntime:
@@ -272,3 +285,7 @@ def _principal_ref(principal: AuthUser | None) -> str:
     if principal is None:
         return "principal:anonymous"
     return f"principal:user:{principal.id}"
+
+
+def _clean_policy_values(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(value.strip() for value in values if isinstance(value, str) and value.strip())

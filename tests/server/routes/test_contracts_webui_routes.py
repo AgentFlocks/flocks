@@ -57,6 +57,23 @@ async def test_create_and_list_webui_pages(client: AsyncClient, webui_pages_env:
 
 
 @pytest.mark.asyncio
+async def test_legacy_user_defined_pages_api_alias_uses_contract_routes(
+    client: AsyncClient,
+    webui_pages_env: WebUIPagesStore,
+):
+    create_resp = await client.post(
+        "/api/user-defined-pages",
+        json={"id": "legacy-dash", "title": "旧页面"},
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    assert create_resp.json()["manifest"]["route"] == "/contracts/webui/legacy-dash"
+
+    list_resp = await client.get("/api/user-defined-pages", params={"enabledOnly": True})
+    assert list_resp.status_code == 200
+    assert list_resp.json()[0]["route"] == "/contracts/webui/legacy-dash"
+
+
+@pytest.mark.asyncio
 async def test_save_source_triggers_build_and_event(client: AsyncClient, webui_pages_env: WebUIPagesStore):
     await client.post("/api/contracts/webui/pages", json={"id": "live-page", "title": "实时页"})
     source = webui_pages_env.read_source_file("live-page", "src/Page.tsx")

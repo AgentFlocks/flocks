@@ -37,6 +37,10 @@ def _write_page(root, page_id: str, title: str, order: int = 100) -> None:
     (page_dir / "src" / "index.tsx").write_text("export default function Page() { return null; }\n", encoding="utf-8")
 
 
+def _read_manifest(root, page_id: str):
+    return json.loads((root / page_id / "manifest.json").read_text(encoding="utf-8"))
+
+
 def test_create_page_scaffold(store: WebUIPagesStore):
     detail = store.create_page(page_id="my-dashboard", title="我的大屏")
     assert detail.manifest.id == "my-dashboard"
@@ -74,6 +78,47 @@ def test_list_pages_scans_user_and_project_roots_with_user_priority(tmp_path):
     assert store.get_page("project-page").manifest.title == "Project page"
     assert store.page_dir("shared-page").is_relative_to(user_root)
     assert store.page_dir("project-page").is_relative_to(project_root)
+
+
+def test_save_project_root_page_materializes_user_copy(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    project_root = tmp_path / "project" / ".flocks" / "plugins" / "contracts" / "webui"
+    _write_page(project_root, "project-page", "Project page")
+
+    store = WebUIPagesStore(root=user_root, project_root=project_root)
+    store.save_manifest("project-page", {"title": "User override"})
+    store.write_build_meta("project-page", store.read_build_meta("project-page").model_copy(update={"status": "ready", "hash": "abc"}))
+
+    assert _read_manifest(project_root, "project-page")["title"] == "Project page"
+    assert _read_manifest(user_root, "project-page")["title"] == "User override"
+    assert (user_root / "project-page" / "dist" / "meta.json").is_file()
+    assert not (project_root / "project-page" / "dist" / "meta.json").is_file()
+    assert store.page_dir("project-page").is_relative_to(user_root)
+
+
+def test_legacy_user_defined_pages_are_migrated_to_contract_root(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    legacy_root = tmp_path / "user" / "user_defined_pages"
+    _write_page(legacy_root, "legacy-page", "Legacy page")
+    legacy_manifest = _read_manifest(legacy_root, "legacy-page")
+    legacy_manifest["route"] = "/user-defined-pages/legacy-page"
+    (legacy_root / "legacy-page" / "manifest.json").write_text(json.dumps(legacy_manifest), encoding="utf-8")
+    (legacy_root / "legacy-page" / "src" / "index.tsx").write_text(
+        "import { Card } from '@flocks/user-defined-page-sdk';\n"
+        "const sdk = globalThis.__FLOCKS_USER_DEFINED_PAGE_SDK__;\n",
+        encoding="utf-8",
+    )
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=legacy_root)
+    pages = store.list_pages()
+
+    assert [page.id for page in pages] == ["legacy-page"]
+    assert pages[0].route == "/contracts/webui/legacy-page"
+    migrated_source = (user_root / "legacy-page" / "src" / "index.tsx").read_text(encoding="utf-8")
+    assert "@flocks/webui-contract-sdk" in migrated_source
+    assert "__FLOCKS_WEBUI_CONTRACT_SDK__" in migrated_source
+    assert _read_manifest(user_root, "legacy-page")["route"] == "/contracts/webui/legacy-page"
+    assert json.loads((user_root / "legacy-page" / "dist" / "meta.json").read_text(encoding="utf-8"))["status"] == "idle"
 
 
 def test_reject_path_traversal_on_write(store: WebUIPagesStore):

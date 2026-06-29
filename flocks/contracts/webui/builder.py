@@ -51,7 +51,7 @@ class WebUIPageBuilder:
     def build(self, page_id: str) -> WebUIPageBuildMeta:
         page_id = self._store.validate_page_id(page_id)
         detail = self._store.get_page(page_id)
-        page_dir = self._store.page_dir(page_id)
+        page_dir = self._store.writable_page_dir(page_id)
         entry = detail.manifest.entry.replace("\\", "/")
         entry_path = (page_dir / entry).resolve()
         try:
