@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
 import { ThemeContext, type Theme } from '@/contexts/ThemeContext';
 
-const { changeLanguage, setTheme, useAuth } = vi.hoisted(() => ({
+const { changeLanguage, flocksproUsersApi, setTheme, useAuth } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
+  flocksproUsersApi: {
+    hasCapability: vi.fn(),
+  },
   setTheme: vi.fn(),
   useAuth: vi.fn(),
 }));
@@ -25,12 +28,20 @@ vi.mock('@/contexts/AuthContext', () => ({
   useAuth,
 }));
 
+vi.mock('@/api/flocksproUsers', () => ({
+  flocksproUsersApi,
+}));
+
 vi.mock('@/pages/Config', () => ({
   default: () => <div>account page</div>,
 }));
 
 vi.mock('@/pages/SystemLog', () => ({
   default: () => <div>system logs page</div>,
+}));
+
+vi.mock('@/pages/AuditLogs', () => ({
+  default: () => <div>audit logs page</div>,
 }));
 
 vi.mock('@/pages/FlocksproUpgrade', () => ({
@@ -75,6 +86,7 @@ function renderSettings(path: string, theme: Theme = 'light', state?: Record<str
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    flocksproUsersApi.hasCapability.mockResolvedValue(true);
     useAuth.mockReturnValue({
       user: {
         id: 'user-1',
@@ -104,8 +116,9 @@ describe('SettingsPage', () => {
     renderSettings('/settings/models');
 
     expect(await screen.findByText('models page')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'models' })).toHaveAttribute('href', '/settings/models');
-    expect(screen.getByRole('link', { name: 'channels' })).toHaveAttribute('href', '/settings/channels');
+    expect(screen.getAllByRole('link', { name: 'models' })[0]).toHaveAttribute('href', '/settings/models');
+    expect(screen.getAllByRole('link', { name: 'channels' })[0]).toHaveAttribute('href', '/settings/channels');
+    expect(await screen.findAllByRole('link', { name: 'auditLogs' })).toHaveLength(2);
   });
 
   it('returns to the page captured before opening settings', async () => {
@@ -119,14 +132,42 @@ describe('SettingsPage', () => {
       },
     });
 
-    await user.click(screen.getByRole('link', { name: 'channels' }));
+    await screen.findAllByRole('link', { name: 'auditLogs' });
+    await user.click(screen.getAllByRole('link', { name: 'channels' })[0]);
     expect(await screen.findByText('channels page')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'settingsBack' }));
+    await user.click(screen.getAllByRole('button', { name: 'settingsBack' })[0]);
 
     expect(await screen.findByTestId('location')).toHaveTextContent(
       '/contracts/webui/workspaces/soc_ui?view=posture#top',
     );
+  });
+
+  it('keeps return and section navigation available outside the desktop sidebar', async () => {
+    renderSettings('/settings/system-logs');
+
+    expect(await screen.findByText('system logs page')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'settingsBack' })).toHaveLength(2);
+
+    const mobileNav = screen.getByRole('navigation', { name: 'settingsTitle' });
+    expect(within(mobileNav).getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
+    expect(within(mobileNav).getByRole('link', { name: 'auditLogs' })).toHaveAttribute('href', '/settings/audit-logs');
+  });
+
+  it('renders audit logs in settings for Flocks Pro admins', async () => {
+    renderSettings('/settings/audit-logs');
+
+    expect(await screen.findByText('audit logs page')).toBeInTheDocument();
+    expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
+  });
+
+  it('hides audit logs when Flocks Pro capability is unavailable', async () => {
+    flocksproUsersApi.hasCapability.mockResolvedValue(false);
+
+    renderSettings('/settings/audit-logs');
+
+    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
   });
 
   it('hides Flocks Pro settings for non-admin users', async () => {
@@ -144,5 +185,6 @@ describe('SettingsPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'flocksproUpgrade' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
   });
 });

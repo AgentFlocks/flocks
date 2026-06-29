@@ -27,7 +27,6 @@ const HubPage = lazy(() => import('@/pages/Hub'));
 const SkillPage = lazy(() => import('@/pages/Skill'));
 const PermissionPage = lazy(() => import('@/pages/Permission'));
 const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
-const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
 const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
 const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
@@ -161,7 +160,7 @@ export function Routes() {
         <Route path="channels" element={<Navigate to="/settings/channels" replace />} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
-        <Route path="audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
+        <Route path="audit-logs" element={<Navigate to="/settings/audit-logs" replace />} />
         <Route path="admin/users" element={<Navigate to="/settings/account" replace />} />
         <Route
           path="flockspro-upgrade"

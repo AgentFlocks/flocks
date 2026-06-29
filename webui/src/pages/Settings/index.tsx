@@ -1,4 +1,4 @@
-import { Suspense, lazy, useContext, useMemo } from 'react';
+import { Suspense, lazy, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -12,6 +12,7 @@ import {
   Radio,
   ScrollText,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sun,
   UserCog,
   type LucideIcon,
@@ -19,14 +20,16 @@ import {
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 
 const ConfigPage = lazy(() => import('@/pages/Config'));
 const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const ModelPage = lazy(() => import('@/pages/Model'));
 const ChannelPage = lazy(() => import('@/pages/Channel'));
+const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 
-type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'flockspro' | 'models' | 'channels';
+type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro' | 'models' | 'channels';
 
 interface ReturnLocation {
   pathname: string;
@@ -43,6 +46,7 @@ interface SettingsSection {
   name: string;
   icon: LucideIcon;
   adminOnly?: boolean;
+  requiresFlockspro?: boolean;
 }
 
 interface SettingsGroup {
@@ -55,6 +59,7 @@ function isSettingsSectionId(value: string | undefined): value is SettingsSectio
     value === 'preferences' ||
     value === 'account' ||
     value === 'system-logs' ||
+    value === 'audit-logs' ||
     value === 'flockspro' ||
     value === 'models' ||
     value === 'channels'
@@ -207,6 +212,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
     <Suspense fallback={<RoutePageSkeleton />}>
       {sectionId === 'account' && <ConfigPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
+      {sectionId === 'audit-logs' && <AuditLogsPage />}
       {sectionId === 'flockspro' && <FlocksproUpgradePage />}
       {sectionId === 'models' && <ModelPage />}
       {sectionId === 'channels' && <ChannelPage />}
@@ -222,8 +228,48 @@ export default function SettingsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const sectionId = params.sectionId;
+  const [flocksproCapabilityReady, setFlocksproCapabilityReady] = useState(false);
+  const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
   const returnLocation = useMemo(() => sanitizeReturnLocation(location.state), [location.state]);
   const settingsRouteState = useMemo(() => ({ from: returnLocation }), [returnLocation]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isAdmin) {
+      setHasFlocksproCapability(false);
+      setFlocksproCapabilityReady(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setFlocksproCapabilityReady(false);
+    const refreshCapability = () => {
+      void flocksproUsersApi.hasCapability()
+        .then((ok) => {
+          if (!cancelled) {
+            setHasFlocksproCapability(ok);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setHasFlocksproCapability(false);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setFlocksproCapabilityReady(true);
+          }
+        });
+    };
+
+    refreshCapability();
+    window.addEventListener('flockspro-license-status-changed', refreshCapability);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('flockspro-license-status-changed', refreshCapability);
+    };
+  }, [isAdmin]);
 
   const groups = useMemo<SettingsGroup[]>(
     () => [
@@ -238,6 +284,7 @@ export default function SettingsPage() {
         items: [
           { id: 'account', name: t('accountManagement'), icon: UserCog },
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
+          { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
           { id: 'flockspro', name: t('flocksproUpgrade'), icon: ArrowUpCircle, adminOnly: true },
         ],
       },
@@ -255,7 +302,11 @@ export default function SettingsPage() {
   const visibleGroups = groups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !item.adminOnly || isAdmin),
+      items: group.items.filter((item) => {
+        if (item.adminOnly && !isAdmin) return false;
+        if (item.requiresFlockspro && flocksproCapabilityReady && !hasFlocksproCapability) return false;
+        return true;
+      }),
     }))
     .filter((group) => group.items.length > 0);
 
@@ -321,7 +372,43 @@ export default function SettingsPage() {
       </aside>
 
       <div className="min-w-0 flex-1 overflow-y-auto bg-white dark:bg-zinc-950">
-        <div className="mx-auto min-h-full w-full px-6 py-6 lg:px-8">
+        <div className="border-b border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950 md:hidden">
+          <button
+            type="button"
+            onClick={() => navigate(buildReturnPath(returnLocation))}
+            className="-ml-1 inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-semibold text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            {t('settingsBack')}
+          </button>
+          <div className="mt-2">
+            <h1 className="text-lg font-bold text-zinc-950 dark:text-zinc-50">{t('settingsTitle')}</h1>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{currentSection.name}</p>
+          </div>
+          <nav className="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label={t('settingsTitle')}>
+            {visibleGroups.flatMap((group) => group.items).map((item) => {
+              const Icon = item.icon;
+              const active = item.id === sectionId;
+              return (
+                <Link
+                  key={item.id}
+                  to={`/settings/${item.id}`}
+                  state={settingsRouteState}
+                  className={`inline-flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors ${
+                    active
+                      ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                      : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-950 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                  }`}
+                >
+                  <Icon className="h-4 w-4" />
+                  {item.name}
+                </Link>
+              );
+            })}
+          </nav>
+        </div>
+
+        <div className="mx-auto min-h-full w-full px-4 py-5 md:px-6 md:py-6 lg:px-8">
           <SettingsContent sectionId={sectionId} />
         </div>
       </div>
