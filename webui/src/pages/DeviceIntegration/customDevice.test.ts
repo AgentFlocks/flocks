@@ -24,6 +24,10 @@ describe('customDevice helpers', () => {
     expect(prompt).toContain('tool-builder skill');
     expect(prompt).toContain('【浏览器接入规则】');
     expect(prompt).toContain('web2cli skill');
+    expect(prompt).toContain('username` / `password` 仅用于 cookie 失效后的浏览器认证恢复');
+    expect(prompt).toContain('二者都必须声明为 `storage: secret`');
+    expect(prompt).toContain('`auth_state`，并声明 `storage: secret` 与 `internal: true`');
+    expect(prompt).toContain('flocks.browser.device_auth.ensure_browser_auth_state');
     expect(prompt).toContain('【Workflow 接入规则】');
     expect(prompt).toContain('不需要创建 device 插件');
   });

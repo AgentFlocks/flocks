@@ -1,0 +1,54 @@
+name: onesig
+vendor: threatbook
+service_id: onesig_v2_5_3_api
+version: "2.5.3"
+integration_type: device
+description: >
+  OneSIG strategy API integration using ApiKey + Secret HMAC-SHA1 request
+  signing. This template targets the third-party strategy API documented in
+  api-onesig-2.5.3, including device status, global whitelist, global
+  blacklist, banned whitelist, HTTP blacklist, protection policy, and asset
+  operations.
+description_cn: >
+  OneSIG 策略 API 接入模板，使用 ApiKey + Secret 的 HMAC-SHA1 签名机制。
+  适用于 api-onesig-2.5.3 文档中的第三方策略 API，覆盖设备状态、全局白名单、
+  全局黑名单、封禁白名单、HTTP 防护、策略配置和资产相关接口。
+auth:
+  type: custom
+  secret: onesig_v2_5_3_secret
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://device.example.com"
+  - key: api_key
+    label: ApiKey
+    storage: secret
+    config_key: api_key
+    secret_id: onesig_v2_5_3_api_key
+    input_type: password
+    required: true
+  - key: secret
+    label: Secret
+    storage: secret
+    config_key: secret
+    secret_id: onesig_v2_5_3_secret
+    input_type: password
+    required: true
+defaults:
+  timeout: 60
+  category: custom
+  product_version: "2.5.3"
+notes: |
+  本模板对应 OneSIG 第三方策略 API：请求 URL 自动追加
+  `apikey=<ApiKey>&timestamp=<UnixSeconds>&sign=<Base64(HMAC-SHA1(ApiKey+Timestamp, Secret))>`。
+
+  与已有 `onesig_v2_5_3_D20260321` 模板不同：
+    - 已有 onesig 模板走控制台 Cookie 登录 + `/v3/...` 接口；
+    - 本模板走第三方 ApiKey/Secret 签名 + `/api/v3/...` 接口。
+
+  若只需要控制台完整能力，优先使用已有 onesig 模板；若客户只开放策略 API，
+  使用本模板。

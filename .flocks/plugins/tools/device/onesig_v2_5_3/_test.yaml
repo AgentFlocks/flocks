@@ -1,0 +1,12 @@
+provider: onesig_v2_5_3_api
+tests:
+  onesig_strategy_api_query:
+    - label: "Query platform status"
+      input:
+        action: platform_status
+    - label: "List global whitelist"
+      input:
+        action: whitelist_list
+        body:
+          pageNo: 1
+          pageSize: 20

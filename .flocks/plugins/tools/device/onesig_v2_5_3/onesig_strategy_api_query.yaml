@@ -1,0 +1,39 @@
+name: onesig_strategy_api_query
+description: >
+  OneSIG Strategy API read-only grouped tool. Uses ApiKey + Secret HMAC-SHA1
+  signing and calls /api/v3 endpoints for status, asset, policy, whitelist,
+  blacklist, banned whitelist, and HTTP blacklist queries.
+description_cn: >
+  OneSIG 策略 API 只读分组工具。使用 ApiKey + Secret HMAC-SHA1 签名，
+  调用 /api/v3 下的设备状态、资产、策略、白名单、黑名单、封禁白名单和 HTTP 防护查询接口。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: onesig_v2_5_3_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - platform_status
+        - system_status
+        - network_status
+        - asset_group_list
+        - asset_list
+        - asset_type_list
+        - protection_policy_list
+        - whitelist_list
+        - blacklist_list
+        - banned_whitelist_list
+        - http_blacklist_list
+      description: 只读动作名。
+    body:
+      type: object
+      description: 请求体。列表类接口可传 pageNo、pageSize、search、direction 等文档字段。
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig_strategy_api.handler.py
+  function: query

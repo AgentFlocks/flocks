@@ -42,6 +42,7 @@ class APIServiceCredentialField(BaseModel):
     config_key: str
     secret_id: Optional[str] = None
     default_value: Optional[str] = None
+    internal: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +253,8 @@ def _normalize_api_service_credential_field(
     if description is not None and not isinstance(description, str):
         description = str(description)
 
+    internal = bool(raw_field.get("internal") or raw_field.get("hidden"))
+
     return APIServiceCredentialField(
         key=key,
         label=label,
@@ -263,6 +266,7 @@ def _normalize_api_service_credential_field(
         config_key=config_key,
         secret_id=secret_id,
         default_value=default_value,
+        internal=internal,
     )
 
 

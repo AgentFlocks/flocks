@@ -58,7 +58,11 @@ export function buildCustomDeviceModeInstruction(mode: CustomDeviceAccessMode): 
       '本次接入方式是浏览器接入。',
       '你必须先读取并使用 web2cli skill，再开始捕获与转换流程。',
       '用户会提供产品 URL 和需要获取的接口/页面行为。目标是安全设备接入，需要生成 device 插件。',
-      '自定义 CLI 默认复用 `cookie/auth-state`；可选暴露 `username` / `password` 仅用于 cookie 失效后的浏览器认证恢复。只有在站点确实需要补充 header、cookie 或 token 时，才额外暴露对应字段。',
+      '自定义 CLI 默认复用 `cookie/auth-state`；优先使用 `auth_state_path` 指向 `~/.flocks/browser/<name>/auth-state.json`。',
+      '`username` / `password` 仅用于 cookie 失效后的浏览器认证恢复，二者都必须声明为 `storage: secret`，不要把账号或密码明文写入数据库字段。',
+      '如果需要保存内联登录态，只能使用 `auth_state`，并声明 `storage: secret` 与 `internal: true`；不要在表单中展示 Cookie、localStorage、token 明文。',
+      '需要自动重登时，在 handler 中优先调用 `flocks.browser.device_auth.ensure_browser_auth_state(...)`，成功后刷新 auth-state；遇到验证码、MFA、短信码或人工确认时停止并让用户接管。',
+      '只有在站点确实需要补充 header、cookie 或 token 时，才额外暴露对应字段，并且必须使用 `storage: secret`。',
       '最终输出目录和插件结构必须符合 device 插件规范。',
     ].join('\n');
   }

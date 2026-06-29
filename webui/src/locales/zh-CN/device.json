@@ -81,7 +81,7 @@
       },
       "prompts": {
         "api": "我已选择 API 接入，请按 API 接入继续，引导我确认厂商、产品名、API 文档、Base URL、认证方式、需要实现的设备能力和冒烟测试步骤。",
-        "browser": "我已选择浏览器接入，请按浏览器接入继续，引导我确认产品 URL、登录方式、目标页面行为、需要获取的数据和自动化验证步骤。",
+        "browser": "我已选择浏览器接入，请按浏览器接入继续，引导我确认产品 URL、登录方式、目标页面行为、需要获取的数据和自动化验证步骤。生成 device 插件时，auth_state_path 用于保存浏览器登录态；username/password 仅用于登录态失效后的自动重登，必须使用 storage: secret；如需内联 auth_state，必须 storage: secret 且 internal: true。",
         "addressOnly": "我只有待接入设备的地址和登录方式，请先帮我判断它是否已有模板可用；如果信息不足，请一次只问一个最关键问题，并在信息足够后输出设备配置 JSON 草稿。",
         "tdp": "我已选择 TDP 接入案例，请引导我接入微步 TDP 设备，确认连接地址、API Key、Secret、SSL 验证和连通测试步骤。",
         "onesec": "我已选择 OneSEC 接入案例，请引导我接入 OneSEC 设备，确认 Base URL、API Key、Secret、SSL 验证和连通测试步骤。"
@@ -137,7 +137,7 @@
         "webcli": {
           "title": "浏览器接入",
           "desc": "通过 Web 控制台页面创建接入能力",
-          "prompt": "我已选择浏览器接入，请引导我准备产品 URL、登录方式、目标页面/操作和浏览器接入步骤。"
+          "prompt": "我已选择浏览器接入，请引导我准备产品 URL、登录方式、目标页面/操作和浏览器接入步骤。生成 device 插件时，auth_state_path 用于保存浏览器登录态；username/password 仅用于登录态失效后的自动重登，必须使用 storage: secret；如需内联 auth_state，必须 storage: secret 且 internal: true。"
         }
       }
     },
@@ -204,6 +204,12 @@
     "sslHint": "关闭可访问自签名证书的内网设备",
     "enabledLabel": "启用设备",
     "enabledHint": "关闭后 Agent 不会调用此设备的工具",
+    "aiAssistTitle": "Rex 辅助配置",
+    "aiAssistHint": "结合当前配置、模板字段和配置指引，帮你补全配置、测试设备或排查连接问题。",
+    "aiAssistComplete": "帮我补全",
+    "aiAssistTest": "帮我测试",
+    "aiAssistTroubleshoot": "排查失败",
+    "aiAssistSaveFirst": "保存设备后可让 Rex 调用设备工具测试",
     "testBtn": "连通测试",
     "saveBtn": "保存配置",
     "addBtn": "确认接入",

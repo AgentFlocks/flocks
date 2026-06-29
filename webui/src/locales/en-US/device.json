@@ -81,7 +81,7 @@
       },
       "prompts": {
         "api": "I have selected API integration. Continue with API integration and guide me through confirming the vendor, product name, API docs, Base URL, authentication method, device capabilities to implement, and smoke-test steps.",
-        "browser": "I have selected browser integration. Continue with browser integration and guide me through confirming the product URL, login method, target page behavior, data to collect, and automation validation steps.",
+        "browser": "I have selected browser integration. Continue with browser integration and guide me through confirming the product URL, login method, target page behavior, data to collect, and automation validation steps. When generating the device plugin, use auth_state_path for the browser login state; username/password are only for auto re-login after the login state expires and must use storage: secret; inline auth_state, if needed, must use storage: secret and internal: true.",
         "addressOnly": "I only have the device URL and login method. First help me determine whether an existing template can be used. If information is missing, ask only the most important question at a time, and output a device configuration JSON draft once enough details are available.",
         "tdp": "I have selected the TDP integration example. Guide me through connecting ThreatBook TDP and confirming the connection URL, API key, secret, SSL verification, and connection test steps.",
         "onesec": "I have selected the OneSEC integration example. Guide me through connecting OneSEC and confirming the Base URL, API key, secret, SSL verification, and connection test steps."
@@ -137,7 +137,7 @@
         "webcli": {
           "title": "Browser integration",
           "desc": "Create integration capability from a web console",
-          "prompt": "I have selected browser integration. Guide me through preparing the product URL, login method, target pages/actions, and browser integration steps."
+          "prompt": "I have selected browser integration. Guide me through preparing the product URL, login method, target pages/actions, and browser integration steps. When generating the device plugin, use auth_state_path for the browser login state; username/password are only for auto re-login after the login state expires and must use storage: secret; inline auth_state, if needed, must use storage: secret and internal: true."
         }
       }
     },
@@ -204,6 +204,12 @@
     "sslHint": "Disable to reach internal devices with self-signed certificates",
     "enabledLabel": "Enable device",
     "enabledHint": "When disabled, agents will not call tools from this device",
+    "aiAssistTitle": "Rex-assisted config",
+    "aiAssistHint": "Use the current values, template fields, and setup guide to fill gaps, test the device, or troubleshoot failures.",
+    "aiAssistComplete": "Fill gaps",
+    "aiAssistTest": "Test",
+    "aiAssistTroubleshoot": "Troubleshoot",
+    "aiAssistSaveFirst": "Save the device before Rex can call its tools",
     "testBtn": "Test connection",
     "saveBtn": "Save config",
     "addBtn": "Confirm integration",

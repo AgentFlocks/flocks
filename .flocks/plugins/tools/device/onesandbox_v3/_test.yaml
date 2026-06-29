@@ -1,0 +1,13 @@
+provider: onesandbox_api
+tests:
+  onesandbox_query:
+    - label: "Readiness check"
+      input:
+        action: readyz
+    - label: "Get API version"
+      input:
+        action: api_version
+    - label: "Query file report"
+      input:
+        action: file_report
+        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

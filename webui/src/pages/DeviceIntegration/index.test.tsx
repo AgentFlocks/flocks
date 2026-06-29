@@ -60,6 +60,12 @@ vi.mock('react-i18next', () => ({
         'config.testBtn': '连通测试',
         'config.showSecretAction': '显示',
         'config.hideSecretAction': '隐藏',
+        'config.aiAssistTitle': 'Rex 辅助配置',
+        'config.aiAssistHint': '结合当前配置、模板字段和配置指引，帮你补全配置、测试设备或排查连接问题。',
+        'config.aiAssistComplete': '帮我补全',
+        'config.aiAssistTest': '帮我测试',
+        'config.aiAssistTroubleshoot': '排查失败',
+        'config.aiAssistSaveFirst': '保存设备后可让 Rex 调用设备工具测试',
         'overview.viewDocs': '查看配置指引',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
         'wizard.tabs.rex': 'Rex 接入',
@@ -407,6 +413,21 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByText('查看更多')).toBeInTheDocument();
   });
 
+  it('returns to the add-device workbench when the workbench tab is clicked', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await openSupportedDeviceList(user);
+    expect(screen.getByText('已支持设备列表')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^工作台$/ }));
+
+    expect(screen.getByText('Rex 辅助接入')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^API 接入$/ })).toBeInTheDocument();
+    expect(screen.queryByText('已支持设备列表')).not.toBeInTheDocument();
+    expect(mocks.resetSession).toHaveBeenCalledTimes(1);
+  });
+
   it('opens the add-device panel on the Rex-guided tab by default', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
@@ -629,6 +650,9 @@ describe('DeviceIntegrationPage', () => {
       model: { providerID: 'openai', modelID: 'gpt-4.1' },
     })));
     expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('不要再询问接入方式');
+    expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('直接调用这台设备的可用工具完成连通测试');
+    expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('明确使用上面的 device_id 作为目标设备');
+    expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).not.toContain('页面上执行的连通测试动作');
   });
 
   it('does not detect Rex prose as a fillable device draft', async () => {
@@ -813,6 +837,42 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.queryByText('huaweicloud')).toBeNull();
   });
 
+  it('shows template versions when supported devices share the same name', async () => {
+    const user = userEvent.setup();
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3_D20260321',
+          storage_key: 'onesig_v2_5_3_D20260321',
+          service_id: 'onesig_api',
+          name: 'onesig',
+          vendor: 'threatbook',
+          version: '2.5.3 D20260321',
+          installed: true,
+          state: 'installed',
+        }),
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3_D20250710',
+          storage_key: 'onesig_v2_5_3_D20250710',
+          service_id: 'onesig_v2_5_3_D20250710_api',
+          name: 'onesig',
+          vendor: 'threatbook',
+          version: '2.5.3 D20250710',
+          installed: true,
+          state: 'installed',
+        }),
+      ],
+    });
+    render(<DeviceIntegrationPage />);
+
+    await openSupportedDeviceList(user);
+    await user.click(screen.getByRole('button', { name: /微步/ }));
+
+    expect(screen.getAllByText('onesig')).toHaveLength(2);
+    expect(screen.getByText('2.5.3 D20260321')).toBeInTheDocument();
+    expect(screen.getByText('2.5.3 D20250710')).toBeInTheDocument();
+  });
+
   it('sends the selected supported device template to Rex from the vendor accordion', async () => {
     const user = userEvent.setup();
     mocks.listTemplates.mockResolvedValueOnce({
@@ -959,6 +1019,68 @@ describe('DeviceIntegrationPage', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: '关闭设备配置面板' })).not.toBeInTheDocument();
     });
+  });
+
+  it('hides internal credential fields from the device config form', async () => {
+    const user = userEvent.setup();
+    mocks.listDevices.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'device-1',
+          group_id: 'group-1',
+          name: 'webcli-device',
+          storage_key: 'webcli_device_v1',
+          service_id: 'webcli_device',
+          enabled: true,
+          verify_ssl: false,
+          fields: { base_url: 'https://device.example.com', auth_state: 'a***xyz' },
+          fields_set: { base_url: true, auth_state: true },
+          status: 'connected',
+          created_at: 0,
+          updated_at: 0,
+        },
+      ],
+    });
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [
+        buildTemplate({
+          plugin_id: 'webcli_device_v1',
+          storage_key: 'webcli_device_v1',
+          service_id: 'webcli_device',
+          name: 'WebCLI Device',
+          vendor: 'threatbook',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+            {
+              key: 'auth_state',
+              label: 'Auth State',
+              storage: 'secret',
+              sensitive: true,
+              required: false,
+              input_type: 'password',
+              config_key: 'auth_state',
+              internal: true,
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('webcli-device'));
+
+    expect(await screen.findByText('Base URL')).toBeInTheDocument();
+    expect(screen.queryByText('Auth State')).toBeNull();
+    expect(screen.queryByDisplayValue('a***xyz')).toBeNull();
   });
 
   it('allows editing an existing device room from a selected room view', async () => {
@@ -1129,6 +1251,90 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.listDevices).toHaveBeenCalledTimes(1);
     expect(screen.getByDisplayValue('https://draft.example.com')).toBeInTheDocument();
     expect(await screen.findByText('HTTP 200, 163ms')).toBeInTheDocument();
+  });
+
+  it('sends current config context to Rex for assisted device testing', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'onesig-02',
+      storage_key: 'onesig_api_v2_5_3',
+      service_id: 'onesig_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        base_url: 'https://persisted.example.com',
+        username: 'admin',
+        password: 'p***word',
+      },
+      fields_set: { base_url: true, username: true, password: true },
+      status: 'connected',
+      message: 'last ok',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3',
+          storage_key: 'onesig_api_v2_5_3',
+          service_id: 'onesig_api',
+          name: 'OneSIG',
+          vendor: 'threatbook',
+          docs_url: 'https://docs.example.com/onesig',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+            {
+              key: 'username',
+              label: 'Username',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'text',
+              config_key: 'username',
+            },
+            {
+              key: 'password',
+              label: 'Password',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'password',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('onesig-02'));
+    expect(await screen.findByText('Rex 辅助配置')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /帮我测试/ }));
+
+    await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
+      displayText: '设备「onesig-02」请帮我测试。',
+      agent: 'rex',
+      model: { providerID: 'openai', modelID: 'gpt-4.1' },
+    })));
+    const prompt = mocks.createAndSend.mock.calls.at(-1)?.[0].text;
+    expect(prompt).toContain('device_id=device-1');
+    expect(prompt).toContain('配置指引文档=https://docs.example.com/onesig');
+    expect(prompt).toContain('任务：请直接调用这台设备的可用工具完成连通测试和基础冒烟验证');
+    expect(prompt).toContain('必须使用上面的 device_id 作为目标设备');
+    expect(prompt).toContain('password (Password): 已填写（敏感值未发送明文）');
+    expect(prompt).not.toContain('p***word');
   });
 
   it('reveals the full persisted secret when clicking show', async () => {

@@ -4,7 +4,7 @@ import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Info,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Info, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -381,9 +381,10 @@ function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceT
     `device_id=${device.id}，storage_key=${device.storage_key}，service_id=${device.service_id}，模板名称=${template.name}。`,
     `设备当前状态=${device.status}，enabled=${device.enabled}，verify_ssl=${device.verify_ssl}，group_id=${device.group_id}。`,
     `已填写字段：${fieldStatus}。`,
-    '请继续留在当前会话，引导我完成连通测试和冒烟验证。',
+    '请继续留在当前会话，直接调用这台设备的可用工具完成连通测试和基础冒烟验证。',
     '不要再询问接入方式，也不要让我在 API 接入、浏览器接入、Workflow 接入之间选择；不要重新输出设备配置 JSON 草稿。',
-    '请先说明下一步需要在页面上执行的连通测试动作、成功/失败时如何判断，以及失败时优先排查哪些配置项。',
+    '测试时请优先选择只读、低风险工具，并明确使用上面的 device_id 作为目标设备；如果需要执行写操作或高风险动作，必须先说明风险并请求确认。',
+    '如果工具调用失败，请根据返回错误给出优先排查项，例如地址、认证字段、SSL 验证、网络连通性或设备侧权限。',
   ].join('\n');
   return {
     text,
@@ -391,9 +392,128 @@ function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceT
   };
 }
 
+type DeviceRexAssistAction = 'complete' | 'test' | 'troubleshoot';
+
+interface DeviceConfigRexAssistInput {
+  action: DeviceRexAssistAction;
+  device?: DeviceIntegration;
+  template?: DeviceTemplate;
+  metadata?: { name?: string; version?: string; description?: string; description_cn?: string; docs_url?: string } | null;
+  name: string;
+  groupId: string;
+  fields: Record<string, string>;
+  fieldsSet?: Record<string, boolean>;
+  credentialSchema: APIServiceCredentialField[];
+  verifySsl: boolean;
+  enabled: boolean;
+  testResult?: { success: boolean; message: string } | null;
+}
+
+function summarizeDeviceFormFields(input: DeviceConfigRexAssistInput): string {
+  const schema = input.credentialSchema || [];
+  const knownKeys = new Set(schema.map((field) => field.key));
+  const lines = schema.map((field) => {
+    const isSecret = field.storage === 'secret' || field.input_type === 'password';
+    const value = (input.fields[field.key] ?? '').trim();
+    const hasPersisted = !!input.fieldsSet?.[field.key];
+    const hasValue = Boolean(value) || hasPersisted;
+    const label = field.label ? ` (${field.label})` : '';
+    if (isSecret) {
+      return `- ${field.key}${label}: ${hasValue ? '已填写（敏感值未发送明文）' : '未填写'}${field.required ? '，必填' : ''}`;
+    }
+    return `- ${field.key}${label}: ${value || '未填写'}${field.required ? '，必填' : ''}`;
+  });
+  Object.entries(input.fields).forEach(([key, value]) => {
+    if (knownKeys.has(key)) return;
+    lines.push(`- ${key}: ${value || '未填写'}`);
+  });
+  return lines.length ? lines.join('\n') : '- 无额外字段';
+}
+
+function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): CreateAndSendOptions {
+  const template = input.template;
+  const device = input.device;
+  const docsUrl = input.metadata?.docs_url ?? template?.docs_url;
+  const identityLines = [
+    `设备名称=${input.name || device?.name || '未命名设备'}`,
+    device ? `device_id=${device.id}` : 'device_id=尚未保存',
+    `storage_key=${device?.storage_key ?? template?.storage_key ?? 'unknown'}`,
+    `service_id=${device?.service_id ?? template?.service_id ?? 'unknown'}`,
+    template?.name ? `模板名称=${template.name}` : null,
+    input.metadata?.version || template?.version ? `版本=${input.metadata?.version ?? template?.version}` : null,
+    `group_id=${input.groupId}`,
+    `enabled=${input.enabled}`,
+    `verify_ssl=${input.verifySsl}`,
+    docsUrl ? `配置指引文档=${docsUrl}` : null,
+  ].filter(Boolean).join('\n');
+  const fieldSummary = summarizeDeviceFormFields(input);
+  const statusLine = device
+    ? `当前状态=${device.status}，message=${device.message || '无'}，latency_ms=${device.latency_ms ?? '无'}`
+    : '当前状态=尚未保存到设备列表';
+  const testLine = input.testResult
+    ? `最近页面连通测试=${input.testResult.success ? '成功' : '失败'}，消息=${input.testResult.message}`
+    : '最近页面连通测试=无';
+
+  const common = [
+    '你是 Flocks 的设备接入助手，请基于当前设备配置上下文继续工作。',
+    '不要要求我在 API 接入、浏览器接入、Workflow 接入之间重新选择；不要索要或复述真实密钥。',
+    '敏感字段只根据“已填写/未填写”判断，不要让用户在对话里粘贴真实密码、Token、API Key 或 Secret。',
+    '',
+    '设备上下文：',
+    identityLines,
+    statusLine,
+    testLine,
+    '',
+    '当前表单字段：',
+    fieldSummary,
+  ];
+
+  if (input.action === 'test') {
+    return {
+      text: [
+        ...common,
+        '',
+        '任务：请直接调用这台设备的可用工具完成连通测试和基础冒烟验证。',
+        '必须使用上面的 device_id 作为目标设备；优先选择只读、低风险工具。',
+        '如果需要执行写操作或高风险动作，必须先说明风险并请求确认。',
+        '完成后总结成功/失败结果；失败时给出地址、认证字段、SSL 验证、网络连通性或设备侧权限等优先排查项。',
+      ].join('\n'),
+      displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我测试。`,
+    };
+  }
+
+  if (input.action === 'troubleshoot') {
+    return {
+      text: [
+        ...common,
+        '',
+        '任务：请帮我排查这台设备的连接或配置问题。',
+        '请先根据当前状态、最近测试结果和表单字段判断最可能原因，再给出按优先级排序的排查步骤。',
+        '如果需要验证，请优先调用只读工具；如果信息不足，只问一个最关键问题。',
+      ].join('\n'),
+      displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我排查连接问题。`,
+    };
+  }
+
+  return {
+    text: [
+      ...common,
+      '',
+      '任务：请帮我检查并补全当前设备配置。',
+      '请结合模板字段和配置指引，指出缺失项、格式问题和建议值。',
+      '如果信息足够，请在回复末尾输出一个 ```json 代码块用于回填表单，格式为 {"storage_key":"...","device_name":"...","fields":{"base_url":"..."},"verify_ssl":false}。',
+      '不要在 JSON 中写入真实密钥；敏感字段请留空或省略，并提示我在页面表单中填写。',
+    ].join('\n'),
+    displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我补全配置。`,
+  };
+}
+
 function DeviceAddRexPanel({
   templates,
   sessionId,
+  showBuiltInTemplates,
+  setShowBuiltInTemplates,
+  workbenchResetToken,
   createAndSend,
   rexComposerControls,
   onApplyDraft,
@@ -402,6 +522,9 @@ function DeviceAddRexPanel({
 }: {
   templates: DeviceTemplate[];
   sessionId: string | null;
+  showBuiltInTemplates: boolean;
+  setShowBuiltInTemplates: (show: boolean) => void;
+  workbenchResetToken: number;
   createAndSend: (options: CreateAndSendOptions) => Promise<string>;
   rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyDraft: (draft: DeviceAddDraft) => void;
@@ -412,9 +535,15 @@ function DeviceAddRexPanel({
   const toast = useToast();
   const [extracting, setExtracting] = useState(false);
   const [detectedAction, setDetectedAction] = useState<DetectedDeviceDraftAction | null>(null);
-  const [showBuiltInTemplates, setShowBuiltInTemplates] = useState(false);
   const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set());
   const [installingTemplateKey, setInstallingTemplateKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (workbenchResetToken === 0) return;
+    setDetectedAction(null);
+    setExpandedVendors(new Set());
+    setInstallingTemplateKey(null);
+  }, [workbenchResetToken]);
 
   const startGuidedPrompt = useCallback((prompt: string) => {
     createAndSend({
@@ -658,6 +787,7 @@ function DeviceAddRexPanel({
                                 const count = instanceCounts[tpl.storage_key] ?? 0;
                                 const action = templateAction(tpl);
                                 const installing = installingTemplateKey === tpl.storage_key;
+                                const templateMeta = tpl.version || tpl.storage_key;
                                 const stateBadge = tpl.installed
                                   ? t('wizard.installState.installed')
                                   : tpl.state === 'updateAvailable'
@@ -673,9 +803,15 @@ function DeviceAddRexPanel({
                                     onClick={() => {
                                       void handleTemplatePrompt(tpl);
                                     }}
-                                    className="group mt-1.5 flex h-9 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
+                                    title={[tpl.name, tpl.version, tpl.storage_key].filter(Boolean).join(' · ')}
+                                    className="group mt-1.5 flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
                                   >
-                                    <span className="min-w-0 flex-1 truncate">{tpl.name}</span>
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate">{tpl.name}</span>
+                                      <span className="mt-0.5 block truncate text-[10px] font-medium text-gray-400 group-hover:text-rose-400">
+                                        {templateMeta}
+                                      </span>
+                                    </span>
                                     <span className="flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium text-gray-400">
                                       {count > 0 && <span>{t('wizard.instanceCount', { count })}</span>}
                                       <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
@@ -773,6 +909,7 @@ function AddDeviceWizardPanel({
   rexComposerControls,
   onApplyRexDraft,
   onInstallTemplate,
+  onResetWorkbench,
   onClose,
 }: {
   templates: DeviceTemplate[];
@@ -782,9 +919,18 @@ function AddDeviceWizardPanel({
   rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyRexDraft: (draft: DeviceAddDraft) => void;
   onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
+  onResetWorkbench: () => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation('device');
+  const [showBuiltInTemplates, setShowBuiltInTemplates] = useState(false);
+  const [workbenchResetToken, setWorkbenchResetToken] = useState(0);
+
+  const handleWorkbenchClick = () => {
+    setShowBuiltInTemplates(false);
+    setWorkbenchResetToken((current) => current + 1);
+    onResetWorkbench();
+  };
 
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
@@ -810,10 +956,14 @@ function AddDeviceWizardPanel({
             </button>
           </div>
           <div className="mt-5 flex justify-center border-b border-red-500">
-            <div className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600">
+            <button
+              type="button"
+              onClick={handleWorkbenchClick}
+              className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600 transition-colors hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
+            >
               <ServerCog className="h-4 w-4" />
               {t('wizard.guide.workbenchTab')}
-            </div>
+            </button>
           </div>
         </div>
 
@@ -823,6 +973,9 @@ function AddDeviceWizardPanel({
             templates={templates}
             instanceCounts={instanceCounts}
             sessionId={sessionId}
+            showBuiltInTemplates={showBuiltInTemplates}
+            setShowBuiltInTemplates={setShowBuiltInTemplates}
+            workbenchResetToken={workbenchResetToken}
             createAndSend={createAndSend}
             rexComposerControls={rexComposerControls}
             onApplyDraft={onApplyRexDraft}
@@ -855,7 +1008,7 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function DeviceConfigPanel({
   device, template, vendorKey, initialGroupId, groups, groupLocked,
   initialDraft,
-  onSave, onDelete, onClose, onTest, onBack,
+  onSave, onDelete, onClose, onTest, onBack, onRexAssist,
 }: {
   device?: DeviceIntegration;
   template?: DeviceTemplate;
@@ -876,6 +1029,7 @@ function DeviceConfigPanel({
   onClose: () => void;
   onTest?: (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
   onBack?: () => void;
+  onRexAssist?: (input: DeviceConfigRexAssistInput) => Promise<void>;
 }) {
   const toast = useToast();
   const { t, i18n } = useTranslation('device');
@@ -892,6 +1046,7 @@ function DeviceConfigPanel({
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [rexAssistAction, setRexAssistAction] = useState<DeviceRexAssistAction | null>(null);
   const [credFields, setCredFields] = useState<APIServiceCredentialField[]>([]);
   const [visibility, setVisibility] = useState<Record<string, boolean>>({});
   const [revealingFields, setRevealingFields] = useState<Record<string, boolean>>({});
@@ -905,6 +1060,7 @@ function DeviceConfigPanel({
   const serviceId = device?.service_id ?? template?.service_id ?? '';
   const storageKey = device?.storage_key ?? template?.storage_key ?? '';
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
+  const visibleCredFields = useMemo(() => credFields.filter((field) => !field.internal), [credFields]);
 
   useEffect(() => {
     if (!serviceId) return;
@@ -1104,6 +1260,31 @@ function DeviceConfigPanel({
     }
   };
 
+  const handleRexAssist = async (action: DeviceRexAssistAction) => {
+    if (!onRexAssist) return;
+    setRexAssistAction(action);
+    try {
+      await onRexAssist({
+        action,
+        device,
+        template,
+        metadata,
+        name: name.trim(),
+        groupId,
+        fields,
+        fieldsSet: device?.fields_set,
+        credentialSchema: credFields,
+        verifySsl,
+        enabled,
+        testResult,
+      });
+    } catch {
+      toast.error(t('toast.actionFailed'));
+    } finally {
+      setRexAssistAction(null);
+    }
+  };
+
   const TABS: { key: PanelTab; label: string; icon: React.ReactNode }[] = [
     { key: 'config', label: t('config.tabConfig'), icon: <Settings className="w-3.5 h-3.5" /> },
     ...(device
@@ -1228,10 +1409,10 @@ function DeviceConfigPanel({
                   )}
                 </div>
 
-                {credFields.length > 0 && (
+                {visibleCredFields.length > 0 && (
                   <div className="space-y-3">
                     <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">{t('config.connectionParams')}</p>
-                    {credFields.map((f) => {
+                    {visibleCredFields.map((f) => {
                       const isSecret = f.storage === 'secret' || f.input_type === 'password';
                       const show = !!visibility[f.key];
                       const revealing = !!revealingFields[f.key];
@@ -1294,6 +1475,43 @@ function DeviceConfigPanel({
                     <Toggle on={enabled} onToggle={handleToggleEnabled} />
                   </div>
                 </div>
+
+                {onRexAssist && (
+                  <div className="rounded-xl border border-red-100 bg-red-50/40 p-3">
+                    <div className="flex items-start gap-2.5">
+                      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-red-100 bg-white text-red-500">
+                        <Sparkles className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
+                        <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{t('config.aiAssistHint')}</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-3 gap-2">
+                      {([
+                        ['complete', t('config.aiAssistComplete'), Settings],
+                        ['test', t('config.aiAssistTest'), Activity],
+                        ['troubleshoot', t('config.aiAssistTroubleshoot'), AlertTriangle],
+                      ] as const).map(([action, label, Icon]) => {
+                        const disabled = action === 'test' && !device;
+                        const loading = rexAssistAction === action;
+                        return (
+                          <button
+                            key={action}
+                            type="button"
+                            onClick={() => handleRexAssist(action)}
+                            disabled={disabled || !!rexAssistAction}
+                            title={disabled ? t('config.aiAssistSaveFirst') : undefined}
+                            className="flex min-h-[34px] items-center justify-center gap-1.5 rounded-lg border border-red-100 bg-white px-2 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
+                          >
+                            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+                            <span className="truncate">{label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {testResult && (
                   <div className={`rounded-lg px-4 py-3 text-sm flex items-start gap-2 ${
@@ -1985,6 +2203,16 @@ export default function DeviceIntegrationPage() {
     return res.data;
   };
 
+  const handleConfigRexAssist = useCallback(async (input: DeviceConfigRexAssistInput) => {
+    const prompt = buildDeviceConfigRexAssistPrompt(input);
+    await createAndSendRex({
+      ...prompt,
+      agent: rexComposerControls.rexAgentName,
+      model: rexComposerControls.rexModel,
+    });
+    setPanel({ kind: 'wizard' });
+  }, [createAndSendRex, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // Group to use when adding a new device (follows sidebar selection).
   // In "全部机房" view (null), pre-select the first available group so the
@@ -2324,6 +2552,7 @@ export default function DeviceIntegrationPage() {
           rexComposerControls={rexComposerControls}
           onApplyRexDraft={handleApplyRexDraft}
           onInstallTemplate={handleInstallTemplate}
+          onResetWorkbench={resetRexSession}
           onClose={closeAddWorkbench}
         />
       )}
@@ -2354,6 +2583,7 @@ export default function DeviceIntegrationPage() {
             onClose={panel.kind === 'add' ? closeAddWorkbench : () => setPanel(null)}
             onTest={panel.kind === 'edit' ? handleTest : undefined}
             onBack={panel.kind === 'add' ? () => setPanel({ kind: 'wizard' }) : undefined}
+            onRexAssist={handleConfigRexAssist}
           />
         );
       })()}
