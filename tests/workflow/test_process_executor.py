@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from flocks.tool import ToolContext
+from flocks.workflow import process_executor, worker_runtime
 from flocks.workflow.events import WorkflowWorkerLimits, WorkflowWorkerRequest, workflow_event
 from flocks.workflow.process_executor import ProcessWorkflowExecutor, _serialize_tool_context, run_workflow_process
 from flocks.workflow.runner import RunWorkflowResult
@@ -96,6 +98,61 @@ def test_workflow_event_uses_jsonl_schema_shape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_control_response_ignores_windows_pipe_closed() -> None:
+    exc = OSError("[WinError 109] The pipe has been ended.")
+    exc.winerror = 109  # type: ignore[attr-defined]
+
+    class ClosedStdin:
+        def is_closing(self) -> bool:
+            return False
+
+        def write(self, _data: bytes) -> None:
+            raise exc
+
+        async def drain(self) -> None:
+            return None
+
+    proc = SimpleNamespace(stdin=ClosedStdin(), returncode=None)
+
+    await process_executor._send_control_response(  # noqa: SLF001
+        proc,  # type: ignore[arg-type]
+        "permission_response",
+        "control-1",
+        ok=True,
+    )
+
+
+def test_worker_event_write_ignores_windows_pipe_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    exc = OSError("[WinError 109] The pipe has been ended.")
+    exc.winerror = 109  # type: ignore[attr-defined]
+
+    class ClosedStdout:
+        def write(self, _data: str) -> None:
+            raise exc
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(worker_runtime, "_ORIGINAL_STDOUT", ClosedStdout())
+
+    worker_runtime._write_event(workflow_event("run_started", "req-closed"))  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_stderr_drain_ignores_windows_pipe_closed() -> None:
+    exc = OSError("[WinError 109] The pipe has been ended.")
+    exc.winerror = 109  # type: ignore[attr-defined]
+
+    class ClosedStderr:
+        async def readline(self) -> bytes:
+            raise exc
+
+    proc = SimpleNamespace(stderr=ClosedStderr())
+
+    assert await process_executor._drain_stderr(proc, max_bytes=1024) == ""  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_process_executor_runs_workflow_and_dispatches_step_events() -> None:
     completed_steps: list[dict] = []
 
@@ -112,6 +169,33 @@ async def test_process_executor_runs_workflow_and_dispatches_step_events() -> No
     assert result.steps == 1
     assert completed_steps
     assert completed_steps[0]["node_id"] == "produce"
+
+
+@pytest.mark.asyncio
+async def test_process_executor_reads_large_jsonl_event_within_result_limit() -> None:
+    workflow = {
+        "name": "large_jsonl_event_test",
+        "metadata": {"runtime": {"memory_limit_mb": 512, "soft_memory_budget_mb": 384}},
+        "start": "produce",
+        "nodes": [
+            {
+                "id": "produce",
+                "type": "python",
+                "code": "outputs['blob'] = 'x' * 131072",
+            }
+        ],
+        "edges": [],
+    }
+
+    result = await run_workflow_process(
+        workflow=workflow,
+        ensure_requirements=False,
+        timeout_s=10,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs["blob"]["_type"] == "string"
+    assert result.outputs["blob"]["chars"] == 131072
 
 
 @pytest.mark.asyncio

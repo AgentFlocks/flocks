@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import errno
 import json
 import os
 import resource
@@ -51,7 +52,12 @@ def _write_event(event: Dict[str, Any], *, max_bytes: Optional[int] = None) -> N
             error=f"ResultTooLarge: event exceeds {max_bytes} bytes",
         )
         encoded = json.dumps(fallback, ensure_ascii=False, default=str)
-    print(encoded, file=_ORIGINAL_STDOUT, flush=True)
+    try:
+        print(encoded, file=_ORIGINAL_STDOUT, flush=True)
+    except OSError as exc:
+        if _is_pipe_closed_error(exc):
+            return
+        raise
 
 
 async def _build_tool_context(payload: Any) -> Any:
@@ -197,7 +203,12 @@ def _start_control_reader() -> None:
 
 def _read_control_responses() -> None:
     while True:
-        raw = sys.stdin.readline()
+        try:
+            raw = sys.stdin.readline()
+        except OSError as exc:
+            if _is_pipe_closed_error(exc):
+                return
+            raise
         if not raw:
             return
         try:
@@ -328,6 +339,14 @@ def _current_rss_mb() -> Optional[float]:
     if sys.platform == "darwin":
         return rss / 1024 / 1024
     return rss / 1024
+
+
+def _is_pipe_closed_error(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    return getattr(exc, "errno", None) in {errno.EPIPE, errno.ECONNRESET} or getattr(exc, "winerror", None) == 109
 
 
 def main() -> int:

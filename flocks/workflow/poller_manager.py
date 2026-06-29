@@ -425,6 +425,7 @@ class WorkflowPollerManager:
                 workflow_id=workflow_id,
                 workflow=workflow_json,
                 inputs=inputs,
+                exec_id=exec_id,
                 timeout_s=config["timeoutSeconds"],
                 trace=False,
                 cancel=cancel_event.is_set,

@@ -223,6 +223,7 @@ class TriggerRuntime:
                 workflow_id=workflow_id,
                 workflow=workflow_json,
                 inputs=mapped_inputs,
+                exec_id=exec_id,
                 trace=False,
             )
             status_value, error_message = resolve_execution_outcome(result)
