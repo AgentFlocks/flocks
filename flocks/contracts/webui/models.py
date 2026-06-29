@@ -37,6 +37,37 @@ class WebUIWorkspaceManifest(BaseModel):
         description="Where to insert the nav item",
     )
     defaultPageId: Optional[str] = Field(None, description="Preferred default page id", alias="defaultPageId")
+    sections: list["WebUIWorkspaceSectionManifest"] = Field(
+        default_factory=list,
+        description="Workspace navigation sections",
+    )
+
+
+class WebUIWorkspaceSectionManifest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Stable section identifier")
+    label: str = Field(..., description="Section label")
+    pageIds: list[str] = Field(
+        default_factory=list,
+        description="Page ids in this section",
+        alias="pageIds",
+    )
+    defaultPageId: Optional[str] = Field(
+        None,
+        description="Preferred default page id for this section",
+        alias="defaultPageId",
+    )
+    contentPadding: Literal["comfortable", "none"] = Field(
+        "comfortable",
+        description="Whether the host should add standard page padding",
+        alias="contentPadding",
+    )
+    themeOverride: Optional[Literal["light", "dark"]] = Field(
+        None,
+        description="Temporary theme override while viewing pages in this section",
+        alias="themeOverride",
+    )
 
 
 class WebUIPageBuildMeta(BaseModel):
@@ -88,6 +119,7 @@ class WebUIWorkspaceListItem(BaseModel):
     enabled: bool
     placement: str
     defaultPageId: Optional[str] = Field(None, alias="defaultPageId")
+    sections: list[WebUIWorkspaceSectionManifest] = Field(default_factory=list)
     pages: list[WebUIPageListItem] = Field(default_factory=list)
 
 

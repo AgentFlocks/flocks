@@ -71,6 +71,15 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                 "enabled": True,
                 "placement": "sceneWorkspace",
                 "defaultPageId": "soc-overview",
+                "sections": [
+                    {
+                        "id": "operations",
+                        "label": "告警运营",
+                        "pageIds": ["soc-overview", "soc-alerts"],
+                        "defaultPageId": "soc-overview",
+                        "contentPadding": "comfortable",
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -112,6 +121,16 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
             "enabled": True,
             "placement": "sceneWorkspace",
             "defaultPageId": "soc-overview",
+            "sections": [
+                {
+                    "id": "operations",
+                    "label": "告警运营",
+                    "pageIds": ["soc-overview", "soc-alerts"],
+                    "defaultPageId": "soc-overview",
+                    "contentPadding": "comfortable",
+                    "themeOverride": None,
+                }
+            ],
             "pages": [
                 {
                     "id": "soc-overview",

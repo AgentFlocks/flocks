@@ -51,7 +51,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
-import type { WebUIContractPageListItem, WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -67,54 +67,6 @@ interface LayoutNavItem {
 interface LayoutNavSection {
   name: string;
   items: LayoutNavItem[];
-}
-
-interface LayoutWorkspaceSection {
-  id: string;
-  label: string;
-  pages: WebUIContractPageListItem[];
-  defaultPageId: string;
-}
-
-function buildLayoutWorkspaceSections(workspace: WebUIContractWorkspaceListItem): LayoutWorkspaceSection[] {
-  const pages = [...workspace.pages].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
-
-  if (workspace.id === 'soc_ui') {
-    const posturePages = pages.filter((page) => page.id === 'alert-denoise-triage-dashboard');
-    const operationPages = pages.filter((page) => page.id === 'soc-overview' || page.id === 'soc-alerts');
-    return [
-      posturePages.length > 0
-        ? {
-            id: 'posture',
-            label: '态势',
-            pages: posturePages,
-            defaultPageId: posturePages[0].id,
-          }
-        : null,
-      operationPages.length > 0
-        ? {
-            id: 'operations',
-            label: '告警运营',
-            pages: operationPages,
-            defaultPageId: operationPages.find((page) => page.id === 'soc-overview')?.id ?? operationPages[0].id,
-          }
-        : null,
-    ].filter((section): section is LayoutWorkspaceSection => section !== null);
-  }
-
-  if (pages.length === 0) return [];
-  const defaultPageId = workspace.defaultPageId && pages.some((page) => page.id === workspace.defaultPageId)
-    ? workspace.defaultPageId
-    : pages.find((page) => page.buildStatus === 'ready')?.id ?? pages[0].id;
-
-  return [
-    {
-      id: 'pages',
-      label: '页面',
-      pages,
-      defaultPageId,
-    },
-  ];
 }
 
 function formatProVersion(version?: string | null): string | null {
@@ -542,7 +494,7 @@ export default function Layout() {
     [openWorkspaceMenuId, webuiContractWorkspaces],
   );
   const activeWorkspaceSections = useMemo(
-    () => (activeWorkspaceMenu ? buildLayoutWorkspaceSections(activeWorkspaceMenu) : []),
+    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu) : []),
     [activeWorkspaceMenu],
   );
 

@@ -45,7 +45,14 @@ def _read_manifest(root, page_id: str):
     return json.loads((root / page_id / "manifest.json").read_text(encoding="utf-8"))
 
 
-def _write_workspace(root, workspace_id: str, title: str, order: int = 100, default_page_id: str | None = None) -> None:
+def _write_workspace(
+    root,
+    workspace_id: str,
+    title: str,
+    order: int = 100,
+    default_page_id: str | None = None,
+    sections: list[dict] | None = None,
+) -> None:
     workspace_dir = root / workspace_id
     workspace_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -58,6 +65,8 @@ def _write_workspace(root, workspace_id: str, title: str, order: int = 100, defa
     }
     if default_page_id is not None:
         payload["defaultPageId"] = default_page_id
+    if sections is not None:
+        payload["sections"] = sections
     (workspace_dir / "workspace.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -126,7 +135,22 @@ def test_grouped_page_directory_uses_manifest_id_for_lookup(tmp_path):
 
 def test_list_workspaces_returns_grouped_pages(tmp_path):
     user_root = tmp_path / "user" / "contracts" / "webui"
-    _write_workspace(user_root, "soc_ui", "SOC 工作区", order=5, default_page_id="soc-overview")
+    _write_workspace(
+        user_root,
+        "soc_ui",
+        "SOC 工作区",
+        order=5,
+        default_page_id="soc-overview",
+        sections=[
+            {
+                "id": "operations",
+                "label": "告警运营",
+                "pageIds": ["soc-overview", "soc-alerts"],
+                "defaultPageId": "soc-overview",
+                "contentPadding": "comfortable",
+            },
+        ],
+    )
     _write_page_at(user_root, "soc_ui/soc_alerts", "soc-alerts", "SOC Alerts", order=20)
     _write_page_at(user_root, "soc_ui/soc_overview", "soc-overview", "SOC Overview", order=10)
     store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
@@ -139,6 +163,12 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
     assert workspaces[0].route == "/contracts/webui/workspaces/soc_ui"
     assert workspaces[0].placement == "sceneWorkspace"
     assert workspaces[0].defaultPageId == "soc-overview"
+    assert len(workspaces[0].sections) == 1
+    assert workspaces[0].sections[0].id == "operations"
+    assert workspaces[0].sections[0].label == "告警运营"
+    assert workspaces[0].sections[0].pageIds == ["soc-overview", "soc-alerts"]
+    assert workspaces[0].sections[0].defaultPageId == "soc-overview"
+    assert workspaces[0].sections[0].contentPadding == "comfortable"
     assert [page.id for page in workspaces[0].pages] == ["soc-overview", "soc-alerts"]
     assert workspaces[0].pages[0].buildStatus == "ready"
 

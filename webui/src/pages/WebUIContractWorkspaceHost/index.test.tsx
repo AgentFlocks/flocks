@@ -42,6 +42,23 @@ describe('WebUIContractWorkspaceHost', () => {
           enabled: true,
           placement: 'sceneWorkspace',
           defaultPageId: 'soc-overview',
+          sections: [
+            {
+              id: 'posture',
+              label: '态势',
+              pageIds: ['alert-denoise-triage-dashboard'],
+              defaultPageId: 'alert-denoise-triage-dashboard',
+              contentPadding: 'none',
+              themeOverride: 'dark',
+            },
+            {
+              id: 'operations',
+              label: '告警运营',
+              pageIds: ['soc-overview', 'soc-alerts'],
+              defaultPageId: 'soc-overview',
+              contentPadding: 'comfortable',
+            },
+          ],
           pages: [
             {
               id: 'alert-denoise-triage-dashboard',

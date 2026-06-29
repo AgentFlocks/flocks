@@ -4,61 +4,12 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import {
   webuiContractPagesAPI,
-  type WebUIContractPageListItem,
   type WebUIContractWorkspaceListItem,
 } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
-
-interface WorkspaceSection {
-  id: string;
-  label: string;
-  pages: WebUIContractPageListItem[];
-  defaultPageId: string;
-}
-
-function buildWorkspaceSections(
-  workspaceId: string | undefined,
-  pages: WebUIContractPageListItem[],
-  workspaceDefaultPageId?: string | null,
-): WorkspaceSection[] {
-  if (workspaceId === 'soc_ui') {
-    const posturePages = pages.filter((page) => page.id === 'alert-denoise-triage-dashboard');
-    const operationPages = pages.filter((page) => page.id === 'soc-overview' || page.id === 'soc-alerts');
-    return [
-      posturePages.length > 0
-        ? {
-            id: 'posture',
-            label: '态势',
-            pages: posturePages,
-            defaultPageId: posturePages[0].id,
-          }
-        : null,
-      operationPages.length > 0
-        ? {
-            id: 'operations',
-            label: '告警运营',
-            pages: operationPages,
-            defaultPageId: operationPages.find((page) => page.id === 'soc-overview')?.id ?? operationPages[0].id,
-          }
-        : null,
-    ].filter((section): section is WorkspaceSection => section !== null);
-  }
-
-  if (pages.length === 0) return [];
-  const defaultPageId = workspaceDefaultPageId && pages.some((page) => page.id === workspaceDefaultPageId)
-    ? workspaceDefaultPageId
-    : pages.find((page) => page.buildStatus === 'ready')?.id ?? pages[0].id;
-  return [
-    {
-      id: 'pages',
-      label: '页面',
-      pages,
-      defaultPageId,
-    },
-  ];
-}
+import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
 
 export default function WebUIContractWorkspaceHost() {
   const { workspaceId, pageId } = useParams<{ workspaceId: string; pageId?: string }>();
@@ -105,24 +56,26 @@ export default function WebUIContractWorkspaceHost() {
     [workspace?.pages],
   );
   const sections = useMemo(
-    () => buildWorkspaceSections(workspaceId, pages, workspace?.defaultPageId),
-    [pages, workspace?.defaultPageId, workspaceId],
+    () => (workspace ? buildWebUIContractWorkspaceSections(workspace) : []),
+    [workspace],
   );
   const currentPage = pages.find((page) => page.id === pageId);
   const currentSection = currentPage
     ? sections.find((section) => section.pages.some((page) => page.id === currentPage.id))
     : undefined;
-  const shouldUsePostureDarkTheme = workspaceId === 'soc_ui' && currentSection?.id === 'posture' && theme === 'light';
+  const temporaryThemeOverride = currentSection?.themeOverride && theme !== currentSection.themeOverride
+    ? currentSection.themeOverride
+    : null;
 
   useEffect(() => {
-    if (!shouldUsePostureDarkTheme) {
+    if (!temporaryThemeOverride) {
       setTemporaryThemeOverride(null);
       return undefined;
     }
 
-    setTemporaryThemeOverride('dark');
+    setTemporaryThemeOverride(temporaryThemeOverride);
     return () => setTemporaryThemeOverride(null);
-  }, [setTemporaryThemeOverride, shouldUsePostureDarkTheme]);
+  }, [setTemporaryThemeOverride, temporaryThemeOverride]);
 
   if (!workspaceId) {
     return <div className="text-sm text-zinc-500">{t('workspace.missingWorkspaceId')}</div>;
@@ -176,7 +129,7 @@ export default function WebUIContractWorkspaceHost() {
     return <div className="text-sm text-zinc-500">{t('workspace.pageNotFound')}</div>;
   }
 
-  const pageContentClassName = currentSection?.id === 'posture'
+  const pageContentClassName = currentSection?.contentPadding === 'none'
     ? 'h-full min-w-0 overflow-x-auto'
     : 'h-full min-w-0 overflow-x-auto p-6';
 

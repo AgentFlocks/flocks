@@ -291,6 +291,7 @@ class WebUIPagesStore:
                         enabled=manifest.enabled,
                         placement=manifest.placement,
                         defaultPageId=manifest.defaultPageId,
+                        sections=manifest.sections,
                         pages=pages,
                     )
                 )
@@ -725,8 +726,29 @@ class WebUIPagesStore:
             manifest = WebUIWorkspaceManifest.model_validate(raw)
             workspace_id = self.validate_workspace_id(manifest.id)
             default_page_id = self.validate_page_id(manifest.defaultPageId) if manifest.defaultPageId else None
-            if manifest.id != workspace_id or manifest.defaultPageId != default_page_id:
-                return manifest.model_copy(update={"id": workspace_id, "defaultPageId": default_page_id})
+            sections = []
+            sections_changed = False
+            for section in manifest.sections:
+                section_id = self.validate_workspace_id(section.id)
+                page_ids = []
+                for page_id in section.pageIds:
+                    normalized_page_id = self.validate_page_id(page_id)
+                    if normalized_page_id not in page_ids:
+                        page_ids.append(normalized_page_id)
+                section_default_page_id = self.validate_page_id(section.defaultPageId) if section.defaultPageId else None
+                if section_default_page_id and section_default_page_id not in page_ids:
+                    page_ids.insert(0, section_default_page_id)
+                updated_section = section.model_copy(
+                    update={
+                        "id": section_id,
+                        "pageIds": page_ids,
+                        "defaultPageId": section_default_page_id,
+                    }
+                )
+                sections.append(updated_section)
+                sections_changed = sections_changed or updated_section != section
+            if manifest.id != workspace_id or manifest.defaultPageId != default_page_id or sections_changed:
+                return manifest.model_copy(update={"id": workspace_id, "defaultPageId": default_page_id, "sections": sections})
             return manifest
         except Exception as exc:
             log.warning("webui_pages.workspace_manifest.invalid", {"path": str(path), "error": str(exc)})

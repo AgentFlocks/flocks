@@ -15,6 +15,15 @@ export interface WebUIContractPageListItem {
   workspaceRoute?: string | null;
 }
 
+export interface WebUIContractWorkspaceSection {
+  id: string;
+  label: string;
+  pageIds: string[];
+  defaultPageId?: string | null;
+  contentPadding?: 'comfortable' | 'none';
+  themeOverride?: 'light' | 'dark' | null;
+}
+
 export interface WebUIContractWorkspaceListItem {
   id: string;
   title: string;
@@ -24,6 +33,7 @@ export interface WebUIContractWorkspaceListItem {
   enabled: boolean;
   placement: 'sceneWorkspace' | 'aiWorkbench';
   defaultPageId?: string | null;
+  sections?: WebUIContractWorkspaceSection[];
   pages: WebUIContractPageListItem[];
 }
 
