@@ -1,25 +1,24 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Info, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat from '@/components/common/SessionChat';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
-import { useSessionChat } from '@/hooks/useSessionChat';
+import { useSessionChat, type CreateAndSendOptions } from '@/hooks/useSessionChat';
 import { sessionApi } from '@/api/session';
 import { providerAPI } from '@/api/provider';
 import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
-import type { APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
+import { hubAPI } from '@/api/hub';
+import type { APIServiceCredentialField, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
-import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
 import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
 
 // ============================================================================
@@ -54,14 +53,18 @@ interface DeviceVendor {
   nameCn: string;
   nameEn: string;
   color: string;
+  mark?: string;
 }
 
 const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
-  sangfor:    { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800' },
-  qianxin:    { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800' },
-  threatbook: { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800' },
-  qingteng:   { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800' },
-  nsfocus:    { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800' },
+  '360':       { nameCn: '360',    nameEn: '360',        color: 'bg-zinc-100 text-zinc-700', mark: '360' },
+  huaweicloud: { nameCn: '华为云', nameEn: 'Huawei Cloud', color: 'bg-red-100 text-red-700', mark: '华' },
+  huorong:     { nameCn: '火绒',   nameEn: 'Huorong',    color: 'bg-amber-100 text-amber-700', mark: '火' },
+  sangfor:     { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800', mark: '深' },
+  qianxin:     { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800', mark: '奇' },
+  threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微' },
+  qingteng:    { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800', mark: '青' },
+  nsfocus:     { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800', mark: '绿' },
 };
 
 function vendorPresentation(vendorKey: string): DeviceVendor {
@@ -72,11 +75,31 @@ function vendorPresentation(vendorKey: string): DeviceVendor {
     nameCn: vendorKey,
     nameEn: vendorKey,
     color: 'bg-zinc-100 text-zinc-700',
+    mark: vendorKey[0]?.toUpperCase() || '?',
   };
 }
 
-function deviceTemplateHubUrl(template: DeviceTemplate): string {
-  return `/hub?type=device&plugin=${encodeURIComponent(template.plugin_id)}&q=${encodeURIComponent(template.plugin_id)}`;
+function VendorMark({ vendor, label, className = 'h-6 w-6 rounded-md text-[11px]' }: {
+  vendor: DeviceVendor;
+  label: string;
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      title={label}
+      className={`flex flex-shrink-0 items-center justify-center font-bold ${vendor.color} ${className}`}
+    >
+      {vendor.mark || label[0]}
+    </span>
+  );
+}
+
+function templateAction(template: DeviceTemplate): 'install' | 'update' | null {
+  if (template.installed) return null;
+  if (template.state === 'available') return 'install';
+  if (template.state === 'updateAvailable') return 'update';
+  return null;
 }
 
 // ============================================================================
@@ -155,8 +178,6 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // Add device wizard panel (step 1: vendor, step 2: product)
 // ============================================================================
 
-type DeviceAddTab = 'rex' | 'manual';
-
 interface DeviceAddDraft {
   template: DeviceTemplate;
   name?: string;
@@ -185,7 +206,8 @@ function buildDeviceAddSessionContext(templates: DeviceTemplate[]): string {
       `vendor=${template.vendor || 'unspecified'}`,
       `state=${template.installed ? 'installed' : template.state}`,
       fields ? `fields=${fields}` : 'fields=none',
-    ].join(' | ');
+      template.docs_url ? `docs_url=${template.docs_url}` : null,
+    ].filter(Boolean).join(' | ');
   });
 
   return [
@@ -329,30 +351,271 @@ function buildDeviceDraftAction(
   };
 }
 
+function buildTemplateGuidePrompt(template: DeviceTemplate): string {
+  const fields = template.credential_schema
+    .map((field) => `${field.key}${field.required ? '*' : ''}${field.label ? ` (${field.label})` : ''}`)
+    .join(', ');
+  const installed = template.installed;
+  return [
+    `我要接入设备「${template.name}」。`,
+    '我已从已支持设备列表选择了这个设备模板，请按该模板继续引导接入。',
+    `模板信息：storage_key=${template.storage_key}，service_id=${template.service_id}，plugin_id=${template.plugin_id}，状态=${installed ? 'installed' : template.state}。`,
+    template.docs_url ? `配置指引文档：${template.docs_url}。请优先结合该文档引导用户完成设备侧准备和 Flocks 侧配置。` : null,
+    fields ? `该设备表单字段包括：${fields}。` : '该设备模板没有声明额外表单字段。',
+    installed
+      ? '请直接引导我确认设备名称、所属机房、连接地址、认证字段、SSL 验证和连通测试步骤。'
+      : '该模板尚未安装，请先引导我前往 FlockHub 安装或更新该设备模板，安装完成后再继续配置。',
+    installed
+      ? '信息足够后，请输出设备配置 JSON 草稿，页面会用它填充表单；不要在 JSON 中写入真实密钥。'
+      : '模板安装完成前不要输出设备配置 JSON 草稿。',
+  ].filter(Boolean).join('\n');
+}
+
+function buildDeviceTestGuidePrompt(device: DeviceIntegration, template: DeviceTemplate): CreateAndSendOptions {
+  const fieldKeys = Object.keys(device.fields || {});
+  const fieldStatus = fieldKeys.length > 0
+    ? fieldKeys.map((key) => `${key}${device.fields_set?.[key] ? '(已填写)' : ''}`).join(', ')
+    : '无额外字段';
+  const text = [
+    `设备「${device.name}」已确认接入并保存。`,
+    `device_id=${device.id}，storage_key=${device.storage_key}，service_id=${device.service_id}，模板名称=${template.name}。`,
+    `设备当前状态=${device.status}，enabled=${device.enabled}，verify_ssl=${device.verify_ssl}，group_id=${device.group_id}。`,
+    `已填写字段：${fieldStatus}。`,
+    '请继续留在当前会话，直接调用这台设备的可用工具完成连通测试和基础冒烟验证。',
+    '不要再询问接入方式，也不要让我在 API 接入、浏览器接入、Workflow 接入之间选择；不要重新输出设备配置 JSON 草稿。',
+    '测试时请优先选择只读、低风险工具，并明确使用上面的 device_id 作为目标设备；如果需要执行写操作或高风险动作，必须先说明风险并请求确认。',
+    '如果工具调用失败，请根据返回错误给出优先排查项，例如地址、认证字段、SSL 验证、网络连通性或设备侧权限。',
+  ].join('\n');
+  return {
+    text,
+    displayText: `设备「${device.name}」已确认接入，请帮我测试。`,
+  };
+}
+
+type DeviceRexAssistAction = 'test' | 'troubleshoot';
+
+interface DeviceConfigRexAssistInput {
+  action: DeviceRexAssistAction;
+  device?: DeviceIntegration;
+  template?: DeviceTemplate;
+  metadata?: { name?: string; version?: string; description?: string; description_cn?: string; docs_url?: string } | null;
+  name: string;
+  groupId: string;
+  fields: Record<string, string>;
+  fieldsSet?: Record<string, boolean>;
+  credentialSchema: APIServiceCredentialField[];
+  verifySsl: boolean;
+  enabled: boolean;
+}
+
+function summarizeDeviceFormFields(input: DeviceConfigRexAssistInput): string {
+  const schema = input.credentialSchema || [];
+  const knownKeys = new Set(schema.map((field) => field.key));
+  const lines = schema.map((field) => {
+    const isSecret = field.storage === 'secret' || field.input_type === 'password';
+    const value = (input.fields[field.key] ?? '').trim();
+    const hasPersisted = !!input.fieldsSet?.[field.key];
+    const hasValue = Boolean(value) || hasPersisted;
+    const label = field.label ? ` (${field.label})` : '';
+    if (isSecret) {
+      return `- ${field.key}${label}: ${hasValue ? '已填写（敏感值未发送明文）' : '未填写'}${field.required ? '，必填' : ''}`;
+    }
+    return `- ${field.key}${label}: ${value || '未填写'}${field.required ? '，必填' : ''}`;
+  });
+  Object.entries(input.fields).forEach(([key, value]) => {
+    if (knownKeys.has(key)) return;
+    lines.push(`- ${key}: ${value || '未填写'}`);
+  });
+  return lines.length ? lines.join('\n') : '- 无额外字段';
+}
+
+function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): CreateAndSendOptions {
+  const template = input.template;
+  const device = input.device;
+  const docsUrl = input.metadata?.docs_url ?? template?.docs_url;
+  const identityLines = [
+    `设备名称=${input.name || device?.name || '未命名设备'}`,
+    device ? `device_id=${device.id}` : 'device_id=尚未保存',
+    `storage_key=${device?.storage_key ?? template?.storage_key ?? 'unknown'}`,
+    `service_id=${device?.service_id ?? template?.service_id ?? 'unknown'}`,
+    template?.name ? `模板名称=${template.name}` : null,
+    input.metadata?.version || template?.version ? `版本=${input.metadata?.version ?? template?.version}` : null,
+    `group_id=${input.groupId}`,
+    `enabled=${input.enabled}`,
+    `verify_ssl=${input.verifySsl}`,
+    docsUrl ? `配置指引文档=${docsUrl}` : null,
+  ].filter(Boolean).join('\n');
+  const fieldSummary = summarizeDeviceFormFields(input);
+  const statusLine = device
+    ? `当前状态=${device.status}，message=${device.message || '无'}，latency_ms=${device.latency_ms ?? '无'}`
+    : '当前状态=尚未保存到设备列表';
+  const common = [
+    '你是 Flocks 的设备接入助手，请基于当前设备配置上下文继续工作。',
+    '不要要求我在 API 接入、浏览器接入、Workflow 接入之间重新选择；不要索要或复述真实密钥。',
+    '敏感字段只根据“已填写/未填写”判断，不要让用户在对话里粘贴真实密码、Token、API Key 或 Secret。',
+    '',
+    '设备上下文：',
+    identityLines,
+    statusLine,
+    '',
+    '当前表单字段：',
+    fieldSummary,
+  ];
+
+  if (input.action === 'test') {
+    return {
+      text: [
+        ...common,
+        '',
+        '任务：请直接调用这台设备的可用工具完成连通测试和基础冒烟验证。',
+        '必须使用上面的 device_id 作为目标设备；优先选择只读、低风险工具。',
+        '如果需要执行写操作或高风险动作，必须先说明风险并请求确认。',
+        '完成后总结成功/失败结果；失败时给出地址、认证字段、SSL 验证、网络连通性或设备侧权限等优先排查项。',
+      ].join('\n'),
+      displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我测试。`,
+    };
+  }
+
+  return {
+    text: [
+      ...common,
+      '',
+      '任务：请帮我排查这台设备的连接或配置问题。',
+      '请先根据当前状态、最近测试结果和表单字段判断最可能原因，再给出按优先级排序的排查步骤。',
+      '如果需要验证，请优先调用只读工具；如果信息不足，只问一个最关键问题。',
+    ].join('\n'),
+    displayText: `设备「${input.name || device?.name || '未命名设备'}」请帮我排查连接问题。`,
+  };
+}
+
 function DeviceAddRexPanel({
   templates,
+  sessionId,
+  showBuiltInTemplates,
+  setShowBuiltInTemplates,
+  workbenchResetToken,
+  createAndSend,
+  rexComposerControls,
   onApplyDraft,
   onInstallTemplate,
+  instanceCounts,
 }: {
   templates: DeviceTemplate[];
+  sessionId: string | null;
+  showBuiltInTemplates: boolean;
+  setShowBuiltInTemplates: (show: boolean) => void;
+  workbenchResetToken: number;
+  createAndSend: (options: CreateAndSendOptions) => Promise<string>;
+  rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyDraft: (draft: DeviceAddDraft) => void;
-  onInstallTemplate: (template: DeviceTemplate) => void;
+  onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
+  instanceCounts: Record<string, number>;
 }) {
-  const { t } = useTranslation('device');
+  const { t, i18n } = useTranslation('device');
   const toast = useToast();
   const [extracting, setExtracting] = useState(false);
   const [detectedAction, setDetectedAction] = useState<DetectedDeviceDraftAction | null>(null);
-  const rexComposerControls = useRexComposerControls();
-  const contextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
-  const welcomeMessage = t('wizard.rex.welcome');
-  const { sessionId, createAndSend, reset } = useSessionChat({
-    title: t('wizard.rex.title'),
-    category: 'entity-config',
-    contextMessage,
-    welcomeMessage,
-  });
+  const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set());
+  const [installingTemplateKey, setInstallingTemplateKey] = useState<string | null>(null);
 
-  useEffect(() => reset, [reset]);
+  useEffect(() => {
+    if (workbenchResetToken === 0) return;
+    setDetectedAction(null);
+    setExpandedVendors(new Set());
+    setInstallingTemplateKey(null);
+  }, [workbenchResetToken]);
+
+  const startGuidedPrompt = useCallback((prompt: string) => {
+    createAndSend({
+      text: prompt,
+      agent: rexComposerControls.rexAgentName,
+      model: rexComposerControls.rexModel,
+    }).catch(() => {});
+  }, [createAndSend, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+
+  const vendorGroups = useMemo(() => {
+    const groups = new Map<string, { vendor: DeviceVendor; templates: DeviceTemplate[] }>();
+    for (const template of templates) {
+      const vendorKey = template.vendor || '__unspecified__';
+      const vendor = vendorKey === '__unspecified__'
+        ? { id: vendorKey, nameCn: t('vendor.unspecified'), nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
+        : vendorPresentation(vendorKey);
+      if (!groups.has(vendorKey)) {
+        groups.set(vendorKey, { vendor, templates: [] });
+      }
+      groups.get(vendorKey)!.templates.push(template);
+    }
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        templates: [...group.templates].sort((a, b) => {
+          if (a.installed !== b.installed) return a.installed ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        }),
+      }))
+      .sort((a, b) => {
+        const rank = (vendor: DeviceVendor) => {
+          if (vendor.id === 'threatbook') return 0;
+          if (vendor.id === '__unspecified__') return 99;
+          return 1;
+        };
+        const ra = rank(a.vendor);
+        const rb = rank(b.vendor);
+        if (ra !== rb) return ra - rb;
+        return a.vendor.id.localeCompare(b.vendor.id);
+      });
+  }, [templates, t]);
+
+  const findCaseTemplate = useCallback((keywords: string[]) => {
+    const normalizedKeywords = keywords.map((keyword) => keyword.toLowerCase());
+    const matches = templates.filter((template) => {
+      const haystack = [
+        template.name,
+        template.plugin_id,
+        template.storage_key,
+        template.service_id,
+      ].join(' ').toLowerCase();
+      return normalizedKeywords.some((keyword) => haystack.includes(keyword));
+    });
+    return matches.find((template) => template.installed) ?? matches[0];
+  }, [templates]);
+
+  const handleTemplatePrompt = useCallback(async (template: DeviceTemplate) => {
+    const action = templateAction(template);
+    if (!action) {
+      setShowBuiltInTemplates(false);
+      startGuidedPrompt(buildTemplateGuidePrompt(template));
+      return;
+    }
+    setInstallingTemplateKey(template.storage_key);
+    try {
+      const installedTemplate = await onInstallTemplate(template);
+      if (installedTemplate) {
+        setShowBuiltInTemplates(false);
+        startGuidedPrompt(buildTemplateGuidePrompt(installedTemplate));
+      }
+    } finally {
+      setInstallingTemplateKey(null);
+    }
+  }, [onInstallTemplate, startGuidedPrompt]);
+
+  const handleCaseTemplate = useCallback((keywords: string[], fallbackPrompt: string) => {
+    const template = findCaseTemplate(keywords);
+    if (!template) {
+      startGuidedPrompt(fallbackPrompt);
+      return;
+    }
+    void handleTemplatePrompt(template);
+  }, [findCaseTemplate, handleTemplatePrompt, startGuidedPrompt]);
+
+  const toggleVendor = (vendorId: string) => {
+    setExpandedVendors((current) => {
+      const next = new Set(current);
+      if (next.has(vendorId)) next.delete(vendorId);
+      else next.add(vendorId);
+      return next;
+    });
+  };
 
   const detectLatestDraft = useCallback(async (silent: boolean) => {
     if (!sessionId || extracting) return;
@@ -379,11 +642,14 @@ function DeviceAddRexPanel({
     }
   }, [extracting, sessionId, t, templates, toast]);
 
-  const handleConfirmDetectedDraft = () => {
+  const handleConfirmDetectedDraft = async () => {
     if (!detectedAction) return;
     if (detectedAction.kind === 'install') {
-      toast.info(t('wizard.rex.installFirst'));
-      onInstallTemplate(detectedAction.template);
+      const installedTemplate = await onInstallTemplate(detectedAction.template);
+      setDetectedAction(null);
+      if (installedTemplate) {
+        startGuidedPrompt(buildTemplateGuidePrompt(installedTemplate));
+      }
       return;
     }
     onApplyDraft(detectedAction.draft);
@@ -414,15 +680,136 @@ function DeviceAddRexPanel({
         emptyText={t('wizard.rex.pending')}
         onStreamingDone={() => void detectLatestDraft(true)}
         welcomeContent={
-          <div className="mx-4 my-4 flex items-start gap-2.5">
-            <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-red-500 text-sm font-bold text-white shadow-sm ring-2 ring-white">
-              R
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="mb-1.5 text-xs font-semibold text-zinc-700">Rex</div>
-              <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm leading-relaxed text-zinc-700 shadow-sm whitespace-pre-line">
-                {welcomeMessage}
-              </div>
+          <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
+            <div className="flex max-h-[min(620px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
+              {!showBuiltInTemplates ? (
+                <>
+                  <div className="flex-shrink-0">
+                    <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+                      <ServerCog className="h-5 w-5" />
+                    </div>
+                    <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
+                    <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
+                      {t('wizard.guide.subtitle')}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
+                    <WorkbenchSection title={t('wizard.guide.customTitle')}>
+                      <WorkbenchAction
+                        label={t('wizard.guide.actions.api')}
+                        onClick={() => startGuidedPrompt(t('wizard.guide.prompts.api'))}
+                      />
+                      <WorkbenchAction
+                        label={t('wizard.guide.actions.browser')}
+                        onClick={() => startGuidedPrompt(t('wizard.guide.prompts.browser'))}
+                      />
+                    </WorkbenchSection>
+
+                    <WorkbenchSection title={t('wizard.guide.caseTitle')}>
+                      <WorkbenchAction
+                        label={t('wizard.guide.cases.tdp')}
+                        onClick={() => handleCaseTemplate(['tdp'], t('wizard.guide.prompts.tdp'))}
+                      />
+                      <WorkbenchAction
+                        label={t('wizard.guide.cases.onesec')}
+                        onClick={() => handleCaseTemplate(['onesec', 'one sec'], t('wizard.guide.prompts.onesec'))}
+                      />
+                      <WorkbenchAction
+                        label={t('wizard.guide.cases.more')}
+                        onClick={() => setShowBuiltInTemplates(true)}
+                      />
+                    </WorkbenchSection>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex-shrink-0 text-left">
+                    <button
+                      type="button"
+                      onClick={() => setShowBuiltInTemplates(false)}
+                      className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                      {t('wizard.supportedList.back')}
+                    </button>
+                    <h3 className="text-sm font-semibold text-gray-900">{t('wizard.supportedList.title')}</h3>
+                    <p className="mt-2 text-xs leading-relaxed text-gray-500">{t('wizard.supportedList.subtitle')}</p>
+                  </div>
+
+                  <div className="mt-4 min-h-0 space-y-2 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
+                    {vendorGroups.map(({ vendor, templates: vendorTemplates }) => {
+                      const expanded = expandedVendors.has(vendor.id);
+                      const vendorName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
+                      const integratedCount = vendorTemplates.reduce(
+                        (sum, template) => sum + (instanceCounts[template.storage_key] ?? 0),
+                        0,
+                      );
+                      return (
+                        <section key={vendor.id} className="rounded-lg border border-gray-200 bg-white">
+                          <button
+                            type="button"
+                            onClick={() => toggleVendor(vendor.id)}
+                            className="flex h-10 w-full items-center gap-2 px-3 text-left"
+                            aria-expanded={expanded}
+                          >
+                            <VendorMark vendor={vendor} label={vendorName} />
+                            <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700">{vendorName}</span>
+                            <span className="text-[10px] font-medium text-gray-400">
+                              {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
+                              {integratedCount > 0 ? ` / ${t('wizard.supportedList.integratedCount', { count: integratedCount })}` : ''}
+                            </span>
+                            <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                          </button>
+                          {expanded && (
+                            <div className="border-t border-gray-100 px-2 pb-2">
+                              {vendorTemplates.map((tpl) => {
+                                const count = instanceCounts[tpl.storage_key] ?? 0;
+                                const action = templateAction(tpl);
+                                const installing = installingTemplateKey === tpl.storage_key;
+                                const templateMeta = tpl.version || tpl.storage_key;
+                                const stateBadge = tpl.installed
+                                  ? t('wizard.installState.installed')
+                                  : tpl.state === 'updateAvailable'
+                                    ? t('wizard.installState.updateAvailable')
+                                    : tpl.state === 'broken'
+                                      ? t('wizard.installState.brokenShort')
+                                      : t('wizard.installState.available');
+                                return (
+                                  <button
+                                    key={tpl.storage_key}
+                                    type="button"
+                                    disabled={!!installingTemplateKey}
+                                    onClick={() => {
+                                      void handleTemplatePrompt(tpl);
+                                    }}
+                                    title={[tpl.name, tpl.version, tpl.storage_key].filter(Boolean).join(' · ')}
+                                    className="group mt-1.5 flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
+                                  >
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate">{tpl.name}</span>
+                                      <span className="mt-0.5 block truncate text-[10px] font-medium text-gray-400 group-hover:text-rose-400">
+                                        {templateMeta}
+                                      </span>
+                                    </span>
+                                    <span className="flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium text-gray-400">
+                                      {count > 0 && <span>{t('wizard.instanceCount', { count })}</span>}
+                                      <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
+                                    </span>
+                                    {installing
+                                      ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
+                                      : <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </section>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         }
@@ -464,63 +851,66 @@ function DeviceAddRexPanel({
   );
 }
 
-function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onApplyRexDraft, onInstallTemplate, onClose }: {
+function WorkbenchSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
+      <div className="flex flex-col gap-1.5">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function WorkbenchAction({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
+    >
+      <span className="min-w-0 truncate">{label}</span>
+      <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />
+    </button>
+  );
+}
+
+function AddDeviceWizardPanel({
+  templates,
+  instanceCounts,
+  sessionId,
+  createAndSend,
+  rexComposerControls,
+  onApplyRexDraft,
+  onInstallTemplate,
+  onResetWorkbench,
+  onClose,
+}: {
   templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
-  initialVendor?: DeviceVendor;
-  onSelect: (template: DeviceTemplate) => void;
-  onSelectCustom: (mode: CustomDeviceAccessMode) => void;
+  sessionId: string | null;
+  createAndSend: (options: CreateAndSendOptions) => Promise<string>;
+  rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyRexDraft: (draft: DeviceAddDraft) => void;
-  onInstallTemplate: (template: DeviceTemplate) => void;
+  onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
+  onResetWorkbench: () => void;
   onClose: () => void;
 }) {
-  const { t, i18n } = useTranslation('device');
-  const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<DeviceAddTab>('rex');
-  const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
-  const [showCustomModes, setShowCustomModes] = useState(false);
+  const { t } = useTranslation('device');
+  const [showBuiltInTemplates, setShowBuiltInTemplates] = useState(false);
+  const [workbenchResetToken, setWorkbenchResetToken] = useState(0);
 
-  const availableVendors = useMemo<DeviceVendor[]>(() => {
-    const seen: string[] = [];
-    for (const t of templates) {
-      const key = t.vendor || '__unspecified__';
-      if (!seen.includes(key)) seen.push(key);
-    }
-    seen.sort((a, b) => {
-      const rank = (k: string) => {
-        if (k === 'threatbook') return 0;
-        if (k === '__unspecified__') return 99;
-        return 1;
-      };
-      const ra = rank(a);
-      const rb = rank(b);
-      if (ra !== rb) return ra - rb;
-      return a.localeCompare(b);
-    });
-    return seen.map((key) =>
-      key === '__unspecified__'
-        ? { id: '__unspecified__', nameCn: t('vendor.unspecified'), nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
-        : vendorPresentation(key),
-    );
-  }, [templates]);
-
-  const vendorTotalCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const t of templates) {
-      const key = t.vendor || '__unspecified__';
-      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.storage_key] ?? 0);
-    }
-    return counts;
-  }, [templates, instanceCounts]);
-
-  const vendorTemplates = useMemo(() => {
-    if (!selectedVendor) return [];
-    return templates.filter((t) => (t.vendor || '__unspecified__') === selectedVendor.id);
-  }, [templates, selectedVendor]);
-
-  const inModeSelection = showCustomModes && !selectedVendor;
-  const shouldShowVendorSecondary = (vendor: DeviceVendor) =>
-    vendor.nameCn.trim().toLocaleLowerCase() !== vendor.nameEn.trim().toLocaleLowerCase();
+  const handleWorkbenchClick = () => {
+    setShowBuiltInTemplates(false);
+    setWorkbenchResetToken((current) => current + 1);
+    onResetWorkbench();
+  };
 
   return (
     <div className="fixed inset-0 z-40 pointer-events-none">
@@ -538,244 +928,39 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
         {/* Header */}
         <div className="px-5 py-4 border-b border-zinc-100 flex-shrink-0">
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold text-zinc-900">{t('wizard.title')}</h3>
+            <div className="flex min-w-0 items-center gap-2">
+              <h3 className="truncate text-lg font-semibold text-zinc-900">{t('wizard.title')}</h3>
+            </div>
             <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
               <X className="w-4 h-4" />
             </button>
           </div>
-          <div className="mt-3 grid w-full grid-cols-2 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
-            {[
-              { key: 'rex' as const, label: t('wizard.tabs.rex') },
-              { key: 'manual' as const, label: t('wizard.tabs.manual') },
-            ].map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => setActiveTab(tab.key)}
-                className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                  activeTab === tab.key
-                    ? 'bg-white text-blue-600 shadow-sm'
-                    : 'text-zinc-500 hover:text-zinc-700'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+          <div className="mt-5 flex justify-center border-b border-red-500">
+            <button
+              type="button"
+              onClick={handleWorkbenchClick}
+              className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600 transition-colors hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
+            >
+              <ServerCog className="h-4 w-4" />
+              {t('wizard.guide.workbenchTab')}
+            </button>
           </div>
-          {activeTab === 'manual' && (
-            <div className="mt-3 flex items-center gap-2.5">
-              {(selectedVendor || inModeSelection) && (
-                <button
-                  onClick={() => {
-                    setSelectedVendor(null);
-                    setShowCustomModes(false);
-                  }}
-                  className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                </button>
-              )}
-              <div className="min-w-0">
-                {(selectedVendor || inModeSelection) && (
-                  <p className="mb-1 text-xs font-medium text-zinc-600">
-                    {selectedVendor
-                      ? t('wizard.selectVendorTitle', { vendor: i18n.language.startsWith('zh') ? selectedVendor.nameCn : selectedVendor.nameEn })
-                      : t('wizard.modeTitle')}
-                  </p>
-                )}
-                <div className="flex items-center gap-1.5">
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
-                    {t('wizard.step1Custom')}
-                  </span>
-                  <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
-                    {t('wizard.step2Custom')}
-                  </span>
-                  <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
-                    {t('wizard.step3Custom')}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Content */}
-        <div className={`flex-1 min-h-0 ${activeTab === 'rex' ? 'overflow-hidden' : 'overflow-y-auto p-5'}`}>
-          {activeTab === 'rex' ? (
-            <DeviceAddRexPanel
-              templates={templates}
-              onApplyDraft={onApplyRexDraft}
-              onInstallTemplate={onInstallTemplate}
-            />
-          ) : !selectedVendor && !inModeSelection ? (
-            <>
-              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  onClick={() => setShowCustomModes(true)}
-                  className="group flex w-full items-center gap-3 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50"
-                >
-                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-blue-100 text-sm font-bold text-blue-700">
-                    自
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-zinc-800 truncate">{t('wizard.customCardTitle')}</p>
-                    <p className="text-[11px] text-zinc-400 truncate">{t('wizard.customCardSubtitle')}</p>
-                    <p className="text-[10px] text-blue-600 mt-1 font-medium truncate">
-                      {t('wizard.customCardCta')}
-                    </p>
-                  </div>
-                  <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-blue-300 transition-colors group-hover:text-blue-500" />
-                </button>
-                {availableVendors.map((vendor) => {
-                  const count = vendorTotalCounts[vendor.id] ?? 0;
-                  const productCount = templates.filter(
-                    (t) => (t.vendor || '__unspecified__') === vendor.id,
-                  ).length;
-                  const primaryName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
-                  const secondaryName = i18n.language.startsWith('zh') ? vendor.nameEn : vendor.nameCn;
-                  const showSecondary = shouldShowVendorSecondary(vendor);
-                  return (
-                    <button
-                      key={vendor.id}
-                      onClick={() => setSelectedVendor(vendor)}
-                      className="group flex w-full items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
-                    >
-                      <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-sm font-bold ${vendor.color}`}>
-                        {vendor.nameCn[0]}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold text-zinc-800 truncate">{primaryName}</p>
-                        {showSecondary && <p className="text-[11px] text-zinc-400 truncate">{secondaryName}</p>}
-                        <p className="text-[10px] text-zinc-400 mt-1 truncate">
-                          {t('wizard.productCount', { count: productCount })}
-                          {count > 0 && <span className="text-zinc-500"> / {t('wizard.instanceCount', { count })}</span>}
-                        </p>
-                      </div>
-                      <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300 transition-colors group-hover:text-blue-400" />
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          ) : inModeSelection ? (
-            <>
-              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseCustomMode')}</p>
-              <div className="space-y-3">
-                {[
-                  {
-                    key: 'api' as const,
-                    title: t('wizard.customModes.api.title'),
-                    desc: t('wizard.customModes.api.desc'),
-                  },
-                  {
-                    key: 'webcli' as const,
-                    title: t('wizard.customModes.webcli.title'),
-                    desc: t('wizard.customModes.webcli.desc'),
-                  },
-                  {
-                    key: 'workflow' as const,
-                    title: t('wizard.customModes.workflow.title'),
-                    desc: t('wizard.customModes.workflow.desc'),
-                  },
-                ].map((mode) => (
-                  <button
-                    key={mode.key}
-                    onClick={() => onSelectCustom(mode.key)}
-                    className="w-full text-left flex items-start gap-3 px-4 py-4 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
-                  >
-                    <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
-                      <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-zinc-800 leading-snug">{mode.title}</p>
-                      <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{mode.desc}</p>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-xs text-zinc-400 mb-4">
-                {t('wizard.productHint', { count: vendorTemplates.length })}
-              </p>
-              <div className="space-y-2">
-                {vendorTemplates.map((tpl) => {
-                  const count = instanceCounts[tpl.storage_key] ?? 0;
-                  const disabled = !tpl.installed;
-                  const stateHint = tpl.state === 'updateAvailable'
-                    ? t('wizard.installState.update')
-                    : tpl.state === 'broken'
-                      ? t('wizard.installState.broken')
-                      : t('wizard.installState.install');
-                  const stateBadge = tpl.state === 'updateAvailable'
-                    ? t('wizard.installState.updateAvailable')
-                    : tpl.state === 'broken'
-                      ? t('wizard.installState.brokenShort')
-                      : tpl.installed
-                        ? t('wizard.installState.installed')
-                        : t('wizard.installState.available');
-                  const hubUrl = deviceTemplateHubUrl(tpl);
-                  return (
-                    <button
-                      key={tpl.storage_key}
-                      onClick={() => { if (disabled) navigate(hubUrl); else onSelect(tpl); }}
-                      className={`w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border transition-all group ${
-                        disabled
-                          ? 'border-zinc-100 bg-zinc-50 opacity-85 hover:border-amber-200 hover:bg-amber-50/30'
-                          : 'border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30'
-                      }`}
-                    >
-                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors ${
-                        disabled ? 'bg-zinc-100' : 'bg-zinc-50 group-hover:bg-blue-50'
-                      }`}>
-                        <Plug className={`w-4 h-4 transition-colors ${disabled ? 'text-zinc-300' : 'text-zinc-400 group-hover:text-blue-500'}`} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-sm font-medium text-zinc-800 leading-snug">{tpl.name}</p>
-                          {tpl.version && (
-                            <span className="text-[10px] text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5">
-                              v{tpl.version}
-                            </span>
-                          )}
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5 font-medium ${
-                            tpl.installed
-                              ? 'bg-green-50 text-green-700'
-                              : tpl.state === 'broken'
-                                ? 'bg-red-50 text-red-700'
-                                : 'bg-amber-50 text-amber-700'
-                          }`}>
-                            {stateBadge}
-                          </span>
-                        </div>
-                        {(tpl.description_cn || tpl.description) && (
-                          <p className="text-xs text-zinc-400 mt-0.5 line-clamp-2 leading-relaxed">
-                            {tpl.description_cn || tpl.description}
-                          </p>
-                        )}
-                        {count > 0 && (
-                          <span className="inline-block mt-1.5 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md font-medium">
-                            {t('wizard.instanceCount', { count })}
-                          </span>
-                        )}
-                        {disabled && (
-                          <span className="inline-block mt-1.5 text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-md font-medium underline underline-offset-2">
-                            {stateHint}
-                          </span>
-                        )}
-                      </div>
-                      <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-2 transition-colors ${disabled ? 'text-amber-300 group-hover:text-amber-500' : 'text-zinc-300 group-hover:text-blue-400'}`} />
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <DeviceAddRexPanel
+            templates={templates}
+            instanceCounts={instanceCounts}
+            sessionId={sessionId}
+            showBuiltInTemplates={showBuiltInTemplates}
+            setShowBuiltInTemplates={setShowBuiltInTemplates}
+            workbenchResetToken={workbenchResetToken}
+            createAndSend={createAndSend}
+            rexComposerControls={rexComposerControls}
+            onApplyDraft={onApplyRexDraft}
+            onInstallTemplate={onInstallTemplate}
+          />
         </div>
       </div>
     </div>
@@ -803,7 +988,7 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function DeviceConfigPanel({
   device, template, vendorKey, initialGroupId, groups, groupLocked,
   initialDraft,
-  onSave, onDelete, onClose, onTest, onBack,
+  onSave, onDelete, onClose, onBack, onRexAssist,
 }: {
   device?: DeviceIntegration;
   template?: DeviceTemplate;
@@ -822,8 +1007,8 @@ function DeviceConfigPanel({
   }) => Promise<void>;
   onDelete?: () => Promise<void>;
   onClose: () => void;
-  onTest?: (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
   onBack?: () => void;
+  onRexAssist?: (input: DeviceConfigRexAssistInput) => Promise<void>;
 }) {
   const toast = useToast();
   const { t, i18n } = useTranslation('device');
@@ -836,10 +1021,9 @@ function DeviceConfigPanel({
   const [enabled, setEnabled] = useState(device?.enabled ?? true);
   const [verifySsl, setVerifySsl] = useState(device?.verify_ssl ?? initialDraft?.verifySsl ?? false);
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [rexAssistAction, setRexAssistAction] = useState<DeviceRexAssistAction | null>(null);
   const [credFields, setCredFields] = useState<APIServiceCredentialField[]>([]);
   const [visibility, setVisibility] = useState<Record<string, boolean>>({});
   const [revealingFields, setRevealingFields] = useState<Record<string, boolean>>({});
@@ -853,47 +1037,73 @@ function DeviceConfigPanel({
   const serviceId = device?.service_id ?? template?.service_id ?? '';
   const storageKey = device?.storage_key ?? template?.storage_key ?? '';
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
+  const visibleCredFields = useMemo(() => credFields.filter((field) => !field.internal), [credFields]);
 
   useEffect(() => {
     if (!serviceId) return;
-    if (template) {
-      const schema = template.credential_schema ?? [];
+    const templateSchema = template?.credential_schema ?? [];
+    const shouldUseTemplateSchema = !!template && (!device || templateSchema.length > 0);
+    if (template && shouldUseTemplateSchema) {
+      const schema = templateSchema;
       setMetadata({
         name: template.name,
         version: template.version ?? undefined,
         description: template.description ?? undefined,
         description_cn: template.description_cn ?? undefined,
+        docs_url: template.docs_url ?? undefined,
       });
       setCredFields(schema);
       const defaults: Record<string, string> = {};
       schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
-      setFields((prev) => ({ ...defaults, ...prev }));
-      return;
-    }
-    providerAPI.getServiceMetadata(serviceId)
-      .then((res) => {
-        const meta = res.data;
-        setMetadata(meta ?? null);
-        const schema: APIServiceCredentialField[] = meta?.credential_schema ?? [];
-        setCredFields(schema);
-        if (device) {
-          const masked: Record<string, string> = {};
-          schema.forEach((f) => {
-            if (f.storage === 'secret' || f.input_type === 'password') {
-              masked[f.key] = device.fields?.[f.key] ?? '';
-            }
-          });
-          originalMasked.current = masked;
-          if (!dirtyRef.current) {
-            setFields({ ...device.fields });
-          }
-        } else {
-          const defaults: Record<string, string> = {};
-          schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
-          setFields((prev) => ({ ...defaults, ...prev }));
+      if (!device) {
+        setFields((prev) => ({ ...defaults, ...prev }));
+        return;
+      }
+      const masked: Record<string, string> = {};
+      schema.forEach((f) => {
+        if (f.storage === 'secret' || f.input_type === 'password') {
+          masked[f.key] = device.fields?.[f.key] ?? '';
         }
-      })
-      .catch(() => {});
+      });
+      originalMasked.current = masked;
+      if (!dirtyRef.current) {
+        setFields({ ...device.fields });
+      }
+    } else {
+      providerAPI.getServiceMetadata(serviceId)
+        .then((res) => {
+          const meta = res.data;
+          setMetadata(meta ? {
+            ...meta,
+            docs_url: meta.docs_url ?? template?.docs_url ?? undefined,
+          } : template ? {
+            name: template.name,
+            version: template.version ?? undefined,
+            description: template.description ?? undefined,
+            description_cn: template.description_cn ?? undefined,
+            docs_url: template.docs_url ?? undefined,
+          } : null);
+          const schema: APIServiceCredentialField[] = meta?.credential_schema ?? [];
+          setCredFields(schema);
+          if (device) {
+            const masked: Record<string, string> = {};
+            schema.forEach((f) => {
+              if (f.storage === 'secret' || f.input_type === 'password') {
+                masked[f.key] = device.fields?.[f.key] ?? '';
+              }
+            });
+            originalMasked.current = masked;
+            if (!dirtyRef.current) {
+              setFields({ ...device.fields });
+            }
+          } else {
+            const defaults: Record<string, string> = {};
+            schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
+            setFields((prev) => ({ ...defaults, ...prev }));
+          }
+        })
+        .catch(() => {});
+    }
 
     if (device) {
       Promise.all([
@@ -932,31 +1142,6 @@ function DeviceConfigPanel({
       toast.error(t('toast.saveFailed'));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleTest = async () => {
-    if (!onTest) return;
-    setTesting(true);
-    setTestResult(null);
-    try {
-      let candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
-      if (!candidateBaseUrl) {
-        const host = (fields.host ?? '').trim();
-        const port = (fields.port ?? '').trim();
-        if (host) {
-          const hasScheme = host.includes('://');
-          const prefix = hasScheme ? host : `https://${host}`;
-          candidateBaseUrl = port ? `${prefix}:${port}` : prefix;
-        }
-      }
-      setTestResult(await onTest({
-        fields,
-        verify_ssl: verifySsl,
-        base_url: candidateBaseUrl || undefined,
-      }));
-    } finally {
-      setTesting(false);
     }
   };
 
@@ -1024,6 +1209,30 @@ function DeviceConfigPanel({
       setToolEnabled((p) => ({ ...p, [toolName]: next }));
     } catch {
       toast.error(t('toast.actionFailed'));
+    }
+  };
+
+  const handleRexAssist = async (action: DeviceRexAssistAction) => {
+    if (!onRexAssist) return;
+    setRexAssistAction(action);
+    try {
+      await onRexAssist({
+        action,
+        device,
+        template,
+        metadata,
+        name: name.trim(),
+        groupId,
+        fields,
+        fieldsSet: device?.fields_set,
+        credentialSchema: credFields,
+        verifySsl,
+        enabled,
+      });
+    } catch {
+      toast.error(t('toast.actionFailed'));
+    } finally {
+      setRexAssistAction(null);
     }
   };
 
@@ -1096,53 +1305,67 @@ function DeviceConfigPanel({
             {/* ── 配置 tab ── */}
             {tab === 'config' && (
               <div className="px-5 py-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
-                    {t('config.nameLabel')} <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={name}
-                    onChange={(e) => {
-                      dirtyRef.current = true;
-                      setName(e.target.value);
-                    }}
-                    placeholder={t('config.namePlaceholder')}
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
+                {metadata?.docs_url && (
+                  <a
+                    href={metadata.docs_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between gap-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:border-blue-200 hover:bg-blue-100"
+                  >
+                    <span>{t('overview.viewDocs')}</span>
+                    <ChevronRight className="h-4 w-4 flex-shrink-0" />
+                  </a>
+                )}
 
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
-                    {t('config.roomLabel')} <span className="text-red-500">*</span>
-                  </label>
-                  {groupLocked ? (
-                    <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
-                      <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
-                      <span className="text-sm text-zinc-600">
-                        {groups.find((g) => g.id === groupId)?.name ?? groupId}
-                      </span>
-                    </div>
-                  ) : (
-                    <select
-                      value={groupId}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="min-w-0">
+                    <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
+                      {t('config.nameLabel')} <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={name}
                       onChange={(e) => {
                         dirtyRef.current = true;
-                        setGroupId(e.target.value);
+                        setName(e.target.value);
                       }}
+                      placeholder={t('config.namePlaceholder')}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    >
-                      {groups.map((g) => (
-                        <option key={g.id} value={g.id}>{g.name}</option>
-                      ))}
-                    </select>
-                  )}
+                    />
+                  </div>
+
+                  <div className="min-w-0">
+                    <label className="block text-xs font-semibold text-zinc-500 mb-1.5">
+                      {t('config.roomLabel')} <span className="text-red-500">*</span>
+                    </label>
+                    {groupLocked ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
+                        <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+                        <span className="truncate text-sm text-zinc-600">
+                          {groups.find((g) => g.id === groupId)?.name ?? groupId}
+                        </span>
+                      </div>
+                    ) : (
+                      <select
+                        value={groupId}
+                        onChange={(e) => {
+                          dirtyRef.current = true;
+                          setGroupId(e.target.value);
+                        }}
+                        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      >
+                        {groups.map((g) => (
+                          <option key={g.id} value={g.id}>{g.name}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
                 </div>
 
-                {credFields.length > 0 && (
+                {visibleCredFields.length > 0 && (
                   <div className="space-y-3">
                     <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">{t('config.connectionParams')}</p>
-                    {credFields.map((f) => {
+                    {visibleCredFields.map((f) => {
                       const isSecret = f.storage === 'secret' || f.input_type === 'password';
                       const show = !!visibility[f.key];
                       const revealing = !!revealingFields[f.key];
@@ -1206,33 +1429,48 @@ function DeviceConfigPanel({
                   </div>
                 </div>
 
-                {testResult && (
-                  <div className={`rounded-lg px-4 py-3 text-sm flex items-start gap-2 ${
-                    testResult.success ? 'bg-green-50 text-green-700 border border-green-100' : 'bg-red-50 text-red-600 border border-red-100'
-                  }`}>
-                    {testResult.success
-                      ? <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                      : <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
-                    <span>{testResult.message}</span>
+                {onRexAssist && (
+                  <div className="rounded-xl border border-zinc-100 bg-white px-3 py-2.5">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-500">
+                          <Sparkles className="h-3.5 w-3.5" />
+                        </div>
+                        <p className="truncate text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 sm:w-auto sm:flex sm:flex-shrink-0">
+                        {([
+                          ['test', t('config.aiAssistTest'), Activity],
+                          ['troubleshoot', t('config.aiAssistTroubleshoot'), AlertTriangle],
+                        ] as const).map(([action, label, Icon]) => {
+                          const disabled = action === 'test' && !device;
+                          const loading = rexAssistAction === action;
+                          return (
+                            <button
+                              key={action}
+                              type="button"
+                              onClick={() => handleRexAssist(action)}
+                              disabled={disabled || !!rexAssistAction}
+                              title={disabled ? t('config.aiAssistSaveFirst') : undefined}
+                              className="flex h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
+                            >
+                              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5 flex-shrink-0" />}
+                              <span className="truncate">{label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">{t('config.aiAssistHint')}</p>
                   </div>
                 )}
 
                 <div className="space-y-2 pt-1">
                   <div className="flex gap-2">
-                    {device && onTest && (
-                      <button
-                        onClick={handleTest}
-                        disabled={testing}
-                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
-                      >
-                        {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
-                        {t('config.testBtn')}
-                      </button>
-                    )}
                     <button
                       onClick={handleSave}
                       disabled={saving}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                      className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                     >
                       {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                       {device ? t('config.saveBtn') : t('config.addBtn')}
@@ -1640,16 +1878,14 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 
 type PanelMode =
   | { kind: 'pick-group' }
-  | { kind: 'wizard'; initialVendor?: DeviceVendor }
+  | { kind: 'wizard' }
   | { kind: 'add'; template: DeviceTemplate; draft?: Omit<DeviceAddDraft, 'template'> }
-  | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
 
 export default function DeviceIntegrationPage() {
   const toast = useToast();
   const { t } = useTranslation('device');
-  const navigate = useNavigate();
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
   const [templates, setTemplates] = useState<DeviceTemplate[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
@@ -1662,6 +1898,18 @@ export default function DeviceIntegrationPage() {
   // Group ids whose section is collapsed in the "全部机房" view. Default
   // (absent) = expanded, so brand-new rooms show their devices immediately.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const rexComposerControls = useRexComposerControls();
+  const rexContextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
+  const {
+    sessionId: rexSessionId,
+    createAndSend: createAndSendRex,
+    reset: resetRexSession,
+  } = useSessionChat({
+    title: t('wizard.rex.title'),
+    category: 'entity-config',
+    contextMessage: rexContextMessage,
+    welcomeMessage: t('wizard.rex.welcome'),
+  });
 
   const toggleGroupCollapsed = useCallback((groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -1677,22 +1925,31 @@ export default function DeviceIntegrationPage() {
     [groups, selectedGroupId],
   );
 
+  const closeAddWorkbench = useCallback(() => {
+    setPanel(null);
+    resetRexSession();
+  }, [resetRexSession]);
+
   // Devices shown in the main area (filtered by selected room)
   const filteredDevices = useMemo(
     () => selectedGroupId ? devices.filter((d) => d.group_id === selectedGroupId) : devices,
     [devices, selectedGroupId],
   );
 
-  const fetchData = useCallback(async (silent = false, refreshTemplates = false): Promise<DeviceTemplate[]> => {
+  const fetchData = useCallback(async (
+    silent = false,
+    refreshTemplates = false,
+    syncDeviceInstances = false,
+  ): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
-      if (refreshTemplates) {
-        await deviceAPI.sync({ refresh: true });
+      if (syncDeviceInstances) {
+        await deviceAPI.sync({ refresh: refreshTemplates });
       }
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        deviceAPI.listTemplates(),
+        refreshTemplates ? deviceAPI.listTemplates({ refresh: true }) : deviceAPI.listTemplates(),
         deviceAPI.listGroups(),
       ]);
       const nextTemplates = tplRes.data || [];
@@ -1815,7 +2072,7 @@ export default function DeviceIntegrationPage() {
     group_id: string;
   }) => {
     if (panel?.kind === 'add') {
-      await deviceAPI.create({
+      const createRes = await deviceAPI.create({
         name: data.name,
         storage_key: panel.template.storage_key,
         service_id: panel.template.service_id,
@@ -1824,8 +2081,17 @@ export default function DeviceIntegrationPage() {
         verify_ssl: data.verify_ssl,
         fields: data.fields,
       });
-      setPanel(null);
-    } else if (panel?.kind === 'edit') {
+      const createdDevice = createRes.data;
+      setPanel({ kind: 'wizard' });
+      createAndSendRex({
+        ...buildDeviceTestGuidePrompt(createdDevice, panel.template),
+        agent: rexComposerControls.rexAgentName,
+        model: rexComposerControls.rexModel,
+      }).catch(() => {});
+      await fetchData(true);
+      return;
+    }
+    if (panel?.kind === 'edit') {
       await deviceAPI.update(panel.device.id, {
         name: data.name,
         group_id: data.group_id,
@@ -1851,22 +2117,15 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
   };
 
-  const handleTest = async (overrides: { fields: Record<string, string>; verify_ssl: boolean; base_url?: string }) => {
-    if (panel?.kind !== 'edit') return { success: false, message: '' };
-    const res = await deviceAPI.test(panel.device.id, overrides);
-    setDevices((current) => current.map((device) => (
-      device.id === panel.device.id
-        ? {
-            ...device,
-            status: res.data.success ? 'ok' : 'error',
-            message: res.data.message,
-            latency_ms: res.data.latency_ms ?? null,
-            checked_at: Date.now(),
-          }
-        : device
-    )));
-    return res.data;
-  };
+  const handleConfigRexAssist = useCallback(async (input: DeviceConfigRexAssistInput) => {
+    const prompt = buildDeviceConfigRexAssistPrompt(input);
+    await createAndSendRex({
+      ...prompt,
+      agent: rexComposerControls.rexAgentName,
+      model: rexComposerControls.rexModel,
+    });
+    setPanel({ kind: 'wizard' });
+  }, [createAndSendRex, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Group to use when adding a new device (follows sidebar selection).
@@ -1877,10 +2136,28 @@ export default function DeviceIntegrationPage() {
   // Whether the room field should be locked (read-only) in the config panel.
   const groupLocked = selectedGroupId !== null;
 
-  const handleInstallTemplate = useCallback((template: DeviceTemplate) => {
-    setPanel(null);
-    navigate(deviceTemplateHubUrl(template));
-  }, [navigate]);
+  const handleInstallTemplate = useCallback(async (template: DeviceTemplate): Promise<DeviceTemplate | null> => {
+    const action = templateAction(template);
+    if (!action) return template;
+    try {
+      if (action === 'install') {
+        toast.info(t('wizard.installState.installingTemplate', { name: template.name }));
+        await hubAPI.install('device', template.plugin_id);
+      } else {
+        toast.info(t('wizard.installState.updatingTemplate', { name: template.name }));
+        await hubAPI.update('device', template.plugin_id);
+      }
+      const nextTemplates = await fetchData(true, true, false);
+      const installedTemplate = nextTemplates.find((item) => item.plugin_id === template.plugin_id)
+        ?? nextTemplates.find((item) => item.storage_key === template.storage_key)
+        ?? { ...template, installed: true, state: 'installed' as const };
+      toast.success(t(action === 'install' ? 'wizard.installState.installDone' : 'wizard.installState.updateDone', { name: template.name }));
+      return installedTemplate;
+    } catch (err: unknown) {
+      toast.error(errDetail(err, t(action === 'install' ? 'wizard.installState.installFailed' : 'wizard.installState.updateFailed', { name: template.name })));
+      return null;
+    }
+  }, [fetchData, t, toast]);
 
   const handleApplyRexDraft = useCallback((draft: DeviceAddDraft) => {
     const normalizedGroupName = draft.groupName?.trim().toLowerCase();
@@ -1936,7 +2213,7 @@ export default function DeviceIntegrationPage() {
         action={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => void fetchData(true, true)}
+              onClick={() => void fetchData(true, true, true)}
               disabled={refreshing}
               title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
@@ -2184,20 +2461,13 @@ export default function DeviceIntegrationPage() {
         <AddDeviceWizardPanel
           templates={templates}
           instanceCounts={instanceCounts}
-          initialVendor={panel.initialVendor}
-          onSelect={(tpl) => setPanel({ kind: 'add', template: tpl })}
-          onSelectCustom={(mode) => setPanel({ kind: 'custom', mode })}
+          sessionId={rexSessionId}
+          createAndSend={createAndSendRex}
+          rexComposerControls={rexComposerControls}
           onApplyRexDraft={handleApplyRexDraft}
           onInstallTemplate={handleInstallTemplate}
-          onClose={() => setPanel(null)}
-        />
-      )}
-
-      {panel?.kind === 'custom' && (
-        <CustomDeviceAccessPanel
-          mode={panel.mode}
-          onClose={() => setPanel(null)}
-          onBack={() => setPanel({ kind: 'wizard' })}
+          onResetWorkbench={resetRexSession}
+          onClose={closeAddWorkbench}
         />
       )}
 
@@ -2209,11 +2479,14 @@ export default function DeviceIntegrationPage() {
         const panelInitGroupId = panel.kind === 'edit'
           ? panel.device.group_id
           : addDefaultGroupId;
+        const panelTemplate = panel.kind === 'add'
+          ? panel.template
+          : templates.find((template) => template.storage_key === panel.device.storage_key);
         return (
           <DeviceConfigPanel
             key={panel.kind === 'edit' ? panel.device.id : panel.template.storage_key}
             device={panel.kind === 'edit' ? panel.device : undefined}
-            template={panel.kind === 'add' ? panel.template : undefined}
+            template={panelTemplate}
             vendorKey={panelVendorKey}
             initialGroupId={panelInitGroupId}
             groups={groups}
@@ -2221,15 +2494,9 @@ export default function DeviceIntegrationPage() {
             initialDraft={panel.kind === 'add' ? panel.draft : undefined}
             onSave={handleSave}
             onDelete={panel.kind === 'edit' ? handleDelete : undefined}
-            onClose={() => setPanel(null)}
-            onTest={panel.kind === 'edit' ? handleTest : undefined}
-            onBack={panel.kind === 'add'
-              ? () => setPanel({
-                  kind: 'wizard',
-                  initialVendor: panelVendorKey ? vendorPresentation(panelVendorKey) : undefined,
-                })
-              : undefined
-            }
+            onClose={panel.kind === 'add' ? closeAddWorkbench : () => setPanel(null)}
+            onBack={panel.kind === 'add' ? () => setPanel({ kind: 'wizard' }) : undefined}
+            onRexAssist={handleConfigRexAssist}
           />
         );
       })()}

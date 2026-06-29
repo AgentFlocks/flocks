@@ -9,6 +9,7 @@ description: >
 description_cn: >
   TDP 监测平台接口，提供监控看板、威胁调查、资产风险、日志检索、MDR、告警调查
   研判和系统运行状态查询能力。
+docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/tdp-integration"
 auth:
   type: custom
   secret: tdp_api_key

@@ -1,0 +1,62 @@
+name: "SecGate 3600"
+vendor: qianxin
+service_id: secgate3600_api
+version: "3.6.6.0"
+integration_type: device
+description: >
+  Qi-Anxin SecGate 3600 firewall RESTful API integration for V3.6.6.0
+  family builds. It supports login validation, system/resource status,
+  interface listing, security-policy queries, dashboard statistics, and
+  documented read-only REST calls.
+description_cn: >
+  奇安信网神 SecGate 3600 防火墙 V3.6.6.0 系列 RESTful API 接入。
+  支持登录校验、系统资源、接口列表、安全策略、首页统计以及文档内只读
+  REST 调用。设备侧需要先开启 RESTful API 服务、配置 RESTful API 管理员
+  账号，并将 Flocks 服务所在机器加入 RESTful API 可信主机。
+auth:
+  type: custom
+  flow: login_cookie_token
+  login_path: /v1.0/login
+credential_fields:
+  - key: base_url
+    label: 设备 API 地址
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://secgate3600.example.com:8443"
+  - key: username
+    label: 用户名
+    storage: secret
+    config_key: username
+    secret_id: secgate3600_username
+    input_type: text
+    required: true
+  - key: password
+    label: 密码
+    storage: secret
+    config_key: password
+    secret_id: secgate3600_password
+    input_type: password
+    required: true
+defaults:
+  timeout: 30
+  category: custom
+  product_version: "V3.6.6.0"
+  verify_ssl: false
+notes: |
+  URL 规则来自《网神 SecGate3600 防火墙 RESTful API 使用指南 V1.1》：
+    - 登录：https://{IP地址}:{端口号}/v1.0/login
+    - 注销：https://{IP地址}:{端口号}/v1.0/out
+    - 数据：https://{IP地址}:{端口号}/v1.0/rest/
+
+  设备侧配置要求：
+    1. 接口管理方式勾选 HTTPS。
+    2. 创建角色为“RESTful API 管理员”的管理账号。
+    3. 在管理主机中添加 Flocks 服务所在机器 IP，服务选择 RESTful API。
+    4. 在本机设置中启用 RESTful API 服务并配置通信端口。
+
+  登录成功后，设备返回 PHPSESSID cookie 和 token；后续 /v1.0/rest/
+  请求会携带 Cookie: PHPSESSID=...; token=...。
+  base_url 可以填写设备根地址，例如 https://10.0.0.1:8443；如果误填了
+  /v1.0、/v1.0/login 或 /v1.0/rest，handler 会自动归一化为根地址。

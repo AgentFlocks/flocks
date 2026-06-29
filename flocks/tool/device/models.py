@@ -187,6 +187,7 @@ class DeviceTemplate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     description_cn: Optional[str] = None
+    docs_url: Optional[str] = None
     credential_schema: List[Dict[str, Any]] = Field(default_factory=list)
     tool_count: int = 0
     installed: bool

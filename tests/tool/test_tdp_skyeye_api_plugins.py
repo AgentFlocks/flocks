@@ -833,6 +833,15 @@ def test_skyeye_verify_ssl_defaults_false_when_unset():
     assert module._verify_ssl({"verify_ssl": False}) is False
 
 
+def test_skyeye_base_url_appends_skyeye_suffix_once():
+    module = _load_module("test_skyeye_handler_base_url", _SKYEYE_HANDLER)
+
+    assert module._ensure_skyeye_base_path("https://skyeye.local") == "https://skyeye.local/skyeye"
+    assert module._ensure_skyeye_base_path("https://skyeye.local/") == "https://skyeye.local/skyeye"
+    assert module._ensure_skyeye_base_path("https://skyeye.local/skyeye") == "https://skyeye.local/skyeye"
+    assert module._ensure_skyeye_base_path("https://skyeye.local/skyeye/") == "https://skyeye.local/skyeye"
+
+
 def test_tdp_resolve_verify_ssl_defaults_false_when_unset():
     module = _load_module("test_tdp_handler_verify_ssl", _TDP_HANDLER)
     assert module._resolve_verify_ssl({}) is False

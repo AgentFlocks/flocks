@@ -5,6 +5,7 @@ version: "4.0.14.0.SP2"
 integration_type: device
 description: SkyEye monitoring platform API for dashboard views, alarm retrieval, and related downloads.
 description_cn: SkyEye 威胁监测平台接口，提供仪表板视图、告警检索、枚举值查询和相关下载能力。
+docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/skyeye-integration"
 auth:
   type: custom
   secret: skyeye_api_key

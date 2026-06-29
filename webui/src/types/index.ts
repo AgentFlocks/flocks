@@ -257,6 +257,7 @@ export interface APIServiceCredentialField {
   config_key: string;
   secret_id?: string;
   default_value?: string;
+  internal?: boolean;
 }
 
 export interface APIServiceMetadata {
