@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
       release_tag:
@@ -47,8 +44,6 @@ jobs:
         id: payload
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
-          EVENT_RELEASE_URL: ${{ github.event.release.html_url }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_RELEASE_URL: ${{ inputs.release_url }}
           INPUT_ROLLBACK_VERSION: ${{ inputs.rollback_version }}
@@ -70,13 +65,6 @@ jobs:
 
           release_tag="${INPUT_RELEASE_TAG:-}"
           release_url="${INPUT_RELEASE_URL:-}"
-
-          if [ -z "$release_tag" ] && [ "$EVENT_NAME" = "release" ]; then
-            release_tag="${EVENT_RELEASE_TAG:-}"
-          fi
-          if [ -z "$release_url" ] && [ "$EVENT_NAME" = "release" ]; then
-            release_url="${EVENT_RELEASE_URL:-}"
-          fi
 
           if [ -z "$release_tag" ]; then
             release_tag="$pyproject_version"
@@ -127,7 +115,7 @@ jobs:
           import os
 
           payload = {
-              "event_type": "flocks_release_published",
+              "event_type": "flocks_main_updated",
               "client_payload": {
                   "release_tag": os.environ["RELEASE_TAG"],
                   "release_url": os.environ["RELEASE_URL"],
