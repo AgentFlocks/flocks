@@ -30,12 +30,12 @@ from flocks.workflow.execution_store import (
 )
 from flocks.workflow.fs_store import read_workflow_from_fs, resolve_workflow_id_from_source
 from flocks.workflow.store import WorkflowStore
+from flocks.tool.truncation import truncate_output
 
 
 log = Log.create(service="tool.run_workflow")
 
 _PROGRESS_FLUSH_EVERY_STEPS = 5
-_FORMATTED_OUTPUT_MAX_CHARS = 8_000
 
 # Lazy import to avoid circular import (flocks.tool <-> flocks.workflow)
 _WORKFLOW_AVAILABLE: Optional[bool] = None
@@ -237,22 +237,9 @@ def _format_workflow_result(result: Any, *, include_history: bool = False) -> st
     if data.get("outputs"):
         output_lines.append("\nFinal Outputs:")
         try:
-            compacted_outputs = compact_outputs_for_storage(data.get("outputs"))
-            outputs_str = json.dumps(compacted_outputs, indent=2, ensure_ascii=False, default=str)
-            if len(outputs_str) > _FORMATTED_OUTPUT_MAX_CHARS:
-                outputs_str = (
-                    outputs_str[:_FORMATTED_OUTPUT_MAX_CHARS]
-                    + f"...[truncated:{len(outputs_str) - _FORMATTED_OUTPUT_MAX_CHARS}]"
-                )
-            output_lines.append(outputs_str)
+            output_lines.append(json.dumps(data.get("outputs"), indent=2, ensure_ascii=False, default=str))
         except Exception:
-            outputs_text = str(compact_outputs_for_storage(data.get("outputs")))
-            if len(outputs_text) > _FORMATTED_OUTPUT_MAX_CHARS:
-                outputs_text = (
-                    outputs_text[:_FORMATTED_OUTPUT_MAX_CHARS]
-                    + f"...[truncated:{len(outputs_text) - _FORMATTED_OUTPUT_MAX_CHARS}]"
-                )
-            output_lines.append(outputs_text)
+            output_lines.append(str(data.get("outputs")))
 
     if include_history and data.get("history"):
         history = data.get("history", [])
@@ -311,6 +298,53 @@ def _format_workflow_result(result: Any, *, include_history: bool = False) -> st
             output_lines.append(f"\n{'=' * 80}")
 
     return "\n".join(output_lines)
+
+
+def _format_workflow_result_for_tool(result: Any) -> tuple[str, bool, Optional[str]]:
+    """Format raw workflow output for the agent and save oversized text."""
+    output = _format_workflow_result(result)
+    truncated = truncate_output(output)
+    return truncated.content, truncated.truncated, truncated.output_path
+
+
+def _output_keys(outputs: Any) -> list[str]:
+    if isinstance(outputs, dict):
+        return [str(key) for key in outputs.keys()]
+    return []
+
+
+def _workflow_tool_metadata(
+    *,
+    workflow_id: str,
+    workflow_name: str,
+    total_nodes: Optional[int],
+    workflow_execution_id: Optional[str],
+    status: str,
+    steps: Any = 0,
+    run_id: Optional[str] = None,
+    last_node_id: Optional[str] = None,
+    outputs: Any = None,
+    history_count: int = 0,
+    output_truncated: bool = False,
+    output_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "workflow_id": workflow_id,
+        "workflow_name": workflow_name,
+        "total_nodes": total_nodes,
+        "workflow_execution_id": workflow_execution_id,
+        "status": status,
+        "steps": steps,
+        "run_id": run_id,
+        "last_node_id": last_node_id,
+        "has_output": bool(outputs),
+        "output_keys": _output_keys(outputs),
+        "output_truncated": output_truncated,
+        "history_count": history_count,
+    }
+    if output_path:
+        metadata["output_path"] = output_path
+    return metadata
 
 
 async def _record_workflow_tool_result(workflow_id: str, result: Any) -> None:
@@ -832,7 +866,7 @@ async def run_workflow_tool(
         success = status == "SUCCEEDED"
         error = result_dict.get("error")
 
-        output = _format_workflow_result(result_dict)
+        output, output_truncated, output_path = _format_workflow_result_for_tool(result_dict)
 
         log.info(
             "run_workflow.execute.complete",
@@ -906,8 +940,6 @@ async def run_workflow_tool(
                 }
             )
 
-        compacted_outputs = compact_outputs_for_storage(result_dict.get("outputs"))
-
         # If workflow failed, include error in ToolResult
         if not success and error:
             return ToolResult(
@@ -915,38 +947,42 @@ async def run_workflow_tool(
                 error=error,
                 output=output,  # Also include formatted output for context
                 title=f"Workflow: {workflow_name}",
-                metadata={
-                    "workflow_id": display_workflow_id,
-                    "workflow_name": workflow_name,
-                    "total_nodes": workflow_total_nodes,
-                    "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-                    "status": status_value,
-                    "steps": result_dict.get("steps", 0),
-                    "run_id": result_dict.get("run_id"),
-                    "last_node_id": result_dict.get("last_node_id"),
-                    "outputs": compacted_outputs,
-                    "history": [],
-                    "history_count": history_count,
-                },
+                metadata=_workflow_tool_metadata(
+                    workflow_id=display_workflow_id,
+                    workflow_name=workflow_name,
+                    total_nodes=workflow_total_nodes,
+                    workflow_execution_id=tracked_execution["id"] if tracked_execution else None,
+                    status=status_value,
+                    steps=result_dict.get("steps", 0),
+                    run_id=result_dict.get("run_id"),
+                    last_node_id=result_dict.get("last_node_id"),
+                    outputs=result_dict.get("outputs"),
+                    history_count=history_count,
+                    output_truncated=output_truncated,
+                    output_path=output_path,
+                ),
+                truncated=output_truncated,
             )
 
         return ToolResult(
             success=success,
             output=output,
             title=f"Workflow: {workflow_name}",
-            metadata={
-                "workflow_id": display_workflow_id,
-                "workflow_name": workflow_name,
-                "total_nodes": workflow_total_nodes,
-                "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-                "status": status_value,
-                "steps": result_dict.get("steps", 0),
-                "run_id": result_dict.get("run_id"),
-                "last_node_id": result_dict.get("last_node_id"),
-                "outputs": compacted_outputs,
-                "history": [],
-                "history_count": history_count,
-            },
+            metadata=_workflow_tool_metadata(
+                workflow_id=display_workflow_id,
+                workflow_name=workflow_name,
+                total_nodes=workflow_total_nodes,
+                workflow_execution_id=tracked_execution["id"] if tracked_execution else None,
+                status=status_value,
+                steps=result_dict.get("steps", 0),
+                run_id=result_dict.get("run_id"),
+                last_node_id=result_dict.get("last_node_id"),
+                outputs=result_dict.get("outputs"),
+                history_count=history_count,
+                output_truncated=output_truncated,
+                output_path=output_path,
+            ),
+            truncated=output_truncated,
         )
 
     except Exception as e:
@@ -996,11 +1032,11 @@ async def run_workflow_tool(
             success=False,
             error=f"Workflow execution failed: {error_msg}",
             title=f"Workflow: {workflow_name}",
-            metadata={
-                "workflow_id": display_workflow_id,
-                "workflow_name": workflow_name,
-                "total_nodes": workflow_total_nodes,
-                "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-                "status": "FAILED",
-            },
+            metadata=_workflow_tool_metadata(
+                workflow_id=display_workflow_id,
+                workflow_name=workflow_name,
+                total_nodes=workflow_total_nodes,
+                workflow_execution_id=tracked_execution["id"] if tracked_execution else None,
+                status="FAILED",
+            ),
         )

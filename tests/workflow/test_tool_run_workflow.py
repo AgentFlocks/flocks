@@ -47,7 +47,7 @@ def _make_large_alerts(count: int) -> list[dict[str, Any]]:
     return [{"id": idx, "payload": "x" * 20} for idx in range(count)]
 
 
-def test_format_workflow_result_compacts_large_outputs() -> None:
+def test_format_workflow_result_keeps_raw_outputs() -> None:
     large_alerts = _make_large_alerts(5_000)
 
     text = run_workflow_module._format_workflow_result(
@@ -61,9 +61,9 @@ def test_format_workflow_result_compacts_large_outputs() -> None:
         }
     )
 
-    assert "_enriched_alerts_count" in text
-    assert "5000" in text
-    assert "payload" not in text
+    assert '"enriched_alerts"' in text
+    assert '"payload"' in text
+    assert "_enriched_alerts_count" not in text
 
 
 # =============================================================================
@@ -503,11 +503,10 @@ class TestRunWorkflowToolExecution:
             "_raw_alerts_count": 150,
             "message": "ok",
         }
-        assert result.metadata["outputs"] == {
-            "_enriched_alerts_count": 150,
-            "message": "done",
-        }
-        assert result.metadata["history"] == []
+        assert result.metadata["has_output"] is True
+        assert result.metadata["output_keys"] == ["enriched_alerts", "message"]
+        assert "outputs" not in result.metadata
+        assert "history" not in result.metadata
         assert result.metadata["history_count"] == 0
 
         final_exec_data = record_result.await_args.args[2]
@@ -813,7 +812,8 @@ class TestRunWorkflowToolResultFormatting:
             assert "Last node: node-3" in output
             assert "Final Outputs:" in output
             assert "Execution History" not in output
-        assert result.metadata["history"] == []
+        assert "history" not in result.metadata
+        assert result.metadata["output_keys"] == ["result", "count"]
         assert result.metadata["history_count"] == len(fake.history)
 
     @pytest.mark.anyio
