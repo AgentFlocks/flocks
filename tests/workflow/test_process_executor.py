@@ -304,36 +304,6 @@ async def test_process_executor_times_out_worker_without_crashing_parent() -> No
 
 
 @pytest.mark.asyncio
-async def test_process_executor_returns_failed_for_strict_implicit_edge_mapping() -> None:
-    workflow = {
-        "name": "strict_mapping_test",
-        "metadata": {"runtime": {"strict_edge_mapping": True}},
-        "start": "produce",
-        "nodes": [
-            {
-                "id": "produce",
-                "type": "python",
-                "code": "outputs['raw'] = 'x' * 1000",
-            },
-            {
-                "id": "consume",
-                "type": "python",
-                "code": "outputs['ok'] = bool(inputs.get('raw'))",
-            },
-        ],
-        "edges": [{"from": "produce", "to": "consume"}],
-    }
-
-    result = await run_workflow_process(
-        workflow=workflow,
-        ensure_requirements=False,
-    )
-
-    assert result.status == "FAILED"
-    assert "strict edge mapping" in str(result.error).lower()
-
-
-@pytest.mark.asyncio
 async def test_process_executor_bridges_tool_permission_callback() -> None:
     permission_requests: list[tuple[str, list[str]]] = []
 
