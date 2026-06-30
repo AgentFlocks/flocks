@@ -831,7 +831,6 @@ async def run_workflow_tool(
         status = result_dict.get("status", "UNKNOWN")
         success = status == "SUCCEEDED"
         error = result_dict.get("error")
-        payload_risk_summary = result_dict.get("payload_risk_summary") or result_dict.get("payloadRiskSummary") or {}
 
         output = _format_workflow_result(result_dict)
 
@@ -875,7 +874,6 @@ async def run_workflow_tool(
                     "finishedAt": int(time.time() * 1000),
                     "duration": time.time() - execution_started_at,
                     "executionLog": compacted_history,
-                    "payloadRiskSummary": payload_risk_summary,
                     "stepCount": final_step_count,
                     "errorMessage": error_message,
                     "currentNodeId": result_dict.get("last_node_id"),
@@ -929,7 +927,6 @@ async def run_workflow_tool(
                     "outputs": compacted_outputs,
                     "history": [],
                     "history_count": history_count,
-                    "payload_risk_summary": payload_risk_summary,
                 },
             )
 
@@ -949,7 +946,6 @@ async def run_workflow_tool(
                 "outputs": compacted_outputs,
                 "history": [],
                 "history_count": history_count,
-                "payload_risk_summary": payload_risk_summary,
             },
         )
 

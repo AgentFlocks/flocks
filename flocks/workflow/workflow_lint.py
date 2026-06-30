@@ -17,6 +17,24 @@ _CN_SECTION_OUTPUT_RE = re.compile(r"^\s*输出要求\s*[:：]?\s*$")
 # Patterns that indicate an "expensive" node (LLM call / file write).
 _EXPENSIVE_CALL_RE = re.compile(r"""llm\.ask\s*\(|tool\.run\s*\(\s*['"]write['"]""")
 _STRICT_MAPPING_TRIGGER_TYPES = {"syslog", "kafka", "schedule"}
+_SCHEMA_ERROR_KINDS = {
+    "schema_mapping_src_not_declared",
+    "schema_mapping_dst_not_declared",
+    "schema_mapping_type_mismatch",
+    "schema_mapping_large_payload",
+    "schema_required_input_missing",
+}
+_TYPE_ALIASES = {
+    "array": "list",
+    "sequence": "list",
+    "object": "dict",
+    "map": "dict",
+    "integer": "int",
+    "number": "float",
+    "boolean": "bool",
+    "text": "str",
+    "string": "str",
+}
 
 
 def _split_keys(raw: str) -> list[str]:
@@ -66,6 +84,59 @@ def estimate_node_output_keys(node: Node) -> Set[str]:
     if node.type == "subworkflow":
         keys.add(node.output_key or "output")
     return keys
+
+
+def _normalize_schema_field(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, str):
+        return {"type": _normalize_type_name(raw)}
+    if isinstance(raw, dict):
+        normalized = dict(raw)
+        if "type" in normalized:
+            normalized["type"] = _normalize_type_name(normalized.get("type"))
+        return normalized
+    return {}
+
+
+def _normalize_type_name(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return _TYPE_ALIASES.get(raw, raw)
+
+
+def _schema_fields(raw_schema: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw_schema, dict):
+        return {}
+    fields = raw_schema.get("fields") if isinstance(raw_schema.get("fields"), dict) else raw_schema
+    if not isinstance(fields, dict):
+        return {}
+    return {str(key): _normalize_schema_field(value) for key, value in fields.items()}
+
+
+def _field_type(field: Dict[str, Any]) -> str:
+    return _normalize_type_name(field.get("type"))
+
+
+def _types_compatible(src_type: str, dst_type: str) -> bool:
+    if not src_type or not dst_type:
+        return True
+    if src_type == dst_type:
+        return True
+    if "any" in {src_type, dst_type}:
+        return True
+    numeric = {"int", "float"}
+    return src_type in numeric and dst_type in numeric
+
+
+def _path_top_key(path: Any) -> str:
+    src_path = "" if path is None else str(path).strip()
+    if src_path == "$":
+        return "$"
+    if src_path.startswith("$."):
+        src_path = src_path[2:]
+    return src_path.split(".", 1)[0] if src_path else ""
+
+
+def is_schema_lint_error(item: Dict[str, Any]) -> bool:
+    return item.get("kind") in _SCHEMA_ERROR_KINDS and item.get("severity") == "error"
 
 
 def _strict_edge_mapping_enabled(workflow: Workflow) -> bool:
@@ -202,6 +273,133 @@ def lint_workflow_mappings(workflow: Workflow) -> List[Dict[str, Any]]:
                     }
                 )
     return warnings
+
+
+def lint_workflow_schema(workflow: Workflow) -> List[Dict[str, Any]]:
+    """Validate explicit edge mappings against lightweight node schemas.
+
+    This is intentionally opt-in: old workflows without ``inputSchema`` or
+    ``outputSchema`` keep their current behavior. When a node does declare a
+    schema, mappings to/from unknown fields or incompatible field types become
+    lint errors.
+    """
+    nodes = workflow.nodes_by_id()
+    results: list[dict[str, Any]] = []
+
+    provided_inputs: Dict[str, Set[str]] = {node.id: set() for node in workflow.nodes}
+    for edge in workflow.edges:
+        downstream = nodes.get(edge.to)
+        if downstream is None:
+            continue
+        if edge.mapping:
+            provided_inputs.setdefault(edge.to, set()).update(str(dst) for dst in edge.mapping)
+        if edge.const:
+            provided_inputs.setdefault(edge.to, set()).update(str(key) for key in edge.const)
+
+    for edge in workflow.edges:
+        if not edge.mapping:
+            continue
+        upstream = nodes.get(edge.from_)
+        downstream = nodes.get(edge.to)
+        if upstream is None or downstream is None:
+            continue
+        output_schema = _schema_fields(upstream.output_schema)
+        input_schema = _schema_fields(downstream.input_schema)
+        for dst, src in edge.mapping.items():
+            dst_key = str(dst)
+            src_key = _path_top_key(src)
+            output_field = output_schema.get(src_key)
+            input_field = input_schema.get(dst_key)
+            if output_schema and src_key and src_key != "$" and output_field is None:
+                results.append(
+                    {
+                        "kind": "schema_mapping_src_not_declared",
+                        "severity": "error",
+                        "edge_from": edge.from_,
+                        "edge_to": edge.to,
+                        "dst_key": dst_key,
+                        "src_path": src,
+                        "declared_output_keys": sorted(output_schema),
+                        "message": (
+                            f"edge {edge.from_!r}->{edge.to!r} maps src {src!r}, "
+                            f"but upstream node {edge.from_!r} outputSchema does not declare {src_key!r}"
+                        ),
+                    }
+                )
+                continue
+            if input_schema and input_field is None:
+                results.append(
+                    {
+                        "kind": "schema_mapping_dst_not_declared",
+                        "severity": "error",
+                        "edge_from": edge.from_,
+                        "edge_to": edge.to,
+                        "dst_key": dst_key,
+                        "src_path": src,
+                        "declared_input_keys": sorted(input_schema),
+                        "message": (
+                            f"edge {edge.from_!r}->{edge.to!r} maps to input {dst_key!r}, "
+                            f"but downstream node {edge.to!r} inputSchema does not declare it"
+                        ),
+                    }
+                )
+                continue
+            if output_field is None or input_field is None:
+                continue
+            src_type = _field_type(output_field)
+            dst_type = _field_type(input_field)
+            if not _types_compatible(src_type, dst_type):
+                results.append(
+                    {
+                        "kind": "schema_mapping_type_mismatch",
+                        "severity": "error",
+                        "edge_from": edge.from_,
+                        "edge_to": edge.to,
+                        "dst_key": dst_key,
+                        "src_path": src,
+                        "output_type": src_type,
+                        "input_type": dst_type,
+                        "message": (
+                            f"edge {edge.from_!r}->{edge.to!r} maps {src_key!r} ({src_type}) "
+                            f"to {dst_key!r} ({dst_type})"
+                        ),
+                    }
+                )
+            if output_field.get("large") and not input_field.get("large"):
+                results.append(
+                    {
+                        "kind": "schema_mapping_large_payload",
+                        "severity": "error",
+                        "edge_from": edge.from_,
+                        "edge_to": edge.to,
+                        "dst_key": dst_key,
+                        "src_path": src,
+                        "message": (
+                            f"edge {edge.from_!r}->{edge.to!r} maps large output {src_key!r} "
+                            f"to input {dst_key!r} that is not marked large"
+                        ),
+                    }
+                )
+
+    for node in workflow.nodes:
+        if node.id == workflow.start:
+            continue
+        input_schema = _schema_fields(node.input_schema)
+        if not input_schema:
+            continue
+        required = {key for key, field in input_schema.items() if field.get("required")}
+        missing = sorted(required - provided_inputs.get(node.id, set()))
+        if missing:
+            results.append(
+                {
+                    "kind": "schema_required_input_missing",
+                    "severity": "error",
+                    "node_id": node.id,
+                    "missing_inputs": missing,
+                    "message": f"node {node.id!r} inputSchema requires inputs that no incoming edge provides: {missing}",
+                }
+            )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +642,7 @@ def lint_workflow(
     for item in lint_workflow_mappings(workflow):
         item.setdefault("severity", "warning")
         results.append(item)
+    results.extend(lint_workflow_schema(workflow))
     # Join safety (errors)
     results.extend(lint_join_requirements(workflow))
     # Expensive node multi-trigger (errors)

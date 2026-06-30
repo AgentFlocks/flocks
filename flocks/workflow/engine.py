@@ -12,10 +12,10 @@ import uuid
 import json
 from typing import Any, Callable, Deque, Dict, List, Literal, NamedTuple, Optional, Set, Tuple, TypeVar
 
-from pydantic import BaseModel, Field
-
 from .code_gen import CodeGen, SimpleCodeGen, LLMCodeGen
+from .edge_resolver import EdgeResolver
 from .errors import MaxStepsExceededError, NodeExecutionError, RunCancelledError, RunTimeoutError
+from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
 from .models import Edge, Workflow, Node
 from .repl_runtime import PythonExecRuntime, Runtime
 
@@ -26,12 +26,6 @@ _T = TypeVar("_T")
 
 StepStartHook = Callable[[str, int, Node, Dict[str, Any]], _T]
 StepEndHook = Callable[[_T, "StepResult"], None]
-_PAYLOAD_RISK_EVENT_LIMIT = 100
-_PAYLOAD_SUMMARY_KEY_LIMIT = 50
-_PAYLOAD_SUMMARY_FIELD_LIMIT = 20
-_LARGE_SEQUENCE_THRESHOLD = 1_000
-_LARGE_STRING_CHARS_THRESHOLD = 20_000
-_LARGE_DICT_KEYS_THRESHOLD = 200
 
 
 class _ExecOutcome(NamedTuple):
@@ -90,89 +84,6 @@ def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"...[truncated:{len(text) - max_chars}]"
-
-
-def _payload_field_summary(key: str, value: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(value, (list, tuple, set)):
-        count = len(value)
-        return {
-            "key": key,
-            "type": type(value).__name__,
-            "count": count,
-            "large": count > _LARGE_SEQUENCE_THRESHOLD,
-        }
-    if isinstance(value, str):
-        chars = len(value)
-        return {
-            "key": key,
-            "type": "string",
-            "chars": chars,
-            "large": chars > _LARGE_STRING_CHARS_THRESHOLD,
-        }
-    if isinstance(value, dict):
-        key_count = len(value)
-        return {
-            "key": key,
-            "type": "dict",
-            "key_count": key_count,
-            "large": key_count > _LARGE_DICT_KEYS_THRESHOLD,
-        }
-    return None
-
-
-def _payload_summary(payload: Any) -> Dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {
-            "type": type(payload).__name__,
-            "key_count": 0,
-            "keys": [],
-            "fields": [],
-            "large_fields": [],
-        }
-
-    fields: list[Dict[str, Any]] = []
-    large_fields: list[Dict[str, Any]] = []
-    for key, value in islice(payload.items(), _PAYLOAD_SUMMARY_KEY_LIMIT):
-        field = _payload_field_summary(str(key), value)
-        if field is None:
-            continue
-        if len(fields) < _PAYLOAD_SUMMARY_FIELD_LIMIT:
-            fields.append(field)
-        if field.get("large"):
-            large_fields.append(field)
-            if len(large_fields) >= _PAYLOAD_SUMMARY_FIELD_LIMIT:
-                break
-
-    return {
-        "type": "dict",
-        "key_count": len(payload),
-        "keys": [str(key) for key in islice(payload.keys(), _PAYLOAD_SUMMARY_KEY_LIMIT)],
-        "fields": fields,
-        "large_fields": large_fields,
-    }
-
-
-def _payload_has_large(summary: Dict[str, Any]) -> bool:
-    return bool(summary.get("large_fields"))
-
-
-class StepResult(BaseModel):
-    node_id: str
-    inputs: Dict[str, Any] = Field(default_factory=dict)
-    outputs: Dict[str, Any] = Field(default_factory=dict)
-    stdout: str = ""
-    error: Optional[str] = None
-    traceback: Optional[str] = None
-    duration_ms: Optional[float] = None
-
-
-class ExecutionResult(BaseModel):
-    steps: int
-    history: list[StepResult] = Field(default_factory=list)
-    last_node_id: Optional[str] = None
-    outputs: Dict[str, Any] = Field(default_factory=dict)
-    run_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    payload_risk_summary: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _default_workflow_loader(workflow_id: str) -> "Workflow":
@@ -289,20 +200,10 @@ class WorkflowEngine:
         for k in incoming_from:
             incoming_from[k].sort()
         q: Deque[Tuple[str, Dict[str, Any], Optional[str]]] = deque([(self.workflow.start, initial_inputs or {}, None)])
-        history: list[StepResult] = []
-        last_outputs: Dict[str, Any] = {}
-        step_count = 0
-        last_node_id: Optional[str] = None
         rid = (run_id or uuid.uuid4().hex).strip() or uuid.uuid4().hex
+        state = WorkflowExecutionState(run_id=rid, history_mode=self.history_mode, retain_history=retain_history)
+        edge_resolver = EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace)
         run_t0 = time.perf_counter()
-        join_inputs: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        join_seen_sources: Dict[str, Set[str]] = {}
-        vertex_outputs: Dict[str, Dict[str, Any]] = {}
-        payload_risk_summary: Dict[str, Any] = {
-            "counts": {},
-            "risks": [],
-            "omitted": 0,
-        }
         # Dedup: track (node_id -> last_input_hash) to skip identical re-executions.
         _dedup_hashes: Dict[str, str] = {}
         step_timeout_s = self.node_timeout_s if (self.node_timeout_s is not None and self.node_timeout_s > 0) else None
@@ -315,47 +216,10 @@ class WorkflowEngine:
             self.runtime.cancel_checker = cancel
         try:
 
-            def _retain_step(step: StepResult) -> None:
-                if retain_history:
-                    history.append(step)
-
-            def _build_execution_context() -> Dict[str, Any]:
-                return {
-                    "run_id": rid,
-                    "steps": step_count,
-                    "last_node_id": last_node_id,
-                    "outputs": last_outputs,
-                    "history": history,
-                    "vertex_output_keys": {
-                        node_id: list(outputs.keys())[:_PAYLOAD_SUMMARY_KEY_LIMIT]
-                        for node_id, outputs in vertex_outputs.items()
-                    },
-                    "payload_risk_summary": payload_risk_summary,
-                }
-
             def _raise_cancelled() -> None:
                 err = RunCancelledError(rid)
-                err.execution_context = _build_execution_context()
+                err.execution_context = state.build_context()
                 raise err
-
-            def _record_payload_risk(kind: str, **event: Any) -> None:
-                counts = payload_risk_summary.setdefault("counts", {})
-                counts[kind] = int(counts.get(kind, 0)) + 1
-                risks = payload_risk_summary.setdefault("risks", [])
-                risk_event = {"kind": kind, **event}
-                if len(risks) < _PAYLOAD_RISK_EVENT_LIMIT:
-                    risks.append(risk_event)
-                else:
-                    payload_risk_summary["omitted"] = int(payload_risk_summary.get("omitted", 0)) + 1
-                _logger.warning(
-                    "wf.payload_risk.%s",
-                    kind,
-                    extra={
-                        "run_id": rid,
-                        "risk_kind": kind,
-                        **{k: v for k, v in risk_event.items() if k != "payload_summary"},
-                    },
-                )
 
             while q:
                 if cancel is not None and cancel():
@@ -363,38 +227,28 @@ class WorkflowEngine:
                 if timeout_s is not None and timeout_s > 0:
                     if (time.perf_counter() - run_t0) > float(timeout_s):
                         err = RunTimeoutError(rid, float(timeout_s))
-                        err.execution_context = _build_execution_context()
+                        err.execution_context = state.build_context()
                         raise err
-                if step_count >= self.max_steps:
+                if state.steps >= self.max_steps:
                     err = MaxStepsExceededError(self.max_steps)
-                    err.execution_context = _build_execution_context()
+                    err.execution_context = state.build_context()
                     raise err
 
                 # ── Phase 1: drain queue, apply join / dedup ──────────────
                 ready: List[Tuple[str, Node, Dict[str, Any], Optional[str]]] = []
                 while q:
                     node_id, inputs, src_node_id = q.popleft()
-                    last_node_id = node_id
+                    state.last_node_id = node_id
                     node = nodes[node_id]
 
                     # Join handling
                     if getattr(node, "join", False) and incoming_from.get(node_id):
                         expected = incoming_from[node_id]
-                        by_src = join_inputs.setdefault(node_id, {})
+                        by_src = state.join_inputs.setdefault(node_id, {})
                         src_key = src_node_id or "__start__"
                         buf = by_src.setdefault(src_key, {})
                         buf.update(inputs)
-                        join_payload_summary = _payload_summary(inputs)
-                        if _payload_has_large(join_payload_summary):
-                            _record_payload_risk(
-                                "large_payload_join_buffer",
-                                node_id=node_id,
-                                source_node_id=src_node_id,
-                                seen_source_count=len(by_src),
-                                expected_source_count=len(expected),
-                                payload_summary=join_payload_summary,
-                            )
-                        seen = join_seen_sources.setdefault(node_id, set())
+                        seen = state.join_seen_sources.setdefault(node_id, set())
                         if src_node_id is not None:
                             if src_node_id in expected:
                                 seen.add(src_node_id)
@@ -402,7 +256,7 @@ class WorkflowEngine:
                             seen.add("__start__")
                         if len(seen.intersection(set(expected))) < len(expected):
                             continue
-                        by_src = join_inputs.pop(node_id, by_src)
+                        by_src = state.join_inputs.pop(node_id, by_src)
                         merged: Dict[str, Any] = {}
                         origin: Dict[str, str] = {}
                         conflict_mode = getattr(node, "join_conflict", "overwrite")
@@ -432,7 +286,7 @@ class WorkflowEngine:
                         if join_mode == "namespace":
                             merged.setdefault(namespace_key, dict(by_src))
                         inputs = merged
-                        join_seen_sources.pop(node_id, None)
+                        state.join_seen_sources.pop(node_id, None)
 
                     # Dedup: skip if same node already ran with identical inputs.
                     # Lightweight history mode is used by high-throughput ingest
@@ -480,23 +334,23 @@ class WorkflowEngine:
                         _desc_text = _desc[0] if _desc else ""
                         _par_tag = " [parallel]" if use_parallel else ""
                         print(
-                            f"\n[WF] step={step_count + _idx + 1} node={_nid} type={_nd.type} {_desc_text}{_par_tag}".rstrip()
+                            f"\n[WF] step={state.steps + _idx + 1} node={_nid} type={_nd.type} {_desc_text}{_par_tag}".rstrip()
                         )
                     _logger.info(
                         "wf.step.start step=%s node=%s type=%s%s",
-                        step_count + _idx + 1,
+                        state.steps + _idx + 1,
                         _nid,
                         _nd.type,
                         " (parallel)" if use_parallel else "",
-                        extra={"run_id": rid, "step": step_count + _idx + 1, "node_id": _nid, "node_type": _nd.type},
+                        extra={"run_id": rid, "step": state.steps + _idx + 1, "node_id": _nid, "node_type": _nd.type},
                     )
                     if on_step_start is not None:
                         try:
-                            step_tokens[_idx] = on_step_start(rid, step_count + _idx + 1, _nd, _inp)
+                            step_tokens[_idx] = on_step_start(rid, state.steps + _idx + 1, _nd, _inp)
                         except Exception:
                             _logger.exception(
                                 "wf.step_start.hook_error",
-                                extra={"run_id": rid, "step": step_count + _idx + 1, "node_id": _nid},
+                                extra={"run_id": rid, "step": state.steps + _idx + 1, "node_id": _nid},
                             )
 
                 if use_parallel:
@@ -592,7 +446,7 @@ class WorkflowEngine:
                                     timeout_executor.shutdown(wait=False)
                                 timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
                         except RunCancelledError as _ce:
-                            _ce.execution_context = _build_execution_context()
+                            _ce.execution_context = state.build_context()
                             raise
                         except Exception as _e:
                             _err = str(_e)
@@ -610,21 +464,11 @@ class WorkflowEngine:
                 _stop_exc: Optional[NodeExecutionError] = None
                 for _eo in exec_results:
                     _nid, _nd, _inp, _src = ready[_eo.idx]
-                    _sn = step_count + _eo.idx + 1
-                    last_node_id = _nid
-                    last_outputs = (
+                    _sn = state.steps + _eo.idx + 1
+                    state.last_node_id = _nid
+                    state.last_outputs = (
                         _summarize_for_observability(_eo.outputs) if self.history_mode == "summary" else _eo.outputs
                     )
-                    input_payload_summary = _payload_summary(_inp)
-                    output_payload_summary = _payload_summary(_eo.outputs)
-                    if _payload_has_large(input_payload_summary) or _payload_has_large(output_payload_summary):
-                        _record_payload_risk(
-                            "large_node_payload",
-                            node_id=_nid,
-                            node_type=_nd.type,
-                            input_summary=input_payload_summary,
-                            output_summary=output_payload_summary,
-                        )
 
                     def _build_step_result(
                         *,
@@ -660,7 +504,7 @@ class WorkflowEngine:
                             error=_eo.error or "Run cancelled",
                             traceback_text=_eo.traceback,
                         )
-                        _retain_step(step_res)
+                        state.retain_step(step_res)
                         if on_step_end is not None and _eo.idx in step_tokens:
                             try:
                                 on_step_end(step_tokens[_eo.idx], step_res)
@@ -686,7 +530,7 @@ class WorkflowEngine:
                             error=_eo.error,
                             traceback_text=_eo.traceback,
                         )
-                        _retain_step(step_res)
+                        state.retain_step(step_res)
                         _status = "timeout" if _eo.is_timeout else "error"
                         (_logger.warning if _eo.is_timeout else _logger.error)(
                             f"wf.step.{_status}",
@@ -757,10 +601,10 @@ class WorkflowEngine:
                                 traceback=_eo.traceback,
                                 execution_context={
                                     "run_id": rid,
-                                    "steps": step_count + len(exec_results),
+                                    "steps": state.steps + len(exec_results),
                                     "last_node_id": _nid,
-                                    "outputs": last_outputs,
-                                    "history": history,
+                                    "outputs": state.last_outputs,
+                                    "history": state.history,
                                 },
                             )
                             continue
@@ -778,7 +622,7 @@ class WorkflowEngine:
                             stdout=_eo.stdout,
                             error=None,
                         )
-                        _retain_step(step_res)
+                        state.retain_step(step_res)
                         outputs_keys = list(_eo.outputs.keys())
                         _logger.info(
                             "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
@@ -828,93 +672,34 @@ class WorkflowEngine:
 
                     # Enqueue downstream (skip for failed node when stop_on_error)
                     if _stop_exc is None:
-                        vertex_outputs[_nid] = _eo.outputs
-                        if self.dataflow_mode == "vertex_cache":
-                            selected = self._select_edges_from_scopes(_nd, [_eo.outputs, _inp], adj.get(_nid, []))
-                            downstream_items: list[tuple[Edge, Dict[str, Any], Dict[str, Any]]] = []
-                            for edge in selected:
-                                edge_inputs = self._build_downstream_inputs_from_scopes([_eo.outputs, _inp], edge)
-                                edge_summary = _payload_summary(edge_inputs)
-                                downstream_items.append((edge, edge_inputs, edge_summary))
-                            large_downstream = [item for item in downstream_items if _payload_has_large(item[2])]
-                            if len(selected) > 1 and large_downstream:
-                                _record_payload_risk(
-                                    "large_payload_fanout",
-                                    source_node_id=_nid,
-                                    source_node_type=_nd.type,
-                                    fanout_count=len(selected),
-                                    target_node_ids=[edge.to for edge in selected],
-                                    payload_summary={
-                                        "type": "vertex_cache_edge_payloads",
-                                        "large_fields": [
-                                            field
-                                            for _edge, _inputs, summary in large_downstream
-                                            for field in summary.get("large_fields", [])
-                                        ][:_PAYLOAD_SUMMARY_FIELD_LIMIT],
-                                    },
-                                )
-                            for edge, edge_inputs, edge_summary in downstream_items:
-                                if not edge.mapping and _payload_has_large(edge_summary):
-                                    _record_payload_risk(
-                                        "implicit_full_payload_edge_large_payload",
-                                        edge_from=edge.from_,
-                                        edge_to=edge.to,
-                                        fanout_count=len(selected),
-                                        payload_summary=edge_summary,
-                                    )
-                                q.append((edge.to, edge_inputs, _nid))
-                        else:
-                            upstream = dict(_inp)
-                            upstream.update(_eo.outputs)
-                            selected = self._select_edges(_nd, upstream, adj.get(_nid, []))
-                            upstream_payload_summary = _payload_summary(upstream)
-                            has_large_upstream = _payload_has_large(upstream_payload_summary)
-                            if len(selected) > 1 and has_large_upstream:
-                                _record_payload_risk(
-                                    "large_payload_fanout",
-                                    source_node_id=_nid,
-                                    source_node_type=_nd.type,
-                                    fanout_count=len(selected),
-                                    target_node_ids=[edge.to for edge in selected],
-                                    payload_summary=upstream_payload_summary,
-                                )
-                            for edge in selected:
-                                if not edge.mapping and has_large_upstream:
-                                    _record_payload_risk(
-                                        "implicit_full_payload_edge_large_payload",
-                                        edge_from=edge.from_,
-                                        edge_to=edge.to,
-                                        fanout_count=len(selected),
-                                        payload_summary=upstream_payload_summary,
-                                    )
-                                q.append((edge.to, self._build_downstream_inputs(upstream, edge), _nid))
+                        state.record_vertex_output(_nid, _eo.outputs)
+                        for edge, edge_inputs in edge_resolver.resolve(
+                            node=_nd,
+                            node_inputs=_inp,
+                            node_outputs=_eo.outputs,
+                            edges=adj.get(_nid, []),
+                        ):
+                            q.append((edge.to, edge_inputs, _nid))
 
-                step_count += len(exec_results)
+                state.steps += len(exec_results)
                 if _stop_exc is not None:
                     raise _stop_exc
                 if cancel is not None and cancel():
                     _raise_cancelled()
 
             pending_joins = []
-            for nid, buf in join_inputs.items():
+            for nid, buf in state.join_inputs.items():
                 n = nodes.get(nid)
                 if n is not None and getattr(n, "join", False):
                     expected = incoming_from.get(nid, [])
-                    seen = join_seen_sources.get(nid, set())
+                    seen = state.join_seen_sources.get(nid, set())
                     pending_joins.append((nid, expected, sorted(seen)))
             if pending_joins:
                 msg = "Join node(s) did not receive all incoming inputs: " + "; ".join(
                     f"{nid} expected={expected} seen={seen}" for nid, expected, seen in pending_joins
                 )
                 raise NodeExecutionError(node_id=pending_joins[0][0], message=msg)
-            return ExecutionResult(
-                steps=step_count,
-                history=history,
-                last_node_id=last_node_id,
-                outputs=last_outputs,
-                run_id=rid,
-                payload_risk_summary=payload_risk_summary,
-            )
+            return state.to_result()
         finally:
             if isinstance(self.runtime, PythonExecRuntime):
                 self.runtime.cancel_checker = previous_cancel_checker
@@ -1168,26 +953,7 @@ class WorkflowEngine:
         return {output_k: last_outputs}, ""
 
     def _select_edges(self, node: Any, payload: Dict[str, Any], edges: List[Edge]) -> List[Edge]:
-        if not edges:
-            return []
-        if node.type in {"python", "tool", "llm", "http_request", "subworkflow"}:
-            return list(edges)
-        key = node.select_key or "result"
-        value = self._get_by_path(payload, key)
-        selected_label: Optional[str]
-        if value is None:
-            selected_label = None
-        elif isinstance(value, bool):
-            selected_label = "true" if value else "false"
-        elif isinstance(value, str):
-            selected_label = value
-        else:
-            selected_label = str(value)
-        matched = [e for e in edges if e.label == selected_label] if selected_label is not None else []
-        if matched:
-            return matched
-        defaults = [e for e in edges if e.label is None]
-        return defaults[:1] if defaults else []
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).select_edges(node, payload, edges)
 
     def _select_edges_from_scopes(
         self,
@@ -1195,130 +961,34 @@ class WorkflowEngine:
         scopes: List[Dict[str, Any]],
         edges: List[Edge],
     ) -> List[Edge]:
-        if not edges:
-            return []
-        if node.type in {"python", "tool", "llm", "http_request", "subworkflow"}:
-            return list(edges)
-        key = node.select_key or "result"
-        found, value = self._try_get_by_path_from_scopes(scopes, key)
-        selected_label: Optional[str]
-        if not found or value is None:
-            selected_label = None
-        elif isinstance(value, bool):
-            selected_label = "true" if value else "false"
-        elif isinstance(value, str):
-            selected_label = value
-        else:
-            selected_label = str(value)
-        matched = [e for e in edges if e.label == selected_label] if selected_label is not None else []
-        if matched:
-            return matched
-        defaults = [e for e in edges if e.label is None]
-        return defaults[:1] if defaults else []
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).select_edges_from_scopes(
+            node,
+            scopes,
+            edges,
+        )
 
     def _build_downstream_inputs(self, upstream: Dict[str, Any], edge: Edge) -> Dict[str, Any]:
-        if edge.mapping:
-            out: Dict[str, Any] = {}
-            for dst, src in edge.mapping.items():
-                found, value = self._try_get_by_path(upstream, src)
-                if found:
-                    out[dst] = value
-                elif self.trace:
-                    available_keys = list(upstream.keys())[:10]
-                    _logger.warning(
-                        "wf.edge.mapping.none_value",
-                        extra={
-                            "edge_from": edge.from_,
-                            "edge_to": edge.to,
-                            "dst_key": dst,
-                            "src_path": src,
-                            "available_keys": available_keys,
-                        },
-                    )
-        else:
-            out = dict(upstream)
-        if edge.const:
-            out.update(edge.const)
-        return out
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).build_downstream_inputs(upstream, edge)
 
     def _build_downstream_inputs_from_scopes(
         self,
         scopes: List[Dict[str, Any]],
         edge: Edge,
     ) -> Dict[str, Any]:
-        if edge.mapping:
-            out: Dict[str, Any] = {}
-            for dst, src in edge.mapping.items():
-                found, value = self._try_get_by_path_from_scopes(scopes, src)
-                if found:
-                    out[dst] = value
-                elif self.trace:
-                    available_keys = []
-                    for scope in scopes:
-                        available_keys.extend(str(key) for key in list(scope.keys())[:10])
-                    _logger.warning(
-                        "wf.edge.mapping.none_value",
-                        extra={
-                            "edge_from": edge.from_,
-                            "edge_to": edge.to,
-                            "dst_key": dst,
-                            "src_path": src,
-                            "available_keys": available_keys[:10],
-                            "dataflow_mode": self.dataflow_mode,
-                        },
-                    )
-        else:
-            # Compatibility fallback for opt-in workflows that have not yet
-            # enabled strict edge mappings. This preserves legacy input shape,
-            # but does not get the memory benefits of vertex-cache dataflow.
-            out = {}
-            for scope in reversed(scopes):
-                out.update(scope)
-        if edge.const:
-            out.update(edge.const)
-        return out
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).build_downstream_inputs_from_scopes(
+            scopes,
+            edge,
+        )
 
     def _try_get_by_path_from_scopes(
         self,
         scopes: List[Dict[str, Any]],
         path: str,
     ) -> tuple[bool, Any]:
-        for scope in scopes:
-            found, value = self._try_get_by_path(scope, path)
-            if found:
-                return True, value
-        return False, None
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path_from_scopes(scopes, path)
 
     def _try_get_by_path(self, data: Any, path: str) -> tuple[bool, Any]:
-        if path is None:
-            return False, None
-        path = str(path).strip()
-        if not path:
-            return False, None
-        if path == "$":
-            return True, data
-        if path.startswith("$."):
-            path = path[2:]
-        cur: Any = data
-        for part in path.split("."):
-            if isinstance(cur, dict):
-                if part in cur:
-                    cur = cur[part]
-                else:
-                    return False, None
-            elif isinstance(cur, list):
-                try:
-                    idx = int(part)
-                except Exception:
-                    return False, None
-                if 0 <= idx < len(cur):
-                    cur = cur[idx]
-                else:
-                    return False, None
-            else:
-                return False, None
-        return True, cur
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path(data, path)
 
     def _get_by_path(self, data: Any, path: str) -> Any:
-        found, value = self._try_get_by_path(data, path)
-        return value if found else None
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).get_by_path(data, path)

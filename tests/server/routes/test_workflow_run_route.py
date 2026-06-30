@@ -152,6 +152,78 @@ async def test_create_workflow_accepts_explicit_mapping_after_strict_default(
 
 
 @pytest.mark.asyncio
+async def test_create_workflow_rejects_schema_lint_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_workflow = Mock()
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", write_workflow)
+
+    workflow_json = _two_node_workflow_json(
+        {
+            "from": "prepare_message",
+            "to": "transform_message",
+            "order": 0,
+            "mapping": {"message_text": "missing_message_text"},
+        }
+    )
+    workflow_json["nodes"][0]["outputSchema"] = {"message_text": {"type": "str"}}
+
+    req = workflow_module.WorkflowCreateRequest(
+        name="bad schema workflow",
+        workflowJson=workflow_json,
+    )
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.create_workflow(req)
+
+    assert exc_info.value.status_code == 400
+    assert "Workflow schema lint failed" in str(exc_info.value.detail)
+    assert "schema_mapping_src_not_declared" in str(exc_info.value.detail)
+    write_workflow.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_workflow_rejects_unmapped_edges_when_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_workflow = Mock()
+    existing = {
+        "id": "wf-1",
+        "name": "existing workflow",
+        "category": "default",
+        "status": "draft",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "source": "global",
+        "workflowJson": _minimal_workflow_json(
+            {"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}}
+        ),
+        "markdownContent": None,
+        "editMarkdownContent": None,
+    }
+
+    monkeypatch.setattr(workflow_module, "_read_workflow_from_fs", lambda _workflow_id: dict(existing))
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", write_workflow)
+
+    req = workflow_module.WorkflowUpdateRequest(
+        workflowJson={
+            **_two_node_workflow_json(
+                {"from": "prepare_message", "to": "transform_message", "order": 0}
+            ),
+            "metadata": {"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}},
+        }
+    )
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.update_workflow("wf-1", req)
+
+    assert exc_info.value.status_code == 400
+    assert "Workflow strict edge mapping failed" in str(exc_info.value.detail)
+    assert "prepare_message" in str(exc_info.value.detail)
+    write_workflow.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

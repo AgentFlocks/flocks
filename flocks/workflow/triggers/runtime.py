@@ -234,7 +234,6 @@ class TriggerRuntime:
                     "duration": time.time() - started_at,
                     "errorMessage": error_message,
                     "executionLog": compact_history_for_storage(result.history),
-                    "payloadRiskSummary": result.payload_risk_summary,
                     "currentNodeId": result.last_node_id,
                     "currentPhase": status_value,
                     "currentStepIndex": result.steps,

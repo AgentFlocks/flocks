@@ -248,7 +248,6 @@ class WorkflowExecutionResponse(BaseModel):
     stepLogLimit: Optional[int] = Field(None, description="Returned step log limit")
     stepLogTotal: Optional[int] = Field(None, description="Total persisted step logs")
     loopProgress: Optional[Dict[str, Any]] = Field(None, description="Best-effort loop progress metadata")
-    payloadRiskSummary: Optional[Dict[str, Any]] = Field(None, description="Workflow payload memory risk summary")
 
 
 class WorkflowCenterPublishRequest(BaseModel):
@@ -421,6 +420,15 @@ def _strict_edge_mapping_lint_errors(workflow: Workflow) -> List[Dict[str, Any]]
         item
         for item in lint_workflow(workflow)
         if item.get("severity") == "error" and item.get("kind") == "implicit_full_payload_edge"
+    ]
+
+
+def _schema_lint_errors(workflow: Workflow) -> List[Dict[str, Any]]:
+    """Return lightweight schema lint errors that would fail execution."""
+    return [
+        item
+        for item in lint_workflow(workflow)
+        if item.get("severity") == "error" and str(item.get("kind", "")).startswith("schema_")
     ]
 
 
@@ -1216,7 +1224,6 @@ async def _run_workflow_execution_task(
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "executionLog": final_history,
-                "payloadRiskSummary": result.payload_risk_summary,
                 "stepCount": final_steps,
                 "errorMessage": error_message,
                 "currentNodeId": result.last_node_id,
@@ -1372,6 +1379,15 @@ async def create_workflow(req: WorkflowCreateRequest):
                     f"{strict_mapping_errors[:5]}"
                 ),
             )
+        schema_errors = _schema_lint_errors(workflow_model)
+        if schema_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workflow schema lint failed: "
+                    f"{schema_errors[:5]}"
+                ),
+            )
 
         workflow_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
@@ -1464,9 +1480,29 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
             data["status"] = req.status
         if req.workflow_json is not None:
             try:
-                Workflow.from_dict(req.workflow_json)
+                workflow_model = Workflow.from_dict(req.workflow_json)
+                strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
+                if strict_mapping_errors:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Workflow strict edge mapping failed: "
+                            f"{strict_mapping_errors[:5]}"
+                        ),
+                    )
+                schema_errors = _schema_lint_errors(workflow_model)
+                if schema_errors:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Workflow schema lint failed: "
+                            f"{schema_errors[:5]}"
+                        ),
+                    )
                 workflow_json = req.workflow_json
             except Exception as e:
+                if isinstance(e, HTTPException):
+                    raise
                 raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
         if req.markdown_content is not None:
             markdown_content = req.markdown_content

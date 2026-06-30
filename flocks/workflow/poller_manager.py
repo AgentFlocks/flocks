@@ -447,7 +447,6 @@ class WorkflowPollerManager:
                     "finishedAt": _now_ms(),
                     "duration": duration_s,
                     "executionLog": [],
-                    "payloadRiskSummary": result.payload_risk_summary,
                     "errorMessage": error_message,
                     "stepCount": step_count,
                     "currentNodeId": result.last_node_id,

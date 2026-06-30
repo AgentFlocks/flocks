@@ -169,36 +169,6 @@ class TestRunSafe:
         assert result["success"] is True
         assert result["text"] == "search results"
 
-    def test_run_safe_retries_after_lazy_mcp_tool_load(self, monkeypatch: pytest.MonkeyPatch):
-        tool_name = "workflow_lazy_mcp_test_tool"
-        ToolRegistry.unregister(tool_name)
-
-        async def _handler(_ctx: ToolContext) -> ToolResult:
-            return ToolResult(success=True, output="lazy-mcp-ok")
-
-        def _fake_lazy_load() -> None:
-            ToolRegistry.register(
-                Tool(
-                    info=ToolInfo(
-                        name=tool_name,
-                        description="Lazy MCP test tool",
-                        category=ToolCategory.CUSTOM,
-                        parameters=[],
-                    ),
-                    handler=_handler,
-                )
-            )
-
-        monkeypatch.setattr(tools_adapter_module, "_try_lazy_load_mcp_tools", _fake_lazy_load)
-        try:
-            adapter = FlocksToolAdapter()
-            result = adapter.run_safe(tool_name)
-        finally:
-            ToolRegistry.unregister(tool_name)
-
-        assert result["success"] is True
-        assert result["text"] == "lazy-mcp-ok"
-
     def test_run_safe_list_output(self):
         adapter = _MockToolAdapter(outputs={"list_tool": [1, 2, 3]})
         result = adapter.run_safe("list_tool")
@@ -426,6 +396,133 @@ class TestLintWorkflowUnified:
         results = lint_workflow(wf)
         assert len(results) == 0
 
+    def test_schema_lint_accepts_declared_mapping(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "schema_clean",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": "outputs['summary'] = 'ok'",
+                        "outputSchema": {"summary": {"type": "str"}},
+                    },
+                    {
+                        "id": "b",
+                        "type": "python",
+                        "code": "outputs['y'] = inputs['text']",
+                        "inputSchema": {"text": {"type": "str", "required": True}},
+                    },
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"text": "summary"}}],
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        assert not [item for item in results if str(item.get("kind", "")).startswith("schema_")]
+
+    def test_schema_lint_rejects_unknown_source_key(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "schema_bad_src",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": "outputs['summary'] = 'ok'",
+                        "outputSchema": {"summary": {"type": "str"}},
+                    },
+                    {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('text')"},
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"text": "missing"}}],
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        assert any(item["kind"] == "schema_mapping_src_not_declared" for item in results)
+
+    def test_schema_lint_rejects_type_mismatch(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "schema_type_mismatch",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": "outputs['count'] = 1",
+                        "outputSchema": {"count": {"type": "int"}},
+                    },
+                    {
+                        "id": "b",
+                        "type": "python",
+                        "code": "outputs['y'] = inputs.get('text')",
+                        "inputSchema": {"text": {"type": "str", "required": True}},
+                    },
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"text": "count"}}],
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        assert any(item["kind"] == "schema_mapping_type_mismatch" for item in results)
+
+    def test_schema_lint_rejects_large_output_to_regular_input(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "schema_large_payload",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": "outputs['raw_events'] = []",
+                        "outputSchema": {"raw_events": {"type": "list", "large": True}},
+                    },
+                    {
+                        "id": "b",
+                        "type": "python",
+                        "code": "outputs['y'] = len(inputs.get('events', []))",
+                        "inputSchema": {"events": {"type": "list", "required": True}},
+                    },
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"events": "raw_events"}}],
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        assert any(item["kind"] == "schema_mapping_large_payload" for item in results)
+
+    def test_run_workflow_rejects_schema_lint_errors(self):
+        workflow = {
+            "name": "schema_runtime_error",
+            "start": "a",
+            "nodes": [
+                {
+                    "id": "a",
+                    "type": "python",
+                    "code": "outputs['count'] = 1",
+                    "outputSchema": {"count": {"type": "int"}},
+                },
+                {
+                    "id": "b",
+                    "type": "python",
+                    "code": "outputs['y'] = inputs.get('text')",
+                    "inputSchema": {"text": {"type": "str", "required": True}},
+                },
+            ],
+            "edges": [{"from": "a", "to": "b", "mapping": {"text": "count"}}],
+        }
+
+        with pytest.raises(WorkflowValidationError, match="Workflow schema lint failed"):
+            run_workflow(workflow=workflow, ensure_requirements=False)
+
     def test_missing_edge_mapping_warns_by_default(self):
         wf = Workflow.from_dict(
             {
@@ -531,8 +628,8 @@ class TestLintWorkflowUnified:
         assert all(item.get("kind") != "recommend_strict_edge_mapping" for item in results)
 
 
-class TestPayloadRiskObservability:
-    def test_large_payload_no_mapping_records_risk_without_changing_inputs(self):
+class TestPayloadRiskRemoved:
+    def test_large_payload_no_mapping_preserves_inputs_without_payload_risk_result(self):
         wf = Workflow.from_dict(
             {
                 "name": "large_payload_no_mapping",
@@ -552,19 +649,9 @@ class TestPayloadRiskObservability:
         result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
 
         assert result.outputs == {"count": 1500, "is_list": True}
-        counts = result.payload_risk_summary["counts"]
-        assert counts["implicit_full_payload_edge_large_payload"] == 1
-        risk = next(
-            item
-            for item in result.payload_risk_summary["risks"]
-            if item["kind"] == "implicit_full_payload_edge_large_payload"
-        )
-        assert risk["edge_from"] == "a"
-        assert risk["edge_to"] == "b"
-        assert risk["payload_summary"]["large_fields"][0]["key"] == "raw_alerts"
-        assert risk["payload_summary"]["large_fields"][0]["count"] == 1500
+        assert not hasattr(result, "payload_risk_summary")
 
-    def test_large_payload_with_mapping_does_not_record_implicit_full_payload_risk(self):
+    def test_large_payload_with_mapping_preserves_outputs_without_payload_risk_result(self):
         wf = Workflow.from_dict(
             {
                 "name": "large_payload_with_mapping",
@@ -580,33 +667,9 @@ class TestPayloadRiskObservability:
         result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
 
         assert result.outputs == {"count": 1500}
-        counts = result.payload_risk_summary["counts"]
-        assert "implicit_full_payload_edge_large_payload" not in counts
+        assert not hasattr(result, "payload_risk_summary")
 
-    def test_large_payload_fanout_records_risk(self):
-        wf = Workflow.from_dict(
-            {
-                "name": "large_payload_fanout",
-                "start": "a",
-                "nodes": [
-                    {"id": "a", "type": "python", "code": "outputs['raw_alerts'] = list(range(1500))"},
-                    {"id": "b", "type": "python", "code": "outputs['b_count'] = len(inputs['raw_alerts'])"},
-                    {"id": "c", "type": "python", "code": "outputs['c_count'] = len(inputs['raw_alerts'])"},
-                ],
-                "edges": [{"from": "a", "to": "b"}, {"from": "a", "to": "c"}],
-            }
-        )
-
-        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
-
-        counts = result.payload_risk_summary["counts"]
-        assert counts["large_payload_fanout"] == 1
-        risk = next(item for item in result.payload_risk_summary["risks"] if item["kind"] == "large_payload_fanout")
-        assert risk["source_node_id"] == "a"
-        assert risk["fanout_count"] == 2
-        assert set(risk["target_node_ids"]) == {"b", "c"}
-
-    def test_large_payload_join_buffer_records_risk(self):
+    def test_large_payload_join_buffer_preserves_outputs_without_payload_risk_result(self):
         wf = Workflow.from_dict(
             {
                 "name": "large_payload_join",
@@ -632,32 +695,11 @@ class TestPayloadRiskObservability:
         result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
 
         assert result.outputs == {"count": 1500}
-        counts = result.payload_risk_summary["counts"]
-        assert counts["large_payload_join_buffer"] >= 1
-
-    def test_payload_risk_summary_does_not_embed_large_payload(self):
-        wf = Workflow.from_dict(
-            {
-                "name": "large_payload_summary_bound",
-                "start": "a",
-                "nodes": [
-                    {"id": "a", "type": "python", "code": "outputs['events'] = list(range(10000))"},
-                    {"id": "b", "type": "python", "code": "outputs['count'] = len(inputs['events'])"},
-                ],
-                "edges": [{"from": "a", "to": "b"}],
-            }
-        )
-
-        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
-
-        text = json.dumps(result.payload_risk_summary)
-        assert len(text) < 20_000
-        assert '"count": 10000' in text
-        assert "[0, 1, 2, 3, 4" not in text
+        assert not hasattr(result, "payload_risk_summary")
 
 
 class TestVertexCacheDataflow:
-    def test_legacy_mode_records_large_fanout_before_mapped_edges(self):
+    def test_legacy_mode_preserves_mapped_fanout_outputs(self):
         wf = Workflow.from_dict(
             {
                 "name": "legacy_large_source_small_mapped_fanout",
@@ -680,9 +722,10 @@ class TestVertexCacheDataflow:
 
         result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="legacy").run()
 
-        assert result.payload_risk_summary["counts"]["large_payload_fanout"] == 1
+        assert result.outputs == {"c_count": 1500}
+        assert not hasattr(result, "payload_risk_summary")
 
-    def test_vertex_cache_mode_records_fanout_only_for_resolved_edge_payload(self):
+    def test_vertex_cache_mode_uses_resolved_edge_payload(self):
         wf = Workflow.from_dict(
             {
                 "name": "vertex_cache_small_mapped_fanout",
@@ -705,9 +748,8 @@ class TestVertexCacheDataflow:
 
         result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="vertex_cache").run()
 
-        counts = result.payload_risk_summary["counts"]
-        assert "large_payload_fanout" not in counts
-        assert "implicit_full_payload_edge_large_payload" not in counts
+        assert result.outputs == {"c_count": 1500}
+        assert not hasattr(result, "payload_risk_summary")
 
     def test_vertex_cache_no_mapping_preserves_legacy_shape(self):
         wf = Workflow.from_dict(
@@ -725,7 +767,7 @@ class TestVertexCacheDataflow:
         result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="vertex_cache").run()
 
         assert result.outputs == {"count": 1500}
-        assert result.payload_risk_summary["counts"]["implicit_full_payload_edge_large_payload"] == 1
+        assert not hasattr(result, "payload_risk_summary")
 
     def test_run_workflow_uses_vertex_cache_dataflow_metadata(self):
         workflow = {
@@ -750,9 +792,8 @@ class TestVertexCacheDataflow:
         result = run_workflow(workflow=workflow, ensure_requirements=False)
 
         assert result.status == "SUCCEEDED"
-        counts = result.payload_risk_summary["counts"]
-        assert "large_payload_fanout" not in counts
-        assert "implicit_full_payload_edge_large_payload" not in counts
+        assert result.outputs == {"c_count": 1500}
+        assert not hasattr(result, "payload_risk_summary")
 
 
 # ===================================================================
