@@ -769,6 +769,49 @@ class TestVertexCacheDataflow:
         assert result.outputs == {"count": 1500}
         assert not hasattr(result, "payload_risk_summary")
 
+    def test_vertex_cache_root_mapping_preserves_legacy_merged_payload(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "vertex_cache_root_mapping",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": (
+                            "outputs['count'] = len(inputs['events'])\n"
+                            "outputs['status'] = 'processed'\n"
+                            "outputs['shared'] = 'output'"
+                        ),
+                    },
+                    {
+                        "id": "b",
+                        "type": "python",
+                        "code": (
+                            "full = inputs['full_data']\n"
+                            "outputs['has_events'] = 'events' in full\n"
+                            "outputs['count'] = full['count']\n"
+                            "outputs['status'] = full['status']\n"
+                            "outputs['shared'] = full['shared']"
+                        ),
+                    },
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"full_data": "$"}}],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="vertex_cache").run(
+            initial_inputs={"events": [1, 2, 3], "status": "raw", "shared": "input"}
+        )
+
+        assert result.outputs == {
+            "has_events": True,
+            "count": 3,
+            "status": "processed",
+            "shared": "output",
+        }
+        assert not hasattr(result, "payload_risk_summary")
+
     def test_run_workflow_uses_vertex_cache_dataflow_metadata(self):
         workflow = {
             "name": "metadata_vertex_cache_small_fanout",

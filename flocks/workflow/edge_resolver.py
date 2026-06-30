@@ -112,11 +112,19 @@ class EdgeResolver:
         scopes: List[Dict[str, Any]],
         path: str,
     ) -> tuple[bool, Any]:
+        if str(path or "").strip() == "$":
+            return True, self._merge_scopes(scopes)
         for scope in scopes:
             found, value = self.try_get_by_path(scope, path)
             if found:
                 return True, value
         return False, None
+
+    def _merge_scopes(self, scopes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for scope in reversed(scopes):
+            out.update(scope)
+        return out
 
     def try_get_by_path(self, data: Any, path: str) -> tuple[bool, Any]:
         if path is None:
