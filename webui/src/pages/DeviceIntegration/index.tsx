@@ -1913,6 +1913,7 @@ export default function DeviceIntegrationPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [panel, setPanel] = useState<PanelMode>(null);
   const lastRefreshRef = useRef(0);
+  const rexStatusPollRef = useRef<number | null>(null);
   // null = "全部机房" aggregate view; string = specific group id
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   // Group ids whose section is collapsed in the "全部机房" view. Default
@@ -2039,6 +2040,62 @@ export default function DeviceIntegrationPage() {
 
   const panelDeviceId = panel?.kind === 'edit' ? panel.device.id : null;
 
+  const clearRexStatusPoll = useCallback(() => {
+    if (rexStatusPollRef.current !== null) {
+      window.clearTimeout(rexStatusPollRef.current);
+      rexStatusPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearRexStatusPoll(), [clearRexStatusPoll]);
+
+  const applyDeviceSnapshot = useCallback((updated: DeviceIntegration) => {
+    setDevices((prev) => prev.map((device) => (
+      device.id === updated.id ? updated : device
+    )));
+    setPanel((prev) => {
+      if (prev?.kind !== 'edit' || prev.device.id !== updated.id) return prev;
+      return { kind: 'edit', device: updated };
+    });
+  }, []);
+
+  const pollRexTestStatus = useCallback((device: DeviceIntegration) => {
+    clearRexStatusPoll();
+    const initialCheckedAt = device.checked_at ?? null;
+    const initialStatus = device.status;
+    let attempts = 0;
+
+    const poll = async () => {
+      attempts += 1;
+      try {
+        const res = await deviceAPI.get(device.id);
+        const updated = res.data;
+        const checkedAt = updated.checked_at ?? null;
+        const checkedChanged = checkedAt !== null && checkedAt !== initialCheckedAt;
+        const statusChanged = updated.status !== initialStatus
+          && ['ok', 'connected', 'error', 'unknown'].includes(updated.status);
+
+        if (checkedChanged || statusChanged) {
+          applyDeviceSnapshot(updated);
+          rexStatusPollRef.current = null;
+          return;
+        }
+      } catch {
+        // Rex may not have reached the tool call yet; keep polling briefly.
+      }
+
+      if (attempts >= 30) {
+        rexStatusPollRef.current = null;
+        return;
+      }
+      rexStatusPollRef.current = window.setTimeout(() => {
+        void poll();
+      }, 2000);
+    };
+
+    void poll();
+  }, [applyDeviceSnapshot, clearRexStatusPoll]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // Group CRUD handlers
   // ──────────────────────────────────────────────────────────────────────────
@@ -2144,8 +2201,11 @@ export default function DeviceIntegrationPage() {
       agent: rexComposerControls.rexAgentName,
       model: rexComposerControls.rexModel,
     });
+    if (input.action === 'test' && input.device) {
+      pollRexTestStatus(input.device);
+    }
     setPanel({ kind: 'wizard' });
-  }, [createAndSendRex, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+  }, [createAndSendRex, pollRexTestStatus, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Group to use when adding a new device (follows sidebar selection).

@@ -48,6 +48,10 @@ vi.mock('react-i18next', () => ({
       const translations: Record<string, string> = {
         pageTitle: '设备接入',
         pageDescription: '配置安全设备 API 连接，使 Flocks 能够直接调用和控制这些设备',
+        'status.connected': '已连接',
+        'status.disabled': '已禁用',
+        'status.error': '连接失败',
+        'status.unknown': '未检测',
         'toolbar.refresh': '刷新',
         'toolbar.addDevice': '立即添加设备',
         'empty.addNow': '立即添加设备',
@@ -1470,6 +1474,71 @@ describe('DeviceIntegrationPage', () => {
     expect(prompt).toContain('必须使用上面的 device_id 作为目标设备');
     expect(prompt).toContain('password (Password): 已填写（敏感值未发送明文）');
     expect(prompt).not.toContain('p***word');
+  });
+
+  it('refreshes the device card status after Rex assisted testing writes a result', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'onesig-02',
+      storage_key: 'onesig_api_v2_5_3',
+      service_id: 'onesig_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        base_url: 'https://persisted.example.com',
+      },
+      fields_set: { base_url: true },
+      status: 'unknown',
+      message: null,
+      latency_ms: null,
+      checked_at: null,
+      created_at: 0,
+      updated_at: 0,
+    };
+    const updatedDevice = {
+      ...initialDevice,
+      status: 'ok',
+      message: 'HTTP 200，延迟 10ms',
+      latency_ms: 10,
+      checked_at: 1782800230695,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.getDevice.mockResolvedValue({ data: updatedDevice });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3',
+          storage_key: 'onesig_api_v2_5_3',
+          service_id: 'onesig_api',
+          name: 'OneSIG',
+          vendor: 'threatbook',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('onesig-02'));
+    expect(screen.getByText('未检测')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /测试设备/ }));
+
+    await waitFor(() => {
+      expect(mocks.getDevice).toHaveBeenCalledWith('device-1');
+      expect(screen.getByText('已连接')).toBeInTheDocument();
+    });
   });
 
   it('reveals the full persisted secret when clicking show', async () => {
