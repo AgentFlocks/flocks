@@ -35,6 +35,7 @@ from flocks.workflow.store import WorkflowStore
 log = Log.create(service="tool.run_workflow")
 
 _PROGRESS_FLUSH_EVERY_STEPS = 5
+_FORMATTED_OUTPUT_MAX_CHARS = 8_000
 
 # Lazy import to avoid circular import (flocks.tool <-> flocks.workflow)
 _WORKFLOW_AVAILABLE: Optional[bool] = None
@@ -236,10 +237,22 @@ def _format_workflow_result(result: Any, *, include_history: bool = False) -> st
     if data.get("outputs"):
         output_lines.append("\nFinal Outputs:")
         try:
-            outputs_str = json.dumps(data.get("outputs"), indent=2, ensure_ascii=False)
+            compacted_outputs = compact_outputs_for_storage(data.get("outputs"))
+            outputs_str = json.dumps(compacted_outputs, indent=2, ensure_ascii=False, default=str)
+            if len(outputs_str) > _FORMATTED_OUTPUT_MAX_CHARS:
+                outputs_str = (
+                    outputs_str[:_FORMATTED_OUTPUT_MAX_CHARS]
+                    + f"...[truncated:{len(outputs_str) - _FORMATTED_OUTPUT_MAX_CHARS}]"
+                )
             output_lines.append(outputs_str)
         except Exception:
-            output_lines.append(str(data.get("outputs")))
+            outputs_text = str(compact_outputs_for_storage(data.get("outputs")))
+            if len(outputs_text) > _FORMATTED_OUTPUT_MAX_CHARS:
+                outputs_text = (
+                    outputs_text[:_FORMATTED_OUTPUT_MAX_CHARS]
+                    + f"...[truncated:{len(outputs_text) - _FORMATTED_OUTPUT_MAX_CHARS}]"
+                )
+            output_lines.append(outputs_text)
 
     if include_history and data.get("history"):
         history = data.get("history", [])
@@ -554,13 +567,15 @@ async def run_workflow_tool(
             outputs=None,
         )
         pending_step_index = step_index
-        pending_step = {
-            "node_id": current_node_id,
-            "node_type": current_node_type,
-            "inputs": _inputs if isinstance(_inputs, dict) else {},
-            "outputs": {},
-            "error": "Run cancelled before node completed",
-        }
+        pending_step = compact_step_for_storage(
+            {
+                "node_id": current_node_id,
+                "node_type": current_node_type,
+                "inputs": _inputs if isinstance(_inputs, dict) else {},
+                "outputs": {},
+                "error": "Run cancelled before node completed",
+            }
+        )
         if tracked_execution is not None:
             _update_execution_progress(
                 {
@@ -816,6 +831,7 @@ async def run_workflow_tool(
         status = result_dict.get("status", "UNKNOWN")
         success = status == "SUCCEEDED"
         error = result_dict.get("error")
+        payload_risk_summary = result_dict.get("payload_risk_summary") or result_dict.get("payloadRiskSummary") or {}
 
         output = _format_workflow_result(result_dict)
 
@@ -859,6 +875,7 @@ async def run_workflow_tool(
                     "finishedAt": int(time.time() * 1000),
                     "duration": time.time() - execution_started_at,
                     "executionLog": compacted_history,
+                    "payloadRiskSummary": payload_risk_summary,
                     "stepCount": final_step_count,
                     "errorMessage": error_message,
                     "currentNodeId": result_dict.get("last_node_id"),
@@ -912,6 +929,7 @@ async def run_workflow_tool(
                     "outputs": compacted_outputs,
                     "history": [],
                     "history_count": history_count,
+                    "payload_risk_summary": payload_risk_summary,
                 },
             )
 
@@ -931,6 +949,7 @@ async def run_workflow_tool(
                 "outputs": compacted_outputs,
                 "history": [],
                 "history_count": history_count,
+                "payload_risk_summary": payload_risk_summary,
             },
         )
 

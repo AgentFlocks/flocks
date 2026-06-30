@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from itertools import islice
 import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -33,6 +34,105 @@ DEFAULT_LARGE_LIST_KEYS: frozenset[str] = frozenset(
 # protects against accidentally stripping small metadata lists that happen
 # to share a name with a known large-list key.
 DEFAULT_COMPACT_SIZE_THRESHOLD: int = 100
+DEFAULT_GENERIC_SEQUENCE_THRESHOLD: int = 1_000
+DEFAULT_MAX_INLINE_STRING_CHARS: int = 20_000
+DEFAULT_MAX_INLINE_DICT_KEYS: int = 200
+DEFAULT_PREVIEW_ITEMS: int = 3
+DEFAULT_PREVIEW_CHARS: int = 500
+
+
+def _sequence_preview(value: Any, *, limit: int = DEFAULT_PREVIEW_ITEMS) -> list[Any]:
+    if isinstance(value, (list, tuple)):
+        items = value[:limit]
+    else:
+        items = islice(value, limit)
+    return [_summarize_large_value(item, depth=1) for item in items]
+
+
+def _summarize_large_value(value: Any, *, depth: int = 0) -> Dict[str, Any]:
+    if isinstance(value, str):
+        return {
+            "_type": "string",
+            "chars": len(value),
+            "preview": value[:DEFAULT_PREVIEW_CHARS],
+        }
+    if isinstance(value, dict):
+        return {
+            "_type": "dict",
+            "key_count": len(value),
+            "keys": list(islice(value.keys(), DEFAULT_PREVIEW_ITEMS * 10)),
+        }
+    if isinstance(value, (list, tuple, set)):
+        summary: Dict[str, Any] = {
+            "_type": type(value).__name__,
+            "count": len(value),
+        }
+        if depth == 0:
+            summary["preview"] = _sequence_preview(value)
+        return summary
+    return {
+        "_type": type(value).__name__,
+        "preview": str(value)[:DEFAULT_PREVIEW_CHARS],
+    }
+
+
+def _compact_value_for_storage(
+    value: Any,
+    *,
+    key: Optional[str],
+    known_large_keys: frozenset[str],
+    size_threshold: int,
+    generic_sequence_threshold: int,
+    max_inline_string_chars: int,
+    max_inline_dict_keys: int,
+    depth: int = 0,
+) -> Any:
+    if (
+        key in known_large_keys
+        and isinstance(value, (list, tuple))
+        and len(value) > size_threshold
+    ):
+        return {f"_{key}_count": len(value)}
+
+    if isinstance(value, str):
+        if len(value) > max_inline_string_chars:
+            return _summarize_large_value(value)
+        return value
+
+    if isinstance(value, (list, tuple, set)):
+        if len(value) > generic_sequence_threshold:
+            return _summarize_large_value(value)
+        return value
+
+    if isinstance(value, dict):
+        if len(value) > max_inline_dict_keys:
+            return _summarize_large_value(value)
+        if depth >= 2:
+            return value
+        compacted: Dict[str, Any] = {}
+        changed = False
+        for child_key, child_value in value.items():
+            child_compacted = _compact_value_for_storage(
+                child_value,
+                key=str(child_key),
+                known_large_keys=known_large_keys,
+                size_threshold=size_threshold,
+                generic_sequence_threshold=generic_sequence_threshold,
+                max_inline_string_chars=max_inline_string_chars,
+                max_inline_dict_keys=max_inline_dict_keys,
+                depth=depth + 1,
+            )
+            if isinstance(child_compacted, dict) and len(child_compacted) == 1:
+                marker_key = next(iter(child_compacted))
+                if marker_key.startswith("_") and marker_key.endswith("_count"):
+                    compacted[marker_key] = child_compacted[marker_key]
+                    changed = True
+                    continue
+            compacted[child_key] = child_compacted
+            changed = changed or child_compacted is not child_value
+        return compacted if changed else value
+
+    return value
 
 
 def compact_outputs_for_storage(
@@ -40,33 +140,37 @@ def compact_outputs_for_storage(
     *,
     keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
     size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+    generic_sequence_threshold: int = DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
+    max_inline_string_chars: int = DEFAULT_MAX_INLINE_STRING_CHARS,
+    max_inline_dict_keys: int = DEFAULT_MAX_INLINE_DICT_KEYS,
 ) -> Dict[str, Any]:
-    """Return a copy of *outputs* with large alert lists replaced by counts.
+    """Return a bounded copy of *outputs* safe for execution records.
 
-    Only **list or tuple** values whose key is in *keys* AND whose length
-    exceeds *size_threshold* are compacted to ``_<key>_count``; everything
-    else is passed through unchanged.  This prevents megabytes of alert data
-    from being serialised into the ``workflow_execution`` SQLite row on every
-    invocation, while still keeping small sequences (e.g. error details, short
-    configuration arrays) fully inspectable in the execution-history UI.
-
-    **Keys that are compacted by default** (see ``DEFAULT_LARGE_LIST_KEYS``):
-    ``enriched_alerts``, ``unique_alerts``, ``raw_alerts``,
-    ``normalized_alerts``, ``filtered_alerts``.  Keys outside this set — such
-    as a generic ``alerts`` parameter — are *not* compacted unless the caller
-    passes a custom *keys* argument.  Callers who depend on inspecting the
-    full list contents of compacted keys must read the data from the JSONL
-    files written by the workflow itself.
+    Known large-list keys keep the historical ``_<key>_count`` shape. Other
+    oversized strings, sequences, and dictionaries are replaced with bounded
+    summaries so unknown workflow payload names cannot inflate SQLite rows or
+    tool metadata.
     """
     if not isinstance(outputs, dict):
         return {}
-    key_set = frozenset(keys)
+    known_large_keys = frozenset(keys)
     compacted: Dict[str, Any] = {}
     for k, v in outputs.items():
-        if k in key_set and isinstance(v, (list, tuple)) and len(v) > size_threshold:
-            compacted[f"_{k}_count"] = len(v)
-        else:
-            compacted[k] = v
+        value = _compact_value_for_storage(
+            v,
+            key=str(k),
+            known_large_keys=known_large_keys,
+            size_threshold=size_threshold,
+            generic_sequence_threshold=generic_sequence_threshold,
+            max_inline_string_chars=max_inline_string_chars,
+            max_inline_dict_keys=max_inline_dict_keys,
+        )
+        if isinstance(value, dict) and len(value) == 1:
+            marker_key = next(iter(value))
+            if marker_key == f"_{k}_count":
+                compacted[marker_key] = value[marker_key]
+                continue
+        compacted[k] = value
     return compacted
 
 

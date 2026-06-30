@@ -253,6 +253,7 @@ class RunWorkflowResult:
     last_node_id: Optional[str] = None
     outputs: Dict[str, Any] = None  # type: ignore[assignment]
     history: list[Dict[str, Any]] = None  # type: ignore[assignment]
+    payload_risk_summary: Dict[str, Any] = None  # type: ignore[assignment]
     error: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -260,6 +261,8 @@ class RunWorkflowResult:
             self.outputs = {}
         if self.history is None:
             self.history = []
+        if self.payload_risk_summary is None:
+            self.payload_risk_summary = {}
 
 
 def _build_initial_inputs(
@@ -504,6 +507,7 @@ def run_workflow(
             last_node_id=exec_ctx.get("last_node_id"),
             outputs=last_outputs,
             history=history_from_error,
+            payload_risk_summary=exec_ctx.get("payload_risk_summary") or {},
         )
 
     history = [s.model_dump(mode="json") for s in result.history] if result.history else []
@@ -517,6 +521,7 @@ def run_workflow(
             last_node_id=result.last_node_id,
             outputs=last_outputs,
             history=history,
+            payload_risk_summary=result.payload_risk_summary,
             error=f"RunCancelledError: Run cancelled: run_id={result.run_id}",
         )
 
@@ -531,4 +536,5 @@ def run_workflow(
         last_node_id=result.last_node_id,
         outputs=last_outputs,
         history=history,
+        payload_risk_summary=result.payload_risk_summary,
     )

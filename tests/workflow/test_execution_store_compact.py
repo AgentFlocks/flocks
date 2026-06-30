@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from flocks.workflow.execution_store import (
     DEFAULT_COMPACT_SIZE_THRESHOLD,
+    DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
     DEFAULT_LARGE_LIST_KEYS,
     _trim_execution_history,
     compact_history_for_storage,
@@ -75,15 +76,26 @@ def test_compact_outputs_keeps_small_lists_verbatim() -> None:
     assert "_enriched_alerts_count" not in compacted
 
 
-def test_compact_outputs_ignores_unknown_keys() -> None:
-    big_unknown = _make_alerts(5_000)
+def test_compact_outputs_summarizes_unknown_large_sequences() -> None:
+    big_unknown = _make_alerts(DEFAULT_GENERIC_SEQUENCE_THRESHOLD + 1)
     outputs = {"some_other_alerts": big_unknown}
 
     compacted = compact_outputs_for_storage(outputs)
 
-    # Unknown keys are not in the default large-list set; they must pass
-    # through even if huge, so callers don't get surprising drops.
-    assert compacted["some_other_alerts"] is big_unknown
+    assert compacted["some_other_alerts"]["_type"] == "list"
+    assert compacted["some_other_alerts"]["count"] == DEFAULT_GENERIC_SEQUENCE_THRESHOLD + 1
+    assert len(compacted["some_other_alerts"]["preview"]) == 3
+    assert compacted["some_other_alerts"] is not big_unknown
+
+
+def test_compact_outputs_summarizes_large_strings() -> None:
+    outputs = {"huge_text": "x" * 25_000}
+
+    compacted = compact_outputs_for_storage(outputs)
+
+    assert compacted["huge_text"]["_type"] == "string"
+    assert compacted["huge_text"]["chars"] == 25_000
+    assert len(compacted["huge_text"]["preview"]) < 25_000
 
 
 def test_compact_outputs_accepts_custom_keys_and_threshold() -> None:

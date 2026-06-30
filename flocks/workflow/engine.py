@@ -4,6 +4,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, field
 import hashlib
+from itertools import islice
 import logging
 import time
 import traceback
@@ -25,6 +26,12 @@ _T = TypeVar("_T")
 
 StepStartHook = Callable[[str, int, Node, Dict[str, Any]], _T]
 StepEndHook = Callable[[_T, "StepResult"], None]
+_PAYLOAD_RISK_EVENT_LIMIT = 100
+_PAYLOAD_SUMMARY_KEY_LIMIT = 50
+_PAYLOAD_SUMMARY_FIELD_LIMIT = 20
+_LARGE_SEQUENCE_THRESHOLD = 1_000
+_LARGE_STRING_CHARS_THRESHOLD = 20_000
+_LARGE_DICT_KEYS_THRESHOLD = 200
 
 
 class _ExecOutcome(NamedTuple):
@@ -46,17 +53,24 @@ def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
         if isinstance(value, (list, tuple, set)):
             return {"_type": type(value).__name__, "count": len(value)}
         if isinstance(value, dict):
-            return {"_type": "dict", "keys": list(value.keys())[:20]}
+            return {"_type": "dict", "keys": list(islice(value.keys(), 20))}
         if isinstance(value, str) and len(value) > 200:
             return {"_type": "string", "chars": len(value), "preview": value[:200]}
         return value
     if isinstance(value, dict):
-        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in list(value.items())[:50]}
+        return {
+            key: _summarize_for_observability(item, depth=depth + 1)
+            for key, item in islice(value.items(), 50)
+        }
     if isinstance(value, (list, tuple, set)):
+        if isinstance(value, (list, tuple)):
+            preview_items = value[:3]
+        else:
+            preview_items = islice(value, 3)
         return {
             "_type": type(value).__name__,
             "count": len(value),
-            "preview": [_summarize_for_observability(item, depth=depth + 1) for item in list(value)[:3]],
+            "preview": [_summarize_for_observability(item, depth=depth + 1) for item in preview_items],
         }
     if isinstance(value, str) and len(value) > 200:
         return {"_type": "string", "chars": len(value), "preview": value[:200]}
@@ -78,6 +92,70 @@ def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
     return text[:max_chars] + f"...[truncated:{len(text) - max_chars}]"
 
 
+def _payload_field_summary(key: str, value: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(value, (list, tuple, set)):
+        count = len(value)
+        return {
+            "key": key,
+            "type": type(value).__name__,
+            "count": count,
+            "large": count > _LARGE_SEQUENCE_THRESHOLD,
+        }
+    if isinstance(value, str):
+        chars = len(value)
+        return {
+            "key": key,
+            "type": "string",
+            "chars": chars,
+            "large": chars > _LARGE_STRING_CHARS_THRESHOLD,
+        }
+    if isinstance(value, dict):
+        key_count = len(value)
+        return {
+            "key": key,
+            "type": "dict",
+            "key_count": key_count,
+            "large": key_count > _LARGE_DICT_KEYS_THRESHOLD,
+        }
+    return None
+
+
+def _payload_summary(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "type": type(payload).__name__,
+            "key_count": 0,
+            "keys": [],
+            "fields": [],
+            "large_fields": [],
+        }
+
+    fields: list[Dict[str, Any]] = []
+    large_fields: list[Dict[str, Any]] = []
+    for key, value in islice(payload.items(), _PAYLOAD_SUMMARY_KEY_LIMIT):
+        field = _payload_field_summary(str(key), value)
+        if field is None:
+            continue
+        if len(fields) < _PAYLOAD_SUMMARY_FIELD_LIMIT:
+            fields.append(field)
+        if field.get("large"):
+            large_fields.append(field)
+            if len(large_fields) >= _PAYLOAD_SUMMARY_FIELD_LIMIT:
+                break
+
+    return {
+        "type": "dict",
+        "key_count": len(payload),
+        "keys": [str(key) for key in islice(payload.keys(), _PAYLOAD_SUMMARY_KEY_LIMIT)],
+        "fields": fields,
+        "large_fields": large_fields,
+    }
+
+
+def _payload_has_large(summary: Dict[str, Any]) -> bool:
+    return bool(summary.get("large_fields"))
+
+
 class StepResult(BaseModel):
     node_id: str
     inputs: Dict[str, Any] = Field(default_factory=dict)
@@ -94,6 +172,7 @@ class ExecutionResult(BaseModel):
     last_node_id: Optional[str] = None
     outputs: Dict[str, Any] = Field(default_factory=dict)
     run_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    payload_risk_summary: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _default_workflow_loader(workflow_id: str) -> "Workflow":
@@ -215,6 +294,11 @@ class WorkflowEngine:
         run_t0 = time.perf_counter()
         join_inputs: Dict[str, Dict[str, Dict[str, Any]]] = {}
         join_seen_sources: Dict[str, Set[str]] = {}
+        payload_risk_summary: Dict[str, Any] = {
+            "counts": {},
+            "risks": [],
+            "omitted": 0,
+        }
         # Dedup: track (node_id -> last_input_hash) to skip identical re-executions.
         _dedup_hashes: Dict[str, str] = {}
         step_timeout_s = self.node_timeout_s if (self.node_timeout_s is not None and self.node_timeout_s > 0) else None
@@ -238,12 +322,32 @@ class WorkflowEngine:
                     "last_node_id": last_node_id,
                     "outputs": last_outputs,
                     "history": history,
+                    "payload_risk_summary": payload_risk_summary,
                 }
 
             def _raise_cancelled() -> None:
                 err = RunCancelledError(rid)
                 err.execution_context = _build_execution_context()
                 raise err
+
+            def _record_payload_risk(kind: str, **event: Any) -> None:
+                counts = payload_risk_summary.setdefault("counts", {})
+                counts[kind] = int(counts.get(kind, 0)) + 1
+                risks = payload_risk_summary.setdefault("risks", [])
+                risk_event = {"kind": kind, **event}
+                if len(risks) < _PAYLOAD_RISK_EVENT_LIMIT:
+                    risks.append(risk_event)
+                else:
+                    payload_risk_summary["omitted"] = int(payload_risk_summary.get("omitted", 0)) + 1
+                _logger.warning(
+                    "wf.payload_risk.%s",
+                    kind,
+                    extra={
+                        "run_id": rid,
+                        "risk_kind": kind,
+                        **{k: v for k, v in risk_event.items() if k != "payload_summary"},
+                    },
+                )
 
             while q:
                 if cancel is not None and cancel():
@@ -272,6 +376,16 @@ class WorkflowEngine:
                         src_key = src_node_id or "__start__"
                         buf = by_src.setdefault(src_key, {})
                         buf.update(inputs)
+                        join_payload_summary = _payload_summary(inputs)
+                        if _payload_has_large(join_payload_summary):
+                            _record_payload_risk(
+                                "large_payload_join_buffer",
+                                node_id=node_id,
+                                source_node_id=src_node_id,
+                                seen_source_count=len(by_src),
+                                expected_source_count=len(expected),
+                                payload_summary=join_payload_summary,
+                            )
                         seen = join_seen_sources.setdefault(node_id, set())
                         if src_node_id is not None:
                             if src_node_id in expected:
@@ -493,6 +607,16 @@ class WorkflowEngine:
                     last_outputs = (
                         _summarize_for_observability(_eo.outputs) if self.history_mode == "summary" else _eo.outputs
                     )
+                    input_payload_summary = _payload_summary(_inp)
+                    output_payload_summary = _payload_summary(_eo.outputs)
+                    if _payload_has_large(input_payload_summary) or _payload_has_large(output_payload_summary):
+                        _record_payload_risk(
+                            "large_node_payload",
+                            node_id=_nid,
+                            node_type=_nd.type,
+                            input_summary=input_payload_summary,
+                            output_summary=output_payload_summary,
+                        )
 
                     def _build_step_result(
                         *,
@@ -699,7 +823,26 @@ class WorkflowEngine:
                         upstream = dict(_inp)
                         upstream.update(_eo.outputs)
                         selected = self._select_edges(_nd, upstream, adj.get(_nid, []))
+                        upstream_payload_summary = _payload_summary(upstream)
+                        has_large_upstream = _payload_has_large(upstream_payload_summary)
+                        if len(selected) > 1 and has_large_upstream:
+                            _record_payload_risk(
+                                "large_payload_fanout",
+                                source_node_id=_nid,
+                                source_node_type=_nd.type,
+                                fanout_count=len(selected),
+                                target_node_ids=[edge.to for edge in selected],
+                                payload_summary=upstream_payload_summary,
+                            )
                         for edge in selected:
+                            if not edge.mapping and has_large_upstream:
+                                _record_payload_risk(
+                                    "implicit_full_payload_edge_large_payload",
+                                    edge_from=edge.from_,
+                                    edge_to=edge.to,
+                                    fanout_count=len(selected),
+                                    payload_summary=upstream_payload_summary,
+                                )
                             q.append((edge.to, self._build_downstream_inputs(upstream, edge), _nid))
 
                 step_count += len(exec_results)
@@ -726,6 +869,7 @@ class WorkflowEngine:
                 last_node_id=last_node_id,
                 outputs=last_outputs,
                 run_id=rid,
+                payload_risk_summary=payload_risk_summary,
             )
         finally:
             if isinstance(self.runtime, PythonExecRuntime):

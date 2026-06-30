@@ -47,6 +47,25 @@ def _make_large_alerts(count: int) -> list[dict[str, Any]]:
     return [{"id": idx, "payload": "x" * 20} for idx in range(count)]
 
 
+def test_format_workflow_result_compacts_large_outputs() -> None:
+    large_alerts = _make_large_alerts(5_000)
+
+    text = run_workflow_module._format_workflow_result(
+        {
+            "status": "SUCCEEDED",
+            "steps": 1,
+            "outputs": {
+                "enriched_alerts": large_alerts,
+                "message": "done",
+            },
+        }
+    )
+
+    assert "_enriched_alerts_count" in text
+    assert "5000" in text
+    assert "payload" not in text
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================

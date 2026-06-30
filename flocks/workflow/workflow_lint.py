@@ -16,6 +16,7 @@ _CN_SECTION_OUTPUT_RE = re.compile(r"^\s*输出要求\s*[:：]?\s*$")
 
 # Patterns that indicate an "expensive" node (LLM call / file write).
 _EXPENSIVE_CALL_RE = re.compile(r"""llm\.ask\s*\(|tool\.run\s*\(\s*['"]write['"]""")
+_STRICT_MAPPING_TRIGGER_TYPES = {"syslog", "kafka", "schedule"}
 
 
 def _split_keys(raw: str) -> list[str]:
@@ -94,6 +95,19 @@ def _strict_edge_mapping_enabled(workflow: Workflow) -> bool:
     return False
 
 
+def _workflow_has_strict_mapping_setting(workflow: Workflow) -> bool:
+    metadata = workflow.metadata if isinstance(workflow.metadata, dict) else {}
+    if "strict_edge_mapping" in metadata or "strictEdgeMapping" in metadata:
+        return True
+    for section_key in ("runtime", "runtime_defaults", "runtimeDefaults"):
+        section = metadata.get(section_key)
+        if isinstance(section, dict) and (
+            "strict_edge_mapping" in section or "strictEdgeMapping" in section
+        ):
+            return True
+    return False
+
+
 def lint_implicit_full_payload_edges(workflow: Workflow) -> List[Dict[str, Any]]:
     nodes = workflow.nodes_by_id()
     strict = _strict_edge_mapping_enabled(workflow)
@@ -120,6 +134,39 @@ def lint_implicit_full_payload_edges(workflow: Workflow) -> List[Dict[str, Any]]
             }
         )
     return results
+
+
+def lint_recommend_strict_edge_mapping(workflow: Workflow) -> List[Dict[str, Any]]:
+    """Recommend strict edge mapping for high-volume trigger workflows.
+
+    This intentionally stays a warning so existing workflow execution remains
+    compatible unless the workflow explicitly opts into strict mode.
+    """
+    if _workflow_has_strict_mapping_setting(workflow):
+        return []
+
+    trigger_types = sorted(
+        {
+            trigger.type
+            for trigger in workflow.triggers
+            if getattr(trigger, "type", None) in _STRICT_MAPPING_TRIGGER_TYPES
+        }
+    )
+    if not trigger_types:
+        return []
+
+    return [
+        {
+            "kind": "recommend_strict_edge_mapping",
+            "severity": "warning",
+            "trigger_types": trigger_types,
+            "message": (
+                "workflows triggered by syslog, kafka, or schedule can process high-volume "
+                "payloads; set metadata.runtime.strict_edge_mapping=true and use explicit "
+                "edge mappings for new workflow definitions"
+            ),
+        }
+    ]
 
 
 def lint_workflow_mappings(workflow: Workflow) -> List[Dict[str, Any]]:
@@ -150,21 +197,6 @@ def lint_workflow_mappings(workflow: Workflow) -> List[Dict[str, Any]]:
                         "message": (
                             f"edge.mapping maps src {src!r} but upstream node {e.from_!r} "
                             "does not appear to write that key to outputs; mapping may produce missing value"
-                        ),
-                    }
-                )
-            if dst == src and not (e.const or {}):
-                warnings.append(
-                    {
-                        "kind": "scheme_a_suggest_omit_identity_mapping",
-                        "severity": "warning",
-                        "edge_from": e.from_,
-                        "edge_to": e.to,
-                        "dst_key": dst,
-                        "src_path": src,
-                        "message": (
-                            "edge.mapping is an identity mapping. Scheme A recommends omitting mapping "
-                            "to pass through the full payload and reduce missing-key issues."
                         ),
                     }
                 )
@@ -406,6 +438,7 @@ def lint_workflow(
     """
     results: List[Dict[str, Any]] = []
     results.extend(lint_implicit_full_payload_edges(workflow))
+    results.extend(lint_recommend_strict_edge_mapping(workflow))
     # Existing mapping checks (warnings)
     for item in lint_workflow_mappings(workflow):
         item.setdefault("severity", "warning")

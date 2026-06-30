@@ -480,6 +480,181 @@ class TestLintWorkflowUnified:
         with pytest.raises(WorkflowValidationError):
             run_workflow(workflow=workflow, ensure_requirements=False)
 
+    def test_identity_mapping_does_not_suggest_omitting_mapping(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "identity_mapping_ok",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['x'] = 1"},
+                    {"id": "b", "type": "python", "code": "outputs['y'] = inputs.get('x')"},
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"x": "x"}}],
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        assert all(item.get("kind") != "scheme_a_suggest_omit_identity_mapping" for item in results)
+
+    def test_trigger_workflow_recommends_strict_edge_mapping(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "kafka_trigger_mapping_recommendation",
+                "start": "a",
+                "nodes": [{"id": "a", "type": "python", "code": "outputs['x'] = 1"}],
+                "edges": [],
+                "triggers": [{"type": "kafka"}],
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        recommendation = next(item for item in results if item["kind"] == "recommend_strict_edge_mapping")
+        assert recommendation["severity"] == "warning"
+        assert recommendation["trigger_types"] == ["kafka"]
+
+    def test_trigger_workflow_with_strict_mapping_does_not_recommend_again(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "strict_kafka_trigger_mapping",
+                "start": "a",
+                "nodes": [{"id": "a", "type": "python", "code": "outputs['x'] = 1"}],
+                "edges": [],
+                "triggers": [{"type": "kafka"}],
+                "metadata": {"runtime": {"strict_edge_mapping": True}},
+            }
+        )
+
+        results = lint_workflow(wf)
+
+        assert all(item.get("kind") != "recommend_strict_edge_mapping" for item in results)
+
+
+class TestPayloadRiskObservability:
+    def test_large_payload_no_mapping_records_risk_without_changing_inputs(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "large_payload_no_mapping",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['raw_alerts'] = list(range(1500))"},
+                    {
+                        "id": "b",
+                        "type": "python",
+                        "code": "outputs['count'] = len(inputs['raw_alerts'])\noutputs['is_list'] = isinstance(inputs['raw_alerts'], list)",
+                    },
+                ],
+                "edges": [{"from": "a", "to": "b"}],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
+
+        assert result.outputs == {"count": 1500, "is_list": True}
+        counts = result.payload_risk_summary["counts"]
+        assert counts["implicit_full_payload_edge_large_payload"] == 1
+        risk = next(
+            item
+            for item in result.payload_risk_summary["risks"]
+            if item["kind"] == "implicit_full_payload_edge_large_payload"
+        )
+        assert risk["edge_from"] == "a"
+        assert risk["edge_to"] == "b"
+        assert risk["payload_summary"]["large_fields"][0]["key"] == "raw_alerts"
+        assert risk["payload_summary"]["large_fields"][0]["count"] == 1500
+
+    def test_large_payload_with_mapping_does_not_record_implicit_full_payload_risk(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "large_payload_with_mapping",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['raw_alerts'] = list(range(1500))"},
+                    {"id": "b", "type": "python", "code": "outputs['count'] = len(inputs['alerts'])"},
+                ],
+                "edges": [{"from": "a", "to": "b", "mapping": {"alerts": "raw_alerts"}}],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
+
+        assert result.outputs == {"count": 1500}
+        counts = result.payload_risk_summary["counts"]
+        assert "implicit_full_payload_edge_large_payload" not in counts
+
+    def test_large_payload_fanout_records_risk(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "large_payload_fanout",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['raw_alerts'] = list(range(1500))"},
+                    {"id": "b", "type": "python", "code": "outputs['b_count'] = len(inputs['raw_alerts'])"},
+                    {"id": "c", "type": "python", "code": "outputs['c_count'] = len(inputs['raw_alerts'])"},
+                ],
+                "edges": [{"from": "a", "to": "b"}, {"from": "a", "to": "c"}],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
+
+        counts = result.payload_risk_summary["counts"]
+        assert counts["large_payload_fanout"] == 1
+        risk = next(item for item in result.payload_risk_summary["risks"] if item["kind"] == "large_payload_fanout")
+        assert risk["source_node_id"] == "a"
+        assert risk["fanout_count"] == 2
+        assert set(risk["target_node_ids"]) == {"b", "c"}
+
+    def test_large_payload_join_buffer_records_risk(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "large_payload_join",
+                "start": "start",
+                "nodes": [
+                    {"id": "start", "type": "python", "code": "outputs['raw_alerts'] = list(range(1500))"},
+                    {"id": "b", "type": "python", "code": "outputs['x'] = 1"},
+                    {
+                        "id": "join",
+                        "type": "python",
+                        "join": True,
+                        "code": "outputs['count'] = len(inputs.get('raw_alerts', []))",
+                    },
+                ],
+                "edges": [
+                    {"from": "start", "to": "join"},
+                    {"from": "start", "to": "b"},
+                    {"from": "b", "to": "join"},
+                ],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
+
+        assert result.outputs == {"count": 1500}
+        counts = result.payload_risk_summary["counts"]
+        assert counts["large_payload_join_buffer"] >= 1
+
+    def test_payload_risk_summary_does_not_embed_large_payload(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "large_payload_summary_bound",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['events'] = list(range(10000))"},
+                    {"id": "b", "type": "python", "code": "outputs['count'] = len(inputs['events'])"},
+                ],
+                "edges": [{"from": "a", "to": "b"}],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime()).run()
+
+        text = json.dumps(result.payload_risk_summary)
+        assert len(text) < 20_000
+        assert '"count": 10000' in text
+        assert "[0, 1, 2, 3, 4" not in text
+
 
 # ===================================================================
 # 方案 2 Layer 3: Engine dedup

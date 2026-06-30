@@ -248,6 +248,7 @@ class WorkflowExecutionResponse(BaseModel):
     stepLogLimit: Optional[int] = Field(None, description="Returned step log limit")
     stepLogTotal: Optional[int] = Field(None, description="Total persisted step logs")
     loopProgress: Optional[Dict[str, Any]] = Field(None, description="Best-effort loop progress metadata")
+    payloadRiskSummary: Optional[Dict[str, Any]] = Field(None, description="Workflow payload memory risk summary")
 
 
 class WorkflowCenterPublishRequest(BaseModel):
@@ -1065,13 +1066,15 @@ async def _run_workflow_execution_task(
             outputs=None,
         )
         pending_step_index = step_index
-        pending_step = {
-            "node_id": node_id,
-            "node_type": node_type,
-            "inputs": _inputs if isinstance(_inputs, dict) else {},
-            "outputs": {},
-            "error": "Run cancelled before node completed",
-        }
+        pending_step = compact_step_for_storage(
+            {
+                "node_id": node_id,
+                "node_type": node_type,
+                "inputs": _inputs if isinstance(_inputs, dict) else {},
+                "outputs": {},
+                "error": "Run cancelled before node completed",
+            }
+        )
         _write_progress(
             {
                 "currentNodeId": node_id,
@@ -1183,6 +1186,7 @@ async def _run_workflow_execution_task(
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "executionLog": final_history,
+                "payloadRiskSummary": result.payload_risk_summary,
                 "stepCount": final_steps,
                 "errorMessage": error_message,
                 "currentNodeId": result.last_node_id,
