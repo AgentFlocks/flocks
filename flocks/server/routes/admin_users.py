@@ -21,6 +21,8 @@ class UserResponse(BaseModel):
     role: str
     status: str
     must_reset_password: bool
+    tenant_ids: tuple[str, ...] = Field(default_factory=tuple)
+    asset_groups: tuple[str, ...] = Field(default_factory=tuple)
     created_at: str
     updated_at: str
     last_login_at: Optional[str] = None
@@ -31,11 +33,33 @@ class ResetPasswordRequest(BaseModel):
     force_reset: bool = True
 
 
+class ContractScopeRequest(BaseModel):
+    tenant_ids: list[str] = Field(default_factory=list)
+    asset_groups: list[str] = Field(default_factory=list)
+
+
 @router.get("/users", response_model=List[UserResponse], summary="管理员获取用户列表")
 async def list_users(request: Request) -> List[UserResponse]:
     _admin = require_admin(request)
     users = await AuthService.list_users()
     return [UserResponse(**u.model_dump()) for u in users]
+
+
+@router.put("/users/{user_id}/contract-scope", response_model=UserResponse, summary="管理员更新用户契约范围")
+async def update_user_contract_scope(user_id: str, payload: ContractScopeRequest, request: Request) -> UserResponse:
+    require_admin(request)
+    setter = getattr(AuthService.get_backend(), "set_user_contract_scope", None)
+    if setter is None:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="当前账号后端不支持契约范围管理")
+    try:
+        user = await setter(
+            target_user_id=user_id,
+            tenant_ids=payload.tenant_ids,
+            asset_groups=payload.asset_groups,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return UserResponse(**user.model_dump())
 
 
 @router.post("/users/{user_id}/reset-password", summary="管理员重置密码")

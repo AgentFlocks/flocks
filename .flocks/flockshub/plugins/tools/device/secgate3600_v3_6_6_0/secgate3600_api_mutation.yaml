@@ -1,0 +1,37 @@
+name: secgate3600_api_mutation
+description: SecGate 3600 documented mutation REST caller with confirmation.
+description_cn: SecGate 3600 文档内变更类 REST 调用工具。使用 api_catalog 查看已收录 API，再用 rest_call_mutation 调用 kind=mutation 的 module/function。所有调用都需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: secgate3600_api
+version: "3.6.6.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_mutation
+    module:
+      type: string
+      description: rest_call_mutation 使用的模块名。必须属于 api_catalog 中 kind=mutation 的条目。
+    function:
+      type: string
+      description: rest_call_mutation 使用的方法名。必须属于 api_catalog 中 kind=mutation 的条目。
+    page_index:
+      type: integer
+      default: 1
+    page_size:
+      type: integer
+      default: 20
+    body:
+      type: object
+      description: REST 请求 body。结构按 SecGate 3600 官方文档对应接口填写。
+  required:
+    - action
+handler:
+  type: script
+  script_file: secgate3600.handler.py
+  function: api_mutation

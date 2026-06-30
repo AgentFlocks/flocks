@@ -7,9 +7,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import aiosqlite
 from pydantic import BaseModel, Field
@@ -45,12 +46,44 @@ def _parse_iso(ts: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _clean_scope_values(values: Iterable[str]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        cleaned.append(normalized)
+        seen.add(normalized)
+    return tuple(cleaned)
+
+
+def _decode_scope_values(raw: Optional[str]) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(values, list):
+        return ()
+    return _clean_scope_values(values)
+
+
+def _encode_scope_values(values: Iterable[str]) -> str:
+    return json.dumps(list(_clean_scope_values(values)), ensure_ascii=False)
+
+
 class LocalUser(BaseModel):
     id: str
     username: str
     role: str
     status: str
     must_reset_password: bool
+    tenant_ids: tuple[str, ...] = Field(default_factory=tuple)
+    asset_groups: tuple[str, ...] = Field(default_factory=tuple)
     created_at: str
     updated_at: str
     last_login_at: Optional[str] = None
@@ -62,6 +95,8 @@ class LocalUser(BaseModel):
             role=self.role,
             status=self.status,
             must_reset_password=self.must_reset_password,
+            tenant_ids=self.tenant_ids,
+            asset_groups=self.asset_groups,
         )
 
 
@@ -95,6 +130,8 @@ class LocalAuthBackend:
                     role TEXT NOT NULL DEFAULT 'member',
                     status TEXT NOT NULL DEFAULT 'active',
                     must_reset_password INTEGER NOT NULL DEFAULT 0,
+                    tenant_ids TEXT NOT NULL DEFAULT '[]',
+                    asset_groups TEXT NOT NULL DEFAULT '[]',
                     temp_password_expires_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -115,6 +152,7 @@ class LocalAuthBackend:
 
                 """
             )
+            await cls._ensure_user_scope_columns(db)
             await cls._drop_legacy_tables(db)
             await db.commit()
 
@@ -127,6 +165,15 @@ class LocalAuthBackend:
     # installs and upgrades converge on the same schema without having to
     # enumerate every historical table name.
     _LEGACY_TABLE_PATTERNS: Tuple[str, ...] = ("cloud\\_%",)
+
+    @classmethod
+    async def _ensure_user_scope_columns(cls, db: aiosqlite.Connection) -> None:
+        async with db.execute("PRAGMA table_info(users)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "tenant_ids" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN tenant_ids TEXT NOT NULL DEFAULT '[]'")
+        if "asset_groups" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN asset_groups TEXT NOT NULL DEFAULT '[]'")
 
     @classmethod
     async def _drop_legacy_tables(cls, db: aiosqlite.Connection) -> None:
@@ -200,6 +247,8 @@ class LocalAuthBackend:
         role: str = "member",
         must_reset_password: bool = False,
         temp_expires_at: Optional[str] = None,
+        tenant_ids: Iterable[str] = (),
+        asset_groups: Iterable[str] = (),
     ) -> LocalUser:
         await cls.init()
         if role not in {"admin", "member"}:
@@ -219,9 +268,9 @@ class LocalAuthBackend:
                 """
                 INSERT INTO users (
                     id, username, password_hash, role, status, must_reset_password,
-                    temp_password_expires_at, created_at, updated_at
+                    tenant_ids, asset_groups, temp_password_expires_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -229,6 +278,8 @@ class LocalAuthBackend:
                     password_hash,
                     role,
                     1 if must_reset_password else 0,
+                    _encode_scope_values(tenant_ids),
+                    _encode_scope_values(asset_groups),
                     temp_expires_at,
                     now,
                     now,
@@ -245,7 +296,7 @@ class LocalAuthBackend:
         async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
-                SELECT id, username, role, status, must_reset_password,
+                SELECT id, username, role, status, must_reset_password, tenant_ids, asset_groups,
                        created_at, updated_at, last_login_at
                 FROM users WHERE id = ?
                 """,
@@ -260,9 +311,11 @@ class LocalAuthBackend:
             role=row[2],
             status=row[3],
             must_reset_password=bool(row[4]),
-            created_at=row[5],
-            updated_at=row[6],
-            last_login_at=row[7],
+            tenant_ids=_decode_scope_values(row[5]),
+            asset_groups=_decode_scope_values(row[6]),
+            created_at=row[7],
+            updated_at=row[8],
+            last_login_at=row[9],
         )
 
     @classmethod
@@ -272,7 +325,8 @@ class LocalAuthBackend:
         async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
-                SELECT id, username, role, status, must_reset_password, created_at, updated_at, last_login_at,
+                SELECT id, username, role, status, must_reset_password, tenant_ids, asset_groups,
+                       created_at, updated_at, last_login_at,
                        password_hash, temp_password_expires_at
                 FROM users WHERE username = ?
                 """,
@@ -287,11 +341,13 @@ class LocalAuthBackend:
             role=row[2],
             status=row[3],
             must_reset_password=bool(row[4]),
-            created_at=row[5],
-            updated_at=row[6],
-            last_login_at=row[7],
+            tenant_ids=_decode_scope_values(row[5]),
+            asset_groups=_decode_scope_values(row[6]),
+            created_at=row[7],
+            updated_at=row[8],
+            last_login_at=row[9],
         )
-        return user, row[8], row[9]
+        return user, row[10], row[11]
 
     @classmethod
     async def list_users(cls) -> List[LocalUser]:
@@ -301,7 +357,8 @@ class LocalAuthBackend:
         async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
-                SELECT id, username, role, status, must_reset_password, created_at, updated_at, last_login_at
+                SELECT id, username, role, status, must_reset_password, tenant_ids, asset_groups,
+                       created_at, updated_at, last_login_at
                 FROM users
                 ORDER BY created_at ASC
                 """
@@ -315,9 +372,11 @@ class LocalAuthBackend:
                     role=row[2],
                     status=row[3],
                     must_reset_password=bool(row[4]),
-                    created_at=row[5],
-                    updated_at=row[6],
-                    last_login_at=row[7],
+                    tenant_ids=_decode_scope_values(row[5]),
+                    asset_groups=_decode_scope_values(row[6]),
+                    created_at=row[7],
+                    updated_at=row[8],
+                    last_login_at=row[9],
                 )
             )
         return users
@@ -347,7 +406,8 @@ class LocalAuthBackend:
         async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
-                SELECT u.id, u.username, u.role, u.status, u.must_reset_password, u.created_at, u.updated_at, u.last_login_at,
+                SELECT u.id, u.username, u.role, u.status, u.must_reset_password,
+                       u.tenant_ids, u.asset_groups, u.created_at, u.updated_at, u.last_login_at,
                        s.expires_at
                 FROM user_sessions s
                 JOIN users u ON s.user_id = u.id
@@ -358,7 +418,7 @@ class LocalAuthBackend:
                 row = await cursor.fetchone()
         if not row:
             return None
-        expires_at = _parse_iso(row[8])
+        expires_at = _parse_iso(row[10])
         if _utc_now() >= expires_at:
             await cls.revoke_session(session_id)
             return None
@@ -368,9 +428,11 @@ class LocalAuthBackend:
             role=row[2],
             status=row[3],
             must_reset_password=bool(row[4]),
-            created_at=row[5],
-            updated_at=row[6],
-            last_login_at=row[7],
+            tenant_ids=_decode_scope_values(row[5]),
+            asset_groups=_decode_scope_values(row[6]),
+            created_at=row[7],
+            updated_at=row[8],
+            last_login_at=row[9],
         )
         if user.status != "active":
             return None
@@ -477,6 +539,39 @@ class LocalAuthBackend:
             # Security hardening: revoke all active sessions after password change/reset.
             await db.execute("DELETE FROM user_sessions WHERE user_id = ?", (target_user_id,))
             await db.commit()
+
+    @classmethod
+    async def set_user_contract_scope(
+        cls,
+        *,
+        target_user_id: str,
+        tenant_ids: Iterable[str],
+        asset_groups: Iterable[str],
+    ) -> LocalUser:
+        await cls.init()
+        now = _iso_now()
+        db_path = Storage.get_db_path()
+        async with Storage.connect(db_path) as db:
+            cursor = await db.execute(
+                """
+                UPDATE users
+                SET tenant_ids = ?, asset_groups = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _encode_scope_values(tenant_ids),
+                    _encode_scope_values(asset_groups),
+                    now,
+                    target_user_id,
+                ),
+            )
+            await db.commit()
+            if cursor.rowcount == 0:
+                raise ValueError("用户不存在")
+        user = await cls.get_user_by_id(target_user_id)
+        if not user:
+            raise ValueError("用户不存在")
+        return user
 
     @classmethod
     async def generate_admin_temp_password(

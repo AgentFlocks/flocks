@@ -448,22 +448,28 @@ async def _cleanup_workflow_storage(workflow_id: str) -> None:
     await _remove_storage_key_if_exists(f"{_WORKFLOW_CENTER_RUNTIME_PREFIX}{workflow_id}")
     await _remove_storage_key_if_exists(f"{_WORKFLOW_CENTER_LOCAL_PID_PREFIX}{workflow_id}")
     await _remove_storage_prefix(f"{_WORKFLOW_CENTER_RELEASE_PREFIX}{workflow_id}/")
+    await _remove_storage_prefix(f"workflow_execution_index/{workflow_id}/")
 
     try:
-        exec_keys = await Storage.list("workflow_execution/")
+        exec_keys = await Storage.list_keys("workflow_execution/")
         for key in exec_keys:
             try:
                 exec_data = await Storage.read(key)
                 if isinstance(exec_data, dict) and exec_data.get("workflowId") == workflow_id:
-                    await Storage.remove(key)
                     exec_id = key.rsplit("/", 1)[-1]
-                    step_rows = await Storage.list_raw(_workflow_execution_step_prefix(exec_id))
-                    for step_key, _value in step_rows:
-                        await Storage.remove(step_key)
-            except Exception:
-                pass
-    except Exception:
-        pass
+                    await Storage.clear(_workflow_execution_step_prefix(exec_id))
+                    await Storage.remove(key)
+            except Exception as exc:
+                log.warning("workflow.delete.execution_cleanup_failed", {
+                    "workflow_id": workflow_id,
+                    "key": key,
+                    "error": str(exc),
+                })
+    except Exception as exc:
+        log.warning("workflow.delete.execution_scan_failed", {
+            "workflow_id": workflow_id,
+            "error": str(exc),
+        })
 
     service_dir = Config.get_data_path() / "workflow-services" / "workflows" / workflow_id
     if service_dir.is_dir():

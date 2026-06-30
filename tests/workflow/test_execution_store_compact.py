@@ -16,8 +16,6 @@ stripping legitimately small metadata lists.
 """
 
 from __future__ import annotations
-
-import json
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, patch
 
@@ -31,6 +29,8 @@ from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
     compact_step_for_storage,
     record_execution_result,
+    workflow_execution_index_key,
+    workflow_execution_step_prefix,
     workflow_execution_step_key,
 )
 from flocks.storage.storage import Storage
@@ -307,6 +307,7 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
     assert write_calls[2].args[0] == "workflow_execution/exec-1"
     assert write_calls[2].args[1]["executionLog"] == []
     assert write_calls[2].args[1]["stepCount"] == 2
+    assert write_calls[3].args[0].startswith("workflow_execution_index/wf/")
 
 
 def test_compact_history_compacts_each_step_inputs() -> None:
@@ -397,14 +398,16 @@ async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
     tmp_path,
 ) -> None:
     workflow_id = "wf-trim"
-    entries = []
+    indexed_rows = []
     for idx in range(32):
         exec_id = f"exec-{idx:02d}"
-        entries.append((
-            f"workflow_execution/{exec_id}",
+        index_key = workflow_execution_index_key(workflow_id, idx, exec_id)
+        indexed_rows.append((
+            index_key,
             {
-                "id": exec_id,
                 "workflowId": workflow_id,
+                "execId": exec_id,
+                "executionKey": f"workflow_execution/{exec_id}",
                 "startedAt": idx,
             },
         ))
@@ -412,34 +415,101 @@ async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
         workflow_record.parent.mkdir(parents=True, exist_ok=True)
         workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
 
-    # Another workflow's record should be ignored entirely.
-    entries.append((
-        "workflow_execution/other-exec",
-        {"id": "other-exec", "workflowId": "wf-other", "startedAt": 0},
-    ))
+    # Another workflow's record should be ignored entirely because the trim
+    # only reads workflow_execution_index/<workflow_id>/.
     other_record = tmp_path / "workflow" / "other-exec.jsonl"
     other_record.parent.mkdir(parents=True, exist_ok=True)
     other_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
 
     remove_mock = AsyncMock(return_value=None)
-    raw_entries = [(key, json.dumps(value)) for key, value in entries]
+    clear_mock = AsyncMock(return_value=2)
+    list_raw_mock = AsyncMock(return_value=[])
 
-    async def list_raw_side_effect(prefix: str):
-        if prefix == "workflow_execution/":
-            return raw_entries
-        return []
-
-    with patch.object(Storage, "list_raw", AsyncMock(side_effect=list_raw_side_effect)), \
+    with patch.object(Storage, "list_entries", AsyncMock(return_value=indexed_rows)), \
+         patch.object(Storage, "list_raw", list_raw_mock), \
+         patch.object(Storage, "clear", clear_mock), \
          patch.object(Storage, "remove", remove_mock), \
          patch("flocks.session.recorder._record_dir", return_value=tmp_path):
         await _trim_execution_history(workflow_id)
 
+    list_raw_mock.assert_not_awaited()
     removed_keys = [call.args[0] for call in remove_mock.await_args_list]
-    assert removed_keys == [
-        "workflow_execution/exec-00",
-        "workflow_execution/exec-01",
+    assert "workflow_execution/exec-00" in removed_keys
+    assert "workflow_execution/exec-01" in removed_keys
+    assert workflow_execution_index_key(workflow_id, 0, "exec-00") in removed_keys
+    assert workflow_execution_index_key(workflow_id, 1, "exec-01") in removed_keys
+    cleared_prefixes = [call.args[0] for call in clear_mock.await_args_list]
+    assert cleared_prefixes == [
+        workflow_execution_step_prefix("exec-00"),
+        workflow_execution_step_prefix("exec-01"),
     ]
     assert not (tmp_path / "workflow" / "exec-00.jsonl").exists()
     assert not (tmp_path / "workflow" / "exec-01.jsonl").exists()
     assert (tmp_path / "workflow" / "exec-02.jsonl").exists()
     assert other_record.exists()
+
+
+@pytest.mark.asyncio
+async def test_trim_execution_history_uses_index_without_full_scan(tmp_path) -> None:
+    workflow_id = "wf-indexed"
+    indexed_rows = []
+    for idx in range(32):
+        exec_id = f"exec-{idx:02d}"
+        index_key = workflow_execution_index_key(workflow_id, idx, exec_id)
+        indexed_rows.append((
+            index_key,
+            {
+                "workflowId": workflow_id,
+                "execId": exec_id,
+                "executionKey": f"workflow_execution/{exec_id}",
+                "startedAt": idx,
+            },
+        ))
+        workflow_record = tmp_path / "workflow" / f"{exec_id}.jsonl"
+        workflow_record.parent.mkdir(parents=True, exist_ok=True)
+        workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
+
+    list_raw_mock = AsyncMock(return_value=[])
+    clear_mock = AsyncMock(return_value=1)
+    remove_mock = AsyncMock(return_value=True)
+
+    with patch.object(Storage, "list_entries", AsyncMock(return_value=indexed_rows)), \
+         patch.object(Storage, "list_raw", list_raw_mock), \
+         patch.object(Storage, "clear", clear_mock), \
+         patch.object(Storage, "remove", remove_mock), \
+         patch("flocks.session.recorder._record_dir", return_value=tmp_path):
+        await _trim_execution_history(workflow_id)
+
+    list_raw_mock.assert_not_awaited()
+    assert [call.args[0] for call in clear_mock.await_args_list] == [
+        workflow_execution_step_prefix("exec-00"),
+        workflow_execution_step_prefix("exec-01"),
+    ]
+    removed = [call.args[0] for call in remove_mock.await_args_list]
+    assert "workflow_execution/exec-00" in removed
+    assert workflow_execution_index_key(workflow_id, 0, "exec-00") in removed
+
+
+@pytest.mark.asyncio
+async def test_trim_execution_history_surfaces_delete_failures() -> None:
+    workflow_id = "wf-trim-fail"
+    indexed_rows = [
+        (
+            workflow_execution_index_key(workflow_id, idx, f"exec-{idx:02d}"),
+            {
+                "workflowId": workflow_id,
+                "execId": f"exec-{idx:02d}",
+                "executionKey": f"workflow_execution/exec-{idx:02d}",
+                "startedAt": idx,
+            },
+        )
+        for idx in range(31)
+    ]
+    list_raw_mock = AsyncMock(return_value=[])
+
+    with patch.object(Storage, "list_entries", AsyncMock(return_value=indexed_rows)), \
+         patch.object(Storage, "list_raw", list_raw_mock), \
+         patch.object(Storage, "clear", AsyncMock(side_effect=RuntimeError("locked"))):
+        with pytest.raises(RuntimeError, match="Failed to trim workflow execution history"):
+            await _trim_execution_history(workflow_id)
+    list_raw_mock.assert_not_awaited()

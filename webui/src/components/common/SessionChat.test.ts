@@ -9,6 +9,7 @@ import {
   areChatMessagePartsRenderEqual,
   buildContextUsageBreakdown,
   buildTodoSummary,
+  ChatMessageBubble,
   ChatToolPart,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
@@ -55,6 +56,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.title': '过程（{{count}} 项）',
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
+  'chat.process.textCount': '{{count}} 段中间回复',
   'chat.compacting': '压缩中...',
   'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
@@ -95,6 +97,26 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.tool.todoSummary.inProgress': '进行中',
   'chat.tool.todoSummary.completed': '完成',
   'chat.tool.todoSummary.done': '完成',
+  'chat.bash.command': '命令',
+  'chat.bash.workdir': '工作目录',
+  'chat.bash.duration': '耗时',
+  'chat.bash.timeout': '超时',
+  'chat.bash.timedOut': '已超时',
+  'chat.bash.aborted': '已中止',
+  'chat.bash.stdout': '标准输出',
+  'chat.bash.stderr': '标准错误',
+  'chat.bash.output': '输出',
+  'chat.bash.noOutput': '无输出',
+  'chat.questionResult.answered': '已回答',
+  'chat.questionResult.unanswered': '未回答',
+  'chat.questionResult.questionLabel': '问题',
+  'chat.questionResult.answerLabel': '回答',
+  'chat.questionResult.yes': '是',
+  'chat.questionResult.no': '否',
+  'question.needsAnswer': '需要你的回答',
+  'question.singleSelect': '单选',
+  'question.confirm': '确认',
+  'question.skip': '跳过',
   'smartAssistant': '智能助手',
   }[key] ?? key);
   return value.replace(/\{\{(\w+)\}\}/g, (_, name) => String(options?.[name] ?? ''));
@@ -216,6 +238,7 @@ beforeEach(() => {
     excludedSegments: [],
   });
   pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
+  pendingQuestionsHookMock.pendingQuestions = {};
   useSSEOptionsRef.current = null;
   useSessionMessagesMock.mockReturnValue({
     messages: [],
@@ -456,6 +479,52 @@ describe('getMessageGroupClassName', () => {
     });
 
     expect(className).toBe('w-full max-w-full');
+  });
+});
+
+describe('SessionChat copy action', () => {
+  it('falls back when async clipboard is unavailable', async () => {
+    const user = userEvent.setup();
+    const execCommand = vi.fn().mockReturnValue(true);
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-copy',
+          role: 'assistant',
+          parts: [{ id: 'text-1', type: 'text', text: 'copy this result' }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+
+    expect(execCommand).toHaveBeenCalledWith('copy');
   });
 });
 
@@ -814,6 +883,449 @@ describe('SessionChat intermediate process collapse', () => {
 
     expect(processGroup.open).toBe(true);
     expect(screen.getByText('read')).toBeInTheDocument();
+  });
+
+  it('opens process groups while an assistant message is active and collapses after completion', () => {
+    const activeMessage = makeMessage({
+      id: 'assistant-active-process',
+      role: 'assistant',
+      parts: [
+        {
+          id: 'reason-active',
+          messageID: 'assistant-active-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查当前配置',
+        } as any,
+        {
+          id: 'tool-active',
+          messageID: 'assistant-active-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-active',
+          state: {
+            status: 'running',
+            input: { filePath: 'workflow.md' },
+          },
+        } as any,
+      ],
+    });
+
+    const { rerender } = render(React.createElement(ChatMessageBubble, {
+      message: activeMessage,
+      isActive: true,
+      collapseIntermediateSteps: true,
+      processGroupsOpenWhileActive: true,
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(processGroup.open).toBe(true);
+
+    rerender(React.createElement(ChatMessageBubble, {
+      message: { ...activeMessage, finish: 'stop' } as Message,
+      isActive: false,
+      collapseIntermediateSteps: true,
+      processGroupsOpenWhileActive: true,
+    }));
+
+    expect(processGroup.open).toBe(false);
+  });
+
+  it('uses one global process group and leaves only the final reply visible', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-global-process',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-global-1',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '先分析需求',
+            } as any,
+            {
+              id: 'tool-global-1',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-global-1',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.md' },
+                output: 'workflow content',
+              },
+            } as any,
+            {
+              id: 'text-global-middle',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '已经读取文件，继续检查相关配置。',
+            } as any,
+            {
+              id: 'reason-global-2',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'thinking',
+              text: '再整理最终结论',
+            } as any,
+            {
+              id: 'tool-global-2',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'write',
+              callID: 'call-global-2',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.json' },
+                output: 'ok',
+              },
+            } as any,
+            {
+              id: 'text-global-final',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '最终结果已生成。',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
+    expect(processGroup.open).toBe(false);
+    expect(screen.getByText('过程（5 项）')).toBeInTheDocument();
+    expect(screen.getByText('2 段思考 · 2 次工具调用 · 1 段中间回复')).toBeInTheDocument();
+    expect(screen.getByText('最终结果已生成。')).toBeVisible();
+  });
+
+  it('keeps a user-opened process group open when new tool parts arrive', async () => {
+    const user = userEvent.setup();
+    const makeProcessMessage = (includeNewTool = false) => makeMessage({
+      id: 'assistant-live-process',
+      role: 'assistant',
+      parts: [
+        {
+          id: 'reason-live',
+          messageID: 'assistant-live-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查上下文',
+        } as any,
+        {
+          id: 'tool-live-1',
+          messageID: 'assistant-live-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-live-1',
+          state: {
+            status: 'completed',
+            input: { filePath: 'workflow.md' },
+            output: 'workflow content',
+          },
+        } as any,
+        ...(
+          includeNewTool
+            ? [{
+                id: 'tool-live-2',
+                messageID: 'assistant-live-process',
+                sessionID: 'sess-1',
+                type: 'tool',
+                tool: 'write',
+                callID: 'call-live-2',
+                state: {
+                  status: 'running',
+                  input: { filePath: 'workflow.json' },
+                },
+              } as any]
+            : []
+        ),
+      ],
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeProcessMessage()],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { rerender } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    await user.click(screen.getByText('过程（2 项）'));
+    expect(processGroup.open).toBe(true);
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeProcessMessage(true)],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getByText('过程（3 项）')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-group')).toBe(processGroup);
+    expect(processGroup.open).toBe(true);
+    expect(screen.getByText('write')).toBeVisible();
+  });
+
+  it('restores a user-opened process group after switching away from a keyed session chat', async () => {
+    const user = userEvent.setup();
+    const processMessage = makeMessage({
+      id: 'assistant-switch-process',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'reason-switch',
+          messageID: 'assistant-switch-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查上下文',
+        } as any,
+        {
+          id: 'tool-switch',
+          messageID: 'assistant-switch-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-switch',
+          state: {
+            status: 'completed',
+            input: { filePath: 'workflow.md' },
+            output: 'workflow content',
+          },
+        } as any,
+      ],
+    });
+    const otherSessionMessage = makeMessage({
+      id: 'assistant-other-session',
+      sessionID: 'sess-2',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'text-other-session',
+          messageID: 'assistant-other-session',
+          sessionID: 'sess-2',
+          type: 'text',
+          text: '另一个 session。',
+        } as any,
+      ],
+    });
+    useSessionMessagesMock.mockImplementation((currentSessionId: string | null) => ({
+      messages: currentSessionId === 'sess-1' ? [processMessage] : [otherSessionMessage],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    }));
+
+    const renderKeyedChat = (currentSessionId: string) => React.createElement(SessionChat, {
+      key: currentSessionId,
+      sessionId: currentSessionId,
+      display: { collapseIntermediateSteps: true },
+    });
+    const { rerender } = render(renderKeyedChat('sess-1'));
+
+    await user.click(screen.getByText('过程（2 项）'));
+    expect(screen.getByTestId('chat-process-group')).toHaveProperty('open', true);
+
+    rerender(renderKeyedChat('sess-2'));
+    expect(screen.getByText('另一个 session。')).toBeVisible();
+
+    rerender(renderKeyedChat('sess-1'));
+
+    const restoredProcessGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(restoredProcessGroup.open).toBe(true);
+    expect(screen.getByText('read')).toBeVisible();
+  });
+
+  it('keeps pending questions visible and folds answered questions into the process group', async () => {
+    const user = userEvent.setup();
+    const makeQuestionMessage = (status: 'running' | 'completed', includeFinalText = false) => makeMessage({
+      id: 'assistant-question-process',
+      role: 'assistant',
+      finish: status === 'completed' ? 'stop' : undefined,
+      parts: [
+        {
+          id: 'reason-before-question',
+          messageID: 'assistant-question-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '需要先询问用户范围',
+        } as any,
+        {
+          id: 'tool-question',
+          messageID: 'assistant-question-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'question',
+          callID: 'call-question',
+          state: {
+            status,
+            input: {
+              questions: [
+                {
+                  question: '选择范围',
+                  header: '测试范围',
+                  type: 'confirm',
+                },
+              ],
+            },
+            output: status === 'completed'
+              ? 'User has answered your questions: "选择范围"="yes". You can now continue with the user\'s answers in mind.'
+              : undefined,
+            metadata: status === 'completed' ? { answers: [['yes']] } : {},
+          },
+        } as any,
+        ...(
+          includeFinalText
+            ? [{
+                id: 'text-after-question',
+                messageID: 'assistant-question-process',
+                sessionID: 'sess-1',
+                type: 'text',
+                text: '已按你的选择继续处理。',
+              } as any]
+            : []
+        ),
+      ],
+    });
+
+    pendingQuestionsHookMock.pendingQuestions = {
+      'call-question': {
+        requestId: 'req-question',
+        questions: [
+          {
+            id: 'scope',
+            type: 'choice',
+            question: '选择范围',
+            options: [
+              { label: '全部', description: '检查全部内容' },
+            ],
+          },
+        ],
+      },
+    };
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeQuestionMessage('running')],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { rerender } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getByText('需要你的回答')).toBeVisible();
+    expect(screen.getByText('选择范围')).toBeVisible();
+    expect(screen.getByText('过程（1 项）')).toBeInTheDocument();
+
+    pendingQuestionsHookMock.pendingQuestions = {};
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeQuestionMessage('completed')],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.queryByText('需要你的回答')).not.toBeInTheDocument();
+    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
+    expect(screen.getByText('1 段思考 · 1 次工具调用')).toBeInTheDocument();
+    expect(screen.queryByText('question')).not.toBeVisible();
+    expect(screen.queryByText('输入参数')).not.toBeInTheDocument();
+    expect(screen.queryByText('输出结果')).not.toBeInTheDocument();
+
+    await user.click(screen.getByText('过程（2 项）'));
+
+    expect(screen.getByText('question')).toBeVisible();
+    expect(screen.getByText('已完成')).toBeVisible();
+    expect(screen.getByText('问题')).not.toBeVisible();
+
+    await user.click(screen.getByText('question'));
+
+    expect(screen.getByText('问题')).toBeVisible();
+    expect(screen.getByText('回答')).toBeVisible();
+    expect(screen.getAllByText('测试范围').length).toBeGreaterThan(0);
+    expect(screen.getByText('是')).toBeVisible();
+
+    await user.click(screen.getByText('过程（2 项）'));
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeQuestionMessage('completed', true)],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getByText('已按你的选择继续处理。')).toBeVisible();
+    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
+    expect(screen.getByText('question')).not.toBeVisible();
   });
 
   it('renders collapsed process groups inside the full compact assistant column', () => {
@@ -1299,6 +1811,94 @@ describe('ChatToolPart todo rendering', () => {
     expect(container.textContent).not.toContain('输入参数');
     expect(container.textContent).not.toContain('输出结果');
     expect(container.textContent).not.toContain('[object Object]');
+  });
+});
+
+describe('ChatToolPart bash rendering', () => {
+  it('renders command metadata and streams without generic JSON sections', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'bash-part',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call-bash',
+          state: {
+            status: 'completed',
+            input: {
+              command: 'npm run test:run -- SessionChat.test.ts',
+              description: '运行会话组件测试',
+              workdir: '/repo',
+              timeout: 120000,
+            },
+            output: {
+              stdout: 'tests passed\n',
+              stderr: 'warning: slow test\n',
+              exit_code: 0,
+            },
+            time: { start: 1000, end: 2500 },
+          },
+        } as any,
+      }),
+    );
+
+    const text = container.textContent || '';
+    expect(text).toContain('bash');
+    expect(text).toContain('运行会话组件测试');
+    expect(text).toContain('npm run test:run -- SessionChat.test.ts');
+    expect(text).toContain('命令');
+    expect(text).toContain('工作目录');
+    expect(text).toContain('/repo');
+    expect(text).toContain('耗时 1.50s');
+    expect(text).toContain('超时 120000ms');
+    expect(text).toContain('标准输出');
+    expect(text).toContain('tests passed');
+    expect(text).toContain('标准错误');
+    expect(text).toContain('warning: slow test');
+    expect(text).not.toContain('输入参数');
+    expect(text).not.toContain('输出结果');
+    expect(text).not.toContain('退出码');
+    expect(text).not.toContain('exit_code');
+    expect(screen.getByText('$')).toHaveClass('text-zinc-500');
+    expect(screen.getByText('$').closest('pre')).toHaveClass('bg-zinc-950');
+    expect(screen.getByText('$').closest('pre')).toHaveClass('max-h-64');
+    expect(screen.getByText('tests passed').closest('pre')).toHaveClass('max-h-64');
+  });
+});
+
+describe('ChatToolPart question result rendering', () => {
+  it('uses error styling for unanswered failed questions', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'question-error-part',
+          type: 'tool',
+          tool: 'question',
+          callID: 'call-question-error',
+          state: {
+            status: 'error',
+            input: {
+              questions: [
+                {
+                  question: '是否继续发布？',
+                  header: '发布确认',
+                  type: 'confirm',
+                },
+              ],
+            },
+            error: 'Question timed out',
+          },
+        } as any,
+      }),
+    );
+
+    const questionDetails = container.querySelector('details') as HTMLDetailsElement;
+    expect(questionDetails).not.toBeNull();
+    expect(questionDetails.open).toBe(false);
+    expect(screen.getByText('失败')).toHaveClass('text-red-500');
+    expect(screen.getByText('回答')).toHaveClass('text-red-500');
+    expect(screen.getByText('未回答')).toHaveClass('border-red-200');
+    expect(screen.getByText('未回答')).toHaveClass('bg-red-50');
   });
 });
 

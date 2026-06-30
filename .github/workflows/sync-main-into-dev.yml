@@ -1,0 +1,126 @@
+name: Sync main into dev
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      sync_label:
+        description: "Optional label to use in the sync branch and PR title"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-main-into-dev-${{ github.sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync-main-into-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch branches
+        run: git fetch origin main dev
+
+      - name: Resolve sync label
+        id: sync
+        env:
+          INPUT_SYNC_LABEL: ${{ github.event.inputs.sync_label }}
+        run: |
+          set -euo pipefail
+
+          main_sha="$(git rev-parse --short=12 origin/main)"
+          sync_label="${INPUT_SYNC_LABEL:-main-${main_sha}}"
+          safe_label="$(printf '%s' "$sync_label" | tr -c 'A-Za-z0-9._-' '-' | sed -e 's/^-*//' -e 's/-*$//')"
+
+          if [ -z "$safe_label" ]; then
+            safe_label="main-${main_sha}"
+          fi
+
+          echo "label=$sync_label" >> "$GITHUB_OUTPUT"
+          echo "safe_label=$safe_label" >> "$GITHUB_OUTPUT"
+
+      - name: Check branch difference
+        id: diff
+        run: |
+          set -euo pipefail
+
+          counts="$(git rev-list --left-right --count origin/main...origin/dev)"
+          read -r main_only dev_only <<< "$counts"
+
+          echo "main_only=$main_only" >> "$GITHUB_OUTPUT"
+          echo "dev_only=$dev_only" >> "$GITHUB_OUTPUT"
+          echo "origin/main only: $main_only"
+          echo "origin/dev only: $dev_only"
+
+      - name: Skip when dev is not behind main
+        if: steps.diff.outputs.main_only == '0'
+        run: echo "dev is not behind main; nothing to sync."
+
+      - name: Merge main into generated sync branch
+        if: steps.diff.outputs.main_only != '0'
+        id: merge
+        env:
+          SAFE_SYNC_LABEL: ${{ steps.sync.outputs.safe_label }}
+          SYNC_LABEL: ${{ steps.sync.outputs.label }}
+        run: |
+          set -euo pipefail
+
+          branch="chore/sync-main-into-dev-${SAFE_SYNC_LABEL}"
+
+          git switch -C "$branch" origin/dev
+          git merge --no-ff origin/main -m "chore: sync main into dev after ${SYNC_LABEL}"
+          git push --force-with-lease -u origin "$branch"
+
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse pull request
+        if: steps.diff.outputs.main_only != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.merge.outputs.branch }}
+          SYNC_LABEL: ${{ steps.sync.outputs.label }}
+          MAIN_ONLY: ${{ steps.diff.outputs.main_only }}
+          DEV_ONLY: ${{ steps.diff.outputs.dev_only }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(gh pr list --base dev --head "$SYNC_BRANCH" --state open --json url --jq '.[0].url // ""')"
+          if [ -n "$existing_pr" ]; then
+            echo "Existing sync PR: $existing_pr"
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          This PR was created automatically after origin/main was updated.
+
+          It merges origin/main into origin/dev to clear dev's behind count while preserving dev-only commits.
+
+          Sync label: ${SYNC_LABEL}
+
+          Branch comparison before sync:
+          - origin/main only: ${MAIN_ONLY}
+          - origin/dev only: ${DEV_ONLY}
+          EOF
+
+          gh pr create \
+            --base dev \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync main into dev after ${SYNC_LABEL}" \
+            --body-file "$body_file"

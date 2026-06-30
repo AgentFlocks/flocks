@@ -21,7 +21,7 @@ const {
   consoleUpgradeApi,
   useAuth,
   useStats,
-  useUserDefinedPages,
+  useWebUIContractPages,
 } = vi.hoisted(() => ({
   catalogAPI: {
     list: vi.fn(),
@@ -55,12 +55,12 @@ const {
   },
   useAuth: vi.fn(),
   useStats: vi.fn(),
-  useUserDefinedPages: vi.fn(() => ({
+  useWebUIContractPages: vi.fn(() => ({
     pages: [
       {
         id: 'dash-1',
         title: '自定义仪表盘',
-        route: '/user-defined-pages/dash-1',
+        route: '/contracts/webui/dash-1',
         icon: 'LayoutDashboard',
         order: 10,
         enabled: true,
@@ -125,8 +125,8 @@ vi.mock('@/components/common/Toast', () => ({
   }),
 }));
 
-vi.mock('@/hooks/useUserDefinedPages', () => ({
-  useUserDefinedPages,
+vi.mock('@/hooks/useWebUIContractPages', () => ({
+  useWebUIContractPages,
 }));
 
 vi.mock('@/components/common/LanguageSwitcher', () => ({
@@ -584,7 +584,7 @@ describe('Layout onboarding entry', () => {
   });
 });
 
-describe('Layout user defined pages navigation', () => {
+describe('Layout WebUI contract pages navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
@@ -622,21 +622,21 @@ describe('Layout user defined pages navigation', () => {
     consoleUpgradeApi.getProPackageStatus.mockResolvedValue({ pro_enabled: false });
   });
 
-  it('renders custom user defined page links under the home section', async () => {
+  it('renders custom WebUI contract page links under the home section', async () => {
     renderHomeWithLayout();
     expect(await screen.findByRole('link', { name: '自定义仪表盘' })).toHaveAttribute(
       'href',
-      '/user-defined-pages/dash-1',
+      '/contracts/webui/dash-1',
     );
   });
 
-  it('does not render custom page links until their build is ready', async () => {
-    useUserDefinedPages.mockReturnValue({
+  it('does not render WebUI contract page links until their build is ready', async () => {
+    useWebUIContractPages.mockReturnValue({
       pages: [
         {
           id: 'ready-page',
           title: '可用页面',
-          route: '/user-defined-pages/ready-page',
+          route: '/contracts/webui/ready-page',
           icon: 'LayoutDashboard',
           order: 10,
           enabled: true,
@@ -647,7 +647,7 @@ describe('Layout user defined pages navigation', () => {
         {
           id: 'failed-page',
           title: '失败页面',
-          route: '/user-defined-pages/failed-page',
+          route: '/contracts/webui/failed-page',
           icon: 'LayoutDashboard',
           order: 20,
           enabled: true,

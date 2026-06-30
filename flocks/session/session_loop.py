@@ -162,7 +162,7 @@ class SessionLoop:
         """Abort all child loops whose session.parent_id matches, recursively."""
         aborted = 0
         child_ids = [
-            sid for sid, ctx in cls._active_loops.items()
+            sid for sid, ctx in list(cls._active_loops.items())
             if getattr(ctx.session, 'parent_id', None) == parent_session_id
         ]
         for sid in child_ids:
@@ -189,6 +189,28 @@ class SessionLoop:
                 "event": event_name,
                 "error": str(exc),
             })
+
+    @classmethod
+    async def _publish_turn_stopped(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        *,
+        step: int,
+        stop_reason: str,
+    ) -> None:
+        turn_state = set_turn_state(
+            session_id,
+            step=step,
+            status="stopped",
+            stop_reason=stop_reason,
+            queued_message_detected=False,
+        )
+        await cls._publish_runtime_event(
+            callbacks,
+            "turn.stopped",
+            turn_state.model_dump(by_alias=True),
+        )
 
     @classmethod
     async def _publish_session_status(
@@ -592,6 +614,12 @@ class SessionLoop:
             })
             if not messages:
                 log.info("loop.no_messages", {"session_id": ctx.session.id})
+                await cls._publish_turn_stopped(
+                    callbacks,
+                    ctx.session.id,
+                    step=ctx.step,
+                    stop_reason="no_messages",
+                )
                 break
             
             # Analyze messages (matching TUI lines 277-292)
@@ -635,7 +663,17 @@ class SessionLoop:
             
             # Check if we have a user message
             if not last_user:
-                log.error("loop.no_user_message", {"session_id": ctx.session.id})
+                log.info("loop.no_user_message", {
+                    "session_id": ctx.session.id,
+                    "message_count": len(messages),
+                    "roles": [str(getattr(msg, "role", "")) for msg in messages[-5:]],
+                })
+                await cls._publish_turn_stopped(
+                    callbacks,
+                    ctx.session.id,
+                    step=ctx.step,
+                    stop_reason="no_user_message",
+                )
                 break
             
             last_assistant_parts = (

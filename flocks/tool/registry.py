@@ -172,7 +172,7 @@ class ToolInfo(BaseModel):
             properties["device_id"] = {
                 "type": "string",
                 "description": (
-                    "目标设备实例的唯一 ID（UUID），来自 device_context 工具返回的"
+                    "目标设备实例的唯一 ID（UUID），来自 device_manage(action='list') 返回的"
                     " `device_id` 字段。当系统中接入了多台同类型设备（例如多台 TDP）"
                     "时必须传入；只有单台时也建议显式传入以避免歧义。"
                 ),
@@ -789,24 +789,25 @@ class ToolRegistry:
             "params": list(kwargs.keys()),
         })
 
-        device_id = kwargs.pop("device_id", None)
+        device_id = None
         per_device_enabled = None
 
         if tool.info.source == "device" and tool.info.provider:
+            requested_device_id = kwargs.pop("device_id", None)
             try:
                 resolved_device_id, resolution_error = await cls._resolve_device_target(
                     storage_key=tool.info.provider,
-                    requested_device_id=str(device_id).strip() if device_id else None,
+                    requested_device_id=str(requested_device_id).strip() if requested_device_id else None,
                 )
             except Exception as exc:
                 log.warn("tool.device.target_resolve_failed", {
                     "tool": tool_name,
                     "provider": tool.info.provider,
-                    "device_id": device_id,
+                    "device_id": requested_device_id,
                     "error": str(exc),
                 })
                 resolved_device_id = None
-                resolution_error = "设备目标解析失败，请通过 device_context 工具确认设备后重试。"
+                resolution_error = "设备目标解析失败，请通过 device_manage(action='list') 确认设备后重试。"
 
             if resolution_error:
                 return ToolResult(success=False, error=resolution_error)
@@ -850,7 +851,7 @@ class ToolRegistry:
                 if not activated:
                     return ToolResult(
                         success=False,
-                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。",
+                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
                 result = await tool.execute(ctx, **kwargs)
         else:
@@ -921,11 +922,11 @@ class ToolRegistry:
             requested = next((device for device in devices if device.id == requested_device_id), None)
             if requested is None or not requested.enabled:
                 return None, (
-                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。"
+                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。"
                 )
             if requested.storage_key != storage_key:
                 return None, (
-                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_context 工具确认目标设备。"
+                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_manage(action='list') 确认目标设备。"
                 )
             return requested.id, None
 
@@ -938,11 +939,11 @@ class ToolRegistry:
             return resolved, None
 
         if not enabled_candidates:
-            return None, "当前没有可用的目标设备，请通过 device_context 工具确认设备状态。"
+            return None, "当前没有可用的目标设备，请通过 device_manage(action='list') 确认设备状态。"
 
         return None, (
             "当前存在多台同类型设备，调用前必须显式传入 `device_id`。"
-            "请先调用 device_context 工具确认目标设备。"
+            "请先调用 device_manage(action='list') 确认目标设备。"
         )
 
     @classmethod
@@ -1462,8 +1463,8 @@ class ToolRegistry:
             ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
-            # device/ — security device asset context
-            ("flocks.tool.device", ["device_context_tool"]),
+            # device/ — security device asset context and status probes
+            ("flocks.tool.device", ["manage_tool"]),
             # channel/ — IM platform messaging
             ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
@@ -1739,6 +1740,32 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 
+_TOOL_WATCH_SUBDIRS = ("api", "device", "python")
+
+
+def _tool_event_paths(event: object) -> List[str]:
+    candidate_paths: List[str] = []
+    src = getattr(event, "src_path", "") or ""
+    if src:
+        candidate_paths.append(src)
+    dest = getattr(event, "dest_path", "") or ""
+    if dest:
+        candidate_paths.append(dest)
+    return candidate_paths
+
+
+def _tool_path_matches_watch_scope(path: str, subdir: str | None = None) -> bool:
+    """Return whether ``path`` is under ``plugins/tools/<type>/``."""
+    parts = Path(path).parts
+    allowed = {subdir} if subdir else set(_TOOL_WATCH_SUBDIRS)
+    for idx, part in enumerate(parts):
+        if part != "tools":
+            continue
+        if idx + 1 < len(parts) and parts[idx + 1] in allowed:
+            return True
+    return False
+
+
 def _tool_event_should_reload(event: object) -> bool:
     """Return True if a watchdog filesystem event should trigger a plugin reload.
 
@@ -1753,17 +1780,13 @@ def _tool_event_should_reload(event: object) -> bool:
     Exposed at module scope so it can be unit-tested without spinning up
     ``watchdog.observers.Observer`` against a temp directory.
     """
-    candidate_paths: List[str] = []
-    src = getattr(event, "src_path", "") or ""
-    if src:
-        candidate_paths.append(src)
-    dest = getattr(event, "dest_path", "") or ""
-    if dest:
-        candidate_paths.append(dest)
+    candidate_paths = _tool_event_paths(event)
     if not candidate_paths:
         return False
 
     for path in candidate_paths:
+        if not _tool_path_matches_watch_scope(path):
+            continue
         if not (path.endswith(".yaml") or path.endswith(".py")):
             continue
         fname = os.path.basename(path)
@@ -1773,6 +1796,11 @@ def _tool_event_should_reload(event: object) -> bool:
             continue
         return True
     return False
+
+
+def _tool_event_touches_device_plugin(event: object) -> bool:
+    """Return True when a reload event targets ``tools/device``."""
+    return any(_tool_path_matches_watch_scope(path, "device") for path in _tool_event_paths(event))
 
 
 class ToolFileWatcher:
@@ -1788,7 +1816,7 @@ class ToolFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 1.0
-    _WATCH_SUBDIRS = ("api", "device", "python")
+    _WATCH_SUBDIRS = _TOOL_WATCH_SUBDIRS
 
     def __init__(self) -> None:
         self._observer: Optional[object] = None
@@ -1842,7 +1870,7 @@ class ToolFileWatcher:
                     return
                 if not _tool_event_should_reload(event):
                     return
-                watcher._schedule_refresh()
+                watcher._schedule_refresh(device_changed=_tool_event_touches_device_plugin(event))
 
         handler = _Handler()
         observer = Observer()
@@ -1874,11 +1902,12 @@ class ToolFileWatcher:
 
     # ---- internal ----
 
-    def _schedule_refresh(self) -> None:
+    def _schedule_refresh(self, *, device_changed: bool = False) -> None:
         """Debounced plugin tool reload."""
         with self._lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
+            self._device_changed = getattr(self, "_device_changed", False) or device_changed
             self._debounce_timer = threading.Timer(
                 self._DEBOUNCE_SECONDS, self._do_refresh
             )
@@ -1895,31 +1924,38 @@ class ToolFileWatcher:
 
     def _run_refresh(self) -> None:
         try:
+            if getattr(self, "_device_changed", False):
+                try:
+                    from flocks.config.api_versioning import discover_api_service_descriptors
+                    from flocks.tool.device.plugin_index import clear_device_template_cache
+
+                    clear_device_template_cache()
+                    discover_api_service_descriptors(refresh=True)
+                except Exception as exc:
+                    log.debug("tool.watcher.device_cache_clear_failed", {"error": str(exc)})
+                finally:
+                    self._device_changed = False
             ToolRegistry.refresh_plugin_tools()
             log.debug("tool.watcher.reloaded", {"reason": "plugin tool file changed on disk"})
         except Exception as e:
             log.warn("tool.watcher.reload_failed", {"error": str(e)})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Return the api/ and python/ subdirectories that exist and should be watched."""
+        """Return plugin roots that exist and should be watched."""
         dirs: Set[str] = set()
         try:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-            tools_root = DEFAULT_PLUGIN_ROOT / "tools"
+            user_plugin_root = DEFAULT_PLUGIN_ROOT
         except Exception:
-            tools_root = Path.home() / ".flocks" / "plugins" / "tools"
+            user_plugin_root = Path.home() / ".flocks" / "plugins"
 
-        for subdir in self._WATCH_SUBDIRS:
-            d = str(tools_root / subdir)
-            if os.path.isdir(d):
-                dirs.add(d)
+        if os.path.isdir(user_plugin_root):
+            dirs.add(str(user_plugin_root))
 
         try:
-            project_tools_root = Path.cwd() / ".flocks" / "plugins" / "tools"
-            for subdir in self._WATCH_SUBDIRS:
-                d = str(project_tools_root / subdir)
-                if d not in dirs and os.path.isdir(d):
-                    dirs.add(d)
+            project_plugin_root = Path.cwd() / ".flocks" / "plugins"
+            if os.path.isdir(project_plugin_root):
+                dirs.add(str(project_plugin_root))
         except Exception:
             pass
 

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 import uuid
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from flocks.session.recorder import Recorder
 from flocks.storage.storage import Storage
@@ -203,16 +202,10 @@ def derive_loop_progress(
 # Keep this intentionally small so high-frequency workflows do not keep
 # inflating the SQLite row set and matching JSONL audit files indefinitely.
 _MAX_EXECUTION_HISTORY_PER_WORKFLOW = 30
-# Trim is an O(N) scan over all workflow_execution rows; only run it every Nth
-# call per workflow to amortise the cost under high syslog throughput.
-_TRIM_CHECK_INTERVAL = 5
-_trim_counters: Dict[str, int] = {}
-# Workflows with an in-flight trim task.  Because trims run as fire-and-forget
-# ``asyncio.create_task`` background jobs, a slow trim under high syslog load
-# could otherwise spawn many overlapping scans that each materialise table
-# state simultaneously — the exact pattern that drove RSS to 20 GB.  This
-# guard ensures at most one trim per workflow is ever running.
-_trim_in_flight: Set[str] = set()
+# Per-workflow trim lock.  Trims are awaited by the writer so the retention cap
+# is enforced before ``record_execution_result`` returns, while concurrent runs
+# for the same workflow serialize instead of skipping cleanup.
+_trim_locks: Dict[str, asyncio.Lock] = {}
 
 # Per-workflow lock to serialize read-modify-write of stats. Concurrent
 # executions of the same workflow (e.g. syslog-triggered runs with
@@ -231,6 +224,14 @@ def _get_stats_lock(workflow_id: str) -> asyncio.Lock:
 
 def _workflow_stats_key(workflow_id: str) -> str:
     return f"workflow/{workflow_id}/stats"
+
+
+def _get_trim_lock(workflow_id: str) -> asyncio.Lock:
+    lock = _trim_locks.get(workflow_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _trim_locks[workflow_id] = lock
+    return lock
 
 
 _DEFAULT_STATS: Dict[str, Any] = {
@@ -278,6 +279,20 @@ async def _update_workflow_stats(workflow_id: str, success: bool, duration: floa
 def workflow_execution_key(exec_id: str) -> str:
     """Return the storage key for one workflow execution."""
     return f"workflow_execution/{exec_id}"
+
+
+def workflow_execution_index_prefix(workflow_id: str) -> str:
+    """Return the storage prefix for one workflow's execution index."""
+    return f"workflow_execution_index/{workflow_id}/"
+
+
+def workflow_execution_index_key(
+    workflow_id: str,
+    started_at: int,
+    exec_id: str,
+) -> str:
+    """Return the index key used to trim one workflow without full-table scans."""
+    return f"{workflow_execution_index_prefix(workflow_id)}{started_at:020d}/{exec_id}"
 
 
 def workflow_execution_step_key(exec_id: str, step_index: int) -> str:
@@ -495,7 +510,14 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    await Storage.write(workflow_execution_key(exec_data["id"]), compact_execution_summary(exec_data))
+    exec_key = workflow_execution_key(exec_data["id"])
+    await Storage.write(exec_key, compact_execution_summary(exec_data))
+    await _write_execution_index(
+        workflow_id=workflow_id,
+        exec_id=str(exec_data["id"]),
+        execution_key=exec_key,
+        started_at=int(exec_data.get("startedAt") or 0),
+    )
     return exec_data
 
 
@@ -512,6 +534,12 @@ async def record_execution_result(
         summary_data["stepCount"] = backfilled_steps
 
     await Storage.write(workflow_execution_key(exec_id), compact_execution_summary(summary_data))
+    await _write_execution_index(
+        workflow_id=workflow_id,
+        exec_id=exec_id,
+        execution_key=workflow_execution_key(exec_id),
+        started_at=int(summary_data.get("startedAt") or 0),
+    )
 
     # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
     # are reflected in the UI stats panel.
@@ -554,78 +582,113 @@ async def record_execution_result(
             pass
 
     # Prune old execution records when the per-workflow limit is exceeded.
-    # Throttled by a per-workflow counter to amortise the O(N) storage scan.
+    # This is awaited so a successful completion does not silently leave the
+    # workflow above its retention cap.
     try:
-        counter = _trim_counters.get(workflow_id, 0) + 1
-        _trim_counters[workflow_id] = counter
-        if counter >= _TRIM_CHECK_INTERVAL:
-            _trim_counters[workflow_id] = 0
-            # Run trim in the background as well; it scans all execution rows
-            # and we don't want to delay the caller.
-            try:
-                asyncio.create_task(
-                    _trim_execution_history(workflow_id),
-                    name=f"trim-{workflow_id}",
-                )
-            except RuntimeError:
-                await _trim_execution_history(workflow_id)
-    except Exception:
-        pass
+        await _trim_execution_history(workflow_id)
+    except Exception as exc:
+        log.error("workflow.history.trim_failed", {
+            "workflow_id": workflow_id,
+            "exec_id": exec_id,
+            "error": str(exc),
+        })
 
 
-# Regex patterns to extract scalar fields from raw JSON strings without
-# calling json.loads.  workflowId/startedAt are always serialised near the
-# start of the record (set in build_initial_execution_record), so we only
-# scan a small prefix of each value string — O(prefix) instead of O(value).
-_RE_WORKFLOW_ID = re.compile(r'"workflowId"\s*:\s*"([^"]+)"')
-_RE_STARTED_AT = re.compile(r'"startedAt"\s*:\s*(\d+)')
+async def _write_execution_index(
+    *,
+    workflow_id: str,
+    exec_id: str,
+    execution_key: str,
+    started_at: int,
+) -> str:
+    index_key = workflow_execution_index_key(workflow_id, started_at, exec_id)
+    await Storage.write(
+        index_key,
+        {
+            "workflowId": workflow_id,
+            "execId": exec_id,
+            "executionKey": execution_key,
+            "startedAt": started_at,
+        },
+    )
+    return index_key
+
+
+async def _list_workflow_execution_entries(
+    workflow_id: str,
+) -> List[Tuple[str, int, Optional[str]]]:
+    """Return indexed ``(execution_key, started_at, index_key)`` rows for one workflow."""
+    indexed_rows = await Storage.list_entries(workflow_execution_index_prefix(workflow_id))
+    entries: List[Tuple[str, int, Optional[str]]] = []
+    for index_key, value in indexed_rows:
+        if not isinstance(value, dict):
+            continue
+        exec_key = value.get("executionKey")
+        exec_id = value.get("execId")
+        if not isinstance(exec_key, str) and isinstance(exec_id, str):
+            exec_key = workflow_execution_key(exec_id)
+        if not isinstance(exec_key, str):
+            continue
+        started_at = _as_positive_int(value.get("startedAt")) or 0
+        entries.append((exec_key, started_at, index_key))
+    return entries
+
+
+async def _delete_execution_history_record(
+    execution_key: str,
+    *,
+    index_key: Optional[str] = None,
+) -> None:
+    exec_id = execution_key.rsplit("/", 1)[-1]
+    deleted_steps = await Storage.clear(workflow_execution_step_prefix(exec_id))
+    removed_execution = await Storage.remove(execution_key)
+    if index_key:
+        await Storage.remove(index_key)
+    record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
+    await asyncio.to_thread(record_path.unlink, missing_ok=True)
+    log.debug("workflow.history.trim_deleted", {
+        "exec_id": exec_id,
+        "execution_key": execution_key,
+        "steps": deleted_steps,
+        "removed_execution": removed_execution,
+    })
 
 
 async def _trim_execution_history(workflow_id: str) -> None:
     """Delete the oldest execution records once the per-workflow cap is exceeded.
 
-    Uses ``Storage.list_raw`` + regex instead of ``list_entries`` + ``json.loads``
-    so that scanning the execution-history table never materialises large JSON
-    blobs as Python objects.  The previous approach caused 100% single-core CPU
-    usage (``json.raw_decode``) and drove RSS to 20 GB under syslog load.
+    New records carry a per-workflow ``workflow_execution_index`` key, so hot
+    trims avoid scanning unrelated workflows.  This path is intentionally
+    index-only: if an old execution has no index key, it is outside the hot
+    retention path and should be handled by a separate migration/GC task.
 
-    Also guards against overlapping trim tasks via ``_trim_in_flight``: because
-    trims run as fire-and-forget background tasks, without the guard a slow trim
-    would spawn multiple concurrent scans that each load the full table
-    simultaneously, multiplying the memory spike.
+    A per-workflow lock serializes concurrent trims.  Cleanup is awaited by
+    ``record_execution_result`` so the retention cap is enforced synchronously
+    instead of being an opportunistic background task.
     """
-    # Coalesce overlapping trims: only one scan per workflow at a time.
-    if workflow_id in _trim_in_flight:
-        return
-    _trim_in_flight.add(workflow_id)
-    try:
-        raw_rows = await Storage.list_raw("workflow_execution/")
-        wf_entries: List[tuple] = []
-        for key, value_str in raw_rows:
-            # Scan only the first 400 chars — enough for workflowId + startedAt.
-            head = value_str[:400]
-            m_wf = _RE_WORKFLOW_ID.search(head)
-            if not m_wf or m_wf.group(1) != workflow_id:
-                continue
-            m_ts = _RE_STARTED_AT.search(head)
-            started_at = int(m_ts.group(1)) if m_ts else 0
-            wf_entries.append((key, started_at))
-
+    lock = _get_trim_lock(workflow_id)
+    async with lock:
+        wf_entries = await _list_workflow_execution_entries(workflow_id)
         if len(wf_entries) <= _MAX_EXECUTION_HISTORY_PER_WORKFLOW:
             return
+
         # Sort ascending by startedAt and remove the oldest excess records.
         wf_entries.sort(key=lambda kd: kd[1])
         excess = len(wf_entries) - _MAX_EXECUTION_HISTORY_PER_WORKFLOW
-        for key, _ in wf_entries[:excess]:
+        failures: List[str] = []
+        for key, _started_at, index_key in wf_entries[:excess]:
             try:
-                exec_id = key.rsplit("/", 1)[-1]
-                await Storage.remove(key)
-                step_rows = await Storage.list_raw(workflow_execution_step_prefix(exec_id))
-                for step_key, _value in step_rows:
-                    await Storage.remove(step_key)
-                record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
-                await asyncio.to_thread(record_path.unlink, missing_ok=True)
-            except Exception:
-                pass
-    finally:
-        _trim_in_flight.discard(workflow_id)
+                await _delete_execution_history_record(key, index_key=index_key)
+            except Exception as exc:
+                failures.append(f"{key}: {exc}")
+                log.warning("workflow.history.trim_delete_failed", {
+                    "workflow_id": workflow_id,
+                    "key": key,
+                    "error": str(exc),
+                })
+
+        if failures:
+            raise RuntimeError(
+                "Failed to trim workflow execution history: "
+                + "; ".join(failures[:3])
+            )

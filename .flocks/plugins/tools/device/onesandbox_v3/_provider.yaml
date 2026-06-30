@@ -1,0 +1,45 @@
+name: onesandbox
+vendor: threatbook
+service_id: onesandbox_api
+version: "3"
+integration_type: device
+description: >
+  OneSandbox v3 API integration for sandbox sample submission, file report
+  lookup and download, hash reputation, SafeSkill, and CheckURL operations.
+  Authentication uses an apikey query parameter.
+description_cn: >
+  OneSandbox v3 API 接入模板，支持沙箱样本提交、文件报告查询/下载、
+  Hash 信誉、SafeSkill 技能检测和 CheckURL URL 检测能力。认证方式为
+  query 参数 apikey。
+auth:
+  type: api_key
+  key: apikey
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://sandbox.example.com"
+  - key: apikey
+    label: API Key
+    storage: secret
+    config_key: apikey
+    secret_id: onesandbox_apikey
+    input_type: password
+    required: true
+defaults:
+  timeout: 120
+  category: custom
+  product_version: "v3"
+notes: |
+  OneSandbox API 手册说明 apikey 认证优先使用 query 参数，尤其文件上传等大表单
+  场景不要把 apikey 放在 form-data 中，避免表单解析失败导致 bad apikey。
+
+  Base URL 示例：
+    - https://sandbox.example.com
+    - http://10.0.0.10:8080
+
+  文件下载类 action 会把返回的二进制文件保存到
+  `~/.flocks/workspace/outputs/<today>/` 下，并在结果中返回 file_path。

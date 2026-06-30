@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from httpx import AsyncClient
+
+from flocks.auth.service import AuthService
+from flocks.server.auth import SESSION_COOKIE_NAME
+from flocks.server.routes import contracts as contracts_routes
+from flocks.contracts.access.runtime import OperationRuntime
+from flocks.contracts.webui.store import WebUIPagesStore
+from tests.contracts.access.test_runtime import (
+    CONTRACT_ID,
+    PAGE_ID,
+    _alert_record,
+    _plugin,
+    _write_alert_assets,
+)
+
+
+def test_contract_route_runtime_reloads_when_plugin_signature_changes(monkeypatch: pytest.MonkeyPatch):
+    created: list[object] = []
+    signature = (("plugin.py", 1, 100),)
+
+    class RuntimeStub:
+        def __init__(self) -> None:
+            created.append(self)
+
+    monkeypatch.setattr(contracts_routes, "OperationRuntime", RuntimeStub)
+    monkeypatch.setattr(contracts_routes, "_contract_plugin_signature", lambda: signature)
+    contracts_routes.reset_route_dependencies()
+
+    first = contracts_routes._get_runtime()
+    second = contracts_routes._get_runtime()
+    assert first is second
+    assert len(created) == 1
+
+    signature = (("plugin.py", 2, 100),)
+    third = contracts_routes._get_runtime()
+    assert third is not first
+    assert len(created) == 2
+
+
+@pytest.fixture
+def contract_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "contracts-webui"
+    monkeypatch.setenv("FLOCKS_CONTRACTS_WEBUI_ROOT", str(root))
+    store = WebUIPagesStore(root=root)
+    _write_alert_assets(store, [_alert_record(id="alert-route-1")])
+    contracts_routes.reset_route_dependencies(runtime=OperationRuntime(plugins=(_plugin(store),)))
+    return store
+
+
+@pytest.fixture
+def contract_pages_with_policy_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "contracts-webui-policy"
+    monkeypatch.setenv("FLOCKS_CONTRACTS_WEBUI_ROOT", str(root))
+    store = WebUIPagesStore(root=root)
+    _write_alert_assets(
+        store,
+        [
+            _alert_record(id="allowed", tenant="tenant-a", asset_group="core"),
+            _alert_record(id="blocked", tenant="tenant-b", asset_group="core"),
+        ],
+    )
+    contracts_routes.reset_route_dependencies(runtime=OperationRuntime(plugins=(_plugin(store),)))
+    return store
+
+
+@pytest.mark.asyncio
+async def test_contract_operation_route(client: AsyncClient, contract_pages: WebUIPagesStore):
+    resp = await client.post(
+        f"/api/contracts/webui/pages/{PAGE_ID}/access/{CONTRACT_ID}/operations/list",
+        json={"params": {"limit": 10}},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["summary"]["totalRaw"] == 1
+    assert body["items"][0]["id"] == "alert-route-1"
+
+
+@pytest.mark.asyncio
+async def test_contract_operation_route_applies_loaded_member_policy(
+    client: AsyncClient,
+    contract_pages_with_policy_rows: WebUIPagesStore,
+):
+    await AuthService._create_user_internal(
+        username="analyst",
+        password="Password123!",
+        role="member",
+        tenant_ids=("tenant-a",),
+        asset_groups=("core",),
+    )
+    _user, session_id = await AuthService.login("analyst", "Password123!")
+    client.cookies.set(SESSION_COOKIE_NAME, session_id)
+
+    response = await client.post(
+        f"/api/contracts/webui/pages/{PAGE_ID}/access/{CONTRACT_ID}/operations/list",
+        json={"params": {"limit": 10}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["id"] for item in body["items"]] == ["allowed"]
+    assert body["meta"]["filterStagesApplied"][0]["source"] == "policy.tenantIds"
+
+
+@pytest.mark.asyncio
+async def test_contract_operation_route_rejects_forbidden_fields(
+    client: AsyncClient,
+    contract_pages: WebUIPagesStore,
+):
+    resp = await client.post(
+        f"/api/contracts/webui/pages/{PAGE_ID}/access/{CONTRACT_ID}/operations/list",
+        json={"params": {"driver": "sqlite"}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "forbidden_request_field"

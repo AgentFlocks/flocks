@@ -1,0 +1,33 @@
+name: secgate3600_system
+description: SecGate 3600 system status and login validation.
+description_cn: SecGate 3600 系统状态和登录校验工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: secgate3600_api
+version: "3.6.6.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - check_login
+        - system_info
+        - system_resource
+        - cpu_usage
+        - memory_usage
+        - disk_usage
+        - test
+    page_index:
+      type: integer
+    page_size:
+      type: integer
+    body:
+      type: object
+  required:
+    - action
+handler:
+  type: script
+  script_file: secgate3600.handler.py
+  function: system
