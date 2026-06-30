@@ -415,6 +415,15 @@ def _apply_new_workflow_runtime_defaults(workflow_json: Dict[str, Any]) -> Dict[
     return normalized
 
 
+def _strict_edge_mapping_lint_errors(workflow: Workflow) -> List[Dict[str, Any]]:
+    """Return strict edge-mapping lint errors that would fail execution."""
+    return [
+        item
+        for item in lint_workflow(workflow)
+        if item.get("severity") == "error" and item.get("kind") == "implicit_full_payload_edge"
+    ]
+
+
 def _delete_workflow_from_fs(workflow_id: str) -> bool:
     """Remove a workflow directory from all known locations (primary + legacy plugins).
 
@@ -1351,9 +1360,18 @@ async def create_workflow(req: WorkflowCreateRequest):
     try:
         workflow_json = _apply_new_workflow_runtime_defaults(req.workflow_json)
         try:
-            Workflow.from_dict(workflow_json)
+            workflow_model = Workflow.from_dict(workflow_json)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
+        strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
+        if strict_mapping_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workflow strict edge mapping failed: "
+                    f"{strict_mapping_errors[:5]}"
+                ),
+            )
 
         workflow_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)

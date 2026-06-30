@@ -20,6 +20,26 @@ def _minimal_workflow_json(metadata=None):
     return workflow
 
 
+def _two_node_workflow_json(edge):
+    return {
+        "name": "two-node",
+        "start": "prepare_message",
+        "nodes": [
+            {
+                "id": "prepare_message",
+                "type": "python",
+                "code": "outputs['message_text'] = inputs.get('message', '')",
+            },
+            {
+                "id": "transform_message",
+                "type": "python",
+                "code": "outputs['final_message'] = inputs.get('message_text', '').upper()",
+            },
+        ],
+        "edges": [edge],
+    }
+
+
 @pytest.mark.asyncio
 async def test_create_workflow_applies_vertex_cache_runtime_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     writes: list[dict] = []
@@ -73,6 +93,62 @@ async def test_create_workflow_preserves_explicit_runtime_defaults(monkeypatch: 
     assert runtime["strict_edge_mapping"] is False
     assert runtime["dataflow_mode"] == "legacy"
     assert writes[0]["workflow_json"]["metadata"]["runtime"] == runtime
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_rejects_unmapped_edges_after_strict_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_workflow = Mock()
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", write_workflow)
+
+    req = workflow_module.WorkflowCreateRequest(
+        name="new workflow",
+        workflowJson=_two_node_workflow_json(
+            {"from": "prepare_message", "to": "transform_message", "order": 0}
+        ),
+    )
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.create_workflow(req)
+
+    assert exc_info.value.status_code == 400
+    assert "Workflow strict edge mapping failed" in str(exc_info.value.detail)
+    assert "prepare_message" in str(exc_info.value.detail)
+    write_workflow.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_accepts_explicit_mapping_after_strict_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[dict] = []
+
+    def _fake_write_workflow_to_fs(workflow_id, workflow_json, meta, *args, **kwargs):
+        writes.append({"workflow_id": workflow_id, "workflow_json": workflow_json, "meta": meta})
+
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", _fake_write_workflow_to_fs)
+    monkeypatch.setattr(workflow_module, "_get_workflow_stats", AsyncMock(return_value={}))
+    monkeypatch.setattr(workflow_module, "publish_event", AsyncMock(return_value=None))
+
+    req = workflow_module.WorkflowCreateRequest(
+        name="new mapped workflow",
+        workflowJson=_two_node_workflow_json(
+            {
+                "from": "prepare_message",
+                "to": "transform_message",
+                "order": 0,
+                "mapping": {"message_text": "message_text"},
+            }
+        ),
+    )
+
+    result = await workflow_module.create_workflow(req)
+
+    runtime = result.workflowJson["metadata"]["runtime"]
+    assert runtime["strict_edge_mapping"] is True
+    assert runtime["dataflow_mode"] == "vertex_cache"
+    assert writes[0]["workflow_json"]["edges"][0]["mapping"] == {"message_text": "message_text"}
 
 
 @pytest.mark.asyncio
