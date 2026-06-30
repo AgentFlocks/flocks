@@ -15,7 +15,9 @@ from flocks.workflow.execution_store import (
     record_execution_result,
     resolve_execution_outcome,
 )
+from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
+from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
 
@@ -277,6 +279,13 @@ class SyslogManager:
             return {"state": "failed", "error": err}
 
         trigger = self._resolve_active_trigger(workflow_json, data)
+        try:
+            workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
+        except Exception as exc:
+            err = f"workflow_plan_failed: {exc}"
+            self._listener_status[workflow_id] = {"state": "failed", "error": err}
+            log.warning("syslog.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
+            return self.get_listener_status(workflow_id)
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
 
@@ -304,7 +313,7 @@ class SyslogManager:
         for i in range(_MAX_CONCURRENT_EXECUTIONS):
             workers.append(
                 asyncio.create_task(
-                    self._worker_loop(workflow_id, workflow_json, trigger, queue, abort),
+                    self._worker_loop(workflow_id, workflow_plan, trigger, queue, abort),
                     name=f"syslog-worker-{workflow_id}-{i}",
                 )
             )
@@ -449,7 +458,7 @@ class SyslogManager:
     async def _worker_loop(
         self,
         workflow_id: str,
-        workflow_json: Any,
+        workflow_plan: Any,
         trigger: TriggerDefinition,
         queue: asyncio.Queue,
         abort: asyncio.Event,
@@ -470,7 +479,7 @@ class SyslogManager:
             try:
                 await self._trigger_workflow(
                     workflow_id,
-                    workflow_json,
+                    workflow_plan,
                     msg,
                     next(iter(trigger.mapping or {}), "syslog_message"),
                     trigger=trigger,
@@ -487,7 +496,7 @@ class SyslogManager:
     async def _trigger_workflow(
         self,
         workflow_id: str,
-        workflow_json: Any,
+        workflow_plan: Any,
         syslog_msg: dict,
         input_key: str,
         *,
@@ -532,9 +541,11 @@ class SyslogManager:
             try:
                 result = await asyncio.to_thread(
                     run_workflow,
-                    workflow=workflow_json,
+                    workflow=workflow_plan,
                     inputs=mapped_inputs,
+                    run_id=exec_id,
                     trace=False,
+                    execution_profile="high_frequency",
                     on_step_complete=step_recorder.on_step_complete,
                 )
                 status, error_msg = resolve_execution_outcome(result)

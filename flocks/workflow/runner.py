@@ -17,16 +17,17 @@ from flocks.sandbox.context import resolve_sandbox_context
 from .errors import FlocksWorkflowError, RunCancelledError, RunTimeoutError, WorkflowValidationError
 from .io import dump_workflow, load_workflow
 from .compiler import default_exec_path, compile_workflow, workflow_has_logic_nodes
+from .execution_plan import (
+    WorkflowExecutionPlan,
+    build_workflow_execution_plan,
+    resolve_workflow_dataflow_mode,
+)
 from .models import Workflow
 from .engine import WorkflowEngine
 from .repl_runtime import PythonExecRuntime, SandboxPythonExecRuntime
 from .tools import get_tool_registry
-from .requirements import (
-    RequirementsInstaller,
-    SandboxRequirementsInstaller,
-    requirements_from_workflow_metadata,
-)
-from .workflow_lint import is_schema_lint_error, lint_workflow
+from .requirements import RequirementsInstaller, SandboxRequirementsInstaller
+from .workflow_lint import is_schema_lint_error
 from .logging_config import setup_workflow_logging
 
 
@@ -162,38 +163,6 @@ def _resolve_workflow_node_timeout(
     return requested_timeout_s
 
 
-def _resolve_workflow_dataflow_mode(workflow_metadata: Optional[Dict[str, Any]]) -> Literal["legacy", "vertex_cache"]:
-    """Resolve workflow dataflow mode from metadata.
-
-    Missing metadata intentionally stays legacy so historical workflow files run
-    with their original full-payload edge semantics.
-    """
-    if not isinstance(workflow_metadata, dict):
-        return "legacy"
-
-    candidates: list[Any] = [
-        workflow_metadata.get("dataflow_mode"),
-        workflow_metadata.get("dataflowMode"),
-    ]
-    for section_key in ("runtime", "runtime_defaults", "runtimeDefaults"):
-        section = workflow_metadata.get(section_key)
-        if isinstance(section, dict):
-            candidates.extend(
-                [
-                    section.get("dataflow_mode"),
-                    section.get("dataflowMode"),
-                ]
-            )
-
-    for value in candidates:
-        normalized = str(value or "").strip().lower().replace("-", "_")
-        if normalized in {"vertex_cache", "vertex", "cache"}:
-            return "vertex_cache"
-        if normalized in {"legacy", "classic", "default"}:
-            return "legacy"
-    return "legacy"
-
-
 def _resolve_sandbox_payload_from_config(tool_context: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Resolve sandbox payload directly from config for workflow sandbox default."""
     config_data = _load_config_data()
@@ -274,7 +243,8 @@ def _ensure_logging_configured() -> None:
         setup_workflow_logging()
 
 
-WorkflowSource = Union[Dict[str, Any], str, Path, Workflow]
+WorkflowSource = Union[Dict[str, Any], str, Path, Workflow, WorkflowExecutionPlan]
+ExecutionProfile = Literal["default", "high_frequency"]
 
 
 @dataclass
@@ -312,6 +282,35 @@ def _build_initial_inputs(
     return initial_inputs
 
 
+def _apply_execution_profile(
+    profile: Optional[ExecutionProfile],
+    *,
+    node_timeout_s: Optional[float],
+    trace: bool,
+    history_mode: Literal["full", "summary"],
+    retain_history: bool,
+) -> tuple[Optional[float], bool, Literal["full", "summary"], bool]:
+    """Apply a coarse runtime profile before execution."""
+    if profile != "high_frequency":
+        return node_timeout_s, trace, history_mode, retain_history
+    return node_timeout_s, False, "summary", False
+
+
+def _validate_lint_results(lint_results: tuple[Dict[str, Any], ...]) -> None:
+    lint_errors = [r for r in lint_results if r.get("severity") == "error"]
+    lint_warnings = [r for r in lint_results if r.get("severity") != "error"]
+    if lint_errors:
+        _logger.error(f"workflow lint 检查发现 {len(lint_errors)} 个错误: {lint_errors[:5]}")
+        strict_mapping_errors = [item for item in lint_errors if item.get("kind") == "implicit_full_payload_edge"]
+        if strict_mapping_errors:
+            raise WorkflowValidationError(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}")
+        schema_errors = [item for item in lint_errors if is_schema_lint_error(item)]
+        if schema_errors:
+            raise WorkflowValidationError(f"Workflow schema lint failed: {schema_errors[:5]}")
+    if lint_warnings:
+        _logger.warning(f"workflow lint 检查发现 {len(lint_warnings)} 个警告: {lint_warnings[:5]}")
+
+
 def run_workflow(
     *,
     workflow: WorkflowSource,
@@ -332,15 +331,32 @@ def run_workflow(
     history_mode: Literal["full", "summary"] = "summary",
     cancel: Optional[Callable[[], bool]] = None,
     retain_history: bool = False,
+    execution_profile: Optional[ExecutionProfile] = None,
 ) -> RunWorkflowResult:
     # 确保日志已配置
     _ensure_logging_configured()
 
     _logger.debug("=== 开始执行 workflow ===")
 
+    node_timeout_s, trace, history_mode, retain_history = _apply_execution_profile(
+        execution_profile,
+        node_timeout_s=node_timeout_s,
+        trace=trace,
+        history_mode=history_mode,
+        retain_history=retain_history,
+    )
+
     workflow_path_for_engine: Optional[str] = None
     effective_use_llm: Optional[bool] = use_llm
-    if isinstance(workflow, Workflow):
+    plan: Optional[WorkflowExecutionPlan] = None
+    if isinstance(workflow, WorkflowExecutionPlan):
+        _logger.debug("workflow 来源: execution plan")
+        plan = workflow
+        wf = plan.workflow
+        workflow_path_for_engine = plan.workflow_path
+        if effective_use_llm is None:
+            effective_use_llm = plan.use_llm
+    elif isinstance(workflow, Workflow):
         _logger.debug("workflow 来源: Workflow 对象")
         wf = workflow
     elif isinstance(workflow, (str, Path)):
@@ -398,22 +414,17 @@ def run_workflow(
     if effective_use_llm is None:
         effective_use_llm = workflow_has_logic_nodes(wf)
 
+    if plan is None:
+        plan = build_workflow_execution_plan(
+            wf,
+            workflow_path=workflow_path_for_engine,
+            use_llm=effective_use_llm,
+        )
+
     _logger.debug("workflow 信息: nodes=%s, edges=%s, start=%s", len(wf.nodes), len(wf.edges), wf.start)
 
     try:
-        lint_results = lint_workflow(wf)
-        lint_errors = [r for r in lint_results if r.get("severity") == "error"]
-        lint_warnings = [r for r in lint_results if r.get("severity") != "error"]
-        if lint_errors:
-            _logger.error(f"workflow lint 检查发现 {len(lint_errors)} 个错误: {lint_errors[:5]}")
-            strict_mapping_errors = [item for item in lint_errors if item.get("kind") == "implicit_full_payload_edge"]
-            if strict_mapping_errors:
-                raise WorkflowValidationError(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}")
-            schema_errors = [item for item in lint_errors if is_schema_lint_error(item)]
-            if schema_errors:
-                raise WorkflowValidationError(f"Workflow schema lint failed: {schema_errors[:5]}")
-        if lint_warnings:
-            _logger.warning(f"workflow lint 检查发现 {len(lint_warnings)} 个警告: {lint_warnings[:5]}")
+        _validate_lint_results(plan.lint_results)
     except WorkflowValidationError:
         raise
     except Exception:
@@ -423,9 +434,9 @@ def run_workflow(
         node_timeout_s,
         wf.metadata,
     )
-    dataflow_mode = _resolve_workflow_dataflow_mode(wf.metadata)
+    dataflow_mode = plan.dataflow_mode
 
-    reqs = requirements_from_workflow_metadata(wf.metadata)
+    reqs = list(plan.requirements)
     if ensure_requirements:
         _logger.debug("检查依赖包...")
         if reqs:
@@ -482,6 +493,7 @@ def run_workflow(
         max_parallel_workers=max_parallel_workers,
         history_mode=history_mode,
         dataflow_mode=dataflow_mode,
+        execution_plan=plan,
     )
 
     initial_inputs = _build_initial_inputs(inputs, workflow_path_for_engine)

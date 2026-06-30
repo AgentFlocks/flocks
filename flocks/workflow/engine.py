@@ -15,6 +15,7 @@ from typing import Any, Callable, Deque, Dict, List, Literal, NamedTuple, Option
 from .code_gen import CodeGen, SimpleCodeGen, LLMCodeGen
 from .edge_resolver import EdgeResolver
 from .errors import MaxStepsExceededError, NodeExecutionError, RunCancelledError, RunTimeoutError
+from .execution_plan import WorkflowExecutionPlan
 from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
 from .models import Edge, Workflow, Node
 from .repl_runtime import PythonExecRuntime, Runtime
@@ -138,6 +139,7 @@ class WorkflowEngine:
     node_timeout_s: Optional[float] = 300.0
     history_mode: Literal["full", "summary"] = "summary"
     dataflow_mode: Literal["legacy", "vertex_cache"] = "legacy"
+    execution_plan: Optional[WorkflowExecutionPlan] = None
     _depth: int = 0
     max_parallel_workers: int = 4
     workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)
@@ -192,13 +194,18 @@ class WorkflowEngine:
         retain_history: bool = False,
     ) -> ExecutionResult:
         assert self.runtime is not None
-        nodes = self.workflow.nodes_by_id()
-        adj = self.workflow.adjacency()
-        incoming_from: Dict[str, List[str]] = {n.id: [] for n in self.workflow.nodes}
-        for e in self.workflow.edges:
-            incoming_from.setdefault(e.to, []).append(e.from_)
-        for k in incoming_from:
-            incoming_from[k].sort()
+        if self.execution_plan is not None and self.execution_plan.workflow is self.workflow:
+            nodes = self.execution_plan.nodes_by_id
+            adj = self.execution_plan.adjacency
+            incoming_from = self.execution_plan.incoming_from
+        else:
+            nodes = self.workflow.nodes_by_id()
+            adj = self.workflow.adjacency()
+            incoming_from: Dict[str, List[str]] = {n.id: [] for n in self.workflow.nodes}
+            for e in self.workflow.edges:
+                incoming_from.setdefault(e.to, []).append(e.from_)
+            for k in incoming_from:
+                incoming_from[k].sort()
         q: Deque[Tuple[str, Dict[str, Any], Optional[str]]] = deque([(self.workflow.start, initial_inputs or {}, None)])
         rid = (run_id or uuid.uuid4().hex).strip() or uuid.uuid4().hex
         state = WorkflowExecutionState(run_id=rid, history_mode=self.history_mode, retain_history=retain_history)

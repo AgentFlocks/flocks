@@ -37,7 +37,9 @@ from flocks.workflow.execution_store import (
     record_execution_result,
     resolve_execution_outcome,
 )
+from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
+from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
 
@@ -398,6 +400,13 @@ class KafkaManager:
             return {"state": "failed", "error": err}
 
         trigger = self._resolve_active_trigger(workflow_json, data)
+        try:
+            workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
+        except Exception as exc:
+            err = f"workflow_plan_failed: {exc}"
+            self._status[workflow_id] = {"state": "failed", "error": err}
+            log.warning("kafka.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
+            return self.get_consumer_status(workflow_id)
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
         configured_inputs = _strip_execution_only_comments(trigger.inputs if isinstance(trigger.inputs, dict) else {})
 
@@ -426,7 +435,7 @@ class KafkaManager:
                 asyncio.create_task(
                     self._worker_loop(
                         workflow_id,
-                        workflow_json,
+                        workflow_plan,
                         trigger,
                         configured_inputs,
                         queue,
@@ -596,7 +605,7 @@ class KafkaManager:
     async def _worker_loop(
         self,
         workflow_id: str,
-        workflow_json: Any,
+        workflow_plan: Any,
         trigger: TriggerDefinition,
         configured_inputs: Dict[str, Any],
         queue: asyncio.Queue,
@@ -615,7 +624,7 @@ class KafkaManager:
                     msg = _decode_message(msg.raw_value)
                 await self._trigger_workflow(
                     workflow_id,
-                    workflow_json,
+                    workflow_plan,
                     msg,
                     next(iter(trigger.mapping or {}), "kafka_message"),
                     configured_inputs,
@@ -633,7 +642,7 @@ class KafkaManager:
     async def _trigger_workflow(
         self,
         workflow_id: str,
-        workflow_json: Any,
+        workflow_plan: Any,
         message: Any,
         input_key: str,
         configured_inputs: Optional[Dict[str, Any]] = None,
@@ -692,10 +701,11 @@ class KafkaManager:
             try:
                 result = await asyncio.to_thread(
                     run_workflow,
-                    workflow=workflow_json,
+                    workflow=workflow_plan,
                     inputs=mapped_inputs,
+                    run_id=exec_id,
                     trace=False,
-                    history_mode="summary",
+                    execution_profile="high_frequency",
                     on_step_complete=step_recorder.on_step_complete,
                 )
                 status, error_msg = resolve_execution_outcome(result)

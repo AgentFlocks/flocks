@@ -23,7 +23,9 @@ from flocks.workflow.execution_store import (
     record_execution_result,
     resolve_execution_outcome,
 )
+from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
+from flocks.workflow.models import Workflow
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.store import WorkflowStore
 
@@ -267,6 +269,19 @@ class WorkflowPollerManager:
             }
             return self.get_status(workflow_id)
 
+        try:
+            workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
+        except Exception as exc:
+            err = f"workflow_plan_failed: {exc}"
+            self._status[workflow_id] = {
+                **self.get_status(workflow_id),
+                "workflowId": workflow_id,
+                "state": "failed",
+                "error": err,
+            }
+            log.warning("poller.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
+            return self.get_status(workflow_id)
+
         abort_event = asyncio.Event()
         self._abort_events[workflow_id] = abort_event
         self._status[workflow_id] = {
@@ -282,7 +297,7 @@ class WorkflowPollerManager:
             "nextRunAt": self._compute_next_run_at_ms(config),
         }
         task = asyncio.create_task(
-            self._poller_loop(workflow_id, workflow_json, config, abort_event),
+            self._poller_loop(workflow_id, workflow_plan, config, abort_event),
             name=f"workflow-poller-{workflow_id}",
         )
         self._tasks[workflow_id] = task
@@ -322,7 +337,7 @@ class WorkflowPollerManager:
     async def _poller_loop(
         self,
         workflow_id: str,
-        workflow_json: Dict[str, Any],
+        workflow_json: Any,
         config: Dict[str, Any],
         abort_event: asyncio.Event,
     ) -> None:
@@ -375,7 +390,7 @@ class WorkflowPollerManager:
     async def _schedule_run(
         self,
         workflow_id: str,
-        workflow_json: Dict[str, Any],
+        workflow_json: Any,
         config: Dict[str, Any],
     ) -> None:
         active_runs = self._cleanup_done_runs(workflow_id)
@@ -424,8 +439,10 @@ class WorkflowPollerManager:
                 run_workflow,
                 workflow=workflow_json,
                 inputs=inputs,
+                run_id=exec_id,
                 timeout_s=config["timeoutSeconds"],
                 trace=False,
+                execution_profile="high_frequency",
                 cancel=cancel_event.is_set,
                 on_step_complete=step_recorder.on_step_complete,
             )
