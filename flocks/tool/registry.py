@@ -789,20 +789,21 @@ class ToolRegistry:
             "params": list(kwargs.keys()),
         })
 
-        device_id = kwargs.pop("device_id", None)
+        device_id = None
         per_device_enabled = None
 
         if tool.info.source == "device" and tool.info.provider:
+            requested_device_id = kwargs.pop("device_id", None)
             try:
                 resolved_device_id, resolution_error = await cls._resolve_device_target(
                     storage_key=tool.info.provider,
-                    requested_device_id=str(device_id).strip() if device_id else None,
+                    requested_device_id=str(requested_device_id).strip() if requested_device_id else None,
                 )
             except Exception as exc:
                 log.warn("tool.device.target_resolve_failed", {
                     "tool": tool_name,
                     "provider": tool.info.provider,
-                    "device_id": device_id,
+                    "device_id": requested_device_id,
                     "error": str(exc),
                 })
                 resolved_device_id = None

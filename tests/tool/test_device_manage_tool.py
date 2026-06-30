@@ -1,7 +1,7 @@
 """Tests for the built-in device_manage tool."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -12,9 +12,11 @@ from flocks.tool.registry import ToolContext, ToolRegistry
 
 
 def make_ctx() -> ToolContext:
-    ctx = MagicMock(spec=ToolContext)
-    ctx.session_id = "session-device-test"
-    return ctx
+    return ToolContext(
+        session_id="session-device-test",
+        message_id="message-device-test",
+        agent="rex",
+    )
 
 
 def test_device_manage_is_registered():
@@ -62,6 +64,30 @@ async def test_device_manage_connectivity_test_writes_status_via_existing_test_p
         "latency_ms": 12,
     }
     assert result.metadata["card_status_updated"] is True
+
+
+@pytest.mark.asyncio
+async def test_device_manage_keeps_device_id_when_executed_through_registry():
+    with patch(
+        "flocks.tool.device.manage_tool.test_device",
+        AsyncMock(
+            return_value=DeviceTestResult(
+                success=True,
+                message="HTTP 200，延迟 12ms",
+                latency_ms=12,
+            )
+        ),
+    ) as mocked_test:
+        result = await ToolRegistry.execute(
+            "device_manage",
+            make_ctx(),
+            action="connectivity_test",
+            device_id="dev-1",
+        )
+
+    mocked_test.assert_awaited_once_with("dev-1")
+    assert result.success is True
+    assert result.metadata["device_id"] == "dev-1"
 
 
 @pytest.mark.asyncio
