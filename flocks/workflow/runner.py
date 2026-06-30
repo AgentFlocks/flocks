@@ -325,6 +325,7 @@ def run_workflow(
     ensure_requirements: bool = True,
     requirements_installer: Optional[RequirementsInstaller] = None,
     sandbox_requirements_installer: Optional[SandboxRequirementsInstaller] = None,
+    run_id: Optional[str] = None,
     on_step_start: Optional[Any] = None,
     on_step_complete: Optional[Any] = None,
     max_parallel_workers: int = 4,
@@ -509,6 +510,7 @@ def run_workflow(
     try:
         result = engine.run(
             initial_inputs=initial_inputs,
+            run_id=run_id,
             timeout_s=timeout_s,
             cancel=cancel,
             on_step_start=_on_step_start,

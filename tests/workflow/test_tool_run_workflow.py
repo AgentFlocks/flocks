@@ -292,11 +292,11 @@ class TestRunWorkflowToolExecution:
 
             assert result.success is True
             assert "SUCCEEDED" in result.output
-            assert "run-123" in result.output
+            assert "run-123" not in result.output
             assert "Steps executed: 1" in result.output
             assert result.metadata["status"] == "success"
             assert result.metadata["steps"] == 1
-            assert result.metadata["run_id"] == "run-123"
+            assert "run_id" not in result.metadata
 
             # Check that permission was requested
             assert len(tool_context_with_permission._permissions_requested) > 0
@@ -311,7 +311,8 @@ class TestRunWorkflowToolExecution:
         tool_context_with_permission._metadata_callback = metadata_updates.append
 
         def run_side_effect(**kwargs):
-            kwargs["on_step_start"]("run-registered", 1, MagicMock(id="node-1", type="python"), {})
+            assert kwargs["run_id"] == "exec-registered"
+            kwargs["on_step_start"](kwargs["run_id"], 1, MagicMock(id="node-1", type="python"), {})
             kwargs["on_step_complete"](
                 {
                     "node_id": "node-1",
@@ -321,7 +322,7 @@ class TestRunWorkflowToolExecution:
             )
             return FakeRunWorkflowResult(
                 status="SUCCEEDED",
-                run_id="run-registered",
+                run_id=kwargs["run_id"],
                 steps=1,
                 last_node_id="node-1",
                 outputs={"message": "ok"},
@@ -364,6 +365,7 @@ class TestRunWorkflowToolExecution:
 
         assert result.success is True
         assert result.metadata["workflow_execution_id"] == "exec-registered"
+        assert "run_id" not in result.metadata
         create_execution.assert_awaited_once()
         record_result.assert_awaited_once()
         assert upsert_execution.await_count >= 1
@@ -442,7 +444,8 @@ class TestRunWorkflowToolExecution:
         tool_context_with_permission._metadata_callback = metadata_updates.append
 
         def run_side_effect(**kwargs):
-            kwargs["on_step_start"]("run-compacted", 1, MagicMock(id="node-1", type="python"), {})
+            assert kwargs["run_id"] == "exec-compacted"
+            kwargs["on_step_start"](kwargs["run_id"], 1, MagicMock(id="node-1", type="python"), {})
             kwargs["on_step_complete"](
                 {
                     "node_id": "node-1",
@@ -453,7 +456,7 @@ class TestRunWorkflowToolExecution:
             )
             return FakeRunWorkflowResult(
                 status="SUCCEEDED",
-                run_id="run-compacted",
+                run_id=kwargs["run_id"],
                 steps=1,
                 last_node_id="node-1",
                 outputs={"enriched_alerts": large_alerts, "message": "done"},
@@ -807,7 +810,7 @@ class TestRunWorkflowToolResultFormatting:
 
             # Check that all key information is present
             assert "Status: SUCCEEDED" in output
-            assert "Run ID: run-format" in output
+            assert "Run ID:" not in output
             assert "Steps executed: 3" in output
             assert "Last node: node-3" in output
             assert "Final Outputs:" in output

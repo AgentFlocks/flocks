@@ -222,9 +222,6 @@ def _format_workflow_result(result: Any, *, include_history: bool = False) -> st
     output_lines = []
     output_lines.append(f"Status: {data.get('status', 'UNKNOWN')}")
 
-    if data.get("run_id"):
-        output_lines.append(f"Run ID: {data.get('run_id')}")
-
     if data.get("steps"):
         output_lines.append(f"Steps executed: {data.get('steps')}")
 
@@ -321,7 +318,6 @@ def _workflow_tool_metadata(
     workflow_execution_id: Optional[str],
     status: str,
     steps: Any = 0,
-    run_id: Optional[str] = None,
     last_node_id: Optional[str] = None,
     outputs: Any = None,
     history_count: int = 0,
@@ -335,7 +331,6 @@ def _workflow_tool_metadata(
         "workflow_execution_id": workflow_execution_id,
         "status": status,
         "steps": steps,
-        "run_id": run_id,
         "last_node_id": last_node_id,
         "has_output": bool(outputs),
         "output_keys": _output_keys(outputs),
@@ -586,7 +581,7 @@ async def run_workflow_tool(
             )
 
     def _on_step_start(
-        run_id: Optional[str],
+        _run_id: Optional[str],
         step_index: int,
         node: Any,
         _inputs: Dict[str, Any],
@@ -629,7 +624,6 @@ async def run_workflow_tool(
                     "workflow_name": workflow_name,
                     "total_nodes": workflow_total_nodes,
                     "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
-                    "run_id": run_id,
                     "status": "running",
                     "phase": "running",
                     "current_node_id": current_node_id,
@@ -802,6 +796,7 @@ async def run_workflow_tool(
         # Backward-compatibility: older runtimes may not accept `use_llm`.
         supports_workflow_id = False
         supports_use_llm = False
+        supports_run_id = False
         supports_step_start = False
         supports_cancel = False
         try:
@@ -810,6 +805,9 @@ async def run_workflow_tool(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
             supports_use_llm = "use_llm" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            supports_run_id = "run_id" in sig.parameters or any(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
             supports_step_start = "on_step_start" in sig.parameters or any(
@@ -822,6 +820,7 @@ async def run_workflow_tool(
             # Best-effort: assume supported.
             supports_workflow_id = True
             supports_use_llm = True
+            supports_run_id = True
             supports_step_start = True
             supports_cancel = True
 
@@ -829,6 +828,8 @@ async def run_workflow_tool(
             call_kwargs["workflow_id"] = display_workflow_id
         if supports_use_llm:
             call_kwargs["use_llm"] = use_llm
+        if supports_run_id and tracked_execution:
+            call_kwargs["run_id"] = tracked_execution["id"]
         if supports_step_start:
             call_kwargs["on_step_start"] = _on_step_start
         call_kwargs["on_step_complete"] = _on_step_complete
@@ -844,6 +845,9 @@ async def run_workflow_tool(
                 result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             elif supports_use_llm and "use_llm" in str(te):
                 call_kwargs.pop("use_llm", None)
+                result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
+            elif supports_run_id and "run_id" in str(te):
+                call_kwargs.pop("run_id", None)
                 result = await _call_workflow_runtime(_run_workflow_fn, call_kwargs)
             elif supports_step_start and "on_step_start" in str(te):
                 call_kwargs.pop("on_step_start", None)
@@ -929,7 +933,6 @@ async def run_workflow_tool(
                         "workflow_name": workflow_name,
                         "total_nodes": workflow_total_nodes,
                         "workflow_execution_id": tracked_execution["id"],
-                        "run_id": result_dict.get("run_id"),
                         "status": status_value,
                         "phase": status_value,
                         "current_node_id": result_dict.get("last_node_id"),
@@ -954,7 +957,6 @@ async def run_workflow_tool(
                     workflow_execution_id=tracked_execution["id"] if tracked_execution else None,
                     status=status_value,
                     steps=result_dict.get("steps", 0),
-                    run_id=result_dict.get("run_id"),
                     last_node_id=result_dict.get("last_node_id"),
                     outputs=result_dict.get("outputs"),
                     history_count=history_count,
@@ -975,7 +977,6 @@ async def run_workflow_tool(
                 workflow_execution_id=tracked_execution["id"] if tracked_execution else None,
                 status=status_value,
                 steps=result_dict.get("steps", 0),
-                run_id=result_dict.get("run_id"),
                 last_node_id=result_dict.get("last_node_id"),
                 outputs=result_dict.get("outputs"),
                 history_count=history_count,
