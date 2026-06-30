@@ -162,8 +162,9 @@ def lint_recommend_strict_edge_mapping(workflow: Workflow) -> List[Dict[str, Any
             "trigger_types": trigger_types,
             "message": (
                 "workflows triggered by syslog, kafka, or schedule can process high-volume "
-                "payloads; set metadata.runtime.strict_edge_mapping=true and use explicit "
-                "edge mappings for new workflow definitions"
+                "payloads; set metadata.runtime.strict_edge_mapping=true, "
+                "metadata.runtime.dataflow_mode='vertex_cache', and use explicit edge "
+                "mappings for new workflow definitions"
             ),
         }
     ]

@@ -656,6 +656,105 @@ class TestPayloadRiskObservability:
         assert "[0, 1, 2, 3, 4" not in text
 
 
+class TestVertexCacheDataflow:
+    def test_legacy_mode_records_large_fanout_before_mapped_edges(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "legacy_large_source_small_mapped_fanout",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": "outputs['events'] = list(range(1500))\noutputs['count'] = len(outputs['events'])",
+                    },
+                    {"id": "b", "type": "python", "code": "outputs['b_count'] = inputs['count']"},
+                    {"id": "c", "type": "python", "code": "outputs['c_count'] = inputs['count']"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "b", "mapping": {"count": "count"}},
+                    {"from": "a", "to": "c", "mapping": {"count": "count"}},
+                ],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="legacy").run()
+
+        assert result.payload_risk_summary["counts"]["large_payload_fanout"] == 1
+
+    def test_vertex_cache_mode_records_fanout_only_for_resolved_edge_payload(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "vertex_cache_small_mapped_fanout",
+                "start": "a",
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "python",
+                        "code": "outputs['events'] = list(range(1500))\noutputs['count'] = len(outputs['events'])",
+                    },
+                    {"id": "b", "type": "python", "code": "outputs['b_count'] = inputs['count']"},
+                    {"id": "c", "type": "python", "code": "outputs['c_count'] = inputs['count']"},
+                ],
+                "edges": [
+                    {"from": "a", "to": "b", "mapping": {"count": "count"}},
+                    {"from": "a", "to": "c", "mapping": {"count": "count"}},
+                ],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="vertex_cache").run()
+
+        counts = result.payload_risk_summary["counts"]
+        assert "large_payload_fanout" not in counts
+        assert "implicit_full_payload_edge_large_payload" not in counts
+
+    def test_vertex_cache_no_mapping_preserves_legacy_shape(self):
+        wf = Workflow.from_dict(
+            {
+                "name": "vertex_cache_no_mapping_fallback",
+                "start": "a",
+                "nodes": [
+                    {"id": "a", "type": "python", "code": "outputs['events'] = list(range(1500))"},
+                    {"id": "b", "type": "python", "code": "outputs['count'] = len(inputs['events'])"},
+                ],
+                "edges": [{"from": "a", "to": "b"}],
+            }
+        )
+
+        result = WorkflowEngine(wf, runtime=PythonExecRuntime(), dataflow_mode="vertex_cache").run()
+
+        assert result.outputs == {"count": 1500}
+        assert result.payload_risk_summary["counts"]["implicit_full_payload_edge_large_payload"] == 1
+
+    def test_run_workflow_uses_vertex_cache_dataflow_metadata(self):
+        workflow = {
+            "name": "metadata_vertex_cache_small_fanout",
+            "start": "a",
+            "metadata": {"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}},
+            "nodes": [
+                {
+                    "id": "a",
+                    "type": "python",
+                    "code": "outputs['events'] = list(range(1500))\noutputs['count'] = len(outputs['events'])",
+                },
+                {"id": "b", "type": "python", "code": "outputs['b_count'] = inputs['count']"},
+                {"id": "c", "type": "python", "code": "outputs['c_count'] = inputs['count']"},
+            ],
+            "edges": [
+                {"from": "a", "to": "b", "mapping": {"count": "count"}},
+                {"from": "a", "to": "c", "mapping": {"count": "count"}},
+            ],
+        }
+
+        result = run_workflow(workflow=workflow, ensure_requirements=False)
+
+        assert result.status == "SUCCEEDED"
+        counts = result.payload_risk_summary["counts"]
+        assert "large_payload_fanout" not in counts
+        assert "implicit_full_payload_edge_large_payload" not in counts
+
+
 # ===================================================================
 # 方案 2 Layer 3: Engine dedup
 # ===================================================================

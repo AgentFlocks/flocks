@@ -226,6 +226,7 @@ class WorkflowEngine:
     workflow_path: Optional[str] = None
     node_timeout_s: Optional[float] = 300.0
     history_mode: Literal["full", "summary"] = "summary"
+    dataflow_mode: Literal["legacy", "vertex_cache"] = "legacy"
     _depth: int = 0
     max_parallel_workers: int = 4
     workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)
@@ -237,6 +238,8 @@ class WorkflowEngine:
             raise ValueError("max_parallel_workers must be >= 1")
         if self.history_mode not in ("full", "summary"):
             raise ValueError("history_mode must be 'full' or 'summary'")
+        if self.dataflow_mode not in ("legacy", "vertex_cache"):
+            raise ValueError("dataflow_mode must be 'legacy' or 'vertex_cache'")
         if self.runtime is None:
             self.runtime = PythonExecRuntime()
         if self.code_gen is None:
@@ -294,6 +297,7 @@ class WorkflowEngine:
         run_t0 = time.perf_counter()
         join_inputs: Dict[str, Dict[str, Dict[str, Any]]] = {}
         join_seen_sources: Dict[str, Set[str]] = {}
+        vertex_outputs: Dict[str, Dict[str, Any]] = {}
         payload_risk_summary: Dict[str, Any] = {
             "counts": {},
             "risks": [],
@@ -322,6 +326,10 @@ class WorkflowEngine:
                     "last_node_id": last_node_id,
                     "outputs": last_outputs,
                     "history": history,
+                    "vertex_output_keys": {
+                        node_id: list(outputs.keys())[:_PAYLOAD_SUMMARY_KEY_LIMIT]
+                        for node_id, outputs in vertex_outputs.items()
+                    },
                     "payload_risk_summary": payload_risk_summary,
                 }
 
@@ -820,30 +828,66 @@ class WorkflowEngine:
 
                     # Enqueue downstream (skip for failed node when stop_on_error)
                     if _stop_exc is None:
-                        upstream = dict(_inp)
-                        upstream.update(_eo.outputs)
-                        selected = self._select_edges(_nd, upstream, adj.get(_nid, []))
-                        upstream_payload_summary = _payload_summary(upstream)
-                        has_large_upstream = _payload_has_large(upstream_payload_summary)
-                        if len(selected) > 1 and has_large_upstream:
-                            _record_payload_risk(
-                                "large_payload_fanout",
-                                source_node_id=_nid,
-                                source_node_type=_nd.type,
-                                fanout_count=len(selected),
-                                target_node_ids=[edge.to for edge in selected],
-                                payload_summary=upstream_payload_summary,
-                            )
-                        for edge in selected:
-                            if not edge.mapping and has_large_upstream:
+                        vertex_outputs[_nid] = _eo.outputs
+                        if self.dataflow_mode == "vertex_cache":
+                            selected = self._select_edges_from_scopes(_nd, [_eo.outputs, _inp], adj.get(_nid, []))
+                            downstream_items: list[tuple[Edge, Dict[str, Any], Dict[str, Any]]] = []
+                            for edge in selected:
+                                edge_inputs = self._build_downstream_inputs_from_scopes([_eo.outputs, _inp], edge)
+                                edge_summary = _payload_summary(edge_inputs)
+                                downstream_items.append((edge, edge_inputs, edge_summary))
+                            large_downstream = [item for item in downstream_items if _payload_has_large(item[2])]
+                            if len(selected) > 1 and large_downstream:
                                 _record_payload_risk(
-                                    "implicit_full_payload_edge_large_payload",
-                                    edge_from=edge.from_,
-                                    edge_to=edge.to,
+                                    "large_payload_fanout",
+                                    source_node_id=_nid,
+                                    source_node_type=_nd.type,
                                     fanout_count=len(selected),
+                                    target_node_ids=[edge.to for edge in selected],
+                                    payload_summary={
+                                        "type": "vertex_cache_edge_payloads",
+                                        "large_fields": [
+                                            field
+                                            for _edge, _inputs, summary in large_downstream
+                                            for field in summary.get("large_fields", [])
+                                        ][:_PAYLOAD_SUMMARY_FIELD_LIMIT],
+                                    },
+                                )
+                            for edge, edge_inputs, edge_summary in downstream_items:
+                                if not edge.mapping and _payload_has_large(edge_summary):
+                                    _record_payload_risk(
+                                        "implicit_full_payload_edge_large_payload",
+                                        edge_from=edge.from_,
+                                        edge_to=edge.to,
+                                        fanout_count=len(selected),
+                                        payload_summary=edge_summary,
+                                    )
+                                q.append((edge.to, edge_inputs, _nid))
+                        else:
+                            upstream = dict(_inp)
+                            upstream.update(_eo.outputs)
+                            selected = self._select_edges(_nd, upstream, adj.get(_nid, []))
+                            upstream_payload_summary = _payload_summary(upstream)
+                            has_large_upstream = _payload_has_large(upstream_payload_summary)
+                            if len(selected) > 1 and has_large_upstream:
+                                _record_payload_risk(
+                                    "large_payload_fanout",
+                                    source_node_id=_nid,
+                                    source_node_type=_nd.type,
+                                    fanout_count=len(selected),
+                                    target_node_ids=[edge.to for edge in selected],
                                     payload_summary=upstream_payload_summary,
                                 )
-                            q.append((edge.to, self._build_downstream_inputs(upstream, edge), _nid))
+                            for edge in selected:
+                                if not edge.mapping and has_large_upstream:
+                                    _record_payload_risk(
+                                        "implicit_full_payload_edge_large_payload",
+                                        edge_from=edge.from_,
+                                        edge_to=edge.to,
+                                        fanout_count=len(selected),
+                                        payload_summary=upstream_payload_summary,
+                                    )
+                                q.append((edge.to, self._build_downstream_inputs(upstream, edge), _nid))
 
                 step_count += len(exec_results)
                 if _stop_exc is not None:
@@ -1113,7 +1157,9 @@ class WorkflowEngine:
             trace=self.trace,
             node_timeout_s=self.node_timeout_s,
             history_mode=self.history_mode,
+            dataflow_mode=self.dataflow_mode,
             _depth=self._depth + 1,
+            max_parallel_workers=self.max_parallel_workers,
             workflow_loader=self.workflow_loader,
         )
         result = sub_engine.run(initial_inputs=sub_inputs)
@@ -1130,6 +1176,33 @@ class WorkflowEngine:
         value = self._get_by_path(payload, key)
         selected_label: Optional[str]
         if value is None:
+            selected_label = None
+        elif isinstance(value, bool):
+            selected_label = "true" if value else "false"
+        elif isinstance(value, str):
+            selected_label = value
+        else:
+            selected_label = str(value)
+        matched = [e for e in edges if e.label == selected_label] if selected_label is not None else []
+        if matched:
+            return matched
+        defaults = [e for e in edges if e.label is None]
+        return defaults[:1] if defaults else []
+
+    def _select_edges_from_scopes(
+        self,
+        node: Any,
+        scopes: List[Dict[str, Any]],
+        edges: List[Edge],
+    ) -> List[Edge]:
+        if not edges:
+            return []
+        if node.type in {"python", "tool", "llm", "http_request", "subworkflow"}:
+            return list(edges)
+        key = node.select_key or "result"
+        found, value = self._try_get_by_path_from_scopes(scopes, key)
+        selected_label: Optional[str]
+        if not found or value is None:
             selected_label = None
         elif isinstance(value, bool):
             selected_label = "true" if value else "false"
@@ -1167,6 +1240,54 @@ class WorkflowEngine:
         if edge.const:
             out.update(edge.const)
         return out
+
+    def _build_downstream_inputs_from_scopes(
+        self,
+        scopes: List[Dict[str, Any]],
+        edge: Edge,
+    ) -> Dict[str, Any]:
+        if edge.mapping:
+            out: Dict[str, Any] = {}
+            for dst, src in edge.mapping.items():
+                found, value = self._try_get_by_path_from_scopes(scopes, src)
+                if found:
+                    out[dst] = value
+                elif self.trace:
+                    available_keys = []
+                    for scope in scopes:
+                        available_keys.extend(str(key) for key in list(scope.keys())[:10])
+                    _logger.warning(
+                        "wf.edge.mapping.none_value",
+                        extra={
+                            "edge_from": edge.from_,
+                            "edge_to": edge.to,
+                            "dst_key": dst,
+                            "src_path": src,
+                            "available_keys": available_keys[:10],
+                            "dataflow_mode": self.dataflow_mode,
+                        },
+                    )
+        else:
+            # Compatibility fallback for opt-in workflows that have not yet
+            # enabled strict edge mappings. This preserves legacy input shape,
+            # but does not get the memory benefits of vertex-cache dataflow.
+            out = {}
+            for scope in reversed(scopes):
+                out.update(scope)
+        if edge.const:
+            out.update(edge.const)
+        return out
+
+    def _try_get_by_path_from_scopes(
+        self,
+        scopes: List[Dict[str, Any]],
+        path: str,
+    ) -> tuple[bool, Any]:
+        for scope in scopes:
+            found, value = self._try_get_by_path(scope, path)
+            if found:
+                return True, value
+        return False, None
 
     def _try_get_by_path(self, data: Any, path: str) -> tuple[bool, Any]:
         if path is None:

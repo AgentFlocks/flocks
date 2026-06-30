@@ -162,6 +162,38 @@ def _resolve_workflow_node_timeout(
     return requested_timeout_s
 
 
+def _resolve_workflow_dataflow_mode(workflow_metadata: Optional[Dict[str, Any]]) -> Literal["legacy", "vertex_cache"]:
+    """Resolve workflow dataflow mode from metadata.
+
+    Missing metadata intentionally stays legacy so historical workflow files run
+    with their original full-payload edge semantics.
+    """
+    if not isinstance(workflow_metadata, dict):
+        return "legacy"
+
+    candidates: list[Any] = [
+        workflow_metadata.get("dataflow_mode"),
+        workflow_metadata.get("dataflowMode"),
+    ]
+    for section_key in ("runtime", "runtime_defaults", "runtimeDefaults"):
+        section = workflow_metadata.get(section_key)
+        if isinstance(section, dict):
+            candidates.extend(
+                [
+                    section.get("dataflow_mode"),
+                    section.get("dataflowMode"),
+                ]
+            )
+
+    for value in candidates:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        if normalized in {"vertex_cache", "vertex", "cache"}:
+            return "vertex_cache"
+        if normalized in {"legacy", "classic", "default"}:
+            return "legacy"
+    return "legacy"
+
+
 def _resolve_sandbox_payload_from_config(tool_context: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Resolve sandbox payload directly from config for workflow sandbox default."""
     config_data = _load_config_data()
@@ -390,6 +422,7 @@ def run_workflow(
         node_timeout_s,
         wf.metadata,
     )
+    dataflow_mode = _resolve_workflow_dataflow_mode(wf.metadata)
 
     reqs = requirements_from_workflow_metadata(wf.metadata)
     if ensure_requirements:
@@ -430,12 +463,13 @@ def run_workflow(
         )
 
     _logger.debug(
-        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, history_mode=%s)",
+        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, history_mode=%s, dataflow_mode=%s)",
         effective_use_llm,
         trace,
         effective_node_timeout_s,
         max_parallel_workers,
         history_mode,
+        dataflow_mode,
     )
     engine = WorkflowEngine(
         wf,
@@ -446,6 +480,7 @@ def run_workflow(
         node_timeout_s=effective_node_timeout_s,
         max_parallel_workers=max_parallel_workers,
         history_mode=history_mode,
+        dataflow_mode=dataflow_mode,
     )
 
     initial_inputs = _build_initial_inputs(inputs, workflow_path_for_engine)
