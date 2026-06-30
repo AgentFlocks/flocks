@@ -185,8 +185,8 @@ class TestRunSafe:
 class TestLintJoinRequirements:
     """Tests for lint_join_requirements()."""
 
-    def test_multi_incoming_no_join_error(self):
-        """Node with 2+ non-exclusive incoming edges and no join -> error."""
+    def test_multi_incoming_no_join_warning(self):
+        """Node with 2+ non-exclusive incoming edges and no join -> warning."""
         wf = Workflow.from_dict(
             {
                 "name": "bad_join",
@@ -205,8 +205,32 @@ class TestLintJoinRequirements:
         results = lint_join_requirements(wf)
         assert len(results) == 1
         assert results[0]["kind"] == "multi_incoming_no_join"
-        assert results[0]["severity"] == "error"
+        assert results[0]["severity"] == "warning"
         assert results[0]["node_id"] == "c"
+
+    def test_loop_node_multi_incoming_no_join_ok(self):
+        """Loop nodes naturally have an initial edge and a back edge."""
+        wf = Workflow.from_dict(
+            {
+                "name": "loop_back_edge",
+                "start": "init",
+                "nodes": [
+                    {"id": "init", "type": "python", "code": "outputs['should_continue'] = True"},
+                    {"id": "loop_check", "type": "loop", "select_key": "should_continue"},
+                    {"id": "body", "type": "python", "code": "outputs['should_continue'] = False"},
+                    {"id": "done", "type": "python", "code": "pass"},
+                ],
+                "edges": [
+                    {"from": "init", "to": "loop_check"},
+                    {"from": "loop_check", "to": "body", "label": "continue"},
+                    {"from": "body", "to": "loop_check"},
+                    {"from": "loop_check", "to": "done", "label": "exit"},
+                ],
+            }
+        )
+
+        results = lint_join_requirements(wf)
+        assert results == []
 
     def test_exclusive_branch_no_error(self):
         """Edges from same branch with different labels are exclusive -> no error."""
@@ -279,6 +303,7 @@ class TestLintJoinRequirements:
         results = lint_join_requirements(wf)
         assert len(results) == 1
         assert results[0]["node_id"] == "merge"
+        assert results[0]["severity"] == "warning"
 
 
 class TestLintExpensiveNodeMultiTrigger:

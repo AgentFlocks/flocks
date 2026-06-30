@@ -456,6 +456,8 @@ def lint_join_requirements(workflow: Workflow) -> List[Dict[str, Any]]:
             continue
         if getattr(node, "join", False):
             continue  # already has join, OK
+        if node.type == "loop":
+            continue
 
         unique_sources = set(sources)
 
@@ -475,13 +477,13 @@ def lint_join_requirements(workflow: Workflow) -> List[Dict[str, Any]]:
             results.append(
                 {
                     "kind": "multi_incoming_no_join",
-                    "severity": "error",
+                    "severity": "warning",
                     "node_id": nid,
                     "sources": sorted(sources),
                     "message": (
                         f"Node {nid!r} has {len(sources)} incoming edges from "
                         f"non-exclusive sources {sorted(unique_sources)} but join=false. "
-                        "This will cause the node to execute multiple times. "
+                        "This may cause the node to execute multiple times. "
                         "Set join=true on this node or restructure edges."
                     ),
                 }
