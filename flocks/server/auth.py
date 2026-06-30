@@ -65,6 +65,13 @@ PUBLIC_PREFIXES = (
 # downstream handler is fully responsible for its own authentication
 # (signature checks, IP allowlists, replay protection, …).  Do NOT add
 # entries that touch user data without a per-request integrity check.
+#
+# SECURITY: Do NOT add workflow webhook paths here (e.g.
+# /webhook/workflows/...).  Workflow triggers must enforce their own
+# authentication via _authorize_webhook_trigger() and must NEVER allow
+# auth.type="none" — otherwise an anonymous attacker can trigger
+# arbitrary workflow execution, leading to RCE when a Python node
+# unsafely processes inputs.  See: https://github.com/AgentFlocks/flocks/issues/454
 PUBLIC_PATH_REGEXES = (
     re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
     re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),
