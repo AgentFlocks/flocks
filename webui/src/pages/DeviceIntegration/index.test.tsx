@@ -48,6 +48,10 @@ vi.mock('react-i18next', () => ({
       const translations: Record<string, string> = {
         pageTitle: '设备接入',
         pageDescription: '配置安全设备 API 连接，使 Flocks 能够直接调用和控制这些设备',
+        'status.connected': '已连接',
+        'status.disabled': '已禁用',
+        'status.error': '连接失败',
+        'status.unknown': '未检测',
         'toolbar.refresh': '刷新',
         'toolbar.addDevice': '立即添加设备',
         'empty.addNow': '立即添加设备',
@@ -87,11 +91,17 @@ vi.mock('react-i18next', () => ({
         'wizard.guide.cases.tdp': 'TDP 接入',
         'wizard.guide.cases.onesec': 'OneSEC 接入',
         'wizard.guide.cases.more': '查看更多',
+        'wizard.guide.descriptions.api': '设备提供 API 能力时使用',
+        'wizard.guide.descriptions.browser': '设备没有开放 API 时使用',
+        'wizard.guide.descriptions.tdp': '按微步 TDP 的已知接入案例继续',
+        'wizard.guide.descriptions.onesec': '按 OneSEC 的已知接入案例继续',
+        'wizard.guide.descriptions.more': '查看当前已支持的设备模板',
         'wizard.supportedList.back': '返回',
         'wizard.supportedList.title': '已支持设备列表',
         'wizard.supportedList.subtitle': '先选择厂商，再选择要接入的设备',
         'wizard.supportedList.deviceCount': `${String(params?.count ?? '')} 款设备`,
         'wizard.supportedList.integratedCount': `已接入 ${String(params?.count ?? '')} 台`,
+        'wizard.supportedList.templateTooltip': '点击后 Rex 会基于该设备模板继续引导配置',
         'wizard.installState.installed': '已安装',
         'wizard.installState.available': '可安装',
         'wizard.installState.updateAvailable': '可更新',
@@ -410,6 +420,21 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByText('TDP 接入')).toBeInTheDocument();
     expect(screen.getByText('OneSEC 接入')).toBeInTheDocument();
     expect(screen.getByText('查看更多')).toBeInTheDocument();
+  });
+
+  it('shows tooltip text when hovering a workbench info icon', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await openManualAddWizard(user);
+
+    const apiButton = screen.getByRole('button', { name: /^API 接入$/ });
+    const infoIcon = apiButton.querySelector('span[aria-hidden="true"]');
+    expect(infoIcon).toBeTruthy();
+
+    await user.hover(infoIcon as HTMLElement);
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('设备提供 API 能力时使用');
   });
 
   it('returns to the add-device workbench when the workbench tab is clicked', async () => {
@@ -1157,6 +1182,141 @@ describe('DeviceIntegrationPage', () => {
     });
   });
 
+  it('omits untouched masked secrets when saving existing device credentials', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'TDP-test-02',
+      storage_key: 'tdp_api_v3_3_10',
+      service_id: 'tdp_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        api_key: '07***0af9',
+        base_url: 'https://tdp.example.com',
+      },
+      fields_set: { api_key: true, base_url: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          credential_schema: [
+            {
+              key: 'api_key',
+              label: 'API Key',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'api_key',
+            },
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('TDP-test-02'));
+    await screen.findByDisplayValue('07***0af9');
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(mocks.updateDevice).toHaveBeenCalledWith(
+        'device-1',
+        expect.objectContaining({
+          fields: expect.not.objectContaining({ api_key: expect.anything() }),
+        }),
+      );
+    });
+  });
+
+  it('submits empty strings when existing device credentials are cleared', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'TDP-test-02',
+      storage_key: 'tdp_api_v3_3_10',
+      service_id: 'tdp_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        api_key: '07***0af9',
+        base_url: 'https://tdp.example.com',
+      },
+      fields_set: { api_key: true, base_url: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          credential_schema: [
+            {
+              key: 'api_key',
+              label: 'API Key',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'api_key',
+            },
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('TDP-test-02'));
+    const apiKeyInput = await screen.findByDisplayValue('07***0af9');
+    await user.clear(apiKeyInput);
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(mocks.updateDevice).toHaveBeenCalledWith(
+        'device-1',
+        expect.objectContaining({
+          fields: expect.objectContaining({ api_key: '' }),
+        }),
+      );
+    });
+  });
+
   it('does not show the legacy page connectivity test button', async () => {
     const user = userEvent.setup();
     const initialDevice = {
@@ -1327,10 +1487,79 @@ describe('DeviceIntegrationPage', () => {
     const prompt = mocks.createAndSend.mock.calls.at(-1)?.[0].text;
     expect(prompt).toContain('device_id=device-1');
     expect(prompt).toContain('配置指引文档=https://docs.example.com/onesig');
-    expect(prompt).toContain('任务：请直接调用这台设备的可用工具完成连通测试和基础冒烟验证');
+    expect(prompt).toContain('任务：请测试这台设备的连通性并完成基础冒烟验证');
+    expect(prompt).toContain('第一步必须调用 `device_manage`');
+    expect(prompt).toContain('action="connectivity_test"');
+    expect(prompt).toContain('完成标准连通性检测并更新设备卡片状态');
+    expect(prompt).toContain('卡片状态只以 `device_manage(action="connectivity_test")` 写入的 status 为准');
     expect(prompt).toContain('必须使用上面的 device_id 作为目标设备');
     expect(prompt).toContain('password (Password): 已填写（敏感值未发送明文）');
     expect(prompt).not.toContain('p***word');
+  });
+
+  it('refreshes the device card status after Rex assisted testing writes a result', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'onesig-02',
+      storage_key: 'onesig_api_v2_5_3',
+      service_id: 'onesig_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        base_url: 'https://persisted.example.com',
+      },
+      fields_set: { base_url: true },
+      status: 'unknown',
+      message: null,
+      latency_ms: null,
+      checked_at: null,
+      created_at: 0,
+      updated_at: 0,
+    };
+    const updatedDevice = {
+      ...initialDevice,
+      status: 'ok',
+      message: 'HTTP 200，延迟 10ms',
+      latency_ms: 10,
+      checked_at: 1782800230695,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.getDevice.mockResolvedValue({ data: updatedDevice });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3',
+          storage_key: 'onesig_api_v2_5_3',
+          service_id: 'onesig_api',
+          name: 'OneSIG',
+          vendor: 'threatbook',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('onesig-02'));
+    expect(screen.getByText('未检测')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /测试设备/ }));
+
+    await waitFor(() => {
+      expect(mocks.getDevice).toHaveBeenCalledWith('device-1');
+      expect(screen.getByText('已连接')).toBeInTheDocument();
+    });
   });
 
   it('reveals the full persisted secret when clicking show', async () => {

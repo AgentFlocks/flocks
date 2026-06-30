@@ -4,12 +4,13 @@ import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Info, Sparkles,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat from '@/components/common/SessionChat';
+import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import { useSessionChat, type CreateAndSendOptions } from '@/hooks/useSessionChat';
 import { sessionApi } from '@/api/session';
@@ -487,7 +488,10 @@ function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): Cr
       text: [
         ...common,
         '',
-        '任务：请直接调用这台设备的可用工具完成连通测试和基础冒烟验证。',
+        '任务：请测试这台设备的连通性并完成基础冒烟验证。',
+        '第一步必须调用 `device_manage`，参数为 action="connectivity_test" 且传入上面的 device_id，完成标准连通性检测并更新设备卡片状态。',
+        '连通性检测成功后，再调用这台设备的少量可用只读工具完成基础冒烟验证。',
+        '卡片状态只以 `device_manage(action="connectivity_test")` 写入的 status 为准；其他工具调用结果用于功能验证总结。',
         '必须使用上面的 device_id 作为目标设备；优先选择只读、低风险工具。',
         '如果需要执行写操作或高风险动作，必须先说明风险并请求确认。',
         '完成后总结成功/失败结果；失败时给出地址、认证字段、SSL 验证、网络连通性或设备侧权限等优先排查项。',
@@ -718,10 +722,12 @@ function DeviceAddRexPanel({
                     <WorkbenchSection title={t('wizard.guide.customTitle')}>
                       <WorkbenchAction
                         label={t('wizard.guide.actions.api')}
+                        description={t('wizard.guide.descriptions.api')}
                         onClick={() => startGuidedPrompt(t('wizard.guide.prompts.api'))}
                       />
                       <WorkbenchAction
                         label={t('wizard.guide.actions.browser')}
+                        description={t('wizard.guide.descriptions.browser')}
                         onClick={() => startGuidedPrompt(t('wizard.guide.prompts.browser'))}
                       />
                     </WorkbenchSection>
@@ -729,14 +735,17 @@ function DeviceAddRexPanel({
                     <WorkbenchSection title={t('wizard.guide.caseTitle')}>
                       <WorkbenchAction
                         label={t('wizard.guide.cases.tdp')}
+                        description={t('wizard.guide.descriptions.tdp')}
                         onClick={() => handleCaseTemplate(['tdp'], t('wizard.guide.prompts.tdp'))}
                       />
                       <WorkbenchAction
                         label={t('wizard.guide.cases.onesec')}
+                        description={t('wizard.guide.descriptions.onesec')}
                         onClick={() => handleCaseTemplate(['onesec', 'one sec'], t('wizard.guide.prompts.onesec'))}
                       />
                       <WorkbenchAction
                         label={t('wizard.guide.cases.more')}
+                        description={t('wizard.guide.descriptions.more')}
                         onClick={() => setShowBuiltInTemplates(true)}
                       />
                     </WorkbenchSection>
@@ -818,7 +827,14 @@ function DeviceAddRexPanel({
                                     </span>
                                     {installing
                                       ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
-                                      : <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />}
+                                      : (
+                                        <GuideInfoIcon
+                                          label={tpl.name}
+                                          description={t('wizard.supportedList.templateTooltip')}
+                                          className="h-4 w-4 text-gray-300 group-hover:text-rose-400"
+                                          interactive={false}
+                                        />
+                                      )}
                                   </button>
                                 );
                               })}
@@ -888,15 +904,21 @@ function WorkbenchSection({
   );
 }
 
-function WorkbenchAction({ label, onClick }: { label: string; onClick: () => void }) {
+function WorkbenchAction({ label, description, onClick }: { label: string; description: string; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={description}
       className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
     >
       <span className="min-w-0 truncate">{label}</span>
-      <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />
+      <GuideInfoIcon
+        label={label}
+        description={description}
+        className="h-4 w-4 text-gray-300 group-hover:text-rose-400"
+        interactive={false}
+      />
     </button>
   );
 }
@@ -1153,7 +1175,7 @@ function DeviceConfigPanel({
     try {
       const payload: Record<string, string> = { ...fields };
       Object.entries(originalMasked.current).forEach(([k, masked]) => {
-        if (payload[k] === masked) payload[k] = '';
+        if (payload[k] === masked) delete payload[k];
       });
       await onSave({ name: name.trim(), fields: payload, enabled, verify_ssl: verifySsl, group_id: groupId });
       dirtyRef.current = false;
@@ -1422,9 +1444,6 @@ function DeviceConfigPanel({
                               </button>
                             )}
                           </div>
-                          {isSecret && device && hasExisting && (
-                            <p className="mt-0.5 text-[11px] text-zinc-400">{t('config.secretConfigured')}</p>
-                          )}
                           {f.description && <p className="mt-0.5 text-xs text-zinc-400">{f.description}</p>}
                         </div>
                       );
@@ -1913,6 +1932,7 @@ export default function DeviceIntegrationPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [panel, setPanel] = useState<PanelMode>(null);
   const lastRefreshRef = useRef(0);
+  const rexStatusPollRef = useRef<number | null>(null);
   // null = "全部机房" aggregate view; string = specific group id
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   // Group ids whose section is collapsed in the "全部机房" view. Default
@@ -2039,6 +2059,62 @@ export default function DeviceIntegrationPage() {
 
   const panelDeviceId = panel?.kind === 'edit' ? panel.device.id : null;
 
+  const clearRexStatusPoll = useCallback(() => {
+    if (rexStatusPollRef.current !== null) {
+      window.clearTimeout(rexStatusPollRef.current);
+      rexStatusPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearRexStatusPoll(), [clearRexStatusPoll]);
+
+  const applyDeviceSnapshot = useCallback((updated: DeviceIntegration) => {
+    setDevices((prev) => prev.map((device) => (
+      device.id === updated.id ? updated : device
+    )));
+    setPanel((prev) => {
+      if (prev?.kind !== 'edit' || prev.device.id !== updated.id) return prev;
+      return { kind: 'edit', device: updated };
+    });
+  }, []);
+
+  const pollRexTestStatus = useCallback((device: DeviceIntegration) => {
+    clearRexStatusPoll();
+    const initialCheckedAt = device.checked_at ?? null;
+    const initialStatus = device.status;
+    let attempts = 0;
+
+    const poll = async () => {
+      attempts += 1;
+      try {
+        const res = await deviceAPI.get(device.id);
+        const updated = res.data;
+        const checkedAt = updated.checked_at ?? null;
+        const checkedChanged = checkedAt !== null && checkedAt !== initialCheckedAt;
+        const statusChanged = updated.status !== initialStatus
+          && ['ok', 'connected', 'error', 'unknown'].includes(updated.status);
+
+        if (checkedChanged || statusChanged) {
+          applyDeviceSnapshot(updated);
+          rexStatusPollRef.current = null;
+          return;
+        }
+      } catch {
+        // Rex may not have reached the tool call yet; keep polling briefly.
+      }
+
+      if (attempts >= 30) {
+        rexStatusPollRef.current = null;
+        return;
+      }
+      rexStatusPollRef.current = window.setTimeout(() => {
+        void poll();
+      }, 2000);
+    };
+
+    void poll();
+  }, [applyDeviceSnapshot, clearRexStatusPoll]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // Group CRUD handlers
   // ──────────────────────────────────────────────────────────────────────────
@@ -2144,8 +2220,11 @@ export default function DeviceIntegrationPage() {
       agent: rexComposerControls.rexAgentName,
       model: rexComposerControls.rexModel,
     });
+    if (input.action === 'test' && input.device) {
+      pollRexTestStatus(input.device);
+    }
     setPanel({ kind: 'wizard' });
-  }, [createAndSendRex, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+  }, [createAndSendRex, pollRexTestStatus, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Group to use when adding a new device (follows sidebar selection).
