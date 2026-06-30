@@ -1,12 +1,12 @@
-"""Tests for the built-in device_connectivity_test tool."""
+"""Tests for the built-in device_manage tool."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from flocks.tool.device.connectivity_tool import device_connectivity_test
 from flocks.tool.device.intake import DeviceNotFoundError
+from flocks.tool.device.manage_tool import device_manage
 from flocks.tool.device.models import DeviceTestResult
 from flocks.tool.registry import ToolContext, ToolRegistry
 
@@ -17,15 +17,27 @@ def make_ctx() -> ToolContext:
     return ctx
 
 
-def test_device_connectivity_test_is_registered():
+def test_device_manage_is_registered():
     tools = {tool.name for tool in ToolRegistry.list_tools()}
-    assert "device_connectivity_test" in tools
+    assert "device_manage" in tools
 
 
 @pytest.mark.asyncio
-async def test_device_connectivity_test_writes_status_via_existing_test_path():
+async def test_device_manage_list_returns_device_inventory():
     with patch(
-        "flocks.tool.device.connectivity_tool.test_device",
+        "flocks.tool.device.prompt.build_device_manage_list_section",
+        AsyncMock(return_value="### 已接入设备\n- device_id: `dev-1`"),
+    ):
+        result = await device_manage(make_ctx(), action="list")
+
+    assert result.success is True
+    assert "dev-1" in result.output
+
+
+@pytest.mark.asyncio
+async def test_device_manage_connectivity_test_writes_status_via_existing_test_path():
+    with patch(
+        "flocks.tool.device.manage_tool.test_device",
         AsyncMock(
             return_value=DeviceTestResult(
                 success=True,
@@ -34,7 +46,11 @@ async def test_device_connectivity_test_writes_status_via_existing_test_path():
             )
         ),
     ) as mocked_test:
-        result = await device_connectivity_test(make_ctx(), device_id="dev-1")
+        result = await device_manage(
+            make_ctx(),
+            action="connectivity_test",
+            device_id="dev-1",
+        )
 
     mocked_test.assert_awaited_once_with("dev-1")
     assert result.success is True
@@ -49,9 +65,9 @@ async def test_device_connectivity_test_writes_status_via_existing_test_path():
 
 
 @pytest.mark.asyncio
-async def test_device_connectivity_test_returns_successful_tool_result_for_failed_probe():
+async def test_device_manage_connectivity_test_returns_successful_tool_result_for_failed_probe():
     with patch(
-        "flocks.tool.device.connectivity_tool.test_device",
+        "flocks.tool.device.manage_tool.test_device",
         AsyncMock(
             return_value=DeviceTestResult(
                 success=False,
@@ -60,7 +76,11 @@ async def test_device_connectivity_test_returns_successful_tool_result_for_faile
             )
         ),
     ):
-        result = await device_connectivity_test(make_ctx(), device_id="dev-1")
+        result = await device_manage(
+            make_ctx(),
+            action="connectivity_test",
+            device_id="dev-1",
+        )
 
     assert result.success is True
     assert result.output["connected"] is False
@@ -68,12 +88,16 @@ async def test_device_connectivity_test_returns_successful_tool_result_for_faile
 
 
 @pytest.mark.asyncio
-async def test_device_connectivity_test_reports_missing_device_as_tool_error():
+async def test_device_manage_connectivity_test_reports_missing_device_as_tool_error():
     with patch(
-        "flocks.tool.device.connectivity_tool.test_device",
+        "flocks.tool.device.manage_tool.test_device",
         AsyncMock(side_effect=DeviceNotFoundError("missing")),
     ):
-        result = await device_connectivity_test(make_ctx(), device_id="missing-id")
+        result = await device_manage(
+            make_ctx(),
+            action="connectivity_test",
+            device_id="missing-id",
+        )
 
     assert result.success is False
     assert "未找到" in (result.error or "")

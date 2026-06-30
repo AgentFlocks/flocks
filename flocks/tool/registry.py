@@ -172,7 +172,7 @@ class ToolInfo(BaseModel):
             properties["device_id"] = {
                 "type": "string",
                 "description": (
-                    "目标设备实例的唯一 ID（UUID），来自 device_context 工具返回的"
+                    "目标设备实例的唯一 ID（UUID），来自 device_manage(action='list') 返回的"
                     " `device_id` 字段。当系统中接入了多台同类型设备（例如多台 TDP）"
                     "时必须传入；只有单台时也建议显式传入以避免歧义。"
                 ),
@@ -806,7 +806,7 @@ class ToolRegistry:
                     "error": str(exc),
                 })
                 resolved_device_id = None
-                resolution_error = "设备目标解析失败，请通过 device_context 工具确认设备后重试。"
+                resolution_error = "设备目标解析失败，请通过 device_manage(action='list') 确认设备后重试。"
 
             if resolution_error:
                 return ToolResult(success=False, error=resolution_error)
@@ -850,7 +850,7 @@ class ToolRegistry:
                 if not activated:
                     return ToolResult(
                         success=False,
-                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。",
+                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
                 result = await tool.execute(ctx, **kwargs)
         else:
@@ -921,11 +921,11 @@ class ToolRegistry:
             requested = next((device for device in devices if device.id == requested_device_id), None)
             if requested is None or not requested.enabled:
                 return None, (
-                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。"
+                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。"
                 )
             if requested.storage_key != storage_key:
                 return None, (
-                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_context 工具确认目标设备。"
+                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_manage(action='list') 确认目标设备。"
                 )
             return requested.id, None
 
@@ -938,11 +938,11 @@ class ToolRegistry:
             return resolved, None
 
         if not enabled_candidates:
-            return None, "当前没有可用的目标设备，请通过 device_context 工具确认设备状态。"
+            return None, "当前没有可用的目标设备，请通过 device_manage(action='list') 确认设备状态。"
 
         return None, (
             "当前存在多台同类型设备，调用前必须显式传入 `device_id`。"
-            "请先调用 device_context 工具确认目标设备。"
+            "请先调用 device_manage(action='list') 确认目标设备。"
         )
 
     @classmethod
@@ -1463,7 +1463,7 @@ class ToolRegistry:
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context and status probes
-            ("flocks.tool.device", ["device_context_tool", "connectivity_tool"]),
+            ("flocks.tool.device", ["manage_tool"]),
             # channel/ — IM platform messaging
             ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）

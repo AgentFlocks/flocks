@@ -42,12 +42,12 @@ def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], i
 async def _resolve_dynamic_always_load_tool_names() -> Set[str]:
     """Return runtime-only always-load tools.
 
-    Device discovery and status probes should be available without an extra
-    ``tool_search`` hop when the workspace has at least one enabled device, but
-    we do not want to expose them in sessions that have no security devices.
+    Device management should be available without an extra ``tool_search`` hop
+    when the workspace has at least one enabled device, but we do not want to
+    expose it in sessions that have no security devices.
     """
     dynamic_names: Set[str] = set()
-    candidate_names = ("device_context", "device_connectivity_test")
+    candidate_names = ("device_manage",)
 
     for name in candidate_names:
         try:

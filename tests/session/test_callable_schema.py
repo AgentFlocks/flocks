@@ -141,14 +141,13 @@ async def test_callable_schema_keeps_user_plugin_tools_visible(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_callable_schema_dynamically_exposes_device_context_when_enabled_devices_exist(
+async def test_callable_schema_dynamically_exposes_device_manage_when_enabled_devices_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tools = [
         _tool("question", ToolCategory.SYSTEM),
         _tool("tool_search", ToolCategory.SYSTEM),
-        _tool("device_context", ToolCategory.SYSTEM),
-        _tool("device_connectivity_test", ToolCategory.SYSTEM),
+        _tool("device_manage", ToolCategory.SYSTEM),
     ]
 
     monkeypatch.setattr("flocks.session.callable_schema.ToolRegistry.list_tools", lambda: tools)
@@ -159,7 +158,7 @@ async def test_callable_schema_dynamically_exposes_device_context_when_enabled_d
     monkeypatch.setattr(
         "flocks.session.callable_schema.ToolRegistry.get",
         lambda name: SimpleNamespace(info=_tool(name, ToolCategory.SYSTEM))
-        if name in {"device_context", "device_connectivity_test"}
+        if name == "device_manage"
         else None,
     )
     monkeypatch.setattr(
@@ -170,11 +169,5 @@ async def test_callable_schema_dynamically_exposes_device_context_when_enabled_d
     result = await list_session_callable_tool_infos(session_id="session-device-aware")
 
     names = [tool.name for tool in result.tool_infos]
-    assert set(names) == {
-        "device_connectivity_test",
-        "device_context",
-        "question",
-        "tool_search",
-    }
-    assert "device_connectivity_test" in result.metadata["alwaysLoadToolNames"]
-    assert "device_context" in result.metadata["alwaysLoadToolNames"]
+    assert set(names) == {"device_manage", "question", "tool_search"}
+    assert "device_manage" in result.metadata["alwaysLoadToolNames"]
