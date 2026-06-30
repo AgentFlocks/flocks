@@ -1462,7 +1462,10 @@ describe('DeviceIntegrationPage', () => {
     const prompt = mocks.createAndSend.mock.calls.at(-1)?.[0].text;
     expect(prompt).toContain('device_id=device-1');
     expect(prompt).toContain('配置指引文档=https://docs.example.com/onesig');
-    expect(prompt).toContain('任务：请直接调用这台设备的可用工具完成连通测试和基础冒烟验证');
+    expect(prompt).toContain('任务：请测试这台设备的连通性并完成基础冒烟验证');
+    expect(prompt).toContain('第一步必须调用 `device_connectivity_test`');
+    expect(prompt).toContain('完成标准连通性检测并更新设备卡片状态');
+    expect(prompt).toContain('卡片状态只以 `device_connectivity_test` 写入的 status 为准');
     expect(prompt).toContain('必须使用上面的 device_id 作为目标设备');
     expect(prompt).toContain('password (Password): 已填写（敏感值未发送明文）');
     expect(prompt).not.toContain('p***word');

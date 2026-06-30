@@ -1462,8 +1462,8 @@ class ToolRegistry:
             ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
-            # device/ — security device asset context
-            ("flocks.tool.device", ["device_context_tool"]),
+            # device/ — security device asset context and status probes
+            ("flocks.tool.device", ["device_context_tool", "connectivity_tool"]),
             # channel/ — IM platform messaging
             ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
