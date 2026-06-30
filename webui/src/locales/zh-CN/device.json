@@ -194,7 +194,6 @@
     "namePlaceholder": "例如：总部 AF 防火墙",
     "roomLabel": "所属机房",
     "connectionParams": "连接参数",
-    "secretConfigured": "已配置 · 保持不变请勿修改，清空则删除",
     "secretRevealFailed": "读取密钥失败",
     "showSecretAction": "显示",
     "hideSecretAction": "隐藏",

@@ -1157,6 +1157,141 @@ describe('DeviceIntegrationPage', () => {
     });
   });
 
+  it('omits untouched masked secrets when saving existing device credentials', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'TDP-test-02',
+      storage_key: 'tdp_api_v3_3_10',
+      service_id: 'tdp_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        api_key: '07***0af9',
+        base_url: 'https://tdp.example.com',
+      },
+      fields_set: { api_key: true, base_url: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          credential_schema: [
+            {
+              key: 'api_key',
+              label: 'API Key',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'api_key',
+            },
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('TDP-test-02'));
+    await screen.findByDisplayValue('07***0af9');
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(mocks.updateDevice).toHaveBeenCalledWith(
+        'device-1',
+        expect.objectContaining({
+          fields: expect.not.objectContaining({ api_key: expect.anything() }),
+        }),
+      );
+    });
+  });
+
+  it('submits empty strings when existing device credentials are cleared', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'TDP-test-02',
+      storage_key: 'tdp_api_v3_3_10',
+      service_id: 'tdp_api',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        api_key: '07***0af9',
+        base_url: 'https://tdp.example.com',
+      },
+      fields_set: { api_key: true, base_url: true },
+      status: 'connected',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
+          name: 'TDP',
+          credential_schema: [
+            {
+              key: 'api_key',
+              label: 'API Key',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'api_key',
+            },
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('TDP-test-02'));
+    const apiKeyInput = await screen.findByDisplayValue('07***0af9');
+    await user.clear(apiKeyInput);
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(mocks.updateDevice).toHaveBeenCalledWith(
+        'device-1',
+        expect.objectContaining({
+          fields: expect.objectContaining({ api_key: '' }),
+        }),
+      );
+    });
+  });
+
   it('does not show the legacy page connectivity test button', async () => {
     const user = userEvent.setup();
     const initialDevice = {

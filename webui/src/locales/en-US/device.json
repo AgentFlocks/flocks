@@ -194,7 +194,6 @@
     "namePlaceholder": "e.g. HQ AF Firewall",
     "roomLabel": "Room",
     "connectionParams": "Connection parameters",
-    "secretConfigured": "Already set · Leave unchanged to keep it, clear to remove",
     "secretRevealFailed": "Failed to reveal credential",
     "showSecretAction": "Show",
     "hideSecretAction": "Hide",

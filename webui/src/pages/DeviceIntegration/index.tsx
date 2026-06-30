@@ -1153,7 +1153,7 @@ function DeviceConfigPanel({
     try {
       const payload: Record<string, string> = { ...fields };
       Object.entries(originalMasked.current).forEach(([k, masked]) => {
-        if (payload[k] === masked) payload[k] = '';
+        if (payload[k] === masked) delete payload[k];
       });
       await onSave({ name: name.trim(), fields: payload, enabled, verify_ssl: verifySsl, group_id: groupId });
       dirtyRef.current = false;
@@ -1422,9 +1422,6 @@ function DeviceConfigPanel({
                               </button>
                             )}
                           </div>
-                          {isSecret && device && hasExisting && (
-                            <p className="mt-0.5 text-[11px] text-zinc-400">{t('config.secretConfigured')}</p>
-                          )}
                           {f.description && <p className="mt-0.5 text-xs text-zinc-400">{f.description}</p>}
                         </div>
                       );
