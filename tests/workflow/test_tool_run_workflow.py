@@ -51,6 +51,7 @@ def _make_large_alerts(count: int) -> list[dict[str, Any]]:
 # Fixtures
 # =============================================================================
 
+
 @pytest.fixture(autouse=True)
 def init_tool_registry():
     """Ensure ToolRegistry is initialized before each test"""
@@ -73,10 +74,10 @@ def tool_context():
 def tool_context_with_permission():
     """Create a tool context with permission tracking"""
     permissions_requested = []
-    
+
     async def track_permission(request):
         permissions_requested.append(request)
-    
+
     ctx = ToolContext(
         session_id="test-session-workflow-perm",
         message_id="test-message-workflow-perm",
@@ -97,13 +98,9 @@ def simple_workflow():
         "metadata": {},
         "start": "node-1",
         "nodes": [
-            {
-                "id": "node-1",
-                "type": "python",
-                "code": "result = {'message': 'Hello from workflow!', 'value': 42}"
-            }
+            {"id": "node-1", "type": "python", "code": "result = {'message': 'Hello from workflow!', 'value': 42}"}
         ],
-        "edges": []
+        "edges": [],
     }
 
 
@@ -114,18 +111,10 @@ def workflow_with_requirements():
         "id": "test-workflow-002",
         "name": "Test Workflow with Requirements",
         "start": "node-1",
-        "metadata": {
-            "requirements": ["requests>=2.31,<3"]
-        },
+        "metadata": {"requirements": ["requests>=2.31,<3"]},
         "start": "node-1",
-        "nodes": [
-            {
-                "id": "node-1",
-                "type": "python",
-                "code": "result = {'status': 'ok'}"
-            }
-        ],
-        "edges": []
+        "nodes": [{"id": "node-1", "type": "python", "code": "result = {'status': 'ok'}"}],
+        "edges": [],
     }
 
 
@@ -142,10 +131,10 @@ def workflow_with_inputs():
             {
                 "id": "node-1",
                 "type": "python",
-                "code": "greeting = f'Hello, {inputs.get(\"name\", \"World\")}!'; result = {'greeting': greeting}"
+                "code": "greeting = f'Hello, {inputs.get(\"name\", \"World\")}!'; result = {'greeting': greeting}",
             }
         ],
-        "edges": []
+        "edges": [],
     }
 
 
@@ -153,9 +142,10 @@ def workflow_with_inputs():
 # Test Tool Registration
 # =============================================================================
 
+
 class TestRunWorkflowToolRegistration:
     """Test run_workflow tool registration"""
-    
+
     def test_run_workflow_tool_exists(self):
         """Test that run_workflow tool is registered"""
         ToolRegistry.init()
@@ -164,7 +154,7 @@ class TestRunWorkflowToolRegistration:
         assert tool.info.name == "run_workflow"
         assert tool.info.category.value == "system"
         assert tool.info.requires_confirmation is True
-    
+
     def test_run_workflow_tool_schema(self):
         """Test run_workflow tool schema"""
         ToolRegistry.init()
@@ -182,9 +172,10 @@ class TestRunWorkflowToolRegistration:
 # Test Error Handling (flocks_workflow not available)
 # =============================================================================
 
+
 class TestRunWorkflowToolWithoutDependency:
     """Test run_workflow tool when flocks_workflow is not available"""
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_without_flocks_workflow(self, tool_context, simple_workflow):
         """Test that tool returns error when flocks_workflow is not available"""
@@ -202,9 +193,10 @@ class TestRunWorkflowToolWithoutDependency:
 # Test Parameter Validation
 # =============================================================================
 
+
 class TestRunWorkflowToolValidation:
     """Test run_workflow tool parameter validation"""
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_missing_workflow(self, tool_context):
         """Test that missing workflow parameter returns error"""
@@ -217,7 +209,7 @@ class TestRunWorkflowToolValidation:
             )
             assert result.success is False
             assert "workflow parameter is required" in result.error
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_invalid_workflow_type(self, tool_context):
         """Test that invalid workflow type returns error"""
@@ -230,7 +222,7 @@ class TestRunWorkflowToolValidation:
             )
             assert result.success is False
             assert "workflow must be a dictionary or string" in result.error
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_empty_workflow(self, tool_context):
         """Test that empty workflow returns error"""
@@ -249,32 +241,36 @@ class TestRunWorkflowToolValidation:
 # Test Workflow Execution (with mocked flocks_workflow)
 # =============================================================================
 
+
 class TestRunWorkflowToolExecution:
     """Test run_workflow tool execution with mocked dependencies"""
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_success(self, tool_context_with_permission, simple_workflow):
         """Test successful workflow execution"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-123",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {"message": "Hello from workflow!", "value": 42},
-            "history": [
-                {"node_id": "node-1", "status": "SUCCEEDED", "outputs": {"message": "Hello from workflow!", "value": 42}}
-            ],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-123",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {"message": "Hello from workflow!", "value": 42},
+                "history": [
+                    {
+                        "node_id": "node-1",
+                        "status": "SUCCEEDED",
+                        "outputs": {"message": "Hello from workflow!", "value": 42},
+                    }
+                ],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={}
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
-            
+
             assert result.success is True
             assert "SUCCEEDED" in result.output
             assert "run-123" in result.output
@@ -282,7 +278,7 @@ class TestRunWorkflowToolExecution:
             assert result.metadata["status"] == "success"
             assert result.metadata["steps"] == 1
             assert result.metadata["run_id"] == "run-123"
-            
+
             # Check that permission was requested
             assert len(tool_context_with_permission._permissions_requested) > 0
 
@@ -297,11 +293,13 @@ class TestRunWorkflowToolExecution:
 
         def run_side_effect(**kwargs):
             kwargs["on_step_start"]("run-registered", 1, MagicMock(id="node-1", type="python"), {})
-            kwargs["on_step_complete"]({
-                "node_id": "node-1",
-                "node_type": "python",
-                "outputs": {"message": "ok"},
-            })
+            kwargs["on_step_complete"](
+                {
+                    "node_id": "node-1",
+                    "node_type": "python",
+                    "outputs": {"message": "ok"},
+                }
+            )
             return FakeRunWorkflowResult(
                 status="SUCCEEDED",
                 run_id="run-registered",
@@ -313,32 +311,31 @@ class TestRunWorkflowToolExecution:
             )
 
         mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
-        create_execution = AsyncMock(return_value={
-            "id": "exec-registered",
-            "workflowId": "test-workflow-001",
-            "inputParams": {"name": "Flocks"},
-            "status": "running",
-            "startedAt": 1,
-            "executionLog": [],
-        })
-        storage_read = AsyncMock(return_value={
-            "id": "exec-registered",
-            "workflowId": "test-workflow-001",
-            "inputParams": {"name": "Flocks"},
-            "status": "running",
-            "startedAt": 1,
-            "executionLog": [],
-        })
-        storage_write = AsyncMock(return_value=None)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-registered",
+                "workflowId": "test-workflow-001",
+                "inputParams": {"name": "Flocks"},
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+        upsert_execution = AsyncMock(return_value=None)
         record_result = AsyncMock(return_value=None)
 
-        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)), \
-             patch.object(run_workflow_module, "read_workflow_from_fs", return_value={"id": "test-workflow-001", "workflowJson": simple_workflow}), \
-             patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"), \
-             patch.object(run_workflow_module, "create_execution_record", create_execution), \
-             patch.object(run_workflow_module.Storage, "read", storage_read), \
-             patch.object(run_workflow_module.Storage, "write", storage_write), \
-             patch.object(run_workflow_module, "record_execution_result", record_result):
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(
+                run_workflow_module,
+                "read_workflow_from_fs",
+                return_value={"id": "test-workflow-001", "workflowJson": simple_workflow},
+            ),
+            patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", upsert_execution),
+            patch.object(run_workflow_module, "record_execution_result", record_result),
+        ):
             result = await ToolRegistry.execute(
                 "run_workflow",
                 ctx=tool_context_with_permission,
@@ -350,8 +347,70 @@ class TestRunWorkflowToolExecution:
         assert result.metadata["workflow_execution_id"] == "exec-registered"
         create_execution.assert_awaited_once()
         record_result.assert_awaited_once()
-        assert storage_write.await_count >= 1
+        assert upsert_execution.await_count >= 1
         assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
+
+    @pytest.mark.anyio
+    async def test_run_workflow_registered_id_overrides_missing_workflow_json_id(
+        self,
+        tool_context_with_permission,
+    ):
+        workflow_without_id = {
+            "name": "Display Name Only",
+            "start": "node-1",
+            "nodes": [{"id": "node-1", "type": "python", "code": "outputs['ok'] = True"}],
+            "edges": [],
+        }
+        captured_kwargs: dict[str, Any] = {}
+
+        def run_side_effect(**kwargs):
+            captured_kwargs.update(kwargs)
+            return FakeRunWorkflowResult(
+                status="SUCCEEDED",
+                run_id="run-directory-id",
+                steps=1,
+                last_node_id="node-1",
+                outputs={"workflow_id": kwargs.get("workflow_id")},
+                history=[],
+                error=None,
+            )
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-directory-id",
+                "workflowId": "wf-directory-id",
+                "inputParams": {},
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(
+                run_workflow_module,
+                "read_workflow_from_fs",
+                return_value={"id": "wf-directory-id", "workflowJson": workflow_without_id},
+            ),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", AsyncMock(return_value=None)),
+            patch.object(run_workflow_module, "record_execution_result", AsyncMock(return_value=None)),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow="wf-directory-id",
+                inputs={},
+            )
+
+        assert result.success is True
+        assert result.metadata["workflow_id"] == "wf-directory-id"
+        assert captured_kwargs["workflow_id"] == "wf-directory-id"
+        assert captured_kwargs["workflow"]["id"] == "wf-directory-id"
+        create_execution.assert_awaited_once()
+        assert create_execution.await_args.args[0] == "wf-directory-id"
 
     @pytest.mark.anyio
     async def test_run_workflow_compacts_large_outputs_for_progress_and_final_record(
@@ -365,12 +424,14 @@ class TestRunWorkflowToolExecution:
 
         def run_side_effect(**kwargs):
             kwargs["on_step_start"]("run-compacted", 1, MagicMock(id="node-1", type="python"), {})
-            kwargs["on_step_complete"]({
-                "node_id": "node-1",
-                "node_type": "python",
-                "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
-                "outputs": {"raw_alerts": large_alerts, "message": "ok"},
-            })
+            kwargs["on_step_complete"](
+                {
+                    "node_id": "node-1",
+                    "node_type": "python",
+                    "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
+                    "outputs": {"raw_alerts": large_alerts, "message": "ok"},
+                }
+            )
             return FakeRunWorkflowResult(
                 status="SUCCEEDED",
                 run_id="run-compacted",
@@ -382,32 +443,29 @@ class TestRunWorkflowToolExecution:
             )
 
         mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
-        create_execution = AsyncMock(return_value={
-            "id": "exec-compacted",
-            "workflowId": "test-workflow-001",
-            "inputParams": {},
-            "status": "running",
-            "startedAt": 1,
-            "executionLog": [],
-        })
-        storage_read = AsyncMock(return_value={
-            "id": "exec-compacted",
-            "workflowId": "test-workflow-001",
-            "inputParams": {},
-            "status": "running",
-            "startedAt": 1,
-            "executionLog": [],
-        })
-        storage_write = AsyncMock(return_value=None)
+        create_execution = AsyncMock(
+            return_value={
+                "id": "exec-compacted",
+                "workflowId": "test-workflow-001",
+                "inputParams": {},
+                "status": "running",
+                "startedAt": 1,
+                "executionLog": [],
+            }
+        )
+        upsert_execution = AsyncMock(return_value=None)
+        record_step = AsyncMock(return_value=None)
         record_result = AsyncMock(return_value=None)
 
-        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)), \
-             patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"), \
-             patch.object(run_workflow_module, "create_execution_record", create_execution), \
-             patch.object(run_workflow_module.Storage, "read", storage_read), \
-             patch.object(run_workflow_module.Storage, "write", storage_write), \
-             patch.object(run_workflow_module, "record_execution_result", record_result), \
-             patch.object(run_workflow_module, "_record_workflow_tool_result", AsyncMock(return_value=None)):
+        with (
+            patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)),
+            patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"),
+            patch.object(run_workflow_module, "create_execution_record", create_execution),
+            patch.object(run_workflow_module.WorkflowStore, "upsert_execution", upsert_execution),
+            patch.object(run_workflow_module, "record_execution_step", record_step),
+            patch.object(run_workflow_module, "record_execution_result", record_result),
+            patch.object(run_workflow_module, "_record_workflow_tool_result", AsyncMock(return_value=None)),
+        ):
             result = await ToolRegistry.execute(
                 "run_workflow",
                 ctx=tool_context_with_permission,
@@ -416,9 +474,8 @@ class TestRunWorkflowToolExecution:
             )
 
         assert result.success is True
-        step_write = storage_write.await_args_list[-1]
-        assert step_write.args[0] == "workflow_execution_step/exec-compacted/00000001"
-        step_payload = step_write.args[1]
+        record_step.assert_awaited()
+        step_payload = record_step.await_args.args[2]
         assert step_payload["inputs"] == {
             "_raw_alerts_count": 150,
             "source": "syslog",
@@ -485,112 +542,112 @@ class TestRunWorkflowToolExecution:
         assert nested_ctx.event_publish_callback == tool_context_with_permission.event_publish_callback
         assert nested_ctx._permission_callback == tool_context_with_permission._permission_callback
         assert nested_ctx._metadata_callback is None
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_with_inputs(self, tool_context_with_permission, workflow_with_inputs):
         """Test workflow execution with input parameters"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-456",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {"greeting": "Hello, Flocks!"},
-            "history": [
-                {"node_id": "node-1", "status": "SUCCEEDED", "outputs": {"greeting": "Hello, Flocks!"}}
-            ],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-456",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {"greeting": "Hello, Flocks!"},
+                "history": [{"node_id": "node-1", "status": "SUCCEEDED", "outputs": {"greeting": "Hello, Flocks!"}}],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
                 "run_workflow",
                 ctx=tool_context_with_permission,
                 workflow=workflow_with_inputs,
-                inputs={"name": "Flocks"}
+                inputs={"name": "Flocks"},
             )
-            
+
             assert result.success is True
             assert "SUCCEEDED" in result.output
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_with_requirements(self, tool_context_with_permission, workflow_with_requirements):
         """Test workflow execution with requirements installation"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-789",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {"status": "ok"},
-            "history": [
-                {"node_id": "node-1", "status": "SUCCEEDED", "outputs": {"status": "ok"}}
-            ],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-789",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {"status": "ok"},
+                "history": [{"node_id": "node-1", "status": "SUCCEEDED", "outputs": {"status": "ok"}}],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         installer_cls = Mock(name="RequirementsInstaller")
-        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run, installer_cls=installer_cls)):
+        with patch.object(
+            run_workflow_module,
+            "_get_workflow_runtime",
+            return_value=_runtime_tuple(run_fn=mock_run, installer_cls=installer_cls),
+        ):
             result = await ToolRegistry.execute(
                 "run_workflow",
                 ctx=tool_context_with_permission,
                 workflow=workflow_with_requirements,
                 inputs={},
-                ensure_requirements=True
+                ensure_requirements=True,
             )
-            
+
             assert result.success is True
             assert installer_cls.called is True
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_with_timeout(self, tool_context_with_permission, simple_workflow):
         """Test workflow execution with timeout"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-timeout",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {},
-            "history": [],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-timeout",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {},
+                "history": [],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={},
-                timeout_s=300.0
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}, timeout_s=300.0
             )
-            
+
             assert result.success is True
             # Verify timeout was passed to run_workflow
             mock_run.assert_called_once()
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs.get("timeout_s") == 300.0
             assert call_kwargs.get("use_llm") is True
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_with_trace(self, tool_context_with_permission, simple_workflow):
         """Test workflow execution with tracing enabled"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-trace",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {},
-            "history": [],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-trace",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {},
+                "history": [],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={},
-                trace=True
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}, trace=True
             )
-            
+
             assert result.success is True
             # Verify trace was passed to run_workflow
             call_kwargs = mock_run.call_args[1]
@@ -600,15 +657,17 @@ class TestRunWorkflowToolExecution:
     @pytest.mark.anyio
     async def test_run_workflow_passes_cancel_callback(self, tool_context_with_permission, simple_workflow):
         """Session abort should be forwarded to workflow runtime cancellation."""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-cancel",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {},
-            "history": [],
-            "error": None,
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-cancel",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {},
+                "history": [],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
@@ -629,15 +688,17 @@ class TestRunWorkflowToolExecution:
     @pytest.mark.anyio
     async def test_run_workflow_disable_llm(self, tool_context_with_permission, simple_workflow):
         """Test workflow execution with use_llm disabled"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-no-llm",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {},
-            "history": [],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-no-llm",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {},
+                "history": [],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
@@ -651,7 +712,7 @@ class TestRunWorkflowToolExecution:
             assert result.success is True
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs.get("use_llm") is False
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_execution_failure(self, tool_context_with_permission, simple_workflow):
         """Test workflow execution failure handling"""
@@ -659,37 +720,33 @@ class TestRunWorkflowToolExecution:
         mock_run = Mock(name="run_workflow", side_effect=Exception("Workflow execution failed"))
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={}
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
-            
+
             assert result.success is False
             assert "Workflow execution failed" in result.error
             assert result.metadata["status"] == "FAILED"
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_failed_status(self, tool_context_with_permission, simple_workflow):
         """Test workflow execution with FAILED status"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "FAILED",
-            "run_id": "run-failed",
-            "steps": 0,
-            "last_node_id": None,
-            "outputs": {},
-            "history": [],
-            "error": "NodeExecutionError: Error in node 'node-1'"
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "FAILED",
+                "run_id": "run-failed",
+                "steps": 0,
+                "last_node_id": None,
+                "outputs": {},
+                "history": [],
+                "error": "NodeExecutionError: Error in node 'node-1'",
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={}
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
-            
+
             assert result.success is False
             assert "FAILED" in result.output
             assert result.metadata["status"] == "error"
@@ -699,40 +756,37 @@ class TestRunWorkflowToolExecution:
 # Test Result Formatting
 # =============================================================================
 
+
 class TestRunWorkflowToolResultFormatting:
     """Test run_workflow tool result formatting"""
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_result_formatting(self, tool_context_with_permission, simple_workflow):
         """Test that workflow results are properly formatted"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-format",
-            "steps": 3,
-            "last_node_id": "node-3",
-            "outputs": {
-                "result": "processed",
-                "count": 42
-            },
-            "history": [
-                {"node_id": "node-1", "status": "SUCCEEDED"},
-                {"node_id": "node-2", "status": "SUCCEEDED"},
-                {"node_id": "node-3", "status": "SUCCEEDED"},
-            ],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-format",
+                "steps": 3,
+                "last_node_id": "node-3",
+                "outputs": {"result": "processed", "count": 42},
+                "history": [
+                    {"node_id": "node-1", "status": "SUCCEEDED"},
+                    {"node_id": "node-2", "status": "SUCCEEDED"},
+                    {"node_id": "node-3", "status": "SUCCEEDED"},
+                ],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={}
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
-            
+
             assert result.success is True
             output = result.output
-            
+
             # Check that all key information is present
             assert "Status: SUCCEEDED" in output
             assert "Run ID: run-format" in output
@@ -742,28 +796,27 @@ class TestRunWorkflowToolResultFormatting:
             assert "Execution History" not in output
         assert result.metadata["history"] == []
         assert result.metadata["history_count"] == len(fake.history)
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_result_with_error(self, tool_context_with_permission, simple_workflow):
         """Test result formatting when workflow has error"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "FAILED",
-            "run_id": "run-error",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {},
-            "history": [],
-            "error": "NodeExecutionError: Invalid code"
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "FAILED",
+                "run_id": "run-error",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {},
+                "history": [],
+                "error": "NodeExecutionError: Invalid code",
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={}
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
-            
+
             assert result.success is False
             assert "Error:" in result.output
             assert "NodeExecutionError" in result.output
@@ -773,30 +826,30 @@ class TestRunWorkflowToolResultFormatting:
 # Test Permission Handling
 # =============================================================================
 
+
 class TestRunWorkflowToolPermissions:
     """Test run_workflow tool permission handling"""
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_requests_permission(self, tool_context_with_permission, simple_workflow):
         """Test that workflow execution requests permission"""
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-perm",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {},
-            "history": [],
-            "error": None
-        })
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-perm",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {},
+                "history": [],
+                "error": None,
+            }
+        )
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             await ToolRegistry.execute(
-                "run_workflow",
-                ctx=tool_context_with_permission,
-                workflow=simple_workflow,
-                inputs={}
+                "run_workflow", ctx=tool_context_with_permission, workflow=simple_workflow, inputs={}
             )
-            
+
             # Verify permission was requested
             assert len(tool_context_with_permission._permissions_requested) == 1
             perm_request = tool_context_with_permission._permissions_requested[0]
@@ -810,74 +863,73 @@ class TestRunWorkflowToolPermissions:
 # JSON Parsing Tests (simulating LLM-generated tool calls)
 # =============================================================================
 
+
 class TestRunWorkflowToolJSONParsing:
     """Test JSON parsing scenarios that occur when LLM generates tool calls."""
-    
+
     @pytest.mark.anyio
     async def test_workflow_path_with_quotes_valid_json(self, tool_context_with_permission, tmp_path):
         """Test that workflow path with quotes is valid JSON and can be parsed."""
         import json
-        
+
         # Create a workflow file
         workflow_path = str(tmp_path / "test_workflow.json")
         workflow_content = {
             "id": "test-json-parsing",
             "name": "Test JSON Parsing",
             "start": "node-1",
-            "nodes": [
-                {
-                    "id": "node-1",
-                    "type": "python",
-                    "code": "outputs['result'] = 'success'"
-                }
-            ],
-            "edges": []
+            "nodes": [{"id": "node-1", "type": "python", "code": "outputs['result'] = 'success'"}],
+            "edges": [],
         }
-        with open(workflow_path, 'w') as f:
+        with open(workflow_path, "w") as f:
             json.dump(workflow_content, f)
-        
+
         # Simulate LLM generating JSON with QUOTED path (correct)
-        arguments_json_string = json.dumps({
-            "workflow": workflow_path,  # This will be properly quoted in JSON
-            "inputs": {}
-        })
-        
+        arguments_json_string = json.dumps(
+            {
+                "workflow": workflow_path,  # This will be properly quoted in JSON
+                "inputs": {},
+            }
+        )
+
         # Verify it's valid JSON
         parsed_args = json.loads(arguments_json_string)
         assert parsed_args["workflow"] == workflow_path
-        
+
         # Now execute with the parsed arguments
-        fake = FakeRunWorkflowResult(**{
-            "status": "SUCCEEDED",
-            "run_id": "run-json-test",
-            "steps": 1,
-            "last_node_id": "node-1",
-            "outputs": {"result": "success"},
-            "history": []
-        })
-        
+        fake = FakeRunWorkflowResult(
+            **{
+                "status": "SUCCEEDED",
+                "run_id": "run-json-test",
+                "steps": 1,
+                "last_node_id": "node-1",
+                "outputs": {"result": "success"},
+                "history": [],
+            }
+        )
+
         mock_run = Mock(name="run_workflow", return_value=fake)
         with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
             result = await ToolRegistry.execute(
                 "run_workflow",
                 ctx=tool_context_with_permission,
-                **parsed_args  # Unpack parsed arguments
+                **parsed_args,  # Unpack parsed arguments
             )
-            
+
             assert result.success is True
-    
+
     @pytest.mark.anyio
     async def test_workflow_path_without_quotes_invalid_json(self):
         """Test that workflow path without quotes is INVALID JSON and cannot be parsed."""
         import json
-        
+
         # Simulate LLM generating JSON with UNQUOTED path (incorrect - this is the bug)
         invalid_json_string = '{"workflow": workflow/alert_triage/workflow.json, "inputs": {}}'
-        
+
         # Verify it's INVALID JSON
         with pytest.raises(json.JSONDecodeError):
             json.loads(invalid_json_string)
-        
+
         # This is exactly what causes "Failed to parse tool arguments" error in production
 
 
@@ -885,9 +937,10 @@ class TestRunWorkflowToolJSONParsing:
 # Integration Test (if flocks_workflow is available)
 # =============================================================================
 
+
 class TestRunWorkflowToolIntegration:
     """Integration tests with the real in-repo workflow runtime."""
-    
+
     @pytest.mark.anyio
     async def test_run_workflow_integration(self, tool_context_with_permission):
         """Integration test that exercises the tool end-to-end."""
@@ -897,23 +950,19 @@ class TestRunWorkflowToolIntegration:
             "metadata": {},
             "start": "node-1",
             "nodes": [
-                {
-                    "id": "node-1",
-                    "type": "python",
-                    "code": "outputs['result'] = {'test': 'integration', 'value': 100}"
-                }
+                {"id": "node-1", "type": "python", "code": "outputs['result'] = {'test': 'integration', 'value': 100}"}
             ],
-            "edges": []
+            "edges": [],
         }
-        
+
         result = await ToolRegistry.execute(
             "run_workflow",
             ctx=tool_context_with_permission,
             workflow=workflow,
             inputs={},
-            ensure_requirements=False  # Skip requirements for test
+            ensure_requirements=False,  # Skip requirements for test
         )
-        
+
         assert result is not None
         assert result.success is True
         assert "Status: SUCCEEDED" in (result.output or "")

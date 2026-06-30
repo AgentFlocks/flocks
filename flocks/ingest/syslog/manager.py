@@ -7,7 +7,6 @@ import time
 import uuid
 from typing import Any, Dict, List
 
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
@@ -18,12 +17,17 @@ from flocks.workflow.execution_store import (
 )
 from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.runner import run_workflow
+from flocks.workflow.store import WorkflowStore
 
 from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.ingest.syslog.listener import run_tcp_syslog_server, run_udp_syslog_server
 from flocks.workflow.triggers.compat import legacy_syslog_trigger_from_config
 from flocks.workflow.triggers.dispatcher import EventDispatcher, TriggerDispatchError, build_trigger_event
-from flocks.workflow.triggers.models import TriggerDefinition, workflow_json_declares_triggers, workflow_trigger_definitions_from_json
+from flocks.workflow.triggers.models import (
+    TriggerDefinition,
+    workflow_json_declares_triggers,
+    workflow_trigger_definitions_from_json,
+)
 
 log = Log.create(service="syslog.manager")
 
@@ -88,13 +92,16 @@ class _DropWarningThrottle:
             self._flush(trigger=trigger)
 
     def _flush(self, *, trigger: str) -> None:
-        log.warning("syslog.queue_full_dropped", {
-            "workflow_id": self._workflow_id,
-            "queue_size": self._queue.qsize(),
-            "queue_capacity": self._queue.maxsize,
-            "dropped_in_window": int(self._count),
-            "trigger": trigger,
-        })
+        log.warning(
+            "syslog.queue_full_dropped",
+            {
+                "workflow_id": self._workflow_id,
+                "queue_size": self._queue.qsize(),
+                "queue_capacity": self._queue.maxsize,
+                "dropped_in_window": int(self._count),
+                "trigger": trigger,
+            },
+        )
         self._count = 0
         self._last_log = time.monotonic()
 
@@ -168,21 +175,13 @@ class SyslogManager:
 
     async def start_all(self) -> None:
         try:
-            keys = await Storage.list_keys(WORKFLOW_SYSLOG_CONFIG_PREFIX)
+            configs = await WorkflowStore.list_configs(kind="workflow_syslog_config")
         except Exception as exc:
-            log.warning("syslog.list_keys_failed", {"error": str(exc)})
+            log.warning("syslog.list_configs_failed", {"error": str(exc)})
             return
 
-        for key in keys:
-            if not key.startswith(WORKFLOW_SYSLOG_CONFIG_PREFIX):
-                continue
-            workflow_id = key[len(WORKFLOW_SYSLOG_CONFIG_PREFIX) :]
+        for workflow_id, data in configs:
             if not workflow_id:
-                continue
-            try:
-                data = await Storage.read(key)
-            except Exception as exc:
-                log.warning("syslog.config_read_failed", {"key": key, "error": str(exc)})
                 continue
             if isinstance(data, dict) and data.get("enabled"):
                 await self.restart_workflow(workflow_id)
@@ -254,9 +253,8 @@ class SyslogManager:
         user instead of silently leaving the listener in a failed state.
         """
         await self.stop_workflow(workflow_id)
-        key = self._config_key(workflow_id)
         try:
-            data = await Storage.read(key)
+            data = await WorkflowStore.get_config(workflow_id, kind="workflow_syslog_config")
         except Exception as exc:
             log.warning("syslog.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"state": "failed", "error": str(exc)}
@@ -543,23 +541,25 @@ class SyslogManager:
                 duration = time.time() - start_time
                 step_count = step_recorder.step_count or result.steps
                 exec_data.update(step_recorder.summary)
-                exec_data.update({
-                    "status": status,
-                    "outputResults": compact_outputs_for_storage(result.outputs),
-                    "finishedAt": int(time.time() * 1000),
-                    "duration": duration,
-                    "errorMessage": error_msg,
-                    "executionLog": [],
-                    "stepCount": step_count,
-                    "currentNodeId": result.last_node_id,
-                    "currentPhase": status,
-                    "currentStepIndex": step_count,
-                    "triggerId": trigger.id,
-                    "triggerType": trigger.type,
-                    "deliveryId": trigger_meta.get("deliveryId"),
-                    "attempt": trigger_meta.get("attempt"),
-                    "triggerSource": trigger_meta.get("source"),
-                })
+                exec_data.update(
+                    {
+                        "status": status,
+                        "outputResults": compact_outputs_for_storage(result.outputs),
+                        "finishedAt": int(time.time() * 1000),
+                        "duration": duration,
+                        "errorMessage": error_msg,
+                        "executionLog": [],
+                        "stepCount": step_count,
+                        "currentNodeId": result.last_node_id,
+                        "currentPhase": status,
+                        "currentStepIndex": step_count,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": trigger_meta.get("deliveryId"),
+                        "attempt": trigger_meta.get("attempt"),
+                        "triggerSource": trigger_meta.get("source"),
+                    }
+                )
             except Exception as exc:
                 duration = time.time() - start_time
                 log.error(
@@ -567,19 +567,21 @@ class SyslogManager:
                     {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
                 )
                 exec_data.update(step_recorder.summary)
-                exec_data.update({
-                    "status": "error",
-                    "errorMessage": str(exc),
-                    "finishedAt": int(time.time() * 1000),
-                    "duration": duration,
-                    "executionLog": [],
-                    "currentPhase": "error",
-                    "triggerId": trigger.id,
-                    "triggerType": trigger.type,
-                    "deliveryId": trigger_meta.get("deliveryId"),
-                    "attempt": trigger_meta.get("attempt"),
-                    "triggerSource": trigger_meta.get("source"),
-                })
+                exec_data.update(
+                    {
+                        "status": "error",
+                        "errorMessage": str(exc),
+                        "finishedAt": int(time.time() * 1000),
+                        "duration": duration,
+                        "executionLog": [],
+                        "currentPhase": "error",
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": trigger_meta.get("deliveryId"),
+                        "attempt": trigger_meta.get("attempt"),
+                        "triggerSource": trigger_meta.get("source"),
+                    }
+                )
             finally:
                 try:
                     await record_execution_result(workflow_id, exec_id, exec_data)
