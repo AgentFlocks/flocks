@@ -394,6 +394,27 @@ def _write_workflow_to_fs(
         legacy_edit_file.unlink()
 
 
+def _apply_new_workflow_runtime_defaults(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Return workflow JSON with runtime defaults for newly created workflows."""
+    normalized = dict(workflow_json)
+    metadata = normalized.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    else:
+        metadata = dict(metadata)
+    runtime = metadata.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    else:
+        runtime = dict(runtime)
+
+    runtime.setdefault("strict_edge_mapping", True)
+    runtime.setdefault("dataflow_mode", "vertex_cache")
+    metadata["runtime"] = runtime
+    normalized["metadata"] = metadata
+    return normalized
+
+
 def _delete_workflow_from_fs(workflow_id: str) -> bool:
     """Remove a workflow directory from all known locations (primary + legacy plugins).
 
@@ -1328,8 +1349,9 @@ async def create_workflow(req: WorkflowCreateRequest):
     of truth. Stats are initialised in Storage on first access.
     """
     try:
+        workflow_json = _apply_new_workflow_runtime_defaults(req.workflow_json)
         try:
-            Workflow.from_dict(req.workflow_json)
+            Workflow.from_dict(workflow_json)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
 
@@ -1349,12 +1371,12 @@ async def create_workflow(req: WorkflowCreateRequest):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, req.workflow_json, meta, global_store=(source == "global"))
+        _write_workflow_to_fs(workflow_id, workflow_json, meta, global_store=(source == "global"))
 
         stats = await _get_workflow_stats(workflow_id)
         data = {
             **meta,
-            "workflowJson": req.workflow_json,
+            "workflowJson": workflow_json,
             "markdownContent": None,
             "editMarkdownContent": None,
             "stats": stats,

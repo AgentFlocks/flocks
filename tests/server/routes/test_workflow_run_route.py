@@ -8,6 +8,73 @@ from flocks.tool import ToolContext
 import flocks.server.routes.workflow as workflow_module
 
 
+def _minimal_workflow_json(metadata=None):
+    workflow = {
+        "name": "minimal",
+        "start": "start",
+        "nodes": [{"id": "start", "type": "python", "code": "outputs['ok'] = True"}],
+        "edges": [],
+    }
+    if metadata is not None:
+        workflow["metadata"] = metadata
+    return workflow
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_applies_vertex_cache_runtime_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes: list[dict] = []
+
+    def _fake_write_workflow_to_fs(workflow_id, workflow_json, meta, *args, **kwargs):
+        writes.append({"workflow_id": workflow_id, "workflow_json": workflow_json, "meta": meta})
+
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", _fake_write_workflow_to_fs)
+    monkeypatch.setattr(workflow_module, "_get_workflow_stats", AsyncMock(return_value={}))
+    monkeypatch.setattr(workflow_module, "publish_event", AsyncMock(return_value=None))
+
+    req = workflow_module.WorkflowCreateRequest(
+        name="new workflow",
+        workflowJson=_minimal_workflow_json(),
+    )
+
+    result = await workflow_module.create_workflow(req)
+
+    runtime = result.workflowJson["metadata"]["runtime"]
+    assert runtime["strict_edge_mapping"] is True
+    assert runtime["dataflow_mode"] == "vertex_cache"
+    assert writes[0]["workflow_json"]["metadata"]["runtime"] == runtime
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_preserves_explicit_runtime_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes: list[dict] = []
+
+    def _fake_write_workflow_to_fs(workflow_id, workflow_json, meta, *args, **kwargs):
+        writes.append({"workflow_id": workflow_id, "workflow_json": workflow_json, "meta": meta})
+
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", _fake_write_workflow_to_fs)
+    monkeypatch.setattr(workflow_module, "_get_workflow_stats", AsyncMock(return_value={}))
+    monkeypatch.setattr(workflow_module, "publish_event", AsyncMock(return_value=None))
+
+    req = workflow_module.WorkflowCreateRequest(
+        name="legacy workflow",
+        workflowJson=_minimal_workflow_json(
+            {
+                "runtime": {
+                    "strict_edge_mapping": False,
+                    "dataflow_mode": "legacy",
+                }
+            }
+        ),
+    )
+
+    result = await workflow_module.create_workflow(req)
+
+    runtime = result.workflowJson["metadata"]["runtime"]
+    assert runtime["strict_edge_mapping"] is False
+    assert runtime["dataflow_mode"] == "legacy"
+    assert writes[0]["workflow_json"]["metadata"]["runtime"] == runtime
+
+
 @pytest.mark.asyncio
 async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     monkeypatch: pytest.MonkeyPatch,
