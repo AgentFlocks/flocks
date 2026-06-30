@@ -91,11 +91,17 @@ vi.mock('react-i18next', () => ({
         'wizard.guide.cases.tdp': 'TDP 接入',
         'wizard.guide.cases.onesec': 'OneSEC 接入',
         'wizard.guide.cases.more': '查看更多',
+        'wizard.guide.descriptions.api': '设备提供 API 能力时使用',
+        'wizard.guide.descriptions.browser': '设备没有开放 API 时使用',
+        'wizard.guide.descriptions.tdp': '按微步 TDP 的已知接入案例继续',
+        'wizard.guide.descriptions.onesec': '按 OneSEC 的已知接入案例继续',
+        'wizard.guide.descriptions.more': '查看当前已支持的设备模板',
         'wizard.supportedList.back': '返回',
         'wizard.supportedList.title': '已支持设备列表',
         'wizard.supportedList.subtitle': '先选择厂商，再选择要接入的设备',
         'wizard.supportedList.deviceCount': `${String(params?.count ?? '')} 款设备`,
         'wizard.supportedList.integratedCount': `已接入 ${String(params?.count ?? '')} 台`,
+        'wizard.supportedList.templateTooltip': '点击后 Rex 会基于该设备模板继续引导配置',
         'wizard.installState.installed': '已安装',
         'wizard.installState.available': '可安装',
         'wizard.installState.updateAvailable': '可更新',
@@ -414,6 +420,21 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByText('TDP 接入')).toBeInTheDocument();
     expect(screen.getByText('OneSEC 接入')).toBeInTheDocument();
     expect(screen.getByText('查看更多')).toBeInTheDocument();
+  });
+
+  it('shows tooltip text when hovering a workbench info icon', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await openManualAddWizard(user);
+
+    const apiButton = screen.getByRole('button', { name: /^API 接入$/ });
+    const infoIcon = apiButton.querySelector('span[aria-hidden="true"]');
+    expect(infoIcon).toBeTruthy();
+
+    await user.hover(infoIcon as HTMLElement);
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('设备提供 API 能力时使用');
   });
 
   it('returns to the add-device workbench when the workbench tab is clicked', async () => {

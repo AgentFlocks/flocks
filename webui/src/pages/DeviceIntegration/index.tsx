@@ -4,12 +4,13 @@ import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Info, Sparkles,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat from '@/components/common/SessionChat';
+import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import { useSessionChat, type CreateAndSendOptions } from '@/hooks/useSessionChat';
 import { sessionApi } from '@/api/session';
@@ -721,10 +722,12 @@ function DeviceAddRexPanel({
                     <WorkbenchSection title={t('wizard.guide.customTitle')}>
                       <WorkbenchAction
                         label={t('wizard.guide.actions.api')}
+                        description={t('wizard.guide.descriptions.api')}
                         onClick={() => startGuidedPrompt(t('wizard.guide.prompts.api'))}
                       />
                       <WorkbenchAction
                         label={t('wizard.guide.actions.browser')}
+                        description={t('wizard.guide.descriptions.browser')}
                         onClick={() => startGuidedPrompt(t('wizard.guide.prompts.browser'))}
                       />
                     </WorkbenchSection>
@@ -732,14 +735,17 @@ function DeviceAddRexPanel({
                     <WorkbenchSection title={t('wizard.guide.caseTitle')}>
                       <WorkbenchAction
                         label={t('wizard.guide.cases.tdp')}
+                        description={t('wizard.guide.descriptions.tdp')}
                         onClick={() => handleCaseTemplate(['tdp'], t('wizard.guide.prompts.tdp'))}
                       />
                       <WorkbenchAction
                         label={t('wizard.guide.cases.onesec')}
+                        description={t('wizard.guide.descriptions.onesec')}
                         onClick={() => handleCaseTemplate(['onesec', 'one sec'], t('wizard.guide.prompts.onesec'))}
                       />
                       <WorkbenchAction
                         label={t('wizard.guide.cases.more')}
+                        description={t('wizard.guide.descriptions.more')}
                         onClick={() => setShowBuiltInTemplates(true)}
                       />
                     </WorkbenchSection>
@@ -821,7 +827,14 @@ function DeviceAddRexPanel({
                                     </span>
                                     {installing
                                       ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
-                                      : <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />}
+                                      : (
+                                        <GuideInfoIcon
+                                          label={tpl.name}
+                                          description={t('wizard.supportedList.templateTooltip')}
+                                          className="h-4 w-4 text-gray-300 group-hover:text-rose-400"
+                                          interactive={false}
+                                        />
+                                      )}
                                   </button>
                                 );
                               })}
@@ -891,15 +904,21 @@ function WorkbenchSection({
   );
 }
 
-function WorkbenchAction({ label, onClick }: { label: string; onClick: () => void }) {
+function WorkbenchAction({ label, description, onClick }: { label: string; description: string; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={description}
       className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
     >
       <span className="min-w-0 truncate">{label}</span>
-      <Info className="h-4 w-4 flex-shrink-0 text-gray-300 transition-colors group-hover:text-rose-400" />
+      <GuideInfoIcon
+        label={label}
+        description={description}
+        className="h-4 w-4 text-gray-300 group-hover:text-rose-400"
+        interactive={false}
+      />
     </button>
   );
 }

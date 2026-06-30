@@ -94,6 +94,13 @@
         "tdp": "TDP 接入",
         "onesec": "OneSEC 接入",
         "more": "查看更多"
+      },
+      "descriptions": {
+        "api": "设备提供 API 能力时使用，Rex 会引导确认文档、认证方式、凭据字段和冒烟测试。",
+        "browser": "设备没有开放 API 时使用，Rex 会引导确认控制台地址、登录方式、页面操作和自动化验证。",
+        "tdp": "按微步 TDP 的已知接入案例继续，重点确认 API Key、Secret、Base URL 和连通测试。",
+        "onesec": "按 OneSEC 的已知接入案例继续，重点确认连接地址、认证字段和连通测试。",
+        "more": "查看当前已支持的设备模板，选择模板后由 Rex 继续引导填写配置。"
       }
     },
     "supportedList": {
@@ -101,7 +108,8 @@
       "title": "已支持设备列表",
       "subtitle": "先选择厂商，再选择要接入的设备。点击设备后 Rex 会继续引导接入。",
       "deviceCount": "{{count}} 款设备",
-      "integratedCount": "已接入 {{count}} 台"
+      "integratedCount": "已接入 {{count}} 台",
+      "templateTooltip": "点击后 Rex 会基于该设备模板继续引导配置；如模板未安装，会先引导到 FlockHub 安装。"
     },
     "rex": {
       "title": "Rex 引导添加设备",
