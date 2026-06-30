@@ -54,17 +54,18 @@ interface DeviceVendor {
   nameEn: string;
   color: string;
   mark?: string;
+  logoSrc?: string;
 }
 
 const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
-  '360':       { nameCn: '360',    nameEn: '360',        color: 'bg-zinc-100 text-zinc-700', mark: '360' },
-  huaweicloud: { nameCn: '华为云', nameEn: 'Huawei Cloud', color: 'bg-red-100 text-red-700', mark: '华' },
-  huorong:     { nameCn: '火绒',   nameEn: 'Huorong',    color: 'bg-amber-100 text-amber-700', mark: '火' },
-  sangfor:     { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800', mark: '深' },
-  qianxin:     { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800', mark: '奇' },
-  threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微' },
-  qingteng:    { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800', mark: '青' },
-  nsfocus:     { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800', mark: '绿' },
+  '360':       { nameCn: '360',    nameEn: '360',        color: 'bg-zinc-100 text-zinc-700', mark: '360', logoSrc: '/vendor-logos/360.png' },
+  huaweicloud: { nameCn: '华为云', nameEn: 'Huawei Cloud', color: 'bg-red-100 text-red-700', mark: '华', logoSrc: '/vendor-logos/huaweicloud.png' },
+  huorong:     { nameCn: '火绒',   nameEn: 'Huorong',    color: 'bg-amber-100 text-amber-700', mark: '火', logoSrc: '/vendor-logos/huorong.png' },
+  sangfor:     { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800', mark: '深', logoSrc: '/vendor-logos/sangfor.png' },
+  qianxin:     { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800', mark: '奇', logoSrc: '/vendor-logos/qianxin.png' },
+  threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微', logoSrc: '/vendor-logos/threatbook.png' },
+  qingteng:    { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800', mark: '青', logoSrc: '/vendor-logos/qingteng.png' },
+  nsfocus:     { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800', mark: '绿', logoSrc: '/vendor-logos/nsfocus.png' },
 };
 
 function vendorPresentation(vendorKey: string): DeviceVendor {
@@ -84,13 +85,28 @@ function VendorMark({ vendor, label, className = 'h-6 w-6 rounded-md text-[11px]
   label: string;
   className?: string;
 }) {
+  const [logoFailed, setLogoFailed] = useState(false);
+  const showLogo = !!vendor.logoSrc && !logoFailed;
   return (
     <span
       aria-hidden="true"
       title={label}
-      className={`flex flex-shrink-0 items-center justify-center font-bold ${vendor.color} ${className}`}
+      className={`flex flex-shrink-0 items-center justify-center overflow-hidden ${
+        showLogo
+          ? ''
+          : `font-bold ${vendor.color}`
+      } ${className}`}
     >
-      {vendor.mark || label[0]}
+      {showLogo ? (
+        <img
+          src={vendor.logoSrc}
+          alt=""
+          className="h-full w-full object-contain"
+          onError={() => setLogoFailed(true)}
+        />
+      ) : (
+        vendor.mark || label[0]
+      )}
     </span>
   );
 }
@@ -100,6 +116,10 @@ function templateAction(template: DeviceTemplate): 'install' | 'update' | null {
   if (template.state === 'available') return 'install';
   if (template.state === 'updateAvailable') return 'update';
   return null;
+}
+
+function formatTemplateVersion(version: string): string {
+  return /^v/i.test(version) ? version : `v${version}`;
 }
 
 // ============================================================================
@@ -767,7 +787,7 @@ function DeviceAddRexPanel({
                                 const count = instanceCounts[tpl.storage_key] ?? 0;
                                 const action = templateAction(tpl);
                                 const installing = installingTemplateKey === tpl.storage_key;
-                                const templateMeta = tpl.version || tpl.storage_key;
+                                const templateMeta = tpl.version ? formatTemplateVersion(tpl.version) : tpl.storage_key;
                                 const stateBadge = tpl.installed
                                   ? t('wizard.installState.installed')
                                   : tpl.state === 'updateAvailable'

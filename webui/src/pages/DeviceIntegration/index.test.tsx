@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import DeviceIntegrationPage from './index';
@@ -825,7 +825,7 @@ describe('DeviceIntegrationPage', () => {
         }),
       ],
     });
-    render(<DeviceIntegrationPage />);
+    const { container } = render(<DeviceIntegrationPage />);
 
     await openSupportedDeviceList(user);
 
@@ -834,6 +834,14 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getAllByText('360').length).toBeGreaterThan(0);
     expect(screen.queryByText('huorong')).toBeNull();
     expect(screen.queryByText('huaweicloud')).toBeNull();
+
+    const huorongLogo = container.querySelector('img[src="/vendor-logos/huorong.png"]');
+    expect(huorongLogo).not.toBeNull();
+    expect(container.querySelector('img[src="/vendor-logos/huaweicloud.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src="/vendor-logos/360.png"]')).not.toBeNull();
+
+    fireEvent.error(huorongLogo as Element);
+    await waitFor(() => expect(screen.getByText('火')).toBeInTheDocument());
   });
 
   it('shows template versions when supported devices share the same name', async () => {
@@ -868,8 +876,8 @@ describe('DeviceIntegrationPage', () => {
     await user.click(screen.getByRole('button', { name: /微步/ }));
 
     expect(screen.getAllByText('onesig')).toHaveLength(2);
-    expect(screen.getByText('2.5.3 D20260321')).toBeInTheDocument();
-    expect(screen.getByText('2.5.3 D20250710')).toBeInTheDocument();
+    expect(screen.getByText('v2.5.3 D20260321')).toBeInTheDocument();
+    expect(screen.getByText('v2.5.3 D20250710')).toBeInTheDocument();
   });
 
   it('sends the selected supported device template to Rex from the vendor accordion', async () => {
