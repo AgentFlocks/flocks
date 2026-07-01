@@ -27,7 +27,8 @@ describe('customDevice helpers', () => {
     expect(prompt).toContain('username` / `password` 仅用于 cookie 失效后的浏览器认证恢复');
     expect(prompt).toContain('二者都必须声明为 `storage: secret`');
     expect(prompt).toContain('`auth_state`，并声明 `storage: secret` 与 `internal: true`');
-    expect(prompt).toContain('flocks.browser.device_auth.ensure_browser_auth_state');
+    expect(prompt).toContain('handler 只读取 `auth_state_path` 指向的 auth-state 文件');
+    expect(prompt).toContain('提示用户重新登录后保存 state');
     expect(prompt).toContain('【Workflow 接入规则】');
     expect(prompt).toContain('不需要创建 device 插件');
   });
