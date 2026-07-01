@@ -25,6 +25,7 @@ export interface HubCatalogEntry {
   riskLevel: string;
   state: HubPluginState;
   installedVersion?: string;
+  enabled: boolean;
   source: string;
   manifestPath: string;
   installPath?: string;
@@ -105,6 +106,9 @@ export const hubAPI = {
 
   uninstall: (type: HubPluginType, id: string) =>
     client.delete(`/api/hub/plugins/${type}/${id}`),
+
+  setEnabled: (type: HubPluginType, id: string, enabled: boolean) =>
+    client.patch(`/api/hub/plugins/${type}/${id}/enabled`, { enabled }),
 
   refresh: () =>
     client.post('/api/hub/refresh'),

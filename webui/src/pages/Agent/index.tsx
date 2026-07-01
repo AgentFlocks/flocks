@@ -1,40 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, Loader2 } from 'lucide-react';
-
-// ---------------------------------------------------------------------------
-// Color helpers
-// ---------------------------------------------------------------------------
-
-// Muted-but-distinct palette — enough personality without being loud.
-const AGENT_PALETTE = [
-  '#3b82f6', // blue-500
-  '#8b5cf6', // violet-500
-  '#06b6d4', // cyan-500
-  '#10b981', // emerald-500
-  '#f59e0b', // amber-500
-  '#ef4444', // red-500
-  '#ec4899', // pink-500
-  '#6366f1', // indigo-500
-];
-
-function resolveAgentColor(agent: Agent): string {
-  if (agent.color) return agent.color;
-  let h = 0;
-  for (let i = 0; i < agent.name.length; i++) {
-    h = agent.name.charCodeAt(i) + ((h << 5) - h);
-  }
-  return AGENT_PALETTE[Math.abs(h) % AGENT_PALETTE.length];
-}
-
-/** hex → rgba string at `alpha` (0–1). Works for 3-char and 6-char hex. */
-function hexAlpha(hex: string, alpha: number): string {
-  const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
+import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, Loader2, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -48,7 +13,11 @@ import AgentSheet from './AgentSheet';
 // Main Page Component
 // ============================================================================
 
-export default function AgentPage() {
+interface AgentPageProps {
+  embedded?: boolean;
+}
+
+export default function AgentPage({ embedded = false }: AgentPageProps = {}) {
   const { t, i18n } = useTranslation('agent');
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [showCreateSheet, setShowCreateSheet] = useState(false);
@@ -133,17 +102,28 @@ export default function AgentPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader
-        title={t('pageTitle')}
-        description={t('pageDescription')}
-        icon={<Bot className="w-8 h-8" />}
-      />
+      {!embedded && (
+        <PageHeader
+          title={t('pageTitle')}
+          description={t('pageDescription')}
+          icon={<Bot className="w-8 h-8" />}
+        />
+      )}
 
       {/* Toolbar — mirrors the Skill page toolbar style */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
-        <span className="text-xs text-gray-400 select-none">
-          {t('totalCount', { total: primaryAgents.length + subAgents.length })}
-        </span>
+        {embedded && primaryAgents[0] && (
+          <PrimaryAgentToolbarItem
+            agent={primaryAgents[0]}
+            displayLang={i18n.language}
+            onClick={() => setEditingAgent(primaryAgents[0])}
+          />
+        )}
+        {!embedded && (
+          <span className="text-xs text-gray-400 select-none">
+            {t('totalCount', { total: primaryAgents.length + subAgents.length })}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={handleRefresh}
@@ -188,10 +168,9 @@ export default function AgentPage() {
           />
         ) : (
           <>
-            {primaryAgents.length > 0 && (
+            {!embedded && primaryAgents.length > 0 && (
               <AgentSection
                 title={t('section.primary.title')}
-                subtitle={t('section.primary.subtitle')}
                 icon={<Shield className="w-4 h-4" />}
                 agents={primaryAgents}
                 displayLang={i18n.language}
@@ -205,7 +184,6 @@ export default function AgentPage() {
             {subAgents.length > 0 && (
               <AgentSection
                 title={t('section.sub.title')}
-                subtitle={t('section.sub.subtitle')}
                 icon={<Zap className="w-4 h-4" />}
                 agents={subAgents}
                 displayLang={i18n.language}
@@ -322,7 +300,6 @@ function PaginationBar({
 
 interface AgentSectionProps {
   title: string;
-  subtitle: string;
   icon: React.ReactNode;
   agents: Agent[];
   displayLang: string;
@@ -337,7 +314,6 @@ interface AgentSectionProps {
 
 function AgentSection({
   title,
-  subtitle,
   icon,
   agents,
   displayLang,
@@ -351,6 +327,7 @@ function AgentSection({
 }: AgentSectionProps) {
   const { t } = useTranslation('agent');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
 
   // Per-source counts for the filter chips
@@ -358,14 +335,21 @@ function AgentSection({
   const customCount  = useMemo(() => agents.filter(a => !a.native).length, [agents]);
 
   const filtered = useMemo(
-    () => showSourceFilter
-      ? agents.filter((a) => {
-          if (sourceFilter === 'builtin') return a.native;
-          if (sourceFilter === 'custom') return !a.native;
-          return true;
-        })
-      : agents,
-    [agents, showSourceFilter, sourceFilter],
+    () => {
+      const q = searchQuery.trim().toLowerCase();
+      return agents.filter((a) => {
+        if (showSourceFilter) {
+          if (sourceFilter === 'builtin' && !a.native) return false;
+          if (sourceFilter === 'custom' && a.native) return false;
+        }
+        if (!q) return true;
+        const name = getAgentDisplayName(a, displayLang).toLowerCase();
+        const desc = getAgentDisplayDescription(a, displayLang).toLowerCase();
+        const model = a.model?.modelID?.toLowerCase() ?? '';
+        return name.includes(q) || desc.includes(q) || model.includes(q);
+      });
+    },
+    [agents, displayLang, searchQuery, showSourceFilter, sourceFilter],
   );
 
   const totalPages = paginate ? Math.max(1, Math.ceil(filtered.length / SUB_AGENT_PAGE_SIZE)) : 1;
@@ -376,7 +360,7 @@ function AgentSection({
   }, [totalPages, page]);
 
   // Reset to page 1 when filter changes
-  useEffect(() => { setPage(1); }, [sourceFilter]);
+  useEffect(() => { setPage(1); }, [searchQuery, sourceFilter]);
 
   const displayed = paginate
     ? filtered.slice((page - 1) * SUB_AGENT_PAGE_SIZE, page * SUB_AGENT_PAGE_SIZE)
@@ -395,24 +379,16 @@ function AgentSection({
 
   return (
     <div>
-      {/* Section header: left accent stripe */}
-      <div className="flex items-start gap-3 pl-3 border-l-2 border-slate-300">
-        <span className="text-slate-400 mt-0.5">{icon}</span>
-        <div className="flex-1 min-w-0">
+      {showSourceFilter && (
+        <div className="mb-3 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
-            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
+            <span className="text-slate-400">{icon}</span>
+            <h2 className="text-sm font-semibold text-gray-900">{title}</h2>
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-slate-500">
               {agents.length}
             </span>
           </div>
-          <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
-        </div>
-      </div>
-
-      {/* Source filter — segmented control, same style as Skill page */}
-      {showSourceFilter && (
-        <div className="mt-2.5 mb-3" role="tablist" aria-label={t('filter.aria')}>
-          <div className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs">
+          <div className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs" role="tablist" aria-label={t('filter.aria')}>
             {filterChips.map((chip, idx) => {
               const active = chip.key === sourceFilter;
               return (
@@ -438,17 +414,38 @@ function AgentSection({
               );
             })}
           </div>
+          <div className="relative ml-auto w-64">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={displayLang.toLowerCase().startsWith('zh') ? '搜索 Agent...' : 'Search agents...'}
+              className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-9 pr-3 text-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-300"
+            />
+          </div>
         </div>
       )}
 
       {/* Grid area — min-height anchors the layout so filter switches don't
           collapse the section height and cause visual jumps. */}
       <div style={GRID_MIN_H ? { minHeight: GRID_MIN_H } : undefined}>
-        {!showSourceFilter && <div className="mb-3" />}
         {displayed.length === 0 ? (
           <p className="text-xs text-gray-400 py-4">
             {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
           </p>
+        ) : !showSourceFilter ? (
+          <div className="space-y-2">
+            {displayed.map((agent) => (
+              <PrimaryAgentRow
+                key={agent.name}
+                agent={agent}
+                displayLang={displayLang}
+                isSelected={selectedAgent?.name === agent.name}
+                onClick={() => onSelect(agent)}
+              />
+            ))}
+          </div>
         ) : (
           <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {displayed.map((agent) => (
@@ -481,6 +478,111 @@ function AgentSection({
 }
 
 // ============================================================================
+// Primary Agent Toolbar Entry
+// ============================================================================
+
+function PrimaryAgentToolbarItem({
+  agent,
+  displayLang,
+  onClick,
+}: Pick<AgentCardProps, 'agent' | 'displayLang' | 'onClick'>) {
+  const { t } = useTranslation('agent');
+  const displayName = getAgentDisplayName(agent, displayLang);
+  const displayDesc = getAgentDisplayDescription(agent, displayLang);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex min-w-0 max-w-[720px] items-center gap-2 rounded-lg border border-gray-200 bg-slate-50/60 px-2.5 py-1.5 text-left transition-colors hover:border-gray-300 hover:bg-white"
+      title={displayDesc || displayName}
+    >
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white text-slate-500 ring-1 ring-gray-200">
+        <Bot className="h-3.5 w-3.5" />
+      </span>
+      <span className="min-w-0">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-xs font-semibold text-gray-900">{displayName}</span>
+          <span className="rounded border border-blue-100 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-600">
+            {t('badge.native')}
+          </span>
+        </span>
+        <span className="block truncate text-[11px] leading-4 text-gray-500">
+          {displayDesc || t('common:empty.noDescription')}
+        </span>
+      </span>
+      <span className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-gray-500 transition-colors group-hover:bg-white group-hover:text-slate-700">
+        <Pencil className="h-3 w-3" />
+        {t('badge.edit')}
+      </span>
+    </button>
+  );
+}
+
+// ============================================================================
+// Primary Agent Row
+// ============================================================================
+
+function PrimaryAgentRow({
+  agent,
+  displayLang,
+  isSelected,
+  onClick,
+}: Pick<AgentCardProps, 'agent' | 'displayLang' | 'isSelected' | 'onClick'>) {
+  const { t } = useTranslation('agent');
+  const displayName = getAgentDisplayName(agent, displayLang);
+  const displayDesc = getAgentDisplayDescription(agent, displayLang);
+
+  return (
+    <div
+      className={`
+        group flex cursor-pointer items-center gap-3 rounded-lg border bg-white px-3 py-2.5 transition-all
+        ${isSelected
+          ? 'border-slate-400 shadow-sm ring-2 ring-slate-100'
+          : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50/60'
+        }
+      `}
+      onClick={onClick}
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-slate-500 ring-1 ring-slate-200">
+        <Bot className="h-4 w-4" />
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="truncate text-sm font-semibold text-gray-900">{displayName}</span>
+          <span className="inline-flex items-center rounded border border-blue-100 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">
+            {t('badge.native')}
+          </span>
+          {agent.model && (
+            <span className="inline-flex max-w-[220px] items-center gap-1 rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+              <Cpu className="h-3 w-3 shrink-0" />
+              <span className="truncate">{agent.model.modelID}</span>
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 truncate text-xs text-gray-500">
+          {displayDesc || t('common:empty.noDescription')}
+        </p>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onClick(); }}
+          title={t('badge.edit')}
+          aria-label={t('badge.edit')}
+          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-slate-700"
+        >
+          <Pencil className="h-3 w-3" />
+          {t('badge.edit')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // Agent Card
 // ============================================================================
 
@@ -506,34 +608,26 @@ function AgentCard({
   const { t } = useTranslation('agent');
   const displayName = getAgentDisplayName(agent, displayLang);
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
-  const color = resolveAgentColor(agent);
   const showDelegatableToggle = agent.mode === 'subagent';
 
   return (
     <div
       className={`
-        group relative bg-white rounded-xl border flex flex-col overflow-hidden
+        group relative bg-white rounded-lg border flex flex-col overflow-hidden
         cursor-pointer transition-all duration-150
         ${isSelected
-          ? 'border-slate-400 shadow-md ring-2 ring-slate-200'
-          : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
+          ? 'border-slate-400 shadow-sm ring-2 ring-slate-100'
+          : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50/40'
         }
       `}
       onClick={onClick}
     >
-      {/* Top accent bar — 3 px strip, full-width, same radius as card */}
-      <div style={{ height: 3, backgroundColor: color }} />
-
       {/* Card body */}
-      <div className="flex-1 px-4 pt-3 pb-3 flex flex-col gap-2 min-w-0">
+      <div className="flex-1 px-3.5 pt-3 pb-3 flex flex-col gap-2 min-w-0">
         {/* Avatar + Name row */}
         <div className="flex items-start gap-2.5 min-w-0">
-          {/* Colored avatar */}
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-            style={{ backgroundColor: hexAlpha(color, 0.12) }}
-          >
-            <Bot className="w-4 h-4" style={{ color }} />
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-slate-500 ring-1 ring-slate-200">
+            <Bot className="w-4 h-4" />
           </div>
 
           <div className="min-w-0 flex-1">
@@ -573,11 +667,8 @@ function AgentCard({
 
         {/* Model chip */}
         {agent.model && (
-          <div
-            className="self-start inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] text-gray-500"
-            style={{ backgroundColor: hexAlpha(color, 0.08), border: `1px solid ${hexAlpha(color, 0.2)}` }}
-          >
-            <Cpu className="w-3 h-3 shrink-0" style={{ color }} />
+          <div className="self-start inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] text-gray-500">
+            <Cpu className="w-3 h-3 shrink-0" />
             <span className="truncate max-w-[120px]">
               {agent.model.modelID}
             </span>
@@ -590,19 +681,8 @@ function AgentCard({
         className="border-t border-gray-100 px-3 py-1.5 flex items-center justify-between"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Delete — disabled for built-in agents */}
-        {agent.native ? (
-          <button
-            type="button"
-            disabled
-            title={t('badge.nativeDeleteDisabled')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
-                       text-gray-300 cursor-not-allowed select-none"
-          >
-            <Trash2 className="w-3 h-3" />
-            {t('badge.delete')}
-          </button>
-        ) : (
+        <div>
+        {!agent.native && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(agent.name); }}
@@ -614,6 +694,7 @@ function AgentCard({
             {t('badge.delete')}
           </button>
         )}
+        </div>
 
         <div className="flex items-center gap-2">
           {showDelegatableToggle && (

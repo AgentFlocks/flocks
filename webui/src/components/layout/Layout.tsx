@@ -2,12 +2,9 @@ import { Outlet, Link, useLocation, matchPath } from 'react-router-dom';
 import {
   Home,
   MessageSquare,
-  Bot,
   Brain,
   Workflow,
   ListTodo,
-  Wrench,
-  BookOpen,
   Radio,
   X,
   ChevronLeft,
@@ -16,7 +13,7 @@ import {
   Menu,
   FolderOpen,
   Sparkles,
-  Archive,
+  PackageCheck,
   ServerCog,
   LogOut,
   Settings,
@@ -462,10 +459,7 @@ export default function Layout() {
         {
           name: t('agentHub'),
           items: [
-            { name: t('agents'), href: '/agents', icon: Bot },
-            { name: t('skills'), href: '/skills', icon: BookOpen },
-            { name: t('tools'), href: '/tools', icon: Wrench },
-            { name: t('hub'), href: '/hub', icon: Archive },
+            { name: t('plugins'), href: '/plugins', icon: PackageCheck },
             { name: t('models'), href: '/models', icon: Brain },
             { name: t('channels'), href: '/channels', icon: Radio },
           ],

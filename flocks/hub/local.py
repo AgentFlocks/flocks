@@ -79,6 +79,27 @@ def save_installed_record(record: InstalledPluginRecord) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def set_installed_record_enabled(plugin_type: PluginType, plugin_id: str, enabled: bool) -> InstalledPluginRecord:
+    record = get_record(plugin_type, plugin_id)
+    install_path = Path(record.installPath) if record and record.installPath else infer_local_install(plugin_type, plugin_id)
+    if install_path is None:
+        raise FileNotFoundError(f"Plugin is not installed: {plugin_type}:{plugin_id}")
+    if record is None:
+        record = make_record(
+            plugin_type=plugin_type,
+            plugin_id=plugin_id,
+            version="0.0.0",
+            source="local",
+            install_path=install_path,
+            enabled=enabled,
+            scope="project" if _project_plugins_root().resolve() in install_path.resolve().parents else "global",
+        )
+    else:
+        record.enabled = enabled
+    save_installed_record(record)
+    return record
+
+
 def remove_installed_record(plugin_type: PluginType, plugin_id: str) -> None:
     import json
 

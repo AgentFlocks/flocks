@@ -192,6 +192,17 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     assert installed.status_code == 200
     assert installed.json()["id"] == "ndr-alert-analysis"
 
+    disabled = client.patch("/api/hub/plugins/skill/ndr-alert-analysis/enabled", json={"enabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    disabled_catalog = client.get("/api/hub/catalog", params={"state": "installed"}).json()
+    disabled_entry = next(item for item in disabled_catalog if item["id"] == "ndr-alert-analysis")
+    assert disabled_entry["enabled"] is False
+
+    enabled = client.patch("/api/hub/plugins/skill/ndr-alert-analysis/enabled", json={"enabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+
     installed_catalog = client.get("/api/hub/catalog", params={"state": "installed"}).json()
     assert any(item["id"] == "ndr-alert-analysis" for item in installed_catalog)
 
