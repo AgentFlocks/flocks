@@ -29,12 +29,9 @@ import ThemeToggle from '@/components/common/ThemeToggle';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
 // the home page never needs. To keep the lazy split effective, we don't
-// re-import the dismissal helpers from the modal modules (a static named
-// import would force Rollup to bundle the whole module eagerly), and instead
-// inline the two localStorage keys here. Keep these in sync with the keys
-// declared in OnboardingModal.tsx / UpdateModal.tsx.
+// re-import dismissal helpers from the modal modules (a static named import
+// would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
-const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 function isOnboardingDismissed(): boolean {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
@@ -52,6 +49,7 @@ import {
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
+import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 
@@ -155,13 +153,15 @@ export default function Layout() {
       if (info.has_update && info.latest_version) {
         setHasUpdate(true);
         setLatestVersion(info.latest_version);
+        const updateDismissalKey = buildUpdateDismissalKey(info);
 
         if (
           canManageUpdates
-          && lastPromptedVersionRef.current !== info.latest_version
-          && localStorage.getItem(UPDATE_DISMISSED_KEY) !== info.current_version
+          && updateDismissalKey
+          && lastPromptedVersionRef.current !== updateDismissalKey
+          && !isUpdateDismissed(info, localStorage.getItem(UPDATE_DISMISSED_KEY))
         ) {
-          lastPromptedVersionRef.current = info.latest_version;
+          lastPromptedVersionRef.current = updateDismissalKey;
           setShowUpdate(true);
         }
         return;

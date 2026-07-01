@@ -14,13 +14,14 @@ import {
 import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
+import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 
 // ------------------------------------------------------------------ //
 
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 
-export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
+export { UPDATE_DISMISSED_KEY };
 
 function formatUpdateVersion(version?: string | null): string {
   const raw = (version || '').trim();
@@ -371,7 +372,10 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
             {info?.has_update && onDismiss && (
               <button
                 onClick={() => {
-                  localStorage.setItem(UPDATE_DISMISSED_KEY, info.current_version);
+                  const dismissalKey = buildUpdateDismissalKey(info);
+                  if (dismissalKey) {
+                    localStorage.setItem(UPDATE_DISMISSED_KEY, dismissalKey);
+                  }
                   onDismiss();
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-gray-600 transition-colors"

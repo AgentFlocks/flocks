@@ -961,7 +961,7 @@ async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[st
     The generic Flocks update endpoint checks OSS releases. Pro bundle upgrades
     opt into the Console manifest explicitly via ``force_console_manifest``.
     """
-    return list(configured_sources)
+    return [source for source in configured_sources if source != "console-manifest"]
 
 
 def _is_flockspro_license_active() -> bool:
@@ -2625,7 +2625,7 @@ async def get_latest_release(
     repo = repo or ucfg.repo
     token = token or ucfg.token
     base_url = base_url or ucfg.base_url
-    sources = list(sources_override or ucfg.sources)
+    sources = list(ucfg.sources if sources_override is None else sources_override)
 
     if provider:
         sources = [provider]

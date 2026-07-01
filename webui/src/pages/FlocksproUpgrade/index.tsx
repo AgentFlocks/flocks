@@ -317,6 +317,9 @@ export default function FlocksproUpgradePage() {
   const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
   const currentConsoleAccountKey = consoleLoginStatus?.logged_in ? consoleAccountName.toLowerCase() : '';
   const isProPackageInstalled = proPackageStatus?.installed === true;
+  const isProRuntimeInstalled =
+    proPackageStatus?.runtime_importable === true ||
+    (proPackageStatus?.runtime_importable == null && proPackageStatus?.installed === true);
   const licenseReapplyAllowed =
     licenseStatus?.reapply_allowed === true ||
     ['revoked', 'expired'].includes(String(licenseStatus?.license_status || '').toLowerCase());
@@ -347,7 +350,7 @@ export default function FlocksproUpgradePage() {
   const currentIssuedRequestLicenseId = currentIssuedRequest ? requestLicenseId(currentIssuedRequest) : '';
   const canInstallProPackageFromRequest = useCallback(
     (item: UpgradeRequestStatus) => {
-      if (!isProPackageInstalled && requestCanInstallProPackage(item) && item.request_id === currentIssuedRequest?.request_id) {
+      if (!isProRuntimeInstalled && requestCanInstallProPackage(item) && item.request_id === currentIssuedRequest?.request_id) {
         if (!runtimeLicenseId) {
           return true;
         }
@@ -358,7 +361,7 @@ export default function FlocksproUpgradePage() {
     [
       currentIssuedRequest?.request_id,
       currentIssuedRequestLicenseId,
-      isProPackageInstalled,
+      isProRuntimeInstalled,
       runtimeLicenseId,
       runtimeLicenseInvalid,
     ],
@@ -416,7 +419,7 @@ export default function FlocksproUpgradePage() {
     proPackageStatus?.pro_enabled === true;
   const hasProInstallSignal =
     isProPackageInstalled ||
-    proPackageStatus?.runtime_importable === true ||
+    isProRuntimeInstalled ||
     proPackageStatus?.install_marker_present === true ||
     licenseStatus?.active === true;
   const canUseProFeatures = hasProInstallSignal && isProRuntimeActive;
@@ -896,7 +899,7 @@ export default function FlocksproUpgradePage() {
     Boolean(activeRequest && currentIssuedRequest) &&
     activeRequest?.request_id === currentIssuedRequest?.request_id &&
     showCurrentLicenseCard;
-  const showActiveRequestCard = Boolean(activeRequest) && !(activeRequestIsCurrentLicense && isProPackageInstalled);
+  const showActiveRequestCard = Boolean(activeRequest) && !(activeRequestIsCurrentLicense && isProRuntimeInstalled);
   const historyRequests = accountScopedRequests.filter((item) => {
     if (item.request_id === currentIssuedRequest?.request_id) {
       return false;
