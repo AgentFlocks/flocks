@@ -11,7 +11,7 @@ from typing import Any, Callable, Coroutine, Optional
 
 from flocks.contracts.webui.api_runtime import WebUIPageApiRuntime
 from flocks.contracts.webui.builder import WebUIPageBuilder
-from flocks.contracts.webui.store import WebUIPagesStore
+from flocks.contracts.webui.store import WORKSPACE_MANIFEST_FILE, WebUIPagesStore
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -143,12 +143,33 @@ class WebUIPagesWatcher:
             return None
         if not rel.parts:
             return None
-        page_id = rel.parts[0]
-        if is_directory and len(rel.parts) == 1 and event_type == "deleted":
-            return page_id, _PendingAction(page_removed=True)
-        if len(rel.parts) < 2:
+
+        if rel.name == WORKSPACE_MANIFEST_FILE:
+            workspace_id = self._store.workspace_id_for_path(src)
+            if workspace_id is not None:
+                return workspace_id, _PendingAction(manifest_changed=True)
+
+        page_id = self._store.page_id_for_path(src)
+        if page_id is None:
+            page_id = self._page_id_from_deleted_path(rel)
+            if page_id is None:
+                return None
+            if is_directory and event_type == "deleted":
+                return page_id, _PendingAction(page_removed=True)
+            if rel.name == "manifest.json" and event_type == "deleted":
+                return page_id, _PendingAction(manifest_changed=True)
             return None
-        rel_str = str(Path(*rel.parts[1:])).replace("\\", "/")
+
+        try:
+            page_dir = self._store.page_dir(page_id).resolve()
+            page_rel = src.resolve(strict=False).relative_to(page_dir)
+        except Exception:
+            return None
+        if not page_rel.parts:
+            if is_directory and event_type == "deleted":
+                return page_id, _PendingAction(page_removed=True)
+            return None
+        rel_str = str(Path(*page_rel.parts)).replace("\\", "/")
         if rel_str == "manifest.json":
             return page_id, _PendingAction(manifest_changed=True)
         if rel_str.startswith("src/") and rel.suffix in {".ts", ".tsx", ".js", ".jsx", ".css"}:
@@ -156,6 +177,15 @@ class WebUIPagesWatcher:
         if rel_str == "api/routes.yaml" or (rel_str.startswith("api/") and rel.suffix == ".py"):
             return page_id, _PendingAction(api_changed=True)
         return None
+
+    def _page_id_from_deleted_path(self, rel: Path) -> Optional[str]:
+        if not rel.parts:
+            return None
+        page_dir_name = rel.parent.name if rel.name == "manifest.json" else rel.name
+        try:
+            return self._store.validate_page_id(page_dir_name.replace("_", "-"))
+        except ValueError:
+            return None
 
     def _schedule(self, page_id: str, update: _PendingAction) -> None:
         with self._lock:

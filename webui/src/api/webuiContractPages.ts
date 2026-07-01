@@ -10,6 +10,31 @@ export interface WebUIContractPageListItem {
   placement: string;
   buildHash: string;
   buildStatus: 'idle' | 'building' | 'ready' | 'failed';
+  workspaceId?: string | null;
+  workspaceTitle?: string | null;
+  workspaceRoute?: string | null;
+}
+
+export interface WebUIContractWorkspaceSection {
+  id: string;
+  label: string;
+  pageIds: string[];
+  defaultPageId?: string | null;
+  contentPadding?: 'comfortable' | 'none';
+  themeOverride?: 'light' | 'dark' | null;
+}
+
+export interface WebUIContractWorkspaceListItem {
+  id: string;
+  title: string;
+  route: string;
+  icon: string;
+  order: number;
+  enabled: boolean;
+  placement: 'sceneWorkspace' | 'aiWorkbench';
+  defaultPageId?: string | null;
+  sections?: WebUIContractWorkspaceSection[];
+  pages: WebUIContractPageListItem[];
 }
 
 export interface WebUIContractPageManifest {
@@ -53,6 +78,11 @@ export interface WebUIContractPageSaveRequest {
 export const webuiContractPagesAPI = {
   list: (enabledOnly = false) =>
     client.get<WebUIContractPageListItem[]>('/api/contracts/webui/pages', {
+      params: enabledOnly ? { enabledOnly: true } : undefined,
+    }),
+
+  listWorkspaces: (enabledOnly = false) =>
+    client.get<WebUIContractWorkspaceListItem[]>('/api/contracts/webui/workspaces', {
       params: enabledOnly ? { enabledOnly: true } : undefined,
     }),
 

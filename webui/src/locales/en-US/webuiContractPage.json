@@ -1,18 +1,31 @@
 {
   "host": {
     "missingPageId": "Page ID is missing",
-    "loading": "Loading WebUI contract page...",
+    "loading": "Loading custom page...",
     "unavailableTitle": "Page unavailable",
     "notBuilt": "This page has not been built yet",
     "loadFailed": "Failed to load page",
     "buildFailed": "Page build failed",
     "retry": "Retry",
     "emptyComponent": "Page component is empty",
-    "renderFailedTitle": "WebUI contract page failed to run",
+    "renderFailedTitle": "Custom page failed to run",
     "renderFailed": "Page render failed",
     "bundleMissingExport": "Page bundle does not export a default component"
   },
   "nav": {
-    "fetchFailed": "Failed to load WebUI contract page navigation"
+    "fetchFailed": "Failed to load custom page navigation"
+  },
+  "workspace": {
+    "missingWorkspaceId": "Workspace ID is missing",
+    "loading": "Loading workspace...",
+    "unavailableTitle": "Workspace unavailable",
+    "loadFailed": "Failed to load workspace",
+    "notFound": "Workspace not found",
+    "empty": "No pages in this workspace",
+    "selectPage": "Select a page from the workspace menu",
+    "pageNotFound": "Page not found",
+    "sectionNavigation": "Workspace page sections",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar"
   }
 }
