@@ -152,3 +152,192 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             --data-binary "@${RUNNER_TEMP}/flocks-autotest-dispatch.json" \
             "https://api.github.com/repos/AgentFlocks/flocks_autotest/dispatches"
+
+      - name: Wait for flocks_autotest result
+        id: autotest
+        timeout-minutes: 210
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTEST_DISPATCH_TOKEN }}
+          RELEASE_TAG: ${{ steps.payload.outputs.release_tag }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          AUTOTEST_REPOSITORY: AgentFlocks/flocks_autotest
+          AUTOTEST_WORKFLOW_FILE: flocks-release-dispatch.yml
+          AUTOTEST_POLL_INTERVAL_SECONDS: "30"
+          AUTOTEST_WAIT_TIMEOUT_SECONDS: "10800"
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          api_root = "https://api.github.com"
+          token = os.environ["GH_TOKEN"]
+          release_tag = os.environ["RELEASE_TAG"]
+          source_run_id = os.environ["SOURCE_RUN_ID"]
+          autotest_repo = os.environ["AUTOTEST_REPOSITORY"]
+          workflow_file = os.environ["AUTOTEST_WORKFLOW_FILE"]
+          poll_interval = int(os.environ["AUTOTEST_POLL_INTERVAL_SECONDS"])
+          wait_timeout = int(os.environ["AUTOTEST_WAIT_TIMEOUT_SECONDS"])
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          runner_temp = os.environ["RUNNER_TEMP"]
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def api_json(url):
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          def download(url, destination):
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request, timeout=300) as response:
+                  with open(destination, "wb") as f:
+                      f.write(response.read())
+
+          def write_summary(lines):
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("\n".join(lines))
+                  f.write("\n")
+
+          def write_outputs(values):
+              with open(output_path, "a", encoding="utf-8") as f:
+                  for key, value in values.items():
+                      f.write(f"{key}={value}\n")
+
+          workflow_ref = urllib.parse.quote(workflow_file, safe="")
+          runs_url = (
+              f"{api_root}/repos/{autotest_repo}/actions/workflows/"
+              f"{workflow_ref}/runs?event=repository_dispatch&per_page=30"
+          )
+          artifact_prefix = f"flocks-windows-upgrade-{release_tag}-time"
+          deadline = time.time() + wait_timeout
+          matched_run = None
+
+          while time.time() < deadline:
+              runs = api_json(runs_url).get("workflow_runs", [])
+              for run in runs:
+                  title = run.get("display_title") or run.get("name") or ""
+                  if f"#{source_run_id}" in title:
+                      matched_run = run
+                      break
+              if matched_run:
+                  break
+              print(
+                  f"Waiting for flocks_autotest workflow run with source_run_id={source_run_id}...",
+                  flush=True,
+              )
+              time.sleep(poll_interval)
+
+          if not matched_run:
+              write_summary(
+                  [
+                      "### flocks_autotest result",
+                      "",
+                      f"- Status: timed out waiting for workflow run",
+                      f"- Source run id: {source_run_id}",
+                      f"- Expected artifact prefix: {artifact_prefix}",
+                  ]
+              )
+              raise SystemExit("Timed out waiting for flocks_autotest workflow run")
+
+          run_id = matched_run["id"]
+          run_api_url = matched_run["url"]
+          run_html_url = matched_run["html_url"]
+          print(f"Matched flocks_autotest run: {run_html_url}", flush=True)
+
+          while time.time() < deadline:
+              matched_run = api_json(run_api_url)
+              status = matched_run.get("status")
+              conclusion = matched_run.get("conclusion") or ""
+              print(
+                  f"flocks_autotest run {run_id}: status={status} conclusion={conclusion}",
+                  flush=True,
+              )
+              if status == "completed":
+                  break
+              time.sleep(poll_interval)
+
+          if matched_run.get("status") != "completed":
+              write_summary(
+                  [
+                      "### flocks_autotest result",
+                      "",
+                      f"- Status: timed out waiting for completion",
+                      f"- Run: {run_html_url}",
+                      f"- Expected artifact prefix: {artifact_prefix}",
+                  ]
+              )
+              raise SystemExit("Timed out waiting for flocks_autotest completion")
+
+          conclusion = matched_run.get("conclusion") or "unknown"
+          artifacts_url = f"{api_root}/repos/{autotest_repo}/actions/runs/{run_id}/artifacts?per_page=100"
+          artifacts = api_json(artifacts_url).get("artifacts", [])
+          matching_artifacts = [
+              artifact
+              for artifact in artifacts
+              if not artifact.get("expired") and (artifact.get("name") or "").startswith(artifact_prefix)
+          ]
+          matching_artifacts.sort(key=lambda artifact: artifact.get("created_at") or "", reverse=True)
+
+          artifact_name = ""
+          artifact_html_url = ""
+          artifact_path = ""
+          if matching_artifacts:
+              artifact = matching_artifacts[0]
+              artifact_name = artifact["name"]
+              artifact_html_url = (
+                  f"https://github.com/{autotest_repo}/actions/runs/{run_id}/artifacts/{artifact['id']}"
+              )
+              artifact_path = os.path.join(runner_temp, f"{artifact_name}.zip")
+              download(artifact["archive_download_url"], artifact_path)
+              print(f"Downloaded flocks_autotest artifact: {artifact_path}", flush=True)
+
+          write_outputs(
+              {
+                  "run_id": str(run_id),
+                  "run_url": run_html_url,
+                  "conclusion": conclusion,
+                  "artifact_name": artifact_name,
+                  "artifact_url": artifact_html_url,
+                  "artifact_path": artifact_path,
+              }
+          )
+
+          summary_lines = [
+              "### flocks_autotest result",
+              "",
+              f"- Run: {run_html_url}",
+              f"- Conclusion: {conclusion}",
+              f"- Expected artifact prefix: {artifact_prefix}",
+          ]
+          if artifact_name:
+              summary_lines.append(f"- Artifact: [{artifact_name}]({artifact_html_url})")
+              summary_lines.append("- Artifact copy: uploaded to this flocks workflow run")
+          else:
+              summary_lines.append("- Artifact: not found")
+          write_summary(summary_lines)
+
+          if conclusion != "success":
+              raise SystemExit(f"flocks_autotest concluded with {conclusion}")
+          if not artifact_name:
+              raise SystemExit("flocks_autotest artifact was not found")
+          PY
+
+      - name: Upload flocks_autotest artifact copy
+        if: ${{ always() && steps.autotest.outputs.artifact_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.autotest.outputs.artifact_name }}
+          path: ${{ steps.autotest.outputs.artifact_path }}
+          if-no-files-found: error
