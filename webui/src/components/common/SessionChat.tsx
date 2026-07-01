@@ -2869,25 +2869,31 @@ export default function SessionChat({
     const lastAsstMsg = [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
     );
+    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;
     suppressStreamingUntilIdleRef.current = true;
     sessionBusyRef.current = false;
-    if (lastAsstMsg?.id) {
-      markMessageStopped(lastAsstMsg.id);
-    }
     setIsStreaming(false);
     setSending(false);
     try {
       await client.post(`/api/session/${sessionId}/abort`);
+      if (lastAsstMsg?.id) {
+        markMessageStopped(lastAsstMsg.id);
+      }
       setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
     } catch (err) {
       console.error('[SessionChat] Abort failed:', err);
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
+      if (shouldRestoreActivity) {
+        sessionBusyRef.current = true;
+        setIsStreaming(true);
+        if (sending) setSending(true);
+      }
     }
-  }, [markMessageStopped, sessionId]);
+  }, [isStreaming, markMessageStopped, sending, sessionId]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
     setEditingQueueId(item.id);
