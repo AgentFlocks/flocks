@@ -54,8 +54,6 @@ class PythonExecRuntime(Runtime):
     _RUNTIME_GLOBAL_KEYS: ClassVar[frozenset[str]] = frozenset(
         {
             "__builtins__",
-            "inputs",
-            "outputs",
             "cancelled",
             "is_cancelled",
             "llm",
@@ -141,73 +139,80 @@ class PythonExecRuntime(Runtime):
             return _cancel_trace
 
         try:
-            if self.cancel_checker is not None:
-                previous_trace = sys.gettrace()
-                sys.settrace(_cancel_trace)
-            with contextlib.redirect_stdout(buf):
-                exec(code, g, g)
-        except SystemExit:
-            # Node code called exit() / sys.exit() — treat as early return with
-            # whatever has been written to outputs so far.  Do NOT propagate
-            # SystemExit; that would kill the asyncio event loop.
-            pass
-        except RunCancelledError:
-            raise
-        except _FuturesTimeoutError:
-            raise
-        except SyntaxError as e:
-            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            raise NodeExecutionError(
-                node_id="<runtime>",
-                message=f"Syntax error in code at line {e.lineno}: {e.msg}",
-                stdout=buf.getvalue(),
-                traceback=tb_str
-            ) from e
-        except AttributeError as e:
-            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            error_msg = f"AttributeError: {e}"
-            if "'NoneType' object has no attribute" in str(e):
-                attr_name = str(e).split("'")[-2] if "'" in str(e) else "unknown"
-                error_msg += f"\n提示: 对象为 None，无法访问属性 '{attr_name}'。"
-            raise NodeExecutionError(node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str) from e
-        except KeyError as e:
-            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            raise NodeExecutionError(
-                node_id="<runtime>",
-                message=f"Missing required input key: {e}",
-                stdout=buf.getvalue(),
-                traceback=tb_str
-            ) from e
-        except NameError as e:
-            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            raise NodeExecutionError(
-                node_id="<runtime>",
-                message=f"Undefined variable or function: {e}",
-                stdout=buf.getvalue(),
-                traceback=tb_str
-            ) from e
-        except TypeError as e:
-            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            error_msg = f"Type error during execution: {e}"
-            raise NodeExecutionError(node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str) from e
-        except Exception as e:
-            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            error_msg = f"Runtime error ({type(e).__name__}): {e}"
-            raise NodeExecutionError(node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str) from e
+            try:
+                if self.cancel_checker is not None:
+                    previous_trace = sys.gettrace()
+                    sys.settrace(_cancel_trace)
+                with contextlib.redirect_stdout(buf):
+                    exec(code, g, g)
+            except SystemExit:
+                # Node code called exit() / sys.exit() — treat as early return with
+                # whatever has been written to outputs so far.  Do NOT propagate
+                # SystemExit; that would kill the asyncio event loop.
+                pass
+            except RunCancelledError:
+                raise
+            except _FuturesTimeoutError:
+                raise
+            except SyntaxError as e:
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Syntax error in code at line {e.lineno}: {e.msg}",
+                    stdout=buf.getvalue(),
+                    traceback=tb_str,
+                ) from e
+            except AttributeError as e:
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                error_msg = f"AttributeError: {e}"
+                if "'NoneType' object has no attribute" in str(e):
+                    attr_name = str(e).split("'")[-2] if "'" in str(e) else "unknown"
+                    error_msg += f"\n提示: 对象为 None，无法访问属性 '{attr_name}'。"
+                raise NodeExecutionError(
+                    node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str
+                ) from e
+            except KeyError as e:
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Missing required input key: {e}",
+                    stdout=buf.getvalue(),
+                    traceback=tb_str,
+                ) from e
+            except NameError as e:
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Undefined variable or function: {e}",
+                    stdout=buf.getvalue(),
+                    traceback=tb_str,
+                ) from e
+            except TypeError as e:
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                error_msg = f"Type error during execution: {e}"
+                raise NodeExecutionError(
+                    node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str
+                ) from e
+            except Exception as e:
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                error_msg = f"Runtime error ({type(e).__name__}): {e}"
+                raise NodeExecutionError(
+                    node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str
+                ) from e
+
+            out_obj = g.get("outputs", {})
+            if out_obj is None:
+                out_obj = {}
+            if not isinstance(out_obj, dict):
+                raise NodeExecutionError(node_id="<runtime>", message="`outputs` must be a dict")
+            return dict(out_obj), buf.getvalue()
         finally:
             if self.cancel_checker is not None:
                 sys.settrace(previous_trace)
-
-        out_obj = g.get("outputs", {})
-        if out_obj is None:
-            out_obj = {}
-        if not isinstance(out_obj, dict):
-            raise NodeExecutionError(node_id="<runtime>", message="`outputs` must be a dict")
-        if self.cleanup_globals_after_execute:
-            for key in list(g.keys()):
-                if key not in self._RUNTIME_GLOBAL_KEYS:
-                    g.pop(key, None)
-        return out_obj, buf.getvalue()
+            if self.cleanup_globals_after_execute:
+                for key in list(g.keys()):
+                    if key not in self._RUNTIME_GLOBAL_KEYS:
+                        g.pop(key, None)
 
     def reset(self) -> None:
         self.globals.clear()
@@ -646,7 +651,7 @@ class PythonREPLRuntime(Runtime):
         outputs: Dict[str, Any] = {}
         for line in stdout.splitlines():
             if line.startswith(marker):
-                payload = line[len(marker):]
+                payload = line[len(marker) :]
                 try:
                     obj = json.loads(payload) if payload else {}
                 except Exception:
