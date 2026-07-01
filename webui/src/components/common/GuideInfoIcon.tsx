@@ -13,12 +13,14 @@ interface GuideInfoIconProps {
   label: string;
   description: string;
   className?: string;
+  interactive?: boolean;
 }
 
 export default function GuideInfoIcon({
   label,
   description,
   className = '',
+  interactive = true,
 }: GuideInfoIconProps) {
   const [tooltip, setTooltip] = useState<GuideTooltip | null>(null);
   const tooltipId = useId();
@@ -39,11 +41,12 @@ export default function GuideInfoIcon({
   return (
     <>
       <span
-        tabIndex={0}
+        tabIndex={interactive ? 0 : undefined}
         className={`inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500 ${className}`}
-        aria-label={`${label}说明`}
-        aria-describedby={tooltip ? tooltipId : undefined}
-        role="img"
+        aria-label={interactive ? `${label}说明` : undefined}
+        aria-hidden={interactive ? undefined : true}
+        aria-describedby={interactive && tooltip ? tooltipId : undefined}
+        role={interactive ? 'img' : undefined}
         onMouseDown={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -53,11 +56,11 @@ export default function GuideInfoIcon({
           event.stopPropagation();
         }}
         onPointerEnter={(event) => showTooltip(event.currentTarget)}
-        onFocus={(event) => showTooltip(event.currentTarget)}
+        onFocus={interactive ? (event) => showTooltip(event.currentTarget) : undefined}
         onMouseEnter={(event) => showTooltip(event.currentTarget)}
         onMouseOver={(event) => showTooltip(event.currentTarget)}
         onPointerLeave={hideTooltip}
-        onBlur={hideTooltip}
+        onBlur={interactive ? hideTooltip : undefined}
         onMouseLeave={hideTooltip}
       >
         <Info className="h-3.5 w-3.5" aria-hidden="true" />

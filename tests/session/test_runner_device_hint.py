@@ -61,7 +61,7 @@ async def test_device_asset_hint_stays_short_and_strategy_only() -> None:
     assert "已省略" not in hint
     assert "threatbook" in hint
     assert "qianxin" in hint
-    assert "`device_context`" in hint
+    assert "`device_manage(action='list')`" in hint
     assert "`tool_search`" in hint
     assert "`device_id`" in hint
     assert "机房:" not in hint

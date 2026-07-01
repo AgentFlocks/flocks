@@ -147,7 +147,7 @@ class DeviceIntegrationUpdate(BaseModel):
     enabled: Optional[bool] = None
     verify_ssl: Optional[bool] = None
     #: Partial update: absent keys keep existing value; empty-string secret
-    #: fields keep the existing secret ("leave blank = keep current" UX).
+    #: fields clear the existing secret.
     fields: Optional[Dict[str, str]] = None
 
 
