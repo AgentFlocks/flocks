@@ -34,3 +34,10 @@ def test_dev_script_stops_backend_process_tree_on_exit() -> None:
     assert 'kill -TERM "${kill_targets[@]}"' in script
     assert 'kill -KILL "${remaining[@]}"' in script
     assert 'kill "${BACKEND_PID}" 2>/dev/null || true' not in script
+
+
+def test_dev_script_sets_console_base_url_default() -> None:
+    script = (SCRIPT_DIR / "dev.sh").read_text(encoding="utf-8")
+
+    assert 'FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL:-https://portalflocks.threatbook.cn}"' in script
+    assert 'FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL}" \\' in script
