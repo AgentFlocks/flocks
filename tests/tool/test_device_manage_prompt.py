@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from flocks.tool.device.prompt import build_device_context_section
+from flocks.tool.device.prompt import build_device_manage_list_section
 from flocks.tool.registry import ParameterType, ToolCategory, ToolInfo, ToolParameter
 
 def _stub_groups(monkeypatch: pytest.MonkeyPatch, groups):
@@ -32,7 +32,7 @@ def _stub_tools(monkeypatch: pytest.MonkeyPatch, tools):
 
 
 @pytest.mark.asyncio
-async def test_device_context_deduplicates_tool_sets_and_references_them_from_devices(
+async def test_device_manage_list_deduplicates_tool_sets_and_references_them_from_devices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -91,7 +91,7 @@ async def test_device_context_deduplicates_tool_sets_and_references_them_from_de
         ],
     )
 
-    content = await build_device_context_section()
+    content = await build_device_manage_list_section()
 
     assert content is not None
     assert "设备不存在时，请提醒用户前往设备接入页面添加设备。" in content
@@ -109,7 +109,7 @@ async def test_device_context_deduplicates_tool_sets_and_references_them_from_de
 
 
 @pytest.mark.asyncio
-async def test_device_context_shows_per_device_disabled_tools_only_for_their_device(
+async def test_device_manage_list_shows_per_device_disabled_tools_only_for_their_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Per-device disabled tools must be annotated only under the device that
@@ -143,7 +143,7 @@ async def test_device_context_shows_per_device_disabled_tools_only_for_their_dev
         ),
     ])
 
-    content = await build_device_context_section()
+    content = await build_device_manage_list_section()
     assert content is not None
 
     # Locate the per-device blocks by anchoring on the device name line.
@@ -166,7 +166,7 @@ async def test_device_context_shows_per_device_disabled_tools_only_for_their_dev
 
 
 @pytest.mark.asyncio
-async def test_device_context_omits_notice_when_no_per_device_overrides(
+async def test_device_manage_list_omits_notice_when_no_per_device_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No notice line should appear when a device has no per-device overrides."""
@@ -186,6 +186,6 @@ async def test_device_context_omits_notice_when_no_per_device_overrides(
         ),
     ])
 
-    content = await build_device_context_section()
+    content = await build_device_manage_list_section()
     assert content is not None
     assert "已单独禁用" not in content

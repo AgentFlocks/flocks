@@ -237,13 +237,17 @@ flowchart TD
 **Edge 约束：**
 
 - JSON 中用 `"from"` 而非 `"from_"`；`from`/`to` 引用存在的 node id；`order` ≥ 0。
+- **新建 workflow 的每条 edge 必须包含非空 `mapping` 对象**。不要生成无 `mapping` 的 edge；不要只写 `const` 而省略 `mapping`。新建 workflow 默认启用 strict edge mapping，无 `mapping` 会在创建或运行时失败。
 
 ### 3.2 映射规则
 
 - `workflow.md` 每步对应一个节点，`id` 用 snake_case。
 - md 中写的输出字段，必须在 `outputs[...]` 中体现。
 - md 中 `Tool: xxx` 标记 → 对应节点 `description` 保留。
-- 下游节点如需 `tool.run(..., **inputs)`，用 `edge.mapping`/`edge.const` 规整输入到匹配工具参数形状。
+- 所有 edge 都必须写 `edge.mapping`，只映射下游节点实际需要的字段，避免全量 payload 传递。
+- 下游节点如需 `tool.run(..., **inputs)`，用 `edge.mapping`/`edge.const` 规整输入到匹配工具参数形状；其中 `edge.mapping` 仍然必须非空。
+- 若某条边只是控制流、下游不需要业务字段，也必须映射一个确定存在的小字段（如 `case_id`、`has_results`、`status`）；如果没有合适字段，让上游节点写出 `outputs["_edge_context"] = True`，并在该边映射 `{ "_edge_context": "_edge_context" }`。
+- `branch`/`loop` 出边同样必须写 `mapping`。映射源可以来自该分支节点收到的输入 payload（例如 `search_text`、`case_id`、`has_results`），不要求来自 branch 节点自身输出。
 - 详细 Mapping 指南见 [reference.md § Edge Mapping](references/reference.md#4-edge-mapping-详细指南)。
 
 ### 3.3 分支/循环与 Join
@@ -322,8 +326,9 @@ elif isinstance(obj, str):
 
 1. 用 `json.load` 确认 JSON 格式正确。
 2. 对每个 `type="python"` 节点的 `code` 执行 `compile(code, "<node_id>", "exec")` 确认 Python 语法正确。
-3. 若格式或语法报错，修复后重新写入 `workflow.json` 并再次验证。
-4. 将阶段 1 收集的样例数据保存到 `POST /api/workflow/{id}/sample-inputs`，body 为 `{ "sampleInputs": <样例 JSON 对象> }`。
+3. 检查每条 `edges[]` 都有非空 `mapping` 对象；发现缺失时必须补齐映射并重写 `workflow.json`。
+4. 若格式、语法或 edge mapping 校验报错，修复后重新写入 `workflow.json` 并再次验证。
+5. 将阶段 1 收集的样例数据保存到 `POST /api/workflow/{id}/sample-inputs`，body 为 `{ "sampleInputs": <样例 JSON 对象> }`。
 
 只有以上步骤全部通过后，才能进入第五阶段逐节点测试。
 

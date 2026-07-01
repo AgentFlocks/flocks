@@ -29,29 +29,48 @@ async function readUpgradePageState(): Promise<string | null> {
   return null;
 }
 
-export async function checkRestartReadiness(): Promise<RestartReadiness> {
-  try {
-    const healthResponse = await fetch('/api/health', { cache: 'no-store' });
-    if (healthResponse.ok) {
-      return { ready: true };
-    }
+function loopbackBackendHealthURL(): string | null {
+  if (typeof window === 'undefined') return null;
 
-    const pageReason = await readUpgradePageState();
-    return {
-      ready: false,
-      reason: [
-        `health check returned HTTP ${healthResponse.status}`,
-        pageReason,
-      ].filter(Boolean).join('; '),
-    };
-  } catch (error) {
-    const pageReason = await readUpgradePageState();
-    return {
-      ready: false,
-      reason: [
-        `health check failed: ${errorMessage(error)}`,
-        pageReason,
-      ].filter(Boolean).join('; '),
-    };
+  const { protocol, hostname, port } = window.location;
+  if (!['localhost', '127.0.0.1', '::1'].includes(hostname)) return null;
+  if (!port || port === '8000') return null;
+
+  const host = hostname === '::1' ? '[::1]' : hostname;
+  return `${protocol}//${host}:8000/api/health`;
+}
+
+async function checkHealth(url: string): Promise<Response | null> {
+  try {
+    return await fetch(url, { cache: 'no-store' });
+  } catch {
+    return null;
   }
+}
+
+export async function checkRestartReadiness(): Promise<RestartReadiness> {
+  const healthResponse = await checkHealth('/api/health');
+  if (healthResponse?.ok) {
+    return { ready: true };
+  }
+
+  const fallbackURL = loopbackBackendHealthURL();
+  const fallbackResponse = fallbackURL ? await checkHealth(fallbackURL) : null;
+  if (fallbackResponse?.ok) {
+    return { ready: true };
+  }
+
+  const pageReason = await readUpgradePageState();
+  return {
+    ready: false,
+    reason: [
+      healthResponse ? `health check returned HTTP ${healthResponse.status}` : 'health check failed',
+      fallbackURL && fallbackResponse
+        ? `loopback health check returned HTTP ${fallbackResponse.status}`
+        : fallbackURL
+          ? `loopback health check failed: ${fallbackURL}`
+          : null,
+      pageReason,
+    ].filter(Boolean).join('; '),
+  };
 }

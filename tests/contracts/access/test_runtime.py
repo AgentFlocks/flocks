@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -26,17 +27,17 @@ from flocks.contracts.webui.store import WebUIPagesStore
 from flocks.plugin.loader import PluginLoader
 
 SOURCE_PAGE_ID = "contract-source"
-PAGE_ID = "test/alerts"
-CONTRACT_ID = "test.alerts"
+PAGE_ID = "test/records"
+CONTRACT_ID = "test.records"
 CONTRACT_VERSION = "1.0"
 DRIVER_FIELDS = frozenset({"id", "tenant", "asset_group", "status", "severity", "time"})
 
 
-def _write_alert_assets(store: WebUIPagesStore, records: list[dict[str, Any]]) -> None:
+def _write_contract_assets(store: WebUIPagesStore, records: list[dict[str, Any]]) -> None:
     store.create_page(page_id=SOURCE_PAGE_ID, title="Contract source")
     asset_dir = store.asset_path(SOURCE_PAGE_ID, "2026-06-25")
     asset_dir.mkdir(parents=True, exist_ok=True)
-    asset_path = asset_dir / "alerts.jsonl"
+    asset_path = asset_dir / "records.jsonl"
     lines = [{"_type": "file_header", "date": "2026-06-25"}, *records]
     asset_path.write_text(
         "\n".join(json.dumps(line, ensure_ascii=False) for line in lines),
@@ -44,9 +45,36 @@ def _write_alert_assets(store: WebUIPagesStore, records: list[dict[str, Any]]) -
     )
 
 
-def _alert_record(**overrides: Any) -> dict[str, Any]:
+def _write_contract_sqlite(db_path: Path, records: list[dict[str, Any]]) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE records (
+            id TEXT PRIMARY KEY,
+            record_date TEXT NOT NULL,
+            record_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO records (id, record_date, record_json) VALUES (?, ?, ?)",
+        [
+            (
+                str(record.get("id") or index),
+                str(record.get("record_date") or "2026-06-25"),
+                json.dumps(record, ensure_ascii=False),
+            )
+            for index, record in enumerate(records, start=1)
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+
+def _contract_record(**overrides: Any) -> dict[str, Any]:
     record = {
-        "id": "alert-1",
+        "id": "record-1",
         "tenant": "tenant-a",
         "asset_group": "core",
         "status": "open",
@@ -92,31 +120,43 @@ def _contract() -> Contract:
                 public_fields=frozenset({"ok", "entityType", "entityId", "overlayVersion", "writeThrough"}),
                 requires_idempotency_key=True,
                 requires_expected_overlay_version=True,
-                mutation_entity_types=frozenset({"alert"}),
+                mutation_entity_types=frozenset({"record"}),
             ),
         },
     )
 
 
 class _BindingResolver:
-    def __init__(self, store: WebUIPagesStore, *, capabilities: frozenset[str] | None = None) -> None:
+    def __init__(
+        self,
+        store: WebUIPagesStore,
+        *,
+        capabilities: frozenset[str] | None = None,
+        adapter_kind: str = "builtin-jsonl",
+        source_root: Path | None = None,
+        driver_options: dict[str, Any] | None = None,
+    ) -> None:
         self._store = store
         self._capabilities = capabilities or frozenset({"query", "mutation"})
+        self._adapter_kind = adapter_kind
+        self._source_root = source_root
+        self._driver_options = driver_options or {}
 
     def resolve(self, *, page_id: str, slot_id: str, contract_id: str, contract_version: str) -> Binding:
-        source_root = self._store.asset_path(SOURCE_PAGE_ID, "")
+        source_root = self._source_root or self._store.asset_path(SOURCE_PAGE_ID, "")
         return Binding(
-            binding_id="test-jsonl",
+            binding_id=f"test-{self._adapter_kind}",
             binding_version=1,
             page_id=page_id,
             slot_id=slot_id,
             contract_id=contract_id,
             contract_version=contract_version,
-            adapter_kind="builtin-jsonl",
+            adapter_kind=self._adapter_kind,
             source_page_id=SOURCE_PAGE_ID,
             source_root=source_root,
             driver_available_fields=DRIVER_FIELDS,
-            driver_allowlist_roots=(source_root,),
+            driver_allowlist_roots=(source_root if source_root.is_dir() else source_root.parent,),
+            driver_options=self._driver_options,
             capabilities=self._capabilities,
         )
 
@@ -126,7 +166,7 @@ class _Adapter:
         return [
             InternalDataRow(
                 raw=row,
-                identity={"entityType": "alert", "entityId": f"alert:{row['id']}"},
+                identity={"entityType": "record", "entityId": f"record:{row['id']}"},
             )
             for row in driver_result.rows
         ]
@@ -169,12 +209,25 @@ class _ResponsePipeline:
         }
 
 
-def _plugin(store: WebUIPagesStore, *, capabilities: frozenset[str] | None = None) -> WebUIContractPlugin:
+def _plugin(
+    store: WebUIPagesStore,
+    *,
+    capabilities: frozenset[str] | None = None,
+    adapter_kind: str = "builtin-jsonl",
+    source_root: Path | None = None,
+    driver_options: dict[str, Any] | None = None,
+) -> WebUIContractPlugin:
     overlay_store = OverlayStore()
     return WebUIContractPlugin(
-        plugin_id="test-alerts",
+        plugin_id="test-records",
         contracts=(_contract(),),
-        binding_resolver=_BindingResolver(store, capabilities=capabilities),
+        binding_resolver=_BindingResolver(
+            store,
+            capabilities=capabilities,
+            adapter_kind=adapter_kind,
+            source_root=source_root,
+            driver_options=driver_options,
+        ),
         adapter=_Adapter(),
         response_pipeline=_ResponsePipeline(overlay_store),
         overlay_store=overlay_store,
@@ -199,7 +252,7 @@ def _runtime(
 
 def test_query_uses_shared_runtime_and_jsonl_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     runtime = _runtime(store)
 
     response = runtime.execute(
@@ -211,14 +264,53 @@ def test_query_uses_shared_runtime_and_jsonl_driver(tmp_path: Path, monkeypatch:
     )
 
     assert response.body["summary"]["totalRaw"] == 1
-    assert response.body["items"][0]["entityId"] == "alert:alert-1"
+    assert response.body["items"][0]["entityId"] == "record:record-1"
     assert response.body["items"][0]["status"] == "open"
     assert response.body["meta"]["sourcePageId"] == SOURCE_PAGE_ID
 
 
+def test_query_can_use_sqlite_json_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    _write_contract_sqlite(
+        db_path,
+        [
+            _contract_record(id="allowed", status="open", severity="high", record_date="2026-06-25"),
+            _contract_record(id="hidden", status="closed", severity="low", record_date="2026-06-25"),
+            _contract_record(id="outside-date", status="open", severity="high", record_date="2026-06-26"),
+        ],
+    )
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={
+                    "table": "records",
+                    "recordColumn": "record_json",
+                    "dateColumn": "record_date",
+                },
+            ),
+        ),
+    )
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"date": "2026-06-25", "filters": {"status": ["open"]}, "limit": 10}},
+        principal=AuthUser(id="u1", username="alice", role="admin"),
+    )
+
+    assert response.body["summary"]["totalRaw"] == 2
+    assert [item["id"] for item in response.body["items"]] == ["allowed"]
+    assert response.body["items"][0]["entityId"] == "record:allowed"
+
+
 def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     runtime = _runtime(store)
 
     with pytest.raises(ContractRuntimeError) as binding_error:
@@ -244,11 +336,11 @@ def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, 
 
 def test_default_policy_resolver_filters_member_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(
+    _write_contract_assets(
         store,
         [
-            _alert_record(id="allowed", tenant="tenant-a", asset_group="core"),
-            _alert_record(id="blocked", tenant="tenant-b", asset_group="core"),
+            _contract_record(id="allowed", tenant="tenant-a", asset_group="core"),
+            _contract_record(id="blocked", tenant="tenant-b", asset_group="core"),
         ],
     )
     runtime = OperationRuntime(plugins=(_plugin(store),))
@@ -286,7 +378,7 @@ def test_default_policy_resolver_filters_member_scope(tmp_path: Path, monkeypatc
 
 def test_default_policy_resolver_fails_closed_for_unscoped_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record(id="hidden", tenant="tenant-a", asset_group="core")])
+    _write_contract_assets(store, [_contract_record(id="hidden", tenant="tenant-a", asset_group="core")])
     runtime = OperationRuntime(plugins=(_plugin(store),))
 
     response = runtime.execute(
@@ -308,7 +400,7 @@ def test_default_policy_resolver_fails_closed_for_unscoped_member(tmp_path: Path
 
 def test_policy_and_field_dependency_plans_drive_query_projection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     provider = _plugin(store)
     binding = provider.binding_resolver.resolve(
         page_id=PAGE_ID,
@@ -330,7 +422,7 @@ def test_policy_and_field_dependency_plans_drive_query_projection(tmp_path: Path
 
 def test_policy_filter_not_enforceable_when_binding_lacks_required_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     provider = _plugin(store)
     binding = provider.binding_resolver.resolve(
         page_id=PAGE_ID,
@@ -358,14 +450,14 @@ def test_policy_filter_not_enforceable_when_binding_lacks_required_field(tmp_pat
 
 def test_mutation_pipeline_enforces_overlay_version_and_idempotency(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     runtime = _runtime(store)
     payload = {
         "idempotencyKey": "key-1",
         "expectedOverlayVersion": None,
         "params": {
-            "entityType": "alert",
-            "entityId": "alert:alert-1",
+            "entityType": "record",
+            "entityId": "record:record-1",
             "manualStatus": "closed",
             "note": "confirmed",
         },
@@ -402,7 +494,7 @@ def test_mutation_pipeline_enforces_overlay_version_and_idempotency(tmp_path: Pa
 
 def test_mutation_overlay_is_visible_on_followup_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     runtime = _runtime(store)
 
     runtime.execute(
@@ -413,8 +505,8 @@ def test_mutation_overlay_is_visible_on_followup_query(tmp_path: Path, monkeypat
             "idempotencyKey": "overlay-query-1",
             "expectedOverlayVersion": None,
             "params": {
-                "entityType": "alert",
-                "entityId": "alert:alert-1",
+                "entityType": "record",
+                "entityId": "record:record-1",
                 "manualStatus": "closed",
                 "note": "confirmed from logs",
             },
@@ -438,7 +530,7 @@ def test_mutation_overlay_is_visible_on_followup_query(tmp_path: Path, monkeypat
 
 def test_mutation_rejects_unsupported_entity_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     runtime = _runtime(store)
 
     with pytest.raises(ContractRuntimeError) as exc:
@@ -463,7 +555,7 @@ def test_mutation_rejects_unsupported_entity_type(tmp_path: Path, monkeypatch: p
 
 def test_runtime_rejects_operations_outside_binding_capabilities(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     runtime = _runtime(store, capabilities=frozenset({"query"}))
 
     with pytest.raises(ContractRuntimeError) as exc:
@@ -475,8 +567,8 @@ def test_runtime_rejects_operations_outside_binding_capabilities(tmp_path: Path,
                 "idempotencyKey": "readonly",
                 "expectedOverlayVersion": None,
                 "params": {
-                    "entityType": "alert",
-                    "entityId": "alert:alert-1",
+                    "entityType": "record",
+                    "entityId": "record:record-1",
                 },
             },
             principal=None,
@@ -487,7 +579,7 @@ def test_runtime_rejects_operations_outside_binding_capabilities(tmp_path: Path,
 
 def test_binding_test_harness_reuses_operation_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
-    _write_alert_assets(store, [_alert_record()])
+    _write_contract_assets(store, [_contract_record()])
     harness = BindingTestHarness(runtime=_runtime(store))
 
     results = harness.run(

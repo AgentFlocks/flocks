@@ -1516,7 +1516,7 @@ class SessionRunner:
         return (
             "## 安全设备使用\n\n"
             f"{summary}\n\n"
-            "当用户要操作特定机房、设备或产品时，先调用 `device_context` 获取 `device_id` 等相关信息。"
+            "当用户要操作特定机房、设备或产品时，先调用 `device_manage(action='list')` 获取 `device_id` 等相关信息。"
             "如果当前无已接入设备，请提示用户前往「设备接入」页面添加设备。"
             "使用 `tool_search` 搜索工具名称查看用法；执行设备工具时必须传入目标 `device_id`。"
             "如果同类设备有多个候选，不要猜测，先询问用户选择。"

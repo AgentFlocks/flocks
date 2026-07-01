@@ -54,9 +54,9 @@ async def test_stop_workflow_service_uses_persisted_runtime_driver(monkeypatch) 
         return True
 
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_DRIVER", "local")
-    monkeypatch.setattr(center.Storage, "read", fake_read)
-    monkeypatch.setattr(center.Storage, "write", fake_write)
-    monkeypatch.setattr(center.Storage, "remove", fake_remove)
+    monkeypatch.setattr(center.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(center.WorkflowStore, "kv_put", fake_write)
+    monkeypatch.setattr(center.WorkflowStore, "kv_remove", fake_remove)
     monkeypatch.setattr(center, "_stop_and_remove_container", fake_stop_container)
 
     result = await center.stop_workflow_service("wf-1")
@@ -108,9 +108,9 @@ async def test_publish_cleanup_uses_previous_runtime_driver(monkeypatch) -> None
         stopped_containers.append(container_name)
         return True
 
-    monkeypatch.setattr(center.Storage, "read", fake_read)
-    monkeypatch.setattr(center.Storage, "write", fake_write)
-    monkeypatch.setattr(center.Storage, "remove", fake_remove)
+    monkeypatch.setattr(center.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(center.WorkflowStore, "kv_put", fake_write)
+    monkeypatch.setattr(center.WorkflowStore, "kv_remove", fake_remove)
     monkeypatch.setattr(center, "_stop_and_remove_container", fake_stop_container)
 
     await center._stop_existing_runtime_for_publish("wf-1")
@@ -152,8 +152,8 @@ async def test_allocate_port_skips_reserved_service_records(monkeypatch) -> None
 
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", "19000")
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", "19003")
-    monkeypatch.setattr(center.Storage, "list_keys", fake_list_keys)
-    monkeypatch.setattr(center.Storage, "read", fake_read)
+    monkeypatch.setattr(center.WorkflowStore, "kv_list_keys", fake_list_keys)
+    monkeypatch.setattr(center.WorkflowStore, "kv_get", fake_read)
     monkeypatch.setattr(center, "_is_port_available", lambda _port: True)
 
     assert await center._allocate_port() == 19003
@@ -169,7 +169,7 @@ async def test_allocate_port_reserves_in_flight_allocations(monkeypatch) -> None
 
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", "19000")
     monkeypatch.setenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", "19001")
-    monkeypatch.setattr(center.Storage, "list_keys", fake_list_keys)
+    monkeypatch.setattr(center.WorkflowStore, "kv_list_keys", fake_list_keys)
     monkeypatch.setattr(center, "_is_port_available", lambda _port: True)
 
     try:
@@ -187,12 +187,14 @@ async def test_publish_workflow_local_releases_reserved_port_on_spawn_failure(
     workflow_id = "wf-local-spawn-fail"
     workflow_path = tmp_path / "workflow.json"
     workflow_path.write_text(
-        json.dumps({
-            "id": workflow_id,
-            "start": "n1",
-            "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
-            "edges": [],
-        }),
+        json.dumps(
+            {
+                "id": workflow_id,
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
     store: dict[str, Any] = {
@@ -223,8 +225,8 @@ async def test_publish_workflow_local_releases_reserved_port_on_spawn_failure(
         raise OSError("spawn failed")
 
     center._IN_FLIGHT_PORT_RESERVATIONS.clear()
-    monkeypatch.setattr(center.Storage, "read", fake_read)
-    monkeypatch.setattr(center.Storage, "write", fake_write)
+    monkeypatch.setattr(center.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(center.WorkflowStore, "kv_put", fake_write)
     monkeypatch.setattr(center, "_stop_existing_runtime_for_publish", fake_stop_existing_runtime_for_publish)
     monkeypatch.setattr(center, "_write_release_snapshot", fake_write_release_snapshot)
     monkeypatch.setattr(center, "_allocate_port", fake_allocate_port)

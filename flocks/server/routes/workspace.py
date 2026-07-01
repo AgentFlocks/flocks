@@ -20,13 +20,17 @@ File operations (workspace only)
   GET    /api/workspace/file          read text file content
   PUT    /api/workspace/file          write / update text file content
   DELETE /api/workspace/file          delete file
+  GET    /api/workspace/preview       preview single file inline
   GET    /api/workspace/download      download single file
   POST   /api/workspace/download/zip  batch download as zip
   POST   /api/workspace/move          move / rename
+  POST   /api/workspace/reveal        open containing folder in system file manager
 
 Memory view (read-only, points to data/memory/)
-  GET /api/workspace/memory/list  list memory files
-  GET /api/workspace/memory/file  read memory file content
+  GET /api/workspace/memory/list      list memory files
+  GET /api/workspace/memory/file      read memory file content
+  GET /api/workspace/memory/preview   preview single memory file inline
+  GET /api/workspace/memory/download  download single memory file
 
 Stats
   GET /api/workspace/stats        workspace + memory totals
@@ -36,9 +40,12 @@ from __future__ import annotations
 
 import asyncio
 import io
+import mimetypes
 import os
 import shutil
 import stat as stat_module
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from typing import List, Optional, Literal
@@ -65,6 +72,16 @@ _ALLOWED_UPLOAD_EXTENSIONS = {
 _ALLOWED_UPLOAD_LABEL = (
     "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx"
 )
+_ALLOWED_PREVIEW_MEDIA_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+}
+
+
 def _max_upload_bytes() -> int:
     return int(os.getenv("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))) * 1024 * 1024
 
@@ -157,6 +174,69 @@ def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
     if truncated:
         data = data[:max_bytes]
     return data.decode("utf-8", errors="replace"), truncated
+
+
+def _inline_preview_response(target: Path) -> FileResponse:
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if media_type not in _ALLOWED_PREVIEW_MEDIA_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="File type is not supported for inline preview",
+        )
+    headers = {
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if media_type == "image/svg+xml":
+        headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; script-src 'none'; "
+            "object-src 'none'; base-uri 'none'; img-src data: blob:; "
+            "style-src 'unsafe-inline'"
+        )
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        headers=headers,
+    )
+
+
+def _download_response(target: Path) -> FileResponse:
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+    )
+
+
+def _reveal_in_file_manager(target: Path) -> str:
+    """Open the OS file manager for a workspace file or directory."""
+    if sys.platform == "win32":
+        args = ["explorer", str(target)] if target.is_dir() else ["explorer", f"/select,{target}"]
+        subprocess.Popen(args)
+        return "reveal" if target.is_file() else "open"
+
+    if sys.platform == "darwin":
+        args = ["open", str(target)] if target.is_dir() else ["open", "-R", str(target)]
+        subprocess.Popen(args)
+        return "reveal" if target.is_file() else "open"
+
+    directory = target if target.is_dir() else target.parent
+    opener = shutil.which("xdg-open")
+    if opener:
+        subprocess.Popen([opener, str(directory)])
+        return "open"
+
+    gio = shutil.which("gio")
+    if gio:
+        subprocess.Popen([gio, "open", str(directory)])
+        return "open"
+
+    kde_open = shutil.which("kde-open")
+    if kde_open:
+        subprocess.Popen([kde_open, str(directory)])
+        return "open"
+
+    raise RuntimeError("No file manager opener found for this platform")
 
 
 # ─── directory operations ───────────────────────────────────────────────────
@@ -386,6 +466,22 @@ async def delete_file(
     return {"path": path, "deleted": True}
 
 
+@router.get("/preview", summary="Preview single file inline")
+async def preview_file(
+    path: str = Query(..., description="Relative path to file"),
+):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_workspace_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    return _inline_preview_response(target)
+
+
 @router.get("/download", summary="Download single file")
 async def download_file(
     path: str = Query(..., description="Relative path to file"),
@@ -399,11 +495,7 @@ async def download_file(
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-    return FileResponse(
-        path=str(target),
-        filename=target.name,
-        media_type="application/octet-stream",
-    )
+    return _download_response(target)
 
 
 class ZipDownloadRequest(BaseModel):
@@ -436,6 +528,10 @@ class MoveRequest(BaseModel):
     dst: str
 
 
+class RevealRequest(BaseModel):
+    path: str
+
+
 @router.post("/move", summary="Move / rename file or directory")
 async def move_item(body: MoveRequest):
     mgr = _get_manager()
@@ -452,6 +548,26 @@ async def move_item(body: MoveRequest):
     shutil.move(str(src), str(dst))
     log.info("workspace.item.moved", {"src": body.src, "dst": body.dst})
     return {"src": body.src, "dst": body.dst, "moved": True}
+
+
+@router.post("/reveal", summary="Open containing folder in system file manager")
+async def reveal_item(body: RevealRequest):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_workspace_path(body.path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {body.path}")
+    target_type = "directory" if target.is_dir() else "file"
+    try:
+        mode = await asyncio.to_thread(_reveal_in_file_manager, target)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to open file manager: {e}")
+    log.info("workspace.item.revealed", {"path": body.path, "target": target_type, "mode": mode})
+    return {"path": body.path, "opened": True, "target": target_type, "mode": mode}
 
 
 # ─── memory view (read-only) ────────────────────────────────────────────────
@@ -496,6 +612,11 @@ async def read_memory_file(
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    if not WorkspaceManager.is_text_file(target):
+        raise HTTPException(
+            status_code=400,
+            detail="Binary file — use /memory/download endpoint instead",
+        )
     max_read_bytes = _max_read_bytes()
     try:
         content, truncated = await asyncio.to_thread(
@@ -512,6 +633,38 @@ async def read_memory_file(
         "size": target.stat().st_size,
         "preview_limit_bytes": max_read_bytes,
     }
+
+
+@router.get("/memory/preview", summary="Preview single memory file inline")
+async def preview_memory_file(
+    path: str = Query(..., description="Relative path inside memory directory"),
+):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_memory_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    return _inline_preview_response(target)
+
+
+@router.get("/memory/download", summary="Download single memory file")
+async def download_memory_file(
+    path: str = Query(..., description="Relative path inside memory directory"),
+):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_memory_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    return _download_response(target)
 
 
 # ─── stats ──────────────────────────────────────────────────────────────────

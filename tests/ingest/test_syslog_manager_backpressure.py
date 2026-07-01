@@ -238,6 +238,8 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["inputs"]["message"] == "demo"
     assert captured_run_kwargs["inputs"]["hostname"] == "router-a"
     assert captured_run_kwargs["inputs"]["pipeline"] == "syslog"
+    assert captured_run_kwargs["run_id"] == "exec-syslog"
+    assert captured_run_kwargs["execution_profile"] == "high_frequency"
     assert callable(captured_run_kwargs["on_step_complete"])
     assert recorded_steps[0][0] == "exec-syslog"
     assert recorded_steps[0][1] == 1

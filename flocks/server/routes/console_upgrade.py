@@ -316,6 +316,7 @@ def _enrich_record_from_install_marker(record: dict[str, Any]) -> dict[str, Any]
     details = record.setdefault("details", {})
     marker = _read_pro_bundle_install_marker()
     if marker:
+        details.setdefault("auto_install_release_id", marker.get("release_id") or marker.get("bundle_release_id"))
         details.setdefault("auto_install_version", marker.get("installed_version"))
         details.setdefault("auto_install_pro_version", marker.get("flockspro_component_version"))
         details.setdefault("flockspro_component_version", marker.get("flockspro_component_version"))
@@ -333,7 +334,9 @@ def _enrich_record_from_install_marker(record: dict[str, Any]) -> dict[str, Any]
     return record
 
 
-async def _maybe_activate_pro_license(record: dict[str, Any], *, force: bool = False) -> None:
+async def _maybe_activate_pro_license(
+    record: dict[str, Any], *, force: bool = False, allow_fallback: bool = True
+) -> None:
     activate_key = str(record.get("activate_key") or "").strip()
     if not activate_key:
         return
@@ -355,7 +358,7 @@ async def _maybe_activate_pro_license(record: dict[str, Any], *, force: bool = F
             details.pop("license_activate_error", None)
     except Exception as exc:
         details["license_activate_error"] = str(exc)
-        if not _is_pro_component_installed():
+        if not allow_fallback or not _is_pro_component_installed():
             return
         _fallback_write_pro_license_state(record, activate_key, str(exc))
 
@@ -418,16 +421,104 @@ async def _maybe_refresh_pro_license(record: dict[str, Any]) -> None:
         details["license_refresh_error"] = str(exc)
 
 
+def _clean_bundle_value(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _clean_version_value(value: Any) -> str:
+    return _clean_bundle_value(value).removeprefix("v")
+
+
+def _record_target_bundle(record: dict[str, Any]) -> dict[str, str]:
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    latest_bundle = details.get("latest_pro_bundle") if isinstance(details.get("latest_pro_bundle"), dict) else {}
+    release_id = _clean_bundle_value(
+        record.get("approved_bundle_release_id")
+        or details.get("approved_bundle_release_id")
+        or details.get("bundle_release_id")
+        or latest_bundle.get("release_id")
+    )
+    target = {
+        "release_id": release_id,
+        "bundle_release_id": _clean_bundle_value(details.get("bundle_release_id") or release_id),
+        "build_id": _clean_bundle_value(details.get("target_build_id") or latest_bundle.get("build_id")),
+        "display_version": _clean_bundle_value(
+            details.get("target_display_version")
+            or details.get("auto_install_target")
+            or latest_bundle.get("display_version")
+        ),
+        "core_version": _clean_bundle_value(
+            details.get("target_core_version")
+            or details.get("target_oss_version")
+            or latest_bundle.get("core_version")
+            or latest_bundle.get("oss_version")
+        ),
+        "flockspro_component_version": _clean_bundle_value(
+            details.get("target_flockspro_component_version")
+            or latest_bundle.get("flockspro_component_version")
+        ),
+    }
+    return {key: value for key, value in target.items() if value}
+
+
+def _target_bundle_fingerprint_matches(target: dict[str, str], marker: dict[str, Any]) -> bool | None:
+    build_id = target.get("build_id")
+    marker_build_id = _clean_bundle_value(marker.get("build_id"))
+    if build_id and marker_build_id:
+        return marker_build_id == build_id
+
+    pro_version = target.get("flockspro_component_version")
+    marker_pro_version = _clean_bundle_value(marker.get("flockspro_component_version"))
+    if pro_version and marker_pro_version:
+        return marker_pro_version == pro_version
+
+    display_version = target.get("display_version")
+    marker_display_version = _clean_bundle_value(marker.get("installed_version") or marker.get("display_version"))
+    if display_version and marker_display_version:
+        return _clean_version_value(marker_display_version) == _clean_version_value(display_version)
+
+    core_version = target.get("core_version") or target.get("oss_version")
+    marker_core_version = _clean_bundle_value(marker.get("core_version") or marker.get("oss_version"))
+    if core_version and marker_core_version:
+        return _clean_version_value(marker_core_version) == _clean_version_value(core_version)
+
+    return None
+
+
+def _marker_matches_target_bundle(marker: dict[str, Any], record: dict[str, Any]) -> bool:
+    if not marker:
+        return False
+    target = _record_target_bundle(record)
+    target_release_id = _clean_bundle_value(target.get("release_id") or target.get("bundle_release_id"))
+    marker_release_id = _clean_bundle_value(marker.get("release_id") or marker.get("bundle_release_id"))
+    if target_release_id:
+        if marker_release_id:
+            return marker_release_id == target_release_id
+        fingerprint_match = _target_bundle_fingerprint_matches(target, marker)
+        return fingerprint_match is True
+
+    fingerprint_match = _target_bundle_fingerprint_matches(target, marker)
+    if fingerprint_match is not None:
+        return fingerprint_match
+    return True
+
+
 async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
     details = record.setdefault("details", {})
     details["auto_install_result"] = "running"
     details["auto_install_started_at"] = datetime.now(UTC).isoformat()
     marker = _read_pro_bundle_install_marker()
-    if _is_pro_component_installed() and marker:
-        details["auto_install_result"] = "already_latest"
+    if _is_pro_component_installed() and _marker_matches_target_bundle(marker, record):
+        details["auto_install_release_id"] = marker.get("release_id") or marker.get("bundle_release_id")
         details["auto_install_version"] = marker.get("installed_version")
+        await _maybe_activate_pro_license(record, allow_fallback=False)
+        await _maybe_refresh_pro_license(record)
+        capability = _record_pro_capability(details)
+        if not capability.get("pro_enabled"):
+            details["auto_install_result"] = "license_inactive"
+            raise ValueError("Flocks Pro component is installed but license activation is inactive")
+        details["auto_install_result"] = "already_latest"
         details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
-        _record_pro_capability(details)
         await _report_pro_bundle_installation(record, install_result="success")
         return record
 
@@ -439,18 +530,23 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
         if progress.stage == "error":
             raise ValueError(progress.message)
 
-    await _maybe_activate_pro_license(record)
+    await _maybe_activate_pro_license(record, allow_fallback=False)
     await _maybe_refresh_pro_license(record)
     capability = _record_pro_capability(details)
     marker = _read_pro_bundle_install_marker()
     details["auto_install_result"] = (
         "done" if final_stage == "done" and capability.get("pro_enabled") else "license_inactive"
     )
+    details["auto_install_release_id"] = marker.get("release_id") or marker.get("bundle_release_id")
     details["auto_install_version"] = marker.get("installed_version")
     details["auto_install_pro_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = final_message
     _enrich_record_from_install_marker(record)
+    if final_stage != "done":
+        raise ValueError(final_message or "Flocks Pro bundle installation did not complete")
+    if not capability.get("pro_enabled"):
+        raise ValueError("Flocks Pro bundle installed but license activation is inactive")
     await _report_pro_bundle_installation(record, install_result="success")
     return record
 
@@ -462,6 +558,15 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _marker_indicates_pro_bundle_installed(marker: dict[str, Any]) -> bool:
+    if not marker:
+        return False
+    return any(
+        str(marker.get(key) or "").strip()
+        for key in ("installed_at", "installed_version", "bundle_version", "flockspro_component_version", "build_id")
+    )
 
 
 async def _report_pro_bundle_installation(
@@ -477,14 +582,34 @@ async def _report_pro_bundle_installation(
         details["install_receipt_error"] = str(exc)
         return
     marker = _read_pro_bundle_install_marker()
+    target = _record_target_bundle(record)
+    marker_matches_target = _marker_matches_target_bundle(marker, record)
+    use_marker = install_result == "success" and marker_matches_target
+    source = marker if use_marker else target
+    release_id = _clean_bundle_value(
+        source.get("release_id")
+        or source.get("bundle_release_id")
+        or target.get("release_id")
+        or target.get("bundle_release_id")
+    )
+    bundle_release_id = _clean_bundle_value(source.get("bundle_release_id") or source.get("release_id") or release_id)
     payload = {
+        "request_id": record.get("request_id"),
+        "release_id": release_id or None,
+        "bundle_release_id": bundle_release_id or None,
         "license_id": _record_license_id(record),
         "fingerprint": console_session.get("fingerprint"),
         "install_id": console_session.get("install_id"),
-        "installed_version": marker.get("installed_version") or details.get("auto_install_target") or details.get("auto_install_version") or "",
-        "oss_version": marker.get("oss_version"),
-        "flockspro_component_version": marker.get("flockspro_component_version"),
-        "build_id": marker.get("build_id"),
+        "installed_version": source.get("installed_version")
+        or source.get("display_version")
+        or target.get("display_version")
+        or details.get("auto_install_target")
+        or details.get("auto_install_version")
+        or "",
+        "core_version": source.get("core_version") or source.get("oss_version") or target.get("core_version"),
+        "oss_version": source.get("core_version") or source.get("oss_version") or target.get("core_version"),
+        "flockspro_component_version": source.get("flockspro_component_version") or target.get("flockspro_component_version"),
+        "build_id": source.get("build_id") or target.get("build_id"),
         "install_result": install_result,
         "error_message": error_message,
         "reported_at": datetime.now(UTC).isoformat(),
@@ -501,6 +626,7 @@ async def _report_pro_bundle_installation(
                 headers={"Authorization": f"Bearer {console_session['console_session_token']}"},
             )
             resp.raise_for_status()
+            details.pop("install_receipt_error", None)
             details["install_receipt_reported_at"] = datetime.now(UTC).isoformat()
     except Exception as exc:
         details["install_receipt_error"] = str(exc)
@@ -529,11 +655,12 @@ async def _maybe_auto_activate_upgrade(record: dict[str, Any]) -> dict[str, Any]
     if not _is_approved(record):
         return record
     details = record.setdefault("details", {})
-    if details.get("auto_install_result") in {"done", "already_latest"}:
+    if details.get("auto_install_result") in {"done", "already_latest"} and _marker_matches_target_bundle(
+        _read_pro_bundle_install_marker(),
+        record,
+    ):
         return record
     try:
-        await _maybe_activate_pro_license(record)
-        await _maybe_refresh_pro_license(record)
         await _run_auto_upgrade_install(record)
         capability = _record_pro_capability(details)
         if capability.get("pro_enabled"):
@@ -546,6 +673,38 @@ async def _maybe_auto_activate_upgrade(record: dict[str, Any]) -> dict[str, Any]
         await _report_pro_bundle_installation(record, install_result="failed", error_message=str(exc))
     finally:
         record["updated_at"] = datetime.now(UTC).isoformat()
+    return record
+
+
+async def _finalize_restarting_upgrade_if_installed(record: dict[str, Any]) -> dict[str, Any]:
+    details = record.setdefault("details", {})
+    if details.get("auto_install_result") != "restarting":
+        return record
+    marker = _read_pro_bundle_install_marker()
+    if not _marker_matches_target_bundle(marker, record):
+        return record
+
+    await _maybe_activate_pro_license(record)
+    await _maybe_refresh_pro_license(record)
+    capability = _record_pro_capability(details)
+    details["auto_install_result"] = "done" if capability.get("pro_enabled") else "license_inactive"
+    details["auto_install_version"] = marker.get("installed_version") or marker.get("display_version")
+    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+    details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
+    details["auto_install_message"] = "Upgrade completed after service restart"
+    _enrich_record_from_install_marker(record)
+    if capability.get("pro_enabled"):
+        record["status"] = "activated"
+    record["updated_at"] = datetime.now(UTC).isoformat()
+
+    previous_reported_at = details.get("install_receipt_reported_at")
+    await _report_pro_bundle_installation(record, install_result="success")
+    if details.get("install_receipt_reported_at") == previous_reported_at and details.get("install_receipt_error"):
+        details["auto_install_result"] = "restarting"
+        record["updated_at"] = datetime.now(UTC).isoformat()
+        return record
+    if capability.get("pro_enabled"):
+        await _mark_console_upgrade_activated(record)
     return record
 
 
@@ -566,7 +725,12 @@ def _schedule_auto_activate_upgrade(request_id: str, record: dict[str, Any]) -> 
     if not _is_approved(record):
         return
     details = record.setdefault("details", {})
-    if details.get("auto_install_result") in {"running", "done", "already_latest"}:
+    if details.get("auto_install_result") == "running":
+        return
+    if details.get("auto_install_result") in {"done", "already_latest"} and _marker_matches_target_bundle(
+        _read_pro_bundle_install_marker(),
+        record,
+    ):
         return
     if request_id in _AUTO_UPGRADE_REQUEST_IDS:
         return
@@ -584,8 +748,12 @@ def _raise_console_service_error(exc: Exception) -> None:
             if isinstance(payload, dict):
                 detail = str(payload.get("detail") or payload.get("message") or detail)
         except Exception:
-            if exc.response.text:
-                detail = exc.response.text
+            response_text = str(exc.response.text or "").strip()
+            content_type = str(exc.response.headers.get("content-type", "")).lower()
+            if response_text and "html" not in content_type and not response_text.lower().startswith("<html"):
+                detail = response_text[:500]
+            else:
+                detail = f"console 升级服务暂不可用（HTTP {exc.response.status_code}），请稍后重试"
     raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
 
@@ -691,6 +859,8 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
     for request_id in reversed(await _list_request_ids()):
         raw = await Storage.get(_request_key(request_id))
         if raw:
+            raw = await _finalize_restarting_upgrade_if_installed(raw)
+            await Storage.set(_request_key(request_id), raw, "json")
             result.append(UpgradeRequestStatus(**_enrich_record_from_install_marker(raw)))
     return result
 
@@ -700,9 +870,13 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
     require_user(request)
     marker = _read_pro_bundle_install_marker()
     capability = _get_pro_capability_status()
-    installed = _is_pro_component_installed()
+    runtime_importable = _is_pro_component_installed()
+    install_marker_present = _marker_indicates_pro_bundle_installed(marker)
+    installed = runtime_importable or install_marker_present
     return {
         "installed": installed,
+        "runtime_importable": runtime_importable,
+        "install_marker_present": install_marker_present,
         "installed_version": marker.get("installed_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),
@@ -713,106 +887,14 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/licenses/sync-revocations")
-async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    console_base = _console_base_url()
-    if not console_base:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="FLOCKS_CONSOLE_BASE_URL 未配置")
-    try:
-        console_session = await ConsoleLoginService.require_console_session()
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
-    account_key = _console_session_account_key(console_session)
-    synced_license_ids: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{console_base}/v1/licenses/revocations", headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-            for request_id in await _list_request_ids():
-                raw = await Storage.get(_request_key(request_id))
-                if not isinstance(raw, dict):
-                    continue
-                record_account_key = _record_account_key(raw)
-                if account_key and record_account_key and record_account_key != account_key:
-                    continue
-                license_id = _record_license_id(raw)
-                if not license_id:
-                    continue
-                license_resp = await client.get(f"{console_base}/v1/licenses/{license_id}", headers=headers)
-                if license_resp.status_code == status.HTTP_404_NOT_FOUND:
-                    continue
-                license_resp.raise_for_status()
-                license_data = license_resp.json()
-                if isinstance(license_data, dict):
-                    _apply_console_license_data(raw, license_data)
-                    synced_license_ids.append(license_id)
-                    await Storage.set(_request_key(request_id), raw, "json")
-    except httpx.HTTPError as exc:
-        _raise_console_service_error(exc)
-
-    revoked_license_ids = data.get("revoked_license_ids", [])
-    if not isinstance(revoked_license_ids, list):
-        revoked_license_ids = []
-
-    imported = False
-    activated_license_id: str | None = None
-    refreshed_license_id: str | None = None
-    if not _is_pro_component_installed():
-        return {
-            "revoked_license_ids": [str(item) for item in revoked_license_ids],
-            "imported": imported,
-            "synced_license_ids": synced_license_ids,
-            "activated_license_id": activated_license_id,
-            "refreshed_license_id": refreshed_license_id,
-            "inactive_reason": "flockspro_not_installed",
-        }
-    try:
-        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
-
-        checker = get_license_checker()
-        import_fn = getattr(checker, "import_revocation", None)
-        if callable(import_fn):
-            import_fn([str(item) for item in revoked_license_ids])
-            imported = True
-
-        revoked_set = {str(item) for item in revoked_license_ids}
-        current_status = _get_pro_capability_status()
-        current_license_id = str(current_status.get("license_id") or "")
-        target = await _latest_usable_issued_record(
-            revoked_set,
-            account_key=_console_session_account_key(console_session),
-        )
-        target_license_id = _record_license_id(target) if target else ""
-        if target and target_license_id:
-            if target_license_id != current_license_id:
-                await _maybe_activate_pro_license(target, force=True)
-                activated_license_id = target_license_id
-            await _maybe_refresh_pro_license(target)
-            refreshed_license_id = target_license_id
-            await Storage.set(_request_key(str(target["request_id"])), target, "json")
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-
-    return {
-        "revoked_license_ids": [str(item) for item in revoked_license_ids],
-        "imported": imported,
-        "synced_license_ids": synced_license_ids,
-        "activated_license_id": activated_license_id,
-        "refreshed_license_id": refreshed_license_id,
-    }
-
-
 @router.get("/upgrade-requests/{request_id}", response_model=UpgradeRequestStatus)
 async def get_upgrade_request(request_id: str, request: Request) -> UpgradeRequestStatus:
     require_admin(request)
     raw = await Storage.get(_request_key(request_id))
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
+    raw = await _finalize_restarting_upgrade_if_installed(raw)
+    await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**_enrich_record_from_install_marker(raw))
 
 
@@ -841,6 +923,9 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
         except httpx.HTTPError as exc:
             _raise_console_service_error(exc)
         else:
+            remote_details = data.get("form_data") if isinstance(data.get("form_data"), dict) else {}
+            local_details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            refreshed_at = datetime.now(UTC).isoformat()
             raw.update(
                 {
                     "status": data.get("status", raw["status"]),
@@ -853,13 +938,14 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
                     "max_admins": data.get("max_admins", raw.get("max_admins")),
                     "max_members": data.get("max_members", raw.get("max_members")),
                     "expires_at": data.get("expires_at", raw.get("expires_at")),
-                    "details": data.get("form_data", raw.get("details", {})),
-                    "updated_at": datetime.now(UTC).isoformat(),
+                    "details": {**local_details, **remote_details, "license_refreshed_at": refreshed_at},
+                    "updated_at": refreshed_at,
                 }
             )
     else:
         raw["updated_at"] = datetime.now(UTC).isoformat()
 
+    raw = await _finalize_restarting_upgrade_if_installed(raw)
     _enrich_record_from_install_marker(raw)
     await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**raw)

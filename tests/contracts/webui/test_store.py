@@ -13,7 +13,11 @@ def store(tmp_path, monkeypatch):
 
 
 def _write_page(root, page_id: str, title: str, order: int = 100) -> None:
-    page_dir = root / page_id
+    _write_page_at(root, page_id, page_id, title, order=order)
+
+
+def _write_page_at(root, page_path: str, page_id: str, title: str, order: int = 100) -> None:
+    page_dir = root / page_path
     (page_dir / "dist").mkdir(parents=True, exist_ok=True)
     (page_dir / "src").mkdir(parents=True, exist_ok=True)
     (page_dir / "manifest.json").write_text(
@@ -39,6 +43,31 @@ def _write_page(root, page_id: str, title: str, order: int = 100) -> None:
 
 def _read_manifest(root, page_id: str):
     return json.loads((root / page_id / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _write_workspace(
+    root,
+    workspace_id: str,
+    title: str,
+    order: int = 100,
+    default_page_id: str | None = None,
+    sections: list[dict] | None = None,
+) -> None:
+    workspace_dir = root / workspace_id
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "id": workspace_id,
+        "title": title,
+        "icon": "ShieldCheck",
+        "order": order,
+        "enabled": True,
+        "placement": "sceneWorkspace",
+    }
+    if default_page_id is not None:
+        payload["defaultPageId"] = default_page_id
+    if sections is not None:
+        payload["sections"] = sections
+    (workspace_dir / "workspace.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def test_create_page_scaffold(store: WebUIPagesStore):
@@ -78,6 +107,89 @@ def test_list_pages_scans_user_and_project_roots_with_user_priority(tmp_path):
     assert store.get_page("project-page").manifest.title == "Project page"
     assert store.page_dir("shared-page").is_relative_to(user_root)
     assert store.page_dir("project-page").is_relative_to(project_root)
+
+
+def test_grouped_page_directory_uses_manifest_id_for_lookup(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_workspace(user_root, "scene_workspace", "场景工作区")
+    _write_page_at(user_root, "scene_workspace/investigation_list", "investigation-list", "Investigation List")
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+
+    pages = store.list_pages()
+    assert [page.id for page in pages] == ["investigation-list"]
+    assert pages[0].route == "/contracts/webui/investigation-list"
+    assert pages[0].workspaceId == "scene_workspace"
+    assert pages[0].workspaceTitle == "场景工作区"
+    assert pages[0].workspaceRoute == "/contracts/webui/workspaces/scene_workspace"
+    assert store.page_dir("investigation-list") == user_root / "scene_workspace" / "investigation_list"
+
+    store.save_manifest("investigation-list", {"title": "调查列表"})
+    store.write_build_meta("investigation-list", store.read_build_meta("investigation-list").model_copy(update={"status": "ready", "hash": "abc"}))
+
+    nested_manifest = json.loads((user_root / "scene_workspace" / "investigation_list" / "manifest.json").read_text(encoding="utf-8"))
+    assert nested_manifest["title"] == "调查列表"
+    assert (user_root / "scene_workspace" / "investigation_list" / "dist" / "meta.json").is_file()
+    assert not (user_root / "investigation-list").exists()
+
+
+def test_list_workspaces_returns_grouped_pages(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_workspace(
+        user_root,
+        "scene_workspace",
+        "场景工作区",
+        order=5,
+        default_page_id="ops-overview",
+        sections=[
+            {
+                "id": "operations",
+                "label": "调查列表",
+                "pageIds": ["ops-overview", "investigation-list"],
+                "defaultPageId": "ops-overview",
+                "contentPadding": "comfortable",
+            },
+        ],
+    )
+    _write_page_at(user_root, "scene_workspace/investigation_list", "investigation-list", "Investigation List", order=20)
+    _write_page_at(user_root, "scene_workspace/ops_overview", "ops-overview", "Ops Overview", order=10)
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+    store.write_build_meta("ops-overview", store.read_build_meta("ops-overview").model_copy(update={"status": "ready", "hash": "abc"}))
+
+    workspaces = store.list_workspaces()
+
+    assert [workspace.id for workspace in workspaces] == ["scene_workspace"]
+    assert workspaces[0].title == "场景工作区"
+    assert workspaces[0].route == "/contracts/webui/workspaces/scene_workspace"
+    assert workspaces[0].placement == "sceneWorkspace"
+    assert workspaces[0].defaultPageId == "ops-overview"
+    assert len(workspaces[0].sections) == 1
+    assert workspaces[0].sections[0].id == "operations"
+    assert workspaces[0].sections[0].label == "调查列表"
+    assert workspaces[0].sections[0].pageIds == ["ops-overview", "investigation-list"]
+    assert workspaces[0].sections[0].defaultPageId == "ops-overview"
+    assert workspaces[0].sections[0].contentPadding == "comfortable"
+    assert [page.id for page in workspaces[0].pages] == ["ops-overview", "investigation-list"]
+    assert workspaces[0].pages[0].buildStatus == "ready"
+
+
+def test_legacy_migration_skips_existing_grouped_page(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    legacy_root = tmp_path / "user" / "user_defined_pages"
+    _write_page_at(
+        user_root,
+        "scene_workspace/risk_dashboard",
+        "risk-dashboard",
+        "Grouped page",
+    )
+    _write_page(legacy_root, "risk-dashboard", "Legacy page")
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=legacy_root)
+    pages = store.list_pages()
+
+    assert [page.id for page in pages] == ["risk-dashboard"]
+    assert store.page_dir("risk-dashboard") == user_root / "scene_workspace" / "risk_dashboard"
+    assert not (user_root / "risk-dashboard").exists()
 
 
 def test_save_project_root_page_materializes_user_copy(tmp_path):

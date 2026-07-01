@@ -57,6 +57,115 @@ async def test_create_and_list_webui_pages(client: AsyncClient, webui_pages_env:
 
 
 @pytest.mark.asyncio
+async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, webui_pages_env: WebUIPagesStore):
+    root = webui_pages_env.root
+    workspace_dir = root / "scene_workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "workspace.json").write_text(
+        json.dumps(
+            {
+                "id": "scene_workspace",
+                "title": "场景工作区",
+                "icon": "ShieldCheck",
+                "order": 10,
+                "enabled": True,
+                "placement": "sceneWorkspace",
+                "defaultPageId": "ops-overview",
+                "sections": [
+                    {
+                        "id": "operations",
+                        "label": "调查列表",
+                        "pageIds": ["ops-overview", "investigation-list"],
+                        "defaultPageId": "ops-overview",
+                        "contentPadding": "comfortable",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    for page_id, page_dir_name, title, order in [
+        ("ops-overview", "ops_overview", "运营总览", 10),
+        ("investigation-list", "investigation_list", "调查列表", 20),
+    ]:
+        page_dir = workspace_dir / page_dir_name
+        (page_dir / "src").mkdir(parents=True, exist_ok=True)
+        (page_dir / "dist").mkdir(parents=True, exist_ok=True)
+        (page_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "id": page_id,
+                    "title": title,
+                    "route": f"/contracts/webui/{page_id}",
+                    "icon": "LayoutDashboard",
+                    "order": order,
+                    "enabled": True,
+                    "placement": "home.after",
+                    "entry": "src/index.tsx",
+                    "updatedAt": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    resp = await client.get("/api/contracts/webui/workspaces", params={"enabledOnly": True})
+
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {
+            "id": "scene_workspace",
+            "title": "场景工作区",
+            "route": "/contracts/webui/workspaces/scene_workspace",
+            "icon": "ShieldCheck",
+            "order": 10,
+            "enabled": True,
+            "placement": "sceneWorkspace",
+            "defaultPageId": "ops-overview",
+            "sections": [
+                {
+                    "id": "operations",
+                    "label": "调查列表",
+                    "pageIds": ["ops-overview", "investigation-list"],
+                    "defaultPageId": "ops-overview",
+                    "contentPadding": "comfortable",
+                    "themeOverride": None,
+                }
+            ],
+            "pages": [
+                {
+                    "id": "ops-overview",
+                    "title": "运营总览",
+                    "route": "/contracts/webui/ops-overview",
+                    "icon": "LayoutDashboard",
+                    "order": 10,
+                    "enabled": True,
+                    "placement": "home.after",
+                    "buildHash": "",
+                    "buildStatus": "idle",
+                    "workspaceId": "scene_workspace",
+                    "workspaceTitle": "场景工作区",
+                    "workspaceRoute": "/contracts/webui/workspaces/scene_workspace",
+                },
+                {
+                    "id": "investigation-list",
+                    "title": "调查列表",
+                    "route": "/contracts/webui/investigation-list",
+                    "icon": "LayoutDashboard",
+                    "order": 20,
+                    "enabled": True,
+                    "placement": "home.after",
+                    "buildHash": "",
+                    "buildStatus": "idle",
+                    "workspaceId": "scene_workspace",
+                    "workspaceTitle": "场景工作区",
+                    "workspaceRoute": "/contracts/webui/workspaces/scene_workspace",
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_legacy_user_defined_pages_api_alias_uses_contract_routes(
     client: AsyncClient,
     webui_pages_env: WebUIPagesStore,

@@ -263,6 +263,50 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   } as Message;
 }
 
+function mockStatefulSessionMessages() {
+  useSessionMessagesMock.mockImplementation(() => {
+    const [messages, setMessages] = React.useState<Message[]>([]);
+    const upsertMessage = (messageInfo: Partial<Message> & { id: string }) => setMessages((prev) => {
+      const existingIndex = prev.findIndex((message) => message.id === messageInfo.id);
+      if (existingIndex >= 0) {
+        const updated = [...prev];
+        updated[existingIndex] = {
+          ...updated[existingIndex],
+          ...messageInfo,
+          parts: messageInfo.parts ?? updated[existingIndex].parts,
+          finish: messageInfo.finish ?? updated[existingIndex].finish,
+        } as Message;
+        return updated;
+      }
+      return [
+        ...prev,
+        makeMessage({
+          id: messageInfo.id,
+          sessionID: messageInfo.sessionID,
+          role: messageInfo.role ?? 'assistant',
+          parts: messageInfo.parts ?? [],
+          parentID: messageInfo.parentID,
+          finish: messageInfo.finish,
+        } as Partial<Message> & { id: string }),
+      ];
+    });
+
+    return {
+      messages,
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: (message: Message) => setMessages((prev) => [...prev, message]),
+      updateMessage: upsertMessage,
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
+        (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
+      )),
+      truncateAfterMessage: vi.fn(),
+    };
+  });
+}
+
 describe('dedupeUploadedDocumentAttachments', () => {
   it('keeps the latest successful document for a workspace path', () => {
     const items = dedupeUploadedDocumentAttachments([
@@ -652,6 +696,174 @@ describe('SessionChat standalone thinking indicator', () => {
       expect(container.textContent).not.toContain('思考中...');
     });
   });
+
+  it('clears the standalone thinking indicator when stopping before Rex creates an assistant message', async () => {
+    const user = userEvent.setup();
+    mockStatefulSessionMessages();
+    clientPostMock.mockImplementation((url: string) => {
+      if (url.endsWith('/prompt_async')) {
+        return new Promise(() => {});
+      }
+      if (url.endsWith('/abort')) {
+        return new Promise(() => {});
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '接入设备');
+    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+    });
+
+    await user.click(screen.getByTitle('chat.stopTitle'));
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'assistant-late',
+            sessionID: 'sess-1',
+            role: 'assistant',
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    });
+  });
+
+  it('does not show dots again when busy status arrives after abort settles', async () => {
+    const user = userEvent.setup();
+    mockStatefulSessionMessages();
+    clientPostMock.mockImplementation((url: string) => {
+      if (url.endsWith('/prompt_async')) {
+        return new Promise(() => {});
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '已连接涉笔');
+    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+    });
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        screen.getByTitle('chat.stopTitle').click();
+      });
+      await act(async () => {});
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-late',
+              sessionID: 'sess-1',
+              role: 'assistant',
+            },
+          },
+        });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_100);
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not mark the active assistant stopped when abort request fails', async () => {
+    const user = userEvent.setup();
+    const markMessageStopped = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-1-part', type: 'text', text: 'hello' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'partial response' }] as Message['parts'],
+          finish: null,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped,
+      truncateAfterMessage: vi.fn(),
+    });
+    clientPostMock.mockImplementation((url: string) => {
+      if (url.endsWith('/abort')) {
+        return Promise.reject(new Error('abort failed'));
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+      }));
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByTitle('chat.stopTitle'));
+
+      await waitFor(() => {
+        expect(consoleError).toHaveBeenCalled();
+      });
+      expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort');
+      expect(markMessageStopped).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });
 
 describe('SessionChat instruction display text', () => {
@@ -705,7 +917,16 @@ describe('shouldRenderMessage', () => {
       role: 'assistant',
       parts: [],
       finish: null,
-    }))).toBe(true);
+    }), { isActive: true })).toBe(true);
+  });
+
+  it('hides inactive empty assistant messages', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-inactive',
+      role: 'assistant',
+      parts: [],
+      finish: null,
+    }))).toBe(false);
   });
 
   it('hides stopped empty assistant messages after abort before first content', () => {

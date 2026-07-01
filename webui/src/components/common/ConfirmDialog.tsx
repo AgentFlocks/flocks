@@ -49,19 +49,21 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     <ConfirmContext.Provider value={{ confirm }}>
       {children}
       {state && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="flex max-h-[calc(100vh-2rem)] w-full max-w-md flex-col overflow-hidden rounded-xl bg-white p-6 shadow-xl">
             <div className="flex items-start gap-3">
               {state.options.variant === 'danger' && (
                 <div className="p-2 bg-red-100 rounded-lg flex-shrink-0">
                   <AlertTriangle className="w-5 h-5 text-red-600" />
                 </div>
               )}
-              <div>
+              <div className="min-w-0 flex-1">
                 {state.options.title && (
                   <h3 className="font-semibold text-gray-900 mb-1">{state.options.title}</h3>
                 )}
-                <p className="text-sm text-gray-600">{state.options.description}</p>
+                <p className="max-h-[45vh] overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-gray-600">
+                  {state.options.description}
+                </p>
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-5">

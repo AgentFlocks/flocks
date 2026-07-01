@@ -79,7 +79,8 @@ def persist_fields(
 
     Rules:
     - **Sensitive, non-empty** → write to SecretManager, store placeholder.
-    - **Sensitive, empty/absent** → keep existing placeholder (no-op).
+    - **Sensitive, empty** → delete existing placeholder and secret.
+    - **Sensitive, absent** → keep existing placeholder (no-op).
     - **Non-sensitive** → store plaintext.
     - Keys absent from ``incoming`` inherit from ``prior_db_fields``.
     """
@@ -92,7 +93,17 @@ def persist_fields(
     for key, value in (incoming or {}).items():
         if key in secret_keys:
             if not value or not value.strip():
-                continue  # keep existing placeholder
+                prior = result.pop(key, None)
+                sid = _parse_placeholder(prior)
+                if sid:
+                    try:
+                        secrets.delete(sid)
+                    except Exception as exc:
+                        log.warn(
+                            "tool.device.secret.delete_error",
+                            {"id": sid, "error": str(exc)},
+                        )
+                continue
             sid = _secret_id(device_id, key)
             try:
                 secrets.set(sid, value)
