@@ -61,7 +61,7 @@ export function buildCustomDeviceModeInstruction(mode: CustomDeviceAccessMode): 
       '自定义 CLI 默认复用 `cookie/auth-state`；优先使用 `auth_state_path` 指向 `~/.flocks/browser/<name>/auth-state.json`。',
       '`username` / `password` 仅用于 cookie 失效后的浏览器认证恢复，二者都必须声明为 `storage: secret`，不要把账号或密码明文写入数据库字段。',
       '如果需要保存内联登录态，只能使用 `auth_state`，并声明 `storage: secret` 与 `internal: true`；不要在表单中展示 Cookie、localStorage、token 明文。',
-      '需要自动重登时，在 handler 中优先调用 `flocks.browser.device_auth.ensure_browser_auth_state(...)`，成功后刷新 auth-state；遇到验证码、MFA、短信码或人工确认时停止并让用户接管。',
+      'handler 只读取 `auth_state_path` 指向的 auth-state 文件；如果文件缺失、过期或无法匹配当前站点，应返回明确错误并提示用户重新登录后保存 state。',
       '只有在站点确实需要补充 header、cookie 或 token 时，才额外暴露对应字段，并且必须使用 `storage: secret`。',
       '最终输出目录和插件结构必须符合 device 插件规范。',
     ].join('\n');

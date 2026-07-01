@@ -1015,6 +1015,22 @@ function AddDeviceWizardPanel({
 
 type PanelTab = 'config' | 'tools' | 'overview';
 
+function applyCredentialDefaults(
+  schema: APIServiceCredentialField[],
+  fields: Record<string, string>,
+): Record<string, string> {
+  const next = { ...fields };
+  schema.forEach((field) => {
+    const defaultValue = field.default_value;
+    if (!defaultValue) return;
+    const currentValue = next[field.key] ?? '';
+    if (!currentValue.trim()) {
+      next[field.key] = defaultValue;
+    }
+  });
+  return next;
+}
+
 function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
@@ -1095,10 +1111,8 @@ function DeviceConfigPanel({
         docs_url: template.docs_url ?? undefined,
       });
       setCredFields(schema);
-      const defaults: Record<string, string> = {};
-      schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
       if (!device) {
-        setFields((prev) => ({ ...defaults, ...prev }));
+        setFields((prev) => applyCredentialDefaults(schema, prev));
         return;
       }
       const masked: Record<string, string> = {};
@@ -1109,7 +1123,7 @@ function DeviceConfigPanel({
       });
       originalMasked.current = masked;
       if (!dirtyRef.current) {
-        setFields({ ...device.fields });
+        setFields(applyCredentialDefaults(schema, device.fields));
       }
     } else {
       providerAPI.getServiceMetadata(serviceId)
@@ -1136,12 +1150,10 @@ function DeviceConfigPanel({
             });
             originalMasked.current = masked;
             if (!dirtyRef.current) {
-              setFields({ ...device.fields });
+              setFields(applyCredentialDefaults(schema, device.fields));
             }
           } else {
-            const defaults: Record<string, string> = {};
-            schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
-            setFields((prev) => ({ ...defaults, ...prev }));
+            setFields((prev) => applyCredentialDefaults(schema, prev));
           }
         })
         .catch(() => {});
@@ -2184,6 +2196,7 @@ export default function DeviceIntegrationPage() {
         agent: rexComposerControls.rexAgentName,
         model: rexComposerControls.rexModel,
       }).catch(() => {});
+      pollRexTestStatus(createdDevice);
       await fetchData(true);
       return;
     }
@@ -2246,7 +2259,7 @@ export default function DeviceIntegrationPage() {
         toast.info(t('wizard.installState.updatingTemplate', { name: template.name }));
         await hubAPI.update('device', template.plugin_id);
       }
-      const nextTemplates = await fetchData(true, true, false);
+      const nextTemplates = await fetchData(true, true, true);
       const installedTemplate = nextTemplates.find((item) => item.plugin_id === template.plugin_id)
         ?? nextTemplates.find((item) => item.storage_key === template.storage_key)
         ?? { ...template, installed: true, state: 'installed' as const };
