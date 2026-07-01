@@ -34,73 +34,73 @@ describe('WebUIContractWorkspaceHost', () => {
     listWorkspacesMock.mockResolvedValue({
       data: [
         {
-          id: 'soc_ui',
-          title: 'SOC 工作区',
-          route: '/contracts/webui/workspaces/soc_ui',
+          id: 'scene_workspace',
+          title: '场景工作区',
+          route: '/contracts/webui/workspaces/scene_workspace',
           icon: 'ShieldCheck',
           order: 10,
           enabled: true,
           placement: 'sceneWorkspace',
-          defaultPageId: 'soc-overview',
+          defaultPageId: 'ops-overview',
           sections: [
             {
               id: 'posture',
               label: '态势',
-              pageIds: ['alert-denoise-triage-dashboard'],
-              defaultPageId: 'alert-denoise-triage-dashboard',
+              pageIds: ['risk-dashboard'],
+              defaultPageId: 'risk-dashboard',
               contentPadding: 'none',
               themeOverride: 'dark',
             },
             {
               id: 'operations',
-              label: '告警运营',
-              pageIds: ['soc-overview', 'soc-alerts'],
-              defaultPageId: 'soc-overview',
+              label: '调查列表',
+              pageIds: ['ops-overview', 'investigation-list'],
+              defaultPageId: 'ops-overview',
               contentPadding: 'comfortable',
             },
           ],
           pages: [
             {
-              id: 'alert-denoise-triage-dashboard',
-              title: '告警态势',
-              route: '/contracts/webui/alert-denoise-triage-dashboard',
+              id: 'risk-dashboard',
+              title: '态势看板',
+              route: '/contracts/webui/risk-dashboard',
               icon: 'ShieldCheck',
               order: 30,
               enabled: true,
               placement: 'home.after',
               buildHash: 'posture',
               buildStatus: 'ready',
-              workspaceId: 'soc_ui',
-              workspaceTitle: 'SOC 工作区',
-              workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+              workspaceId: 'scene_workspace',
+              workspaceTitle: '场景工作区',
+              workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
             },
             {
-              id: 'soc-overview',
-              title: 'SOC 总览',
-              route: '/contracts/webui/soc-overview',
+              id: 'ops-overview',
+              title: '运营总览',
+              route: '/contracts/webui/ops-overview',
               icon: 'Shield',
               order: 10,
               enabled: true,
               placement: 'home.after',
               buildHash: 'abc',
               buildStatus: 'ready',
-              workspaceId: 'soc_ui',
-              workspaceTitle: 'SOC 工作区',
-              workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+              workspaceId: 'scene_workspace',
+              workspaceTitle: '场景工作区',
+              workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
             },
             {
-              id: 'soc-alerts',
-              title: '告警运营',
-              route: '/contracts/webui/soc-alerts',
+              id: 'investigation-list',
+              title: '调查列表',
+              route: '/contracts/webui/investigation-list',
               icon: 'AlertTriangle',
               order: 20,
               enabled: true,
               placement: 'home.after',
               buildHash: '',
               buildStatus: 'failed',
-              workspaceId: 'soc_ui',
-              workspaceTitle: 'SOC 工作区',
-              workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+              workspaceId: 'scene_workspace',
+              workspaceTitle: '场景工作区',
+              workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
             },
           ],
         },
@@ -108,9 +108,9 @@ describe('WebUIContractWorkspaceHost', () => {
     });
   });
 
-  it('waits for an explicit page selection on the SOC workspace root', async () => {
+  it('waits for an explicit page selection on the workspace root', async () => {
     render(
-      <MemoryRouter initialEntries={['/contracts/webui/workspaces/soc_ui']}>
+      <MemoryRouter initialEntries={['/contracts/webui/workspaces/scene_workspace']}>
         <Routes>
           <Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} />
         </Routes>
@@ -120,13 +120,13 @@ describe('WebUIContractWorkspaceHost', () => {
     await waitFor(() => {
       expect(screen.getByText('workspace.selectPage')).toBeInTheDocument();
     });
-    expect(screen.queryByText('page:alert-denoise-triage-dashboard')).not.toBeInTheDocument();
+    expect(screen.queryByText('page:risk-dashboard')).not.toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
   });
 
   it('renders a selected operation page without a fixed workspace sidebar', async () => {
     render(
-      <MemoryRouter initialEntries={['/contracts/webui/workspaces/soc_ui/soc-alerts']}>
+      <MemoryRouter initialEntries={['/contracts/webui/workspaces/scene_workspace/investigation-list']}>
         <Routes>
           <Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} />
         </Routes>
@@ -134,9 +134,9 @@ describe('WebUIContractWorkspaceHost', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('page:soc-alerts')).toBeInTheDocument();
+      expect(screen.getByText('page:investigation-list')).toBeInTheDocument();
     });
-    expect(screen.getByText('page:soc-alerts').parentElement).toHaveClass('p-6');
+    expect(screen.getByText('page:investigation-list').parentElement).toHaveClass('p-6');
     expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
   });
 
@@ -152,7 +152,7 @@ describe('WebUIContractWorkspaceHost', () => {
           setTemporaryThemeOverride,
         }}
       >
-        <MemoryRouter initialEntries={['/contracts/webui/workspaces/soc_ui/alert-denoise-triage-dashboard']}>
+        <MemoryRouter initialEntries={['/contracts/webui/workspaces/scene_workspace/risk-dashboard']}>
           <Routes>
             <Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} />
           </Routes>
@@ -161,9 +161,9 @@ describe('WebUIContractWorkspaceHost', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('page:alert-denoise-triage-dashboard')).toBeInTheDocument();
+      expect(screen.getByText('page:risk-dashboard')).toBeInTheDocument();
     });
-    expect(screen.getByText('page:alert-denoise-triage-dashboard').parentElement).not.toHaveClass('p-6');
+    expect(screen.getByText('page:risk-dashboard').parentElement).not.toHaveClass('p-6');
     await waitFor(() => {
       expect(setTemporaryThemeOverride).toHaveBeenCalledWith('dark');
     });

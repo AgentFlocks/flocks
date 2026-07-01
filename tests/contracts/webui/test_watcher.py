@@ -41,14 +41,14 @@ def test_watcher_api_change_uses_main_loop_bridge(monkeypatch):
 
 def test_watcher_classifies_nested_page_api_change(tmp_path):
     root = tmp_path / "webui_pages"
-    page_dir = root / "soc_ui" / "soc_alerts"
+    page_dir = root / "scene_workspace" / "investigation_list"
     (page_dir / "api").mkdir(parents=True)
     (page_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "id": "soc-alerts",
-                "title": "SOC Alerts",
-                "route": "/contracts/webui/soc-alerts",
+                "id": "investigation-list",
+                "title": "Investigation List",
+                "route": "/contracts/webui/investigation-list",
                 "icon": "AlertTriangle",
                 "order": 20,
                 "enabled": True,
@@ -70,19 +70,19 @@ def test_watcher_classifies_nested_page_api_change(tmp_path):
         is_directory=False,
     )
 
-    assert page_id == "soc-alerts"
+    assert page_id == "investigation-list"
     assert pending.api_changed
 
 
 def test_watcher_classifies_workspace_manifest_change(tmp_path):
     root = tmp_path / "webui_pages"
-    workspace_dir = root / "soc_ui"
+    workspace_dir = root / "scene_workspace"
     workspace_dir.mkdir(parents=True)
     (workspace_dir / "workspace.json").write_text(
         json.dumps(
             {
-                "id": "soc_ui",
-                "title": "SOC 工作区",
+                "id": "scene_workspace",
+                "title": "场景工作区",
                 "icon": "ShieldCheck",
                 "order": 10,
                 "enabled": True,
@@ -102,5 +102,5 @@ def test_watcher_classifies_workspace_manifest_change(tmp_path):
         is_directory=False,
     )
 
-    assert page_id == "soc_ui"
+    assert page_id == "scene_workspace"
     assert pending.manifest_changed

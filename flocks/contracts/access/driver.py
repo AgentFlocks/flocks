@@ -63,9 +63,9 @@ class SqliteJsonDriverExecutor:
             )
 
         options = plan.binding.driver_options
-        table = _sqlite_identifier(options.get("table"), "alert_records")
+        table = _sqlite_identifier(options.get("table"), "records")
         record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
-        date_column = _sqlite_identifier(options.get("dateColumn"), "asset_date")
+        date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
         query = f"SELECT {record_column} FROM {table}"
         query_params: list[Any] = []
         start_date, end_date = JsonlDriverExecutor()._request_date_range(plan.params)
@@ -220,11 +220,11 @@ class JsonlDriverExecutor:
             matched = [
                 path
                 for path in all_files
-                if (asset_date := _asset_file_date(root, path)) and start_date <= asset_date <= end_date
+                if (file_date := _data_file_date(root, path)) and start_date <= file_date <= end_date
             ]
             return matched
 
-        dated_files = [(date, path) for path in all_files if (date := _asset_file_date(root, path))]
+        dated_files = [(date, path) for path in all_files if (date := _data_file_date(root, path))]
         if dated_files:
             latest_date = max(date for date, _path in dated_files)
             return [path for date, path in dated_files if date == latest_date]
@@ -283,7 +283,7 @@ class JsonlDriverExecutor:
         return True
 
 
-def _asset_file_date(root: Path, path: Path) -> str:
+def _data_file_date(root: Path, path: Path) -> str:
     try:
         parts = path.resolve().relative_to(root.resolve()).parts
     except ValueError:

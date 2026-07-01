@@ -132,7 +132,7 @@ describe('SettingsPage', () => {
 
     renderSettings('/settings/system-logs', 'light', {
       from: {
-        pathname: '/contracts/webui/workspaces/soc_ui',
+        pathname: '/contracts/webui/workspaces/scene_workspace',
         search: '?view=posture',
         hash: '#top',
       },
@@ -145,7 +145,7 @@ describe('SettingsPage', () => {
     await user.click(screen.getAllByRole('button', { name: 'settingsBack' })[0]);
 
     expect(await screen.findByTestId('location')).toHaveTextContent(
-      '/contracts/webui/workspaces/soc_ui?view=posture#top',
+      '/contracts/webui/workspaces/scene_workspace?view=posture#top',
     );
   });
 

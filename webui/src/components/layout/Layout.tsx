@@ -18,7 +18,6 @@ import {
   Sparkles,
   Archive,
   ServerCog,
-  ShieldCheck,
   LogOut,
   Settings,
   ArrowUpCircle,
@@ -418,16 +417,13 @@ export default function Layout() {
     () => {
       const sceneWorkspaceItems = webuiContractWorkspaces
         .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
-        .map((workspace) => {
-          const isSocWorkspace = workspace.id === 'soc_ui' || workspace.title.toLowerCase().includes('soc');
-          return {
-            name: workspace.title,
-            href: workspace.route,
-            icon: isSocWorkspace ? ShieldCheck : resolveWebUIContractPageIcon(workspace.icon),
-            opensWorkspaceMenu: true,
-            workspaceId: workspace.id,
-          };
-        });
+        .map((workspace) => ({
+          name: workspace.title,
+          href: workspace.route,
+          icon: resolveWebUIContractPageIcon(workspace.icon),
+          opensWorkspaceMenu: true,
+          workspaceId: workspace.id,
+        }));
 
       return [
         {
@@ -504,6 +500,9 @@ export default function Layout() {
     () => webuiContractWorkspaces.find((workspace) => workspace.id === openWorkspaceMenuId && workspace.enabled) ?? null,
     [openWorkspaceMenuId, webuiContractWorkspaces],
   );
+  const ActiveWorkspaceMenuIcon = activeWorkspaceMenu
+    ? resolveWebUIContractPageIcon(activeWorkspaceMenu.icon)
+    : null;
   const activeWorkspaceSections = useMemo(
     () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu) : []),
     [activeWorkspaceMenu],
@@ -851,14 +850,16 @@ export default function Layout() {
           }`}
         >
           <div className="flex h-16 items-center gap-3 border-b border-zinc-200 px-4 dark:border-white/10">
-            <ShieldCheck className="h-5 w-5 shrink-0 text-red-500 dark:text-red-300" />
+            {ActiveWorkspaceMenuIcon && (
+              <ActiveWorkspaceMenuIcon className="h-5 w-5 shrink-0 text-zinc-500 dark:text-zinc-300" />
+            )}
             <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenu.title}>
               {activeWorkspaceMenu.title}
             </div>
             <button
               type="button"
               onClick={() => setOpenWorkspaceMenuId(null)}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/70 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-red-100 dark:hover:bg-white/10 dark:hover:text-white dark:focus:ring-red-400/40"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/70 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:hover:bg-white/10 dark:hover:text-white dark:focus:ring-zinc-700"
               title={tWebUIContractPage('workspace.collapseSidebar')}
               aria-label={tWebUIContractPage('workspace.collapseSidebar')}
             >

@@ -797,80 +797,80 @@ describe('Layout WebUI contract pages navigation', () => {
 
   it('renders WebUI workspaces and device integration in the scene workspace group', async () => {
     const user = userEvent.setup();
-    const socWorkspacePages = [
+    const workspacePages = [
       {
-        id: 'alert-denoise-triage-dashboard',
-        title: '告警态势',
-        route: '/contracts/webui/alert-denoise-triage-dashboard',
+        id: 'risk-dashboard',
+        title: '态势看板',
+        route: '/contracts/webui/risk-dashboard',
         icon: 'Activity',
         order: 30,
         enabled: true,
         placement: 'home.after',
         buildHash: 'ready',
         buildStatus: 'ready' as const,
-        workspaceId: 'soc_ui',
-        workspaceTitle: 'SOC 工作区',
-        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+        workspaceId: 'scene_workspace',
+        workspaceTitle: '场景工作区',
+        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
       },
       {
-        id: 'soc-overview',
-        title: 'SOC 总览',
-        route: '/contracts/webui/soc-overview',
+        id: 'ops-overview',
+        title: '运营总览',
+        route: '/contracts/webui/ops-overview',
         icon: 'ShieldCheck',
         order: 10,
         enabled: true,
         placement: 'home.after',
         buildHash: 'ready',
         buildStatus: 'ready' as const,
-        workspaceId: 'soc_ui',
-        workspaceTitle: 'SOC 工作区',
-        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+        workspaceId: 'scene_workspace',
+        workspaceTitle: '场景工作区',
+        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
       },
       {
-        id: 'soc-alerts',
-        title: '告警运营',
-        route: '/contracts/webui/soc-alerts',
+        id: 'investigation-list',
+        title: '调查列表',
+        route: '/contracts/webui/investigation-list',
         icon: 'AlertTriangle',
         order: 20,
         enabled: true,
         placement: 'home.after',
         buildHash: 'ready',
         buildStatus: 'ready' as const,
-        workspaceId: 'soc_ui',
-        workspaceTitle: 'SOC 工作区',
-        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+        workspaceId: 'scene_workspace',
+        workspaceTitle: '场景工作区',
+        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
       },
     ];
     useWebUIContractPages.mockReturnValue({
-      pages: socWorkspacePages,
+      pages: workspacePages,
       workspaces: [
         {
-          id: 'soc_ui',
-          title: 'SOC 工作区',
-          route: '/contracts/webui/workspaces/soc_ui',
+          id: 'scene_workspace',
+          title: '场景工作区',
+          route: '/contracts/webui/workspaces/scene_workspace',
           icon: 'ShieldCheck',
           order: 10,
           enabled: true,
           placement: 'sceneWorkspace',
-          defaultPageId: 'soc-overview',
+          defaultPageId: 'ops-overview',
           sections: [
             {
               id: 'posture',
               label: '态势',
-              pageIds: ['alert-denoise-triage-dashboard'],
-              defaultPageId: 'alert-denoise-triage-dashboard',
+              pageIds: ['risk-dashboard'],
+              defaultPageId: 'risk-dashboard',
               contentPadding: 'none',
               themeOverride: 'dark',
             },
             {
               id: 'operations',
-              label: '告警运营',
-              pageIds: ['soc-overview', 'soc-alerts'],
-              defaultPageId: 'soc-overview',
+              label: '调查列表',
+              pageIds: ['ops-overview', 'investigation-list'],
+              defaultPageId: 'ops-overview',
               contentPadding: 'comfortable',
             },
           ],
-          pages: socWorkspacePages,
+          pages: workspacePages,
         },
       ],
       loading: false,
@@ -880,13 +880,13 @@ describe('Layout WebUI contract pages navigation', () => {
 
     const { container } = renderHomeWithLayout();
 
-    const socWorkspaceLink = await screen.findByRole('link', { name: 'SOC 工作区' });
-    expect(socWorkspaceLink).toHaveAttribute(
+    const workspaceLink = await screen.findByRole('link', { name: '场景工作区' });
+    expect(workspaceLink).toHaveAttribute(
       'href',
-      '/contracts/webui/workspaces/soc_ui',
+      '/contracts/webui/workspaces/scene_workspace',
     );
-    expect(socWorkspaceLink.querySelectorAll('svg')).toHaveLength(2);
-    expect(screen.queryByRole('link', { name: '告警运营' })).not.toBeInTheDocument();
+    expect(workspaceLink.querySelectorAll('svg')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: '调查列表' })).not.toBeInTheDocument();
 
     const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
     expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
@@ -896,7 +896,7 @@ describe('Layout WebUI contract pages navigation', () => {
     const sceneSection = Array.from(container.querySelectorAll('h3'))
       .find((heading) => heading.textContent === 'sceneWorkspaces')
       ?.parentElement;
-    expect(sceneSection?.querySelector('a[href="/contracts/webui/workspaces/soc_ui"]')).not.toBeNull();
+    expect(sceneSection?.querySelector('a[href="/contracts/webui/workspaces/scene_workspace"]')).not.toBeNull();
     expect(sceneSection?.querySelector('a[href="/devices"]')).not.toBeNull();
 
     const agentSection = Array.from(container.querySelectorAll('h3'))
@@ -906,7 +906,7 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(agentSection?.querySelector('a[href="/models"]')).not.toBeNull();
     expect(agentSection?.querySelector('a[href="/channels"]')).not.toBeNull();
 
-    await user.click(socWorkspaceLink);
+    await user.click(workspaceLink);
 
     const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
     expect(workspaceMenu).toBeInTheDocument();
@@ -914,32 +914,32 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(workspaceMenu).toHaveClass('bg-zinc-100');
     expect(screen.getByRole('link', { name: '态势' })).toHaveAttribute(
       'href',
-      '/contracts/webui/workspaces/soc_ui/alert-denoise-triage-dashboard',
+      '/contracts/webui/workspaces/scene_workspace/risk-dashboard',
     );
-    expect(screen.getByRole('link', { name: 'SOC 总览' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '运营总览' })).toHaveAttribute(
       'href',
-      '/contracts/webui/workspaces/soc_ui/soc-overview',
+      '/contracts/webui/workspaces/scene_workspace/ops-overview',
     );
-    expect(screen.getAllByRole('link', { name: '告警运营' }).find((link) => link.getAttribute('href')?.endsWith('/soc-alerts'))).toHaveAttribute(
+    expect(screen.getAllByRole('link', { name: '调查列表' }).find((link) => link.getAttribute('href')?.endsWith('/investigation-list'))).toHaveAttribute(
       'href',
-      '/contracts/webui/workspaces/soc_ui/soc-alerts',
+      '/contracts/webui/workspaces/scene_workspace/investigation-list',
     );
 
     const workspaceMenuScope = within(workspaceMenu);
     const collapseButtons = workspaceMenuScope.getAllByTitle('workspace.collapseSidebar');
     await user.click(collapseButtons[collapseButtons.length - 1]);
-    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '运营总览' })).not.toBeInTheDocument();
 
     await user.click(workspaceMenuScope.getByTitle('workspace.expandSidebar'));
-    expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '运营总览' })).toBeInTheDocument();
 
-    await user.click(workspaceMenuScope.getByRole('button', { name: '告警运营' }));
-    expect(screen.queryByRole('link', { name: 'SOC 总览' })).not.toBeInTheDocument();
+    await user.click(workspaceMenuScope.getByRole('button', { name: '调查列表' }));
+    expect(screen.queryByRole('link', { name: '运营总览' })).not.toBeInTheDocument();
 
-    await user.click(workspaceMenuScope.getByRole('button', { name: '告警运营' }));
-    expect(screen.getByRole('link', { name: 'SOC 总览' })).toBeInTheDocument();
+    await user.click(workspaceMenuScope.getByRole('button', { name: '调查列表' }));
+    expect(screen.getByRole('link', { name: '运营总览' })).toBeInTheDocument();
 
-    await user.unhover(socWorkspaceLink);
+    await user.unhover(workspaceLink);
 
     await waitFor(() => {
       expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();

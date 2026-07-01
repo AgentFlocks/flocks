@@ -111,65 +111,65 @@ def test_list_pages_scans_user_and_project_roots_with_user_priority(tmp_path):
 
 def test_grouped_page_directory_uses_manifest_id_for_lookup(tmp_path):
     user_root = tmp_path / "user" / "contracts" / "webui"
-    _write_workspace(user_root, "soc_ui", "SOC 工作区")
-    _write_page_at(user_root, "soc_ui/soc_alerts", "soc-alerts", "SOC Alerts")
+    _write_workspace(user_root, "scene_workspace", "场景工作区")
+    _write_page_at(user_root, "scene_workspace/investigation_list", "investigation-list", "Investigation List")
 
     store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
 
     pages = store.list_pages()
-    assert [page.id for page in pages] == ["soc-alerts"]
-    assert pages[0].route == "/contracts/webui/soc-alerts"
-    assert pages[0].workspaceId == "soc_ui"
-    assert pages[0].workspaceTitle == "SOC 工作区"
-    assert pages[0].workspaceRoute == "/contracts/webui/workspaces/soc_ui"
-    assert store.page_dir("soc-alerts") == user_root / "soc_ui" / "soc_alerts"
+    assert [page.id for page in pages] == ["investigation-list"]
+    assert pages[0].route == "/contracts/webui/investigation-list"
+    assert pages[0].workspaceId == "scene_workspace"
+    assert pages[0].workspaceTitle == "场景工作区"
+    assert pages[0].workspaceRoute == "/contracts/webui/workspaces/scene_workspace"
+    assert store.page_dir("investigation-list") == user_root / "scene_workspace" / "investigation_list"
 
-    store.save_manifest("soc-alerts", {"title": "告警运营"})
-    store.write_build_meta("soc-alerts", store.read_build_meta("soc-alerts").model_copy(update={"status": "ready", "hash": "abc"}))
+    store.save_manifest("investigation-list", {"title": "调查列表"})
+    store.write_build_meta("investigation-list", store.read_build_meta("investigation-list").model_copy(update={"status": "ready", "hash": "abc"}))
 
-    nested_manifest = json.loads((user_root / "soc_ui" / "soc_alerts" / "manifest.json").read_text(encoding="utf-8"))
-    assert nested_manifest["title"] == "告警运营"
-    assert (user_root / "soc_ui" / "soc_alerts" / "dist" / "meta.json").is_file()
-    assert not (user_root / "soc-alerts").exists()
+    nested_manifest = json.loads((user_root / "scene_workspace" / "investigation_list" / "manifest.json").read_text(encoding="utf-8"))
+    assert nested_manifest["title"] == "调查列表"
+    assert (user_root / "scene_workspace" / "investigation_list" / "dist" / "meta.json").is_file()
+    assert not (user_root / "investigation-list").exists()
 
 
 def test_list_workspaces_returns_grouped_pages(tmp_path):
     user_root = tmp_path / "user" / "contracts" / "webui"
     _write_workspace(
         user_root,
-        "soc_ui",
-        "SOC 工作区",
+        "scene_workspace",
+        "场景工作区",
         order=5,
-        default_page_id="soc-overview",
+        default_page_id="ops-overview",
         sections=[
             {
                 "id": "operations",
-                "label": "告警运营",
-                "pageIds": ["soc-overview", "soc-alerts"],
-                "defaultPageId": "soc-overview",
+                "label": "调查列表",
+                "pageIds": ["ops-overview", "investigation-list"],
+                "defaultPageId": "ops-overview",
                 "contentPadding": "comfortable",
             },
         ],
     )
-    _write_page_at(user_root, "soc_ui/soc_alerts", "soc-alerts", "SOC Alerts", order=20)
-    _write_page_at(user_root, "soc_ui/soc_overview", "soc-overview", "SOC Overview", order=10)
+    _write_page_at(user_root, "scene_workspace/investigation_list", "investigation-list", "Investigation List", order=20)
+    _write_page_at(user_root, "scene_workspace/ops_overview", "ops-overview", "Ops Overview", order=10)
     store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
-    store.write_build_meta("soc-overview", store.read_build_meta("soc-overview").model_copy(update={"status": "ready", "hash": "abc"}))
+    store.write_build_meta("ops-overview", store.read_build_meta("ops-overview").model_copy(update={"status": "ready", "hash": "abc"}))
 
     workspaces = store.list_workspaces()
 
-    assert [workspace.id for workspace in workspaces] == ["soc_ui"]
-    assert workspaces[0].title == "SOC 工作区"
-    assert workspaces[0].route == "/contracts/webui/workspaces/soc_ui"
+    assert [workspace.id for workspace in workspaces] == ["scene_workspace"]
+    assert workspaces[0].title == "场景工作区"
+    assert workspaces[0].route == "/contracts/webui/workspaces/scene_workspace"
     assert workspaces[0].placement == "sceneWorkspace"
-    assert workspaces[0].defaultPageId == "soc-overview"
+    assert workspaces[0].defaultPageId == "ops-overview"
     assert len(workspaces[0].sections) == 1
     assert workspaces[0].sections[0].id == "operations"
-    assert workspaces[0].sections[0].label == "告警运营"
-    assert workspaces[0].sections[0].pageIds == ["soc-overview", "soc-alerts"]
-    assert workspaces[0].sections[0].defaultPageId == "soc-overview"
+    assert workspaces[0].sections[0].label == "调查列表"
+    assert workspaces[0].sections[0].pageIds == ["ops-overview", "investigation-list"]
+    assert workspaces[0].sections[0].defaultPageId == "ops-overview"
     assert workspaces[0].sections[0].contentPadding == "comfortable"
-    assert [page.id for page in workspaces[0].pages] == ["soc-overview", "soc-alerts"]
+    assert [page.id for page in workspaces[0].pages] == ["ops-overview", "investigation-list"]
     assert workspaces[0].pages[0].buildStatus == "ready"
 
 
@@ -178,18 +178,18 @@ def test_legacy_migration_skips_existing_grouped_page(tmp_path):
     legacy_root = tmp_path / "user" / "user_defined_pages"
     _write_page_at(
         user_root,
-        "soc_ui/alert_denoise_triage_dashboard",
-        "alert-denoise-triage-dashboard",
+        "scene_workspace/risk_dashboard",
+        "risk-dashboard",
         "Grouped page",
     )
-    _write_page(legacy_root, "alert-denoise-triage-dashboard", "Legacy page")
+    _write_page(legacy_root, "risk-dashboard", "Legacy page")
 
     store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=legacy_root)
     pages = store.list_pages()
 
-    assert [page.id for page in pages] == ["alert-denoise-triage-dashboard"]
-    assert store.page_dir("alert-denoise-triage-dashboard") == user_root / "soc_ui" / "alert_denoise_triage_dashboard"
-    assert not (user_root / "alert-denoise-triage-dashboard").exists()
+    assert [page.id for page in pages] == ["risk-dashboard"]
+    assert store.page_dir("risk-dashboard") == user_root / "scene_workspace" / "risk_dashboard"
+    assert not (user_root / "risk-dashboard").exists()
 
 
 def test_save_project_root_page_materializes_user_copy(tmp_path):

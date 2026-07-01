@@ -59,24 +59,24 @@ async def test_create_and_list_webui_pages(client: AsyncClient, webui_pages_env:
 @pytest.mark.asyncio
 async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, webui_pages_env: WebUIPagesStore):
     root = webui_pages_env.root
-    workspace_dir = root / "soc_ui"
+    workspace_dir = root / "scene_workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
     (workspace_dir / "workspace.json").write_text(
         json.dumps(
             {
-                "id": "soc_ui",
-                "title": "SOC 工作区",
+                "id": "scene_workspace",
+                "title": "场景工作区",
                 "icon": "ShieldCheck",
                 "order": 10,
                 "enabled": True,
                 "placement": "sceneWorkspace",
-                "defaultPageId": "soc-overview",
+                "defaultPageId": "ops-overview",
                 "sections": [
                     {
                         "id": "operations",
-                        "label": "告警运营",
-                        "pageIds": ["soc-overview", "soc-alerts"],
-                        "defaultPageId": "soc-overview",
+                        "label": "调查列表",
+                        "pageIds": ["ops-overview", "investigation-list"],
+                        "defaultPageId": "ops-overview",
                         "contentPadding": "comfortable",
                     }
                 ],
@@ -85,8 +85,8 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
         encoding="utf-8",
     )
     for page_id, page_dir_name, title, order in [
-        ("soc-overview", "soc_overview", "SOC 总览", 10),
-        ("soc-alerts", "soc_alerts", "告警运营", 20),
+        ("ops-overview", "ops_overview", "运营总览", 10),
+        ("investigation-list", "investigation_list", "调查列表", 20),
     ]:
         page_dir = workspace_dir / page_dir_name
         (page_dir / "src").mkdir(parents=True, exist_ok=True)
@@ -113,52 +113,52 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
     assert resp.status_code == 200
     assert resp.json() == [
         {
-            "id": "soc_ui",
-            "title": "SOC 工作区",
-            "route": "/contracts/webui/workspaces/soc_ui",
+            "id": "scene_workspace",
+            "title": "场景工作区",
+            "route": "/contracts/webui/workspaces/scene_workspace",
             "icon": "ShieldCheck",
             "order": 10,
             "enabled": True,
             "placement": "sceneWorkspace",
-            "defaultPageId": "soc-overview",
+            "defaultPageId": "ops-overview",
             "sections": [
                 {
                     "id": "operations",
-                    "label": "告警运营",
-                    "pageIds": ["soc-overview", "soc-alerts"],
-                    "defaultPageId": "soc-overview",
+                    "label": "调查列表",
+                    "pageIds": ["ops-overview", "investigation-list"],
+                    "defaultPageId": "ops-overview",
                     "contentPadding": "comfortable",
                     "themeOverride": None,
                 }
             ],
             "pages": [
                 {
-                    "id": "soc-overview",
-                    "title": "SOC 总览",
-                    "route": "/contracts/webui/soc-overview",
+                    "id": "ops-overview",
+                    "title": "运营总览",
+                    "route": "/contracts/webui/ops-overview",
                     "icon": "LayoutDashboard",
                     "order": 10,
                     "enabled": True,
                     "placement": "home.after",
                     "buildHash": "",
                     "buildStatus": "idle",
-                    "workspaceId": "soc_ui",
-                    "workspaceTitle": "SOC 工作区",
-                    "workspaceRoute": "/contracts/webui/workspaces/soc_ui",
+                    "workspaceId": "scene_workspace",
+                    "workspaceTitle": "场景工作区",
+                    "workspaceRoute": "/contracts/webui/workspaces/scene_workspace",
                 },
                 {
-                    "id": "soc-alerts",
-                    "title": "告警运营",
-                    "route": "/contracts/webui/soc-alerts",
+                    "id": "investigation-list",
+                    "title": "调查列表",
+                    "route": "/contracts/webui/investigation-list",
                     "icon": "LayoutDashboard",
                     "order": 20,
                     "enabled": True,
                     "placement": "home.after",
                     "buildHash": "",
                     "buildStatus": "idle",
-                    "workspaceId": "soc_ui",
-                    "workspaceTitle": "SOC 工作区",
-                    "workspaceRoute": "/contracts/webui/workspaces/soc_ui",
+                    "workspaceId": "scene_workspace",
+                    "workspaceTitle": "场景工作区",
+                    "workspaceRoute": "/contracts/webui/workspaces/scene_workspace",
                 },
             ],
         }

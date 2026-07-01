@@ -18,10 +18,10 @@ describe('WebUIContractPage runtime', () => {
     installWebUIContractPageRuntime('dash-1');
     const sdk = window.__FLOCKS_WEBUI_CONTRACT_SDK__;
     await sdk!.api
-      .contract('soc/alerts', 'soc.alerts.operations')
+      .contract('records/list', 'records.operations')
       .operation('list', { params: { limit: 10 } });
     expect(postSpy).toHaveBeenCalledWith(
-      '/api/contracts/webui/pages/soc/alerts/access/soc.alerts.operations/operations/list',
+      '/api/contracts/webui/pages/records/list/access/records.operations/operations/list',
       { params: { limit: 10 } },
       undefined,
     );
