@@ -16,7 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
@@ -38,6 +38,7 @@ import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { copyText } from '@/utils/clipboard';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -945,7 +946,19 @@ export function getRenderableFileUrl(url: string): string {
   }
 }
 
-export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>): boolean {
+export function shouldRenderMessage(
+  message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>,
+  options?: { isActive?: boolean },
+): boolean {
+  if (
+    message.role === 'assistant' &&
+    (message.parts?.length ?? 0) === 0 &&
+    message.finish !== 'summary' &&
+    !message.error &&
+    !options?.isActive
+  ) {
+    return false;
+  }
   if (
     message.role === 'assistant' &&
     (message.parts?.length ?? 0) === 0 &&
@@ -1128,6 +1141,44 @@ function writeDismissedGoalKey(sessionId: string | null | undefined, goalKey: st
     }
   } catch {
     // Ignore unavailable storage; dismissal still works for the current mount.
+  }
+}
+
+export type ProcessGroupOpenState = Record<string, boolean>;
+
+function getProcessGroupOpenStorageKey(sessionId?: string | null): string | null {
+  return sessionId ? `flocks:session:${sessionId}:processGroupsOpen` : null;
+}
+
+function readProcessGroupOpenState(sessionId?: string | null): ProcessGroupOpenState {
+  const storageKey = getProcessGroupOpenStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, boolean] => (
+        typeof entry[0] === 'string' && typeof entry[1] === 'boolean'
+      )),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeProcessGroupOpenState(sessionId: string | null | undefined, state: ProcessGroupOpenState): void {
+  const storageKey = getProcessGroupOpenStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return;
+  try {
+    if (Object.keys(state).length > 0) {
+      window.localStorage.setItem(storageKey, JSON.stringify(state));
+    } else {
+      window.localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Ignore unavailable storage; process groups still work for this render.
   }
 }
 
@@ -1453,6 +1504,9 @@ export default function SessionChat({
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
   const [editingQueueText, setEditingQueueText] = useState('');
   const [queueActionId, setQueueActionId] = useState<string | null>(null);
+  const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
+    readProcessGroupOpenState(sessionId)
+  ));
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -1527,6 +1581,7 @@ export default function SessionChat({
   const goalHydrationVersionRef = useRef(0);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
+  const suppressStreamingUntilIdleRef = useRef(false);
   const statusCheckedRef = useRef<string | null>(null);
   const {
     pendingQuestions,
@@ -1787,6 +1842,7 @@ export default function SessionChat({
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
+        suppressStreamingUntilIdleRef.current = false;
         setContextUsageSnapshot(null);
         setContextUsageRefreshing(true);
         setContextUsageWindowTokens(0);
@@ -1802,12 +1858,18 @@ export default function SessionChat({
         const statusType = type === 'session.status' ? properties.status?.type : properties.status;
         if (statusType === 'busy') {
           sessionBusyRef.current = true;
-          if (!abortingRef.current) setIsStreaming(true);
+          if (
+            !abortingRef.current &&
+            !suppressStreamingUntilIdleRef.current
+          ) setIsStreaming(true);
           setIsCompacting(false);
           isCompactingRef.current = false;
         } else if (statusType === 'compacting') {
           sessionBusyRef.current = true;
-          if (!abortingRef.current) setIsStreaming(true);
+          if (
+            !abortingRef.current &&
+            !suppressStreamingUntilIdleRef.current
+          ) setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
           setCompactingMessage(properties.status?.message || t('chat.compacting'));
@@ -1816,6 +1878,7 @@ export default function SessionChat({
           setCompactionStages([]);
         } else if (statusType === 'idle') {
           sessionBusyRef.current = false;
+          suppressStreamingUntilIdleRef.current = false;
           activeToolPartIdsRef.current.clear();
           setIsStreaming(false);
           setIsCompacting(false);
@@ -1827,7 +1890,18 @@ export default function SessionChat({
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
-        if (properties.info.finish || properties.info.time?.completed) {
+        if (
+          properties.info.role === 'assistant' &&
+          (abortingRef.current || suppressStreamingUntilIdleRef.current)
+        ) {
+          abortedMessageIdRef.current = properties.info.id;
+          markMessageStopped(properties.info.id);
+          setIsStreaming(false);
+          setSending(false);
+          if (properties.info.finish || properties.info.time?.completed) {
+            void refreshContextUsage();
+          }
+        } else if (properties.info.finish || properties.info.time?.completed) {
           const shouldRefetch = shouldRefetchFinishedMessage({
             finishedMessageId: properties.info.id,
             abortedMessageId: abortedMessageIdRef.current,
@@ -1856,7 +1930,7 @@ export default function SessionChat({
         if (part.id) {
           if (isActiveToolPart(part)) {
             activeToolPartIdsRef.current.add(part.id);
-            if (!abortingRef.current) setIsStreaming(true);
+            if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) setIsStreaming(true);
           } else {
             activeToolPartIdsRef.current.delete(part.id);
           }
@@ -2059,6 +2133,7 @@ export default function SessionChat({
     setPendingAgentName(agentName || 'rex');
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     sessionBusyRef.current = false;
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
@@ -2067,7 +2142,17 @@ export default function SessionChat({
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
     setInput(readChatDraft(sessionId));
+    setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
   }, [sessionId, agentName, clearPendingQuestions]);
+
+  const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
+    setProcessGroupOpenState(prev => {
+      if (prev[key] === open) return prev;
+      const next = { ...prev, [key]: open };
+      writeProcessGroupOpenState(sessionId, next);
+      return next;
+    });
+  }, [sessionId]);
 
   useEffect(() => {
     fetchPromptQueue();
@@ -2091,10 +2176,10 @@ export default function SessionChat({
       try {
         const res = await client.get('/api/session/status');
         const status = res.data[sessionId];
-        if (status?.type === 'busy') {
+        if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
-        } else if (status?.type === 'compacting') {
+        } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsCompacting(true);
@@ -2412,6 +2497,8 @@ export default function SessionChat({
     if (!sessionId) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
@@ -2464,6 +2551,8 @@ export default function SessionChat({
     const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     // Force scroll to bottom when user sends a new message
     isAtBottomRef.current = true;
     setSending(true);
@@ -2776,25 +2865,35 @@ export default function SessionChat({
 
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
+    // Record the ID of the message being aborted so we can ignore its finish event later.
+    const lastAsstMsg = [...messagesRef.current].reverse().find(
+      (m) => m.role === 'assistant' && !m.finish,
+    );
+    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    abortedMessageIdRef.current = lastAsstMsg?.id || null;
+    abortingRef.current = true;
+    suppressStreamingUntilIdleRef.current = true;
+    sessionBusyRef.current = false;
+    setIsStreaming(false);
+    setSending(false);
     try {
-      // Record the ID of the message being aborted so we can ignore its finish event later
-      const lastAsstMsg = [...messagesRef.current].reverse().find(
-        (m) => m.role === 'assistant' && !m.finish,
-      );
-      abortedMessageIdRef.current = lastAsstMsg?.id || null;
-      abortingRef.current = true;
       await client.post(`/api/session/${sessionId}/abort`);
       if (lastAsstMsg?.id) {
         markMessageStopped(lastAsstMsg.id);
       }
-      setIsStreaming(false);
       setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
     } catch (err) {
       console.error('[SessionChat] Abort failed:', err);
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
+      if (shouldRestoreActivity) {
+        sessionBusyRef.current = true;
+        setIsStreaming(true);
+        if (sending) setSending(true);
+      }
     }
-  }, [markMessageStopped, sessionId]);
+  }, [isStreaming, markMessageStopped, sending, sessionId]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
     setEditingQueueId(item.id);
@@ -2843,6 +2942,9 @@ export default function SessionChat({
       await sessionApi.runQueuedPromptNow(sessionId, item.id);
       if (editingQueueId === item.id) handleQueuedEditCancel();
       await fetchPromptQueue();
+      abortingRef.current = false;
+      abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
       setIsStreaming(true);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
@@ -2890,7 +2992,7 @@ export default function SessionChat({
 
   // Copy text to clipboard
   const handleCopy = useCallback((text: string) => {
-    navigator.clipboard.writeText(text).catch(() => {});
+    void copyText(text).catch(() => {});
   }, []);
 
   const resetEditingState = useCallback(() => {
@@ -2961,6 +3063,8 @@ export default function SessionChat({
     if (!text) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(editingMessageId);
     try {
@@ -2991,6 +3095,8 @@ export default function SessionChat({
     if (!sessionId) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(messageId);
     try {
@@ -3028,10 +3134,6 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (!shouldRenderMessage(msg)) {
-        skipIndices.add(idx);
-        continue;
-      }
       if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
         skipIndices.add(idx);
         continue;
@@ -3102,16 +3204,17 @@ export default function SessionChat({
             )}
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
+              const isActiveMessage =
+                isStreaming &&
+                i === merged.length - 1 &&
+                msg.role === 'assistant' &&
+                !msg.finish;
+              if (!shouldRenderMessage(msg, { isActive: isActiveMessage })) return null;
               return (
                 <ChatMessageBubble
                   key={msg.id}
                   message={msg}
-                  isActive={
-                    isStreaming &&
-                    i === merged.length - 1 &&
-                    msg.role === 'assistant' &&
-                    !msg.finish
-                  }
+                  isActive={isActiveMessage}
                   pendingQuestions={pendingQuestions}
                   onQuestionAnswer={handleQuestionAnswer}
                   onQuestionReject={handleQuestionReject}
@@ -3120,6 +3223,8 @@ export default function SessionChat({
                   collapseIntermediateSteps={collapseIntermediateSteps}
                   processGroupsDefaultOpen={processGroupsDefaultOpen}
                   processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+                  processGroupOpenState={processGroupOpenState}
+                  onProcessGroupOpenChange={handleProcessGroupOpenChange}
                   compact={compact}
                   onCopy={handleCopy}
                   editingMessageId={editingMessageId}
@@ -3666,6 +3771,8 @@ export interface ChatMessageBubbleProps {
   collapseIntermediateSteps?: boolean;
   processGroupsDefaultOpen?: boolean;
   processGroupsOpenWhileActive?: boolean;
+  processGroupOpenState?: ProcessGroupOpenState;
+  onProcessGroupOpenChange?: (key: string, open: boolean) => void;
   compact?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
@@ -3682,25 +3789,49 @@ export interface ChatMessageBubbleProps {
 
 function ProcessGroupDetails({
   defaultOpen,
+  open,
+  onOpenChange,
+  summary,
   children,
 }: {
   defaultOpen: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  summary: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const isControlled = typeof open === 'boolean';
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
 
-  useLayoutEffect(() => {
-    if (detailsRef.current) {
-      detailsRef.current.open = defaultOpen;
+  useEffect(() => {
+    if (!isControlled) {
+      setInternalOpen(defaultOpen);
     }
-  }, [defaultOpen]);
+  }, [defaultOpen, isControlled]);
+
+  const effectiveOpen = isControlled ? open : internalOpen;
+  const handleSummaryClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    const nextOpen = !effectiveOpen;
+    if (!isControlled) {
+      setInternalOpen(nextOpen);
+    }
+    onOpenChange?.(nextOpen);
+  }, [effectiveOpen, isControlled, onOpenChange]);
 
   return (
     <details
-      ref={detailsRef}
+      open={effectiveOpen}
       data-testid="chat-process-group"
       className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
     >
+      <summary
+        onClick={handleSummaryClick}
+        className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50"
+      >
+        {summary}
+        <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
+      </summary>
       {children}
     </details>
   );
@@ -3717,6 +3848,8 @@ function ChatMessageBubbleInner({
   collapseIntermediateSteps = false,
   processGroupsDefaultOpen = false,
   processGroupsOpenWhileActive = false,
+  processGroupOpenState,
+  onProcessGroupOpenChange,
   compact = true,
   onCopy,
   editingMessageId,
@@ -3978,23 +4111,32 @@ function ChatMessageBubbleInner({
               textCount > 0 ? t('chat.process.textCount', { count: textCount }) : '',
             ].filter(Boolean).join(' · ');
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
+            const processGroupKey = `${message.id}:process:${groupIndex}`;
+            const hasStoredOpenState = !!processGroupOpenState
+              && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
+            const effectiveProcessGroupOpen = hasStoredOpenState
+              ? processGroupOpenState[processGroupKey]
+              : processGroupOpen;
             return (
               <ProcessGroupDetails
                 key={`process-${groupIndex}`}
                 defaultOpen={processGroupOpen}
-              >
-                <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50">
-                  <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
-                  <span className="flex-shrink-0 font-semibold text-zinc-700">
-                    {t('chat.process.title', { count: group.length })}
-                  </span>
-                  {summary && (
-                    <span className="min-w-0 truncate text-zinc-500">
-                      {summary}
+                open={effectiveProcessGroupOpen}
+                onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
+                summary={(
+                  <>
+                    <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
+                    <span className="flex-shrink-0 font-semibold text-zinc-700">
+                      {t('chat.process.title', { count: group.length })}
                     </span>
-                  )}
-                  <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
-                </summary>
+                    {summary && (
+                      <span className="min-w-0 truncate text-zinc-500">
+                        {summary}
+                      </span>
+                    )}
+                  </>
+                )}
+              >
                 <div className="border-t border-zinc-200/70 px-2.5 py-2">
                   {group.map(({ part, index }) => renderPart(part, index))}
                 </div>
@@ -5046,6 +5188,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
   if (prev.processGroupsOpenWhileActive !== next.processGroupsOpenWhileActive) return false;
+  if (prev.processGroupOpenState !== next.processGroupOpenState) return false;
   if (prev.editingMessageId !== next.editingMessageId) return false;
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;

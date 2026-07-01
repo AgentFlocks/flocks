@@ -35,24 +35,24 @@ export default function Home() {
   const navigate = useNavigate();
   const toast = useToast();
   const { user } = useAuth();
-  const canCreateUserDefinedPage = user?.role === 'admin';
+  const canCreateWebUIContractPage = user?.role === 'admin';
   const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
-  const [creatingUserDefinedPageSession, setCreatingUserDefinedPageSession] = useState(false);
+  const [creatingWebUIContractPageSession, setCreatingWebUIContractPageSession] = useState(false);
 
-  const handleCreateUserDefinedPage = useCallback(async () => {
-    if (creatingUserDefinedPageSession) return;
-    setCreatingUserDefinedPageSession(true);
+  const handleCreateWebUIContractPage = useCallback(async () => {
+    if (creatingWebUIContractPageSession) return;
+    setCreatingWebUIContractPageSession(true);
     try {
-      const session = await sessionApi.create({ title: t('createUserDefinedPageSessionTitle') });
-      const message = t('createUserDefinedPageInitialMessage');
+      const session = await sessionApi.create({ title: t('createWebUIContractPageSessionTitle') });
+      const message = t('createWebUIContractPageInitialMessage');
       navigate(`/sessions?session=${session.id}&message=${encodeURIComponent(message)}`);
     } catch (err: unknown) {
-      const detail = err instanceof Error ? err.message : t('createUserDefinedPageError');
-      toast.error(t('createUserDefinedPageError'), detail);
+      const detail = err instanceof Error ? err.message : t('createWebUIContractPageError');
+      toast.error(t('createWebUIContractPageError'), detail);
     } finally {
-      setCreatingUserDefinedPageSession(false);
+      setCreatingWebUIContractPageSession(false);
     }
-  }, [creatingUserDefinedPageSession, navigate, t, toast]);
+  }, [creatingWebUIContractPageSession, navigate, t, toast]);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -91,19 +91,19 @@ export default function Home() {
               <ChevronRight className="ml-1.5 w-4 h-4" />
             </button>
 
-            {canCreateUserDefinedPage ? (
+            {canCreateWebUIContractPage ? (
               <button
                 type="button"
-                onClick={() => void handleCreateUserDefinedPage()}
-                disabled={creatingUserDefinedPageSession}
+                onClick={() => void handleCreateWebUIContractPage()}
+                disabled={creatingWebUIContractPageSession}
                 className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-100 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-red-500/40 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {creatingUserDefinedPageSession ? (
+                {creatingWebUIContractPageSession ? (
                   <Loader2 className="mr-2 w-4 h-4 animate-spin" />
                 ) : (
                   <LayoutDashboard className="mr-2 w-4 h-4 text-red-300" />
                 )}
-                {t('createUserDefinedPage')}
+                {t('createWebUIContractPage')}
               </button>
             ) : null}
 

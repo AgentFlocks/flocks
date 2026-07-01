@@ -20,16 +20,20 @@ async def test_publish_workflow_as_api_reuses_key_for_runtime(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda requested_id: {
-            "id": requested_id,
-            "name": "Demo Workflow",
-            "workflowJson": {
+        lambda requested_id: (
+            {
                 "id": requested_id,
-                "start": "n1",
-                "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
-                "edges": [],
-            },
-        } if requested_id == workflow_id else None,
+                "name": "Demo Workflow",
+                "workflowJson": {
+                    "id": requested_id,
+                    "start": "n1",
+                    "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
+                    "edges": [],
+                },
+            }
+            if requested_id == workflow_id
+            else None
+        ),
     )
     monkeypatch.setattr(workflow_routes.Config, "get_data_path", lambda: tmp_path)
 
@@ -47,12 +51,14 @@ async def test_publish_workflow_as_api_reuses_key_for_runtime(
         driver: str | None = None,
         api_key: str | None = None,
     ) -> dict[str, Any]:
-        publish_calls.append({
-            "workflow_id": requested_id,
-            "image": image,
-            "driver": driver,
-            "api_key": api_key,
-        })
+        publish_calls.append(
+            {
+                "workflow_id": requested_id,
+                "image": image,
+                "driver": driver,
+                "api_key": api_key,
+            }
+        )
         return {
             "serviceUrl": "http://127.0.0.1:19000",
             "containerName": "local-wf-1",
@@ -60,8 +66,8 @@ async def test_publish_workflow_as_api_reuses_key_for_runtime(
             "apiKey": api_key,
         }
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_put", fake_write)
     monkeypatch.setattr(workflow_routes, "publish_workflow", fake_publish_workflow)
 
     result = await workflow_routes.publish_workflow_as_api(
@@ -69,12 +75,14 @@ async def test_publish_workflow_as_api_reuses_key_for_runtime(
         workflow_routes.WorkflowCenterPublishRequest(driver="local"),
     )
 
-    assert publish_calls == [{
-        "workflow_id": workflow_id,
-        "image": None,
-        "driver": "local",
-        "api_key": existing_key,
-    }]
+    assert publish_calls == [
+        {
+            "workflow_id": workflow_id,
+            "image": None,
+            "driver": "local",
+            "api_key": existing_key,
+        }
+    ]
     assert result["apiKey"] == existing_key
     assert writes[workflow_routes._api_service_key(workflow_id)]["apiKey"] == existing_key
 
@@ -124,12 +132,14 @@ async def test_reconcile_published_workflow_api_services_restarts_unhealthy_serv
         driver: str | None = None,
         api_key: str | None = None,
     ) -> dict[str, Any]:
-        publish_calls.append({
-            "workflow_id": requested_id,
-            "image": image,
-            "driver": driver,
-            "api_key": api_key,
-        })
+        publish_calls.append(
+            {
+                "workflow_id": requested_id,
+                "image": image,
+                "driver": driver,
+                "api_key": api_key,
+            }
+        )
         return {
             "serviceUrl": "http://127.0.0.1:19001",
             "containerName": "flocks-wf-wf-1-rel-1",
@@ -138,9 +148,9 @@ async def test_reconcile_published_workflow_api_services_restarts_unhealthy_serv
             "apiKey": api_key,
         }
 
-    monkeypatch.setattr(workflow_routes.Storage, "list_keys", fake_list_keys)
-    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_list_keys", fake_list_keys)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_put", fake_write)
     monkeypatch.setattr(workflow_routes, "get_workflow_health", fake_health)
     monkeypatch.setattr(workflow_routes, "_prepare_workflow_api_registry", fake_prepare_registry)
     monkeypatch.setattr(workflow_routes, "publish_workflow", fake_publish_workflow)
@@ -149,12 +159,14 @@ async def test_reconcile_published_workflow_api_services_restarts_unhealthy_serv
 
     assert result["checked"] == 1
     assert result["restarted"] == 1
-    assert publish_calls == [{
-        "workflow_id": workflow_id,
-        "image": "custom-image:latest",
-        "driver": "docker",
-        "api_key": existing_key,
-    }]
+    assert publish_calls == [
+        {
+            "workflow_id": workflow_id,
+            "image": "custom-image:latest",
+            "driver": "docker",
+            "api_key": existing_key,
+        }
+    ]
     assert store[service_key]["status"] == "running"
     assert store[service_key]["apiKey"] == existing_key
     assert store[service_key]["serviceUrl"] == "http://127.0.0.1:19001"
@@ -208,9 +220,9 @@ async def test_reconcile_published_workflow_api_services_restarts_health_marked_
             "apiKey": api_key,
         }
 
-    monkeypatch.setattr(workflow_routes.Storage, "list_keys", fake_list_keys)
-    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_list_keys", fake_list_keys)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_put", fake_write)
     monkeypatch.setattr(workflow_routes, "get_workflow_health", fake_health)
     monkeypatch.setattr(workflow_routes, "_prepare_workflow_api_registry", fake_prepare_registry)
     monkeypatch.setattr(workflow_routes, "publish_workflow", fake_publish_workflow)
@@ -251,8 +263,8 @@ async def test_reconcile_published_workflow_api_services_skips_manually_stopped_
         health_calls.append(requested_id)
         return {"ok": True}
 
-    monkeypatch.setattr(workflow_routes.Storage, "list_keys", fake_list_keys)
-    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_list_keys", fake_list_keys)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", fake_read)
     monkeypatch.setattr(workflow_routes, "get_workflow_health", fake_health)
 
     result = await workflow_routes.reconcile_published_workflow_api_services()
@@ -286,8 +298,8 @@ async def test_get_workflow_service_does_not_probe_runtime_health(
         health_calls.append(requested_id)
         return {"ok": False, "published": False}
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_put", fake_write)
     monkeypatch.setattr(workflow_routes, "get_workflow_health", fake_health)
 
     result = await workflow_routes.get_workflow_service(workflow_id)
@@ -327,9 +339,9 @@ async def test_list_workflow_services_marks_stale_running_service_stopped_in_res
     async def fake_write(key: Any, value: Any) -> None:
         writes.append((key, value))
 
-    monkeypatch.setattr(workflow_routes.Storage, "list_keys", fake_list_keys)
-    monkeypatch.setattr(workflow_routes.Storage, "read", fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_list_keys", fake_list_keys)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", fake_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_put", fake_write)
 
     result = await workflow_routes.list_workflow_services()
 

@@ -1,0 +1,77 @@
+name: onesandbox_ops
+description: >
+  OneSandbox v3 mutation grouped tool for sample upload, report deletion,
+  event upload, hash reputation update/delete, SafeSkill scan, and CheckURL
+  scan operations.
+description_cn: >
+  OneSandbox v3 写操作分组工具，支持样本上传、报告删除、事件上报、
+  Hash 信誉新增/删除、SafeSkill 扫描和 CheckURL 扫描。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesandbox_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - upload_file
+        - delete_file_report
+        - upload_event
+        - hash_reputation_set
+        - hash_reputation_delete
+        - safeskill_scan
+        - checkurl_scan
+      description: 写操作动作名。调用前请确认影响范围。
+    file_path:
+      type: string
+      description: upload_file 本地样本文件路径。
+    filename:
+      type: string
+      description: 上传文件名。
+    password:
+      type: string
+      description: 加密压缩包密码。
+    run_time:
+      type: integer
+      description: 沙箱运行时间，单位秒，通常 30-300。
+    mode:
+      type: string
+      description: 上传模式：standard/rapid/custom。
+    sha256:
+      type: string
+      description: 文件 SHA256。
+    md5:
+      type: string
+      description: 文件 MD5。
+    sha1:
+      type: string
+      description: 文件 SHA1。
+    hash:
+      type: string
+      description: hash_reputation_set 的哈希值。
+    white:
+      type: boolean
+      description: hash_reputation_set 是否白名单。
+    threat:
+      type: string
+      description: hash_reputation_set 威胁类型。
+    classify:
+      type: string
+      description: hash_reputation_set 分类。
+    description:
+      type: string
+      description: hash_reputation_set 描述。
+    url:
+      type: string
+      description: checkurl_scan 待检测 URL，或 SafeSkill 相关 URL。
+    body:
+      type: object
+      description: upload_event 或扩展接口的原始请求体。
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesandbox.handler.py
+  function: ops

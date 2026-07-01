@@ -20,22 +20,26 @@ async def test_list_workflow_triggers_returns_unified_status(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {
-            "id": workflow_id,
-            "workflowJson": {
-                "start": "n1",
-                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
-                "edges": [],
-                "triggers": [
-                    {
-                        "id": "schedule-default",
-                        "type": "schedule",
-                        "enabled": True,
-                        "source": {"intervalSeconds": 60},
-                    }
-                ],
-            },
-        } if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {
+                "id": workflow_id,
+                "workflowJson": {
+                    "start": "n1",
+                    "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                    "edges": [],
+                    "triggers": [
+                        {
+                            "id": "schedule-default",
+                            "type": "schedule",
+                            "enabled": True,
+                            "source": {"intervalSeconds": 60},
+                        }
+                    ],
+                },
+            }
+            if workflow_id == "wf-1"
+            else None
+        ),
     )
 
     async def _fake_statuses(_workflow_id: str, _workflow_json: dict[str, Any]) -> list[dict[str, Any]]:
@@ -70,15 +74,19 @@ async def test_list_workflow_triggers_respects_explicit_empty_trigger_list(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {
-            "id": workflow_id,
-            "workflowJson": {
-                "start": "n1",
-                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
-                "edges": [],
-                "triggers": [],
-            },
-        } if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {
+                "id": workflow_id,
+                "workflowJson": {
+                    "start": "n1",
+                    "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                    "edges": [],
+                    "triggers": [],
+                },
+            }
+            if workflow_id == "wf-1"
+            else None
+        ),
     )
 
     async def _fake_legacy_triggers(_workflow_id: str) -> list[Any]:
@@ -148,27 +156,31 @@ async def test_workflow_config_response_keeps_template_separate_from_runtime(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {
-            "id": workflow_id,
-            "name": "demo",
-            "workflowJson": {
-                "start": "n1",
-                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
-                "edges": [],
-                "triggers": [
-                    {
-                        "id": "syslog-default",
-                        "type": "syslog",
-                        "enabled": True,
-                    }
-                ],
-            },
-        } if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {
+                "id": workflow_id,
+                "name": "demo",
+                "workflowJson": {
+                    "start": "n1",
+                    "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                    "edges": [],
+                    "triggers": [
+                        {
+                            "id": "syslog-default",
+                            "type": "syslog",
+                            "enabled": True,
+                        }
+                    ],
+                },
+            }
+            if workflow_id == "wf-1"
+            else None
+        ),
     )
 
     stored_writes: dict[str, Any] = {}
 
-    async def _fake_read(key: Any, _model: Any = None) -> dict[str, Any] | None:
+    async def _fake_kv_get(key: Any) -> dict[str, Any] | None:
         if key == workflow_routes._api_service_key("wf-1"):
             return {
                 "workflowId": "wf-1",
@@ -177,8 +189,8 @@ async def test_workflow_config_response_keeps_template_separate_from_runtime(
             }
         return None
 
-    async def _fake_write(key: Any, value: Any) -> None:
-        stored_writes[str(key)] = value
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        stored_writes[workflow_routes._workflow_integration_config_key(workflow_id)] = config
 
     async def _fake_statuses(_workflow_id: str, _workflow_json: dict[str, Any]) -> list[dict[str, Any]]:
         return [
@@ -190,8 +202,8 @@ async def test_workflow_config_response_keeps_template_separate_from_runtime(
             }
         ]
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", _fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", _fake_kv_get)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
     monkeypatch.setattr(
         workflow_routes,
         "default_trigger_runtime",
@@ -251,26 +263,30 @@ async def test_workflow_config_prefers_storage_over_config_file(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {
-            "id": workflow_id,
-            "name": "demo",
-            "workflowJson": {"start": "n1", "nodes": [], "edges": [], "triggers": []},
-        } if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {
+                "id": workflow_id,
+                "name": "demo",
+                "workflowJson": {"start": "n1", "nodes": [], "edges": [], "triggers": []},
+            }
+            if workflow_id == "wf-1"
+            else None
+        ),
     )
 
-    async def _fake_read(key: Any, _model: Any = None) -> dict[str, Any] | None:
-        if key == workflow_routes._workflow_integration_config_key("wf-1"):
+    async def _fake_get_config(workflow_id: str, *, kind: str = "workflow.integration-config") -> dict[str, Any] | None:
+        if workflow_id == "wf-1" and kind == "workflow.integration-config":
             return stored_config
         return None
 
-    async def _fake_write(key: Any, value: Any) -> None:
-        write_calls.append((key, value))
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        write_calls.append((workflow_routes._workflow_integration_config_key(workflow_id), config))
 
     async def _fake_statuses(_workflow_id: str, _workflow_json: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", _fake_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "get_config", _fake_get_config)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
     monkeypatch.setattr(
         workflow_routes,
         "default_trigger_runtime",
@@ -323,10 +339,9 @@ async def test_update_workflow_config_writes_template_without_mutating_runtime(
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(fs_store, "_workspace_root", None)
 
-    original_storage_read = workflow_routes.Storage.read
     stored_writes: dict[str, Any] = {}
 
-    async def _fake_storage_read(key: Any, *args: Any, **kwargs: Any) -> Any:
+    async def _fake_kv_get(key: Any) -> Any:
         if key == workflow_routes._api_service_key(workflow_id):
             return {
                 "workflowId": workflow_id,
@@ -338,10 +353,10 @@ async def test_update_workflow_config_writes_template_without_mutating_runtime(
                 "driver": "local",
                 "publishedAt": 123,
             }
-        return await original_storage_read(key, *args, **kwargs)
+        return None
 
-    async def _fake_storage_write(key: Any, value: Any) -> None:
-        stored_writes[str(key)] = value
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        stored_writes[workflow_routes._workflow_integration_config_key(workflow_id)] = config
 
     async def _fake_statuses(_workflow_id: str, _workflow_json: dict[str, Any]) -> list[dict[str, Any]]:
         return [
@@ -353,8 +368,8 @@ async def test_update_workflow_config_writes_template_without_mutating_runtime(
             }
         ]
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", _fake_storage_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_storage_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", _fake_kv_get)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
     monkeypatch.setattr(
         workflow_routes,
         "default_trigger_runtime",
@@ -422,7 +437,7 @@ async def test_delete_workflow_service_removes_runtime_service_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workflow_id = "wf-service-delete"
-    await workflow_routes.Storage.write(
+    await workflow_routes.WorkflowStore.kv_put(
         workflow_routes._api_service_key(workflow_id),
         {
             "workflowId": workflow_id,
@@ -448,7 +463,7 @@ async def test_delete_workflow_service_removes_runtime_service_record(
     assert response.status_code == 200, response.text
     assert response.json() == {"ok": True, "workflowId": workflow_id}
     assert stopped == [workflow_id]
-    assert await workflow_routes.Storage.read(workflow_routes._api_service_key(workflow_id)) is None
+    assert await workflow_routes.WorkflowStore.kv_get(workflow_routes._api_service_key(workflow_id)) is None
 
 
 @pytest.mark.asyncio
@@ -459,11 +474,15 @@ async def test_update_workflow_config_rejects_mismatched_workflow_id(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {
-            "id": workflow_id,
-            "name": "demo",
-            "workflowJson": {"start": "n1", "nodes": [], "edges": []},
-        } if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {
+                "id": workflow_id,
+                "name": "demo",
+                "workflowJson": {"start": "n1", "nodes": [], "edges": []},
+            }
+            if workflow_id == "wf-1"
+            else None
+        ),
     )
 
     response = await client.put(
@@ -506,27 +525,35 @@ async def test_delete_workflow_cleans_directory_and_storage(
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(fs_store, "_workspace_root", None)
 
-    storage_keys = [
-        workflow_routes._workflow_stats_key(workflow_id),
-        workflow_routes._workflow_integration_config_key(workflow_id),
+    await workflow_routes.WorkflowStore.put_stats(workflow_id, {"callCount": 1})
+    await workflow_routes.WorkflowStore.put_config(workflow_id, {"workflowId": workflow_id})
+    await workflow_routes.WorkflowStore.put_config(
+        workflow_id,
+        {"workflowId": workflow_id},
+        kind="workflow_syslog_config",
+    )
+    await workflow_routes.WorkflowStore.put_config(
+        workflow_id,
+        {"workflowId": workflow_id},
+        kind="workflow_kafka_config",
+    )
+    await workflow_routes.WorkflowStore.put_config(
+        workflow_id,
+        {"workflowId": workflow_id},
+        kind="workflow_poller_config",
+    )
+    kv_keys = [
         workflow_routes._api_service_key(workflow_id),
-        workflow_routes._syslog_config_key(workflow_id),
-        workflow_routes._kafka_config_key(workflow_id),
-        f"workflow_poller_config/{workflow_id}",
         f"workflow_registry/{workflow_id}",
         f"workflow_runtime/{workflow_id}",
         f"workflow_local_pid/{workflow_id}",
         f"workflow_release/{workflow_id}/active",
         f"workflow_release/{workflow_id}/rel-1",
-        workflow_routes._workflow_execution_key("exec-delete"),
-        "workflow_execution_step/exec-delete/00000001",
-        f"workflow_execution_index/{workflow_id}/00000000000000000001/exec-delete",
     ]
-    for key in storage_keys:
-        payload = {"workflowId": workflow_id}
-        if key == workflow_routes._workflow_execution_key("exec-delete"):
-            payload = {"id": "exec-delete", "workflowId": workflow_id}
-        await workflow_routes.Storage.write(key, payload)
+    for key in kv_keys:
+        await workflow_routes.WorkflowStore.kv_put(key, {"workflowId": workflow_id})
+    await workflow_routes.WorkflowStore.upsert_execution({"id": "exec-delete", "workflowId": workflow_id})
+    await workflow_routes.WorkflowStore.record_step("exec-delete", 1, {"workflowId": workflow_id})
 
     stopped: list[Any] = []
 
@@ -552,9 +579,15 @@ async def test_delete_workflow_cleans_directory_and_storage(
     assert not service_dir.exists()
     assert ("service", workflow_id) in stopped
     assert ("triggers", workflow_id, {"triggers": []}) in stopped
-    for key in storage_keys:
-        assert await workflow_routes.Storage.read(key) is None
-    assert await workflow_routes.Storage.list(f"workflow_release/{workflow_id}/") == []
+    assert await workflow_routes.WorkflowStore.get_stats(workflow_id) is None
+    assert await workflow_routes.WorkflowStore.get_config(workflow_id) is None
+    assert await workflow_routes.WorkflowStore.get_config(workflow_id, kind="workflow_syslog_config") is None
+    assert await workflow_routes.WorkflowStore.get_config(workflow_id, kind="workflow_kafka_config") is None
+    assert await workflow_routes.WorkflowStore.get_config(workflow_id, kind="workflow_poller_config") is None
+    assert await workflow_routes.WorkflowStore.get_execution("exec-delete") is None
+    for key in kv_keys:
+        assert await workflow_routes.WorkflowStore.kv_get(key) is None
+    assert await workflow_routes.WorkflowStore.kv_list(f"workflow_release/{workflow_id}/") == []
 
 
 @pytest.mark.asyncio
@@ -675,22 +708,26 @@ async def test_create_workflow_trigger_rejects_multiple_legacy_singletons(
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
-        lambda workflow_id: {
-            "id": workflow_id,
-            "workflowJson": {
-                "start": "n1",
-                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
-                "edges": [],
-                "triggers": [
-                    {
-                        "id": "schedule-default",
-                        "type": "schedule",
-                        "enabled": True,
-                        "source": {"intervalSeconds": 60},
-                    }
-                ],
-            },
-        } if workflow_id == "wf-1" else None,
+        lambda workflow_id: (
+            {
+                "id": workflow_id,
+                "workflowJson": {
+                    "start": "n1",
+                    "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                    "edges": [],
+                    "triggers": [
+                        {
+                            "id": "schedule-default",
+                            "type": "schedule",
+                            "enabled": True,
+                            "source": {"intervalSeconds": 60},
+                        }
+                    ],
+                },
+            }
+            if workflow_id == "wf-1"
+            else None
+        ),
     )
 
     response = await client.post(
@@ -982,10 +1019,9 @@ async def test_sync_workflow_config_writes_publish_and_trigger_capabilities(
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(fs_store, "_workspace_root", None)
 
-    original_storage_read = workflow_routes.Storage.read
     stored_writes: dict[str, Any] = {}
 
-    async def _fake_storage_read(key: Any, *args: Any, **kwargs: Any) -> Any:
+    async def _fake_kv_get(key: Any) -> Any:
         if key == workflow_routes._api_service_key(workflow_id):
             return {
                 "workflowId": workflow_id,
@@ -997,13 +1033,13 @@ async def test_sync_workflow_config_writes_publish_and_trigger_capabilities(
                 "driver": "local",
                 "publishedAt": 123,
             }
-        return await original_storage_read(key, *args, **kwargs)
+        return None
 
-    async def _fake_storage_write(key: Any, value: Any) -> None:
-        stored_writes[str(key)] = value
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        stored_writes[workflow_routes._workflow_integration_config_key(workflow_id)] = config
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", _fake_storage_read)
-    monkeypatch.setattr(workflow_routes.Storage, "write", _fake_storage_write)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", _fake_kv_get)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
 
     response = await client.post(f"/api/workflow/{workflow_id}/config/sync")
 
@@ -1049,10 +1085,10 @@ async def test_persist_workflow_triggers_does_not_overwrite_config_template(
     monkeypatch.chdir(workspace)
     monkeypatch.setattr(fs_store, "_workspace_root", None)
 
-    async def _fake_storage_read(_key: Any, *_args: Any, **_kwargs: Any) -> None:
+    async def _fake_kv_get_none(_key: Any) -> None:
         return None
 
-    monkeypatch.setattr(workflow_routes.Storage, "read", _fake_storage_read)
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", _fake_kv_get_none)
 
     workflow_data = {
         "id": workflow_id,
@@ -1129,5 +1165,5 @@ async def test_sync_workflow_config_preserves_existing_template(
     assert body["config"]["publish"] == {"type": "api_service"}
     assert body["config"]["triggers"] == []
     assert config_path.read_text(encoding="utf-8") == before
-    stored = await workflow_routes.Storage.read(workflow_routes._workflow_integration_config_key(workflow_id))
+    stored = await workflow_routes.WorkflowStore.get_config(workflow_id)
     assert stored == body["config"]

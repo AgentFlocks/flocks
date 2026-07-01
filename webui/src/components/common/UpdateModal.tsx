@@ -6,25 +6,22 @@ import {
   ArrowUpCircle,
   CheckCircle,
   XCircle,
-  ExternalLink,
   Loader2,
   Sparkles,
-  ChevronDown,
-  ChevronUp,
   Container,
   BellOff,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
-import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { checkRestartReadiness } from '@/utils/restartPolling';
+import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 
 // ------------------------------------------------------------------ //
 
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 
-export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
+export { UPDATE_DISMISSED_KEY };
 
 function formatUpdateVersion(version?: string | null): string {
   const raw = (version || '').trim();
@@ -48,9 +45,13 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
-  const [showReleaseNotes, setShowReleaseNotes] = useState(false);
-  const localizedReleaseNotes = getLocalizedReleaseNotes(info?.release_notes, i18n.language);
   const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
+  const currentDisplayVersion = edition === 'flockspro'
+    ? info?.current_bundle_version || null
+    : info?.current_version || null;
+  const latestDisplayVersion = edition === 'flockspro'
+    ? info?.latest_bundle_version || null
+    : info?.latest_version || null;
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -208,9 +209,9 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
                     <div className="text-sm font-semibold text-amber-950">
                       {upgrading || restarting ? t('upgrading') : t('newVersionTitle')}
                     </div>
-                    {info?.latest_version && (
+                    {latestDisplayVersion && (
                       <div className="mt-1 text-2xl font-bold text-amber-900">
-                        {formatUpdateVersion(info.latest_version)}
+                        {formatUpdateVersion(latestDisplayVersion)}
                       </div>
                     )}
                     <p className="mt-2 text-sm leading-6 text-amber-800">
@@ -283,8 +284,8 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
                 <div className="text-sm font-semibold text-amber-950">
                   {info?.has_update ? t('newVersionTitle') : modalTitle}
                 </div>
-                {info?.latest_version && (
-                  <div className="text-xs text-amber-700">{formatUpdateVersion(info.latest_version)}</div>
+                {latestDisplayVersion && (
+                  <div className="text-xs text-amber-700">{formatUpdateVersion(latestDisplayVersion)}</div>
                 )}
               </div>
             </div>
@@ -301,7 +302,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
               <>
                 <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
                   <div className="font-medium">
-                    {t('confirmUpgrade', { version: formatUpdateVersion(info.latest_version) })}
+                    {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
                   </div>
                   <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
                 </div>
@@ -328,17 +329,17 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
           <div className="px-4 pb-3 space-y-3">
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('currentVersion')}</span>
-              <span className="font-medium text-gray-700">{formatUpdateVersion(info?.current_version)}</span>
+              <span className="font-medium text-gray-700">{formatUpdateVersion(currentDisplayVersion)}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('latestVersion')}</span>
               <div className="flex items-center gap-1.5">
                 {checking ? (
                   <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
-                ) : info?.latest_version ? (
+                ) : latestDisplayVersion ? (
                   <>
-                    <span className="font-medium text-gray-700">{formatUpdateVersion(info.latest_version)}</span>
-                    {info.has_update ? (
+                    <span className="font-medium text-gray-700">{formatUpdateVersion(latestDisplayVersion)}</span>
+                    {info?.has_update ? (
                       <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">{t('hasUpdate')}</span>
                     ) : (
                       <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">{t('upToDate')}</span>
@@ -350,43 +351,6 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
               </div>
             </div>
           </div>
-
-          {info?.has_update && localizedReleaseNotes && (
-            <div className="px-4 pb-3">
-              <button
-                onClick={() => setShowReleaseNotes((prev) => !prev)}
-                className="flex w-full items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-left transition-colors hover:bg-gray-100"
-              >
-                <span className="text-xs font-medium text-gray-600">{t('viewReleaseNotes')}</span>
-                {showReleaseNotes ? (
-                  <ChevronUp className="w-4 h-4 text-gray-400" />
-                ) : (
-                  <ChevronDown className="w-4 h-4 text-gray-400" />
-                )}
-              </button>
-
-              {showReleaseNotes && (
-                <div className="mt-2">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-medium text-gray-500">{t('releaseNotes')}</span>
-                    {info.release_url && (
-                      <a
-                        href={info.release_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-0.5 text-xs text-blue-500 hover:text-blue-700"
-                      >
-                        {t('details')} <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
-                  </div>
-                  <pre className="text-xs text-gray-500 bg-gray-50 rounded-lg p-2.5 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
-                    {localizedReleaseNotes}
-                  </pre>
-                </div>
-              )}
-            </div>
-          )}
 
           <div className="flex items-center gap-2 px-4 pb-4">
             <button
@@ -408,7 +372,10 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
             {info?.has_update && onDismiss && (
               <button
                 onClick={() => {
-                  localStorage.setItem(UPDATE_DISMISSED_KEY, info.current_version);
+                  const dismissalKey = buildUpdateDismissalKey(info);
+                  if (dismissalKey) {
+                    localStorage.setItem(UPDATE_DISMISSED_KEY, dismissalKey);
+                  }
                   onDismiss();
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-gray-600 transition-colors"

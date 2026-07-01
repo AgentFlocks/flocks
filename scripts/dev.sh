@@ -17,6 +17,7 @@ BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL:-https://portalflocks.threatbook.cn}"
 
 BACKEND_ACCESS_HOST="${BACKEND_HOST}"
 if [ "${BACKEND_ACCESS_HOST}" = "0.0.0.0" ] || [ "${BACKEND_ACCESS_HOST}" = "::" ]; then
@@ -42,6 +43,7 @@ Environment variables:
   BACKEND_PORT   默认 8000
   FRONTEND_HOST  默认 127.0.0.1
   FRONTEND_PORT  默认 5173
+  FLOCKS_CONSOLE_BASE_URL  默认 https://portalflocks.threatbook.cn
 EOF
 }
 
@@ -206,6 +208,7 @@ start_backend() {
     cd "${PROJECT_ROOT}"
     _FLOCKS_WEBUI_HOST="${FRONTEND_HOST}" \
     _FLOCKS_WEBUI_PORT="${FRONTEND_PORT}" \
+    FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL}" \
     uv run uvicorn flocks.server.app:app \
         --host "${BACKEND_HOST}" \
         --port "${BACKEND_PORT}" \
@@ -226,6 +229,7 @@ start_all() {
     cd "${PROJECT_ROOT}"
     _FLOCKS_WEBUI_HOST="${FRONTEND_HOST}" \
     _FLOCKS_WEBUI_PORT="${FRONTEND_PORT}" \
+    FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL}" \
     uv run uvicorn flocks.server.app:app \
         --host "${BACKEND_HOST}" \
         --port "${BACKEND_PORT}" \

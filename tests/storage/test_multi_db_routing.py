@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 
 from flocks.config.config import Config
-from flocks.storage.storage import Storage, StorageError
+from flocks.storage.storage import Storage
 from flocks.task.models import TaskExecution, TaskScheduler
 from flocks.task.store import TaskStore, _TASKS_DDL
+from flocks.workflow.store import WorkflowStore
 
 
 def _reset_state() -> None:
@@ -20,6 +21,10 @@ def _reset_state() -> None:
     TaskStore._initialized = False
     TaskStore._conn = None
     TaskStore._init_pid = None
+    WorkflowStore._initialized = False
+    WorkflowStore._conn = None
+    WorkflowStore._init_pid = None
+    WorkflowStore._db_path = None
 
 
 def _fetch_storage_value(db_path: Path, key: str):
@@ -27,6 +32,18 @@ def _fetch_storage_value(db_path: Path, key: str):
     try:
         row = conn.execute(
             "SELECT value FROM storage WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _fetch_workflow_kv_value(db_path: Path, key: str):
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM workflow_kv WHERE key = ?",
             (key,),
         ).fetchone()
         return row[0] if row else None
@@ -50,11 +67,12 @@ async def isolated_multi_db_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     _reset_state()
     yield
     await TaskStore.close()
+    await WorkflowStore.close()
     _reset_state()
 
 
 @pytest.mark.asyncio
-async def test_workflow_keys_route_to_workflow_db() -> None:
+async def test_storage_no_longer_routes_workflow_keys_to_workflow_db() -> None:
     await Storage.init()
 
     await Storage.write("workflow/wf-1", {"name": "workflow"})
@@ -63,10 +81,9 @@ async def test_workflow_keys_route_to_workflow_db() -> None:
     flocks_db = Storage.get_db_path()
     workflow_db = Storage.get_workflow_db_path()
 
-    assert _fetch_storage_value(workflow_db, "workflow/wf-1") is not None
-    assert _fetch_storage_value(flocks_db, "workflow/wf-1") is None
+    assert _fetch_storage_value(flocks_db, "workflow/wf-1") is not None
     assert _fetch_storage_value(flocks_db, "project/proj-1") is not None
-    assert _fetch_storage_value(workflow_db, "project/proj-1") is None
+    assert not workflow_db.exists()
     assert await Storage.read("workflow/wf-1") == {"name": "workflow"}
     assert await Storage.list_keys("workflow") == ["workflow/wf-1"]
 
@@ -78,11 +95,11 @@ async def test_short_non_workflow_prefix_stays_on_flocks_db() -> None:
     await Storage.write("workspace/item-1", {"name": "workspace"})
     await Storage.write("workflow/item-1", {"name": "workflow"})
 
-    assert await Storage.list_keys("work") == ["workspace/item-1"]
+    assert await Storage.list_keys("work") == ["workflow/item-1", "workspace/item-1"]
 
 
 @pytest.mark.asyncio
-async def test_clear_without_prefix_clears_flocks_and_workflow_dbs() -> None:
+async def test_clear_without_prefix_clears_flocks_db_only() -> None:
     await Storage.init()
 
     await Storage.write("project/proj-1", {"name": "project"})
@@ -94,7 +111,61 @@ async def test_clear_without_prefix_clears_flocks_and_workflow_dbs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_without_prefix_merges_flocks_and_workflow_dbs() -> None:
+async def test_workflow_prefix_clear_does_not_invalidate_session_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    await Storage.init()
+    await Storage.write("workflow_execution_step/exec-1/00000001", {"ok": True})
+    calls: list[str] = []
+
+    monkeypatch.setattr(Session, "invalidate_cache", lambda: calls.append("session"))
+    monkeypatch.setattr(
+        Message,
+        "invalidate_cache",
+        lambda session_id=None: calls.append(f"message:{session_id}"),
+    )
+
+    assert await Storage.clear("workflow_execution_step/exec-1/") == 1
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_session_and_message_prefix_clear_invalidate_matching_runtime_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    await Storage.init()
+    await Storage.write("session:proj:ses-1", {"id": "ses-1"})
+    await Storage.write("message:ses-1", [])
+    await Storage.write("message_parts:ses-1/msg-1", [])
+    calls: list[str] = []
+
+    monkeypatch.setattr(Session, "invalidate_cache", lambda: calls.append("session"))
+    monkeypatch.setattr(
+        Message,
+        "invalidate_cache",
+        lambda session_id=None: calls.append(f"message:{session_id}"),
+    )
+
+    assert await Storage.clear("session:") == 1
+    assert calls == ["session"]
+
+    calls.clear()
+    assert await Storage.clear("message:") == 1
+    assert calls == ["message:None"]
+
+    calls.clear()
+    assert await Storage.clear("message_parts:") == 1
+    assert calls == ["message:None"]
+
+
+@pytest.mark.asyncio
+async def test_list_without_prefix_reads_flocks_db_only() -> None:
     await Storage.init()
 
     await Storage.write("project/proj-1", {"name": "project"})
@@ -140,16 +211,15 @@ async def test_workflow_kv_migrates_from_legacy_flocks_db() -> None:
     finally:
         conn.close()
 
-    await Storage.init()
+    await WorkflowStore.init()
 
     workflow_db = Storage.get_workflow_db_path()
-    assert _fetch_storage_value(workflow_db, "workflow_registry/wf-legacy") == '{"ok": true}'
+    assert _fetch_workflow_kv_value(workflow_db, "workflow_registry/wf-legacy") == '{"ok": true}'
     assert _fetch_storage_value(flocks_db, "workflow_registry/wf-legacy") == '{"ok": true}'
-    assert _fetch_storage_value(workflow_db, "session:legacy") is None
-    marker = await Storage.get(Storage._multi_db_migration_marker_key)
-    assert marker["workflow_migrated"] is True
-    assert marker["workflow_rows"] == 1
-    assert marker["workflow_source_rows_deleted"] == 0
+    assert _fetch_workflow_kv_value(workflow_db, "session:legacy") is None
+    assert await WorkflowStore.kv_get("workflow_registry/wf-legacy") == {"ok": True}
+    marker = await WorkflowStore.kv_get("workflow_store.migration.tables.v1")
+    assert marker["kv"] == 1
 
 
 @pytest.mark.asyncio
@@ -181,18 +251,19 @@ async def test_workflow_prefix_migration_treats_underscore_literally() -> None:
     finally:
         conn.close()
 
-    await Storage.init()
+    await WorkflowStore.init()
 
     workflow_db = Storage.get_workflow_db_path()
-    assert _fetch_storage_value(workflow_db, "workflow_registry/wf-ok") == '{"ok": true}'
-    assert _fetch_storage_value(workflow_db, "workflowXregistry/wf-bad") is None
+    assert _fetch_workflow_kv_value(workflow_db, "workflow_registry/wf-ok") == '{"ok": true}'
+    assert _fetch_workflow_kv_value(workflow_db, "workflowXregistry/wf-bad") is None
     assert _fetch_storage_value(flocks_db, "workflow_registry/wf-ok") == '{"ok": true}'
     assert _fetch_storage_value(flocks_db, "workflowXregistry/wf-bad") == '{"bad": true}'
     assert await Storage.list_keys("workflow_registry/") == ["workflow_registry/wf-ok"]
+    assert await WorkflowStore.kv_list_keys("workflow_registry/") == ["workflow_registry/wf-ok"]
 
 
 @pytest.mark.asyncio
-async def test_completed_workflow_migration_fails_if_workflow_db_disappears() -> None:
+async def test_workflow_store_recreates_workflow_db_if_it_disappears() -> None:
     flocks_db = Config.get_data_path() / "flocks.db"
     flocks_db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(flocks_db)
@@ -210,20 +281,23 @@ async def test_completed_workflow_migration_fails_if_workflow_db_disappears() ->
         )
         conn.execute(
             "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ("workflow/wf-legacy", '{"ok": true}', "json", "old", "old"),
+            ("workflow_registry/wf-legacy", '{"ok": true}', "json", "old", "old"),
         )
         conn.commit()
     finally:
         conn.close()
 
-    await Storage.init()
+    await WorkflowStore.init()
     workflow_db = Storage.get_workflow_db_path()
     assert workflow_db.exists()
+    assert await WorkflowStore.kv_get("workflow_registry/wf-legacy") == {"ok": True}
+    await WorkflowStore.close()
     workflow_db.unlink()
     _reset_state()
 
-    with pytest.raises(StorageError, match="workflow.db is missing"):
-        await Storage.init()
+    await WorkflowStore.init()
+    assert Storage.get_workflow_db_path().exists()
+    assert await WorkflowStore.kv_get("workflow_registry/wf-legacy") == {"ok": True}
 
 
 @pytest.mark.asyncio

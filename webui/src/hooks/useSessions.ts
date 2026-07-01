@@ -33,10 +33,46 @@ function finalizeStoppedMessageParts(parts: Message['parts'], stoppedAt = Date.n
   });
 }
 
+function normalizeMessageOrder(messages: Message[]): Message[] {
+  const messageIds = new Set(messages.map((message) => message.id));
+  const assistantChildrenByParent = new Map<string, Message[]>();
+  const childIds = new Set<string>();
+
+  messages.forEach((message) => {
+    if (message.role !== 'assistant' || !message.parentID || !messageIds.has(message.parentID)) {
+      return;
+    }
+    childIds.add(message.id);
+    const siblings = assistantChildrenByParent.get(message.parentID) ?? [];
+    siblings.push(message);
+    assistantChildrenByParent.set(message.parentID, siblings);
+  });
+
+  const ordered: Message[] = [];
+  const pushed = new Set<string>();
+
+  messages.forEach((message) => {
+    if (childIds.has(message.id)) return;
+    if (!pushed.has(message.id)) {
+      ordered.push(message);
+      pushed.add(message.id);
+    }
+
+    const children = assistantChildrenByParent.get(message.id) ?? [];
+    children.forEach((child) => {
+      if (pushed.has(child.id)) return;
+      ordered.push(child);
+      pushed.add(child.id);
+    });
+  });
+
+  return ordered;
+}
+
 function mergeFetchedMessages(prev: Message[], fetched: Message[]): Message[] {
   const previousById = new Map(prev.map((message) => [message.id, message]));
 
-  return fetched.map((message) => {
+  return normalizeMessageOrder(fetched.map((message) => {
     const existing = previousById.get(message.id);
     if (!existing) return message;
 
@@ -53,11 +89,11 @@ function mergeFetchedMessages(prev: Message[], fetched: Message[]): Message[] {
     }
 
     return message;
-  });
+  }));
 }
 
 function mergeLatestFetchedMessages(prev: Message[], fetched: Message[]): Message[] {
-  if (prev.length === 0) return fetched;
+  if (prev.length === 0) return normalizeMessageOrder(fetched);
   const fetchedIds = new Set(fetched.map((message) => message.id));
   const mergedFetched = mergeFetchedMessages(prev, fetched);
   const firstFetchedTimestamp = mergedFetched[0]?.timestamp ?? Number.POSITIVE_INFINITY;
@@ -67,12 +103,12 @@ function mergeLatestFetchedMessages(prev: Message[], fetched: Message[]): Messag
   const retainedNewer = prev.filter(
     (message) => !fetchedIds.has(message.id) && message.timestamp > firstFetchedTimestamp,
   );
-  return [...retainedOlder, ...mergedFetched, ...retainedNewer];
+  return normalizeMessageOrder([...retainedOlder, ...mergedFetched, ...retainedNewer]);
 }
 
 function prependOlderMessages(prev: Message[], older: Message[]): Message[] {
   const existingIds = new Set(prev.map((message) => message.id));
-  return [...older.filter((message) => !existingIds.has(message.id)), ...prev];
+  return normalizeMessageOrder([...older.filter((message) => !existingIds.has(message.id)), ...prev]);
 }
 
 function transformMessageResponse(data: any): {
@@ -441,7 +477,7 @@ export function useSessionMessages(sessionId?: string) {
           );
           if (tempIndex >= 0) {
             const updated = [...prev];
-            updated[tempIndex] = {
+            const nextUser = {
               id: messageInfo.id,
               sessionID: messageInfo.sessionID,
               role: 'user' as const,
@@ -454,7 +490,8 @@ export function useSessionMessages(sessionId?: string) {
               tokens: messageInfo.tokens,
               timestamp: messageInfo.time?.created || updated[tempIndex].timestamp,
             };
-            return updated;
+            updated[tempIndex] = nextUser;
+            return normalizeMessageOrder(updated);
           }
         }
 
@@ -474,20 +511,9 @@ export function useSessionMessages(sessionId?: string) {
           timestamp: messageInfo.time?.created || Date.now(),
         };
 
-        if (messageInfo.role === 'user') {
-          const childIndex = prev.findIndex(
-            (m) => m.role === 'assistant' && m.parentID === messageInfo.id,
-          );
-          if (childIndex >= 0) {
-            const updated = [...prev];
-            updated.splice(childIndex, 0, nextMessage);
-            return updated;
-          }
-        }
-
-        return [...prev, {
+        return normalizeMessageOrder([...prev, {
           ...nextMessage,
-        }];
+        }]);
       });
     },
     /**

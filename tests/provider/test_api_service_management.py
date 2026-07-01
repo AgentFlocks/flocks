@@ -399,6 +399,7 @@ class TestProviderYamlMetadata:
             "service_id": "threatbook_api",
             "description": "Threat intelligence",
             "description_cn": "威胁情报",
+            "docs_url": "https://docs.example.com/threatbook",
         }), encoding="utf-8")
         (provider_dir / "threatbook_ip_query.yaml").write_text(yaml.safe_dump({
             "name": "threatbook_ip_query",
@@ -413,6 +414,7 @@ class TestProviderYamlMetadata:
         assert metadata is not None
         assert metadata["name"] == "ThreatBook"
         assert metadata["description_cn"] == "威胁情报"
+        assert metadata["docs_url"] == "https://docs.example.com/threatbook"
         assert metadata["apis"][0]["name"] == "threatbook_ip_query"
 
     @pytest.mark.asyncio
@@ -424,6 +426,7 @@ class TestProviderYamlMetadata:
             return_value={
                 "name": "Qingteng",
                 "description": "Qingteng API service",
+                "docs_url": "https://docs.example.com/qingteng",
                 "credential_fields": [
                     {"key": "base_url", "storage": "config", "config_key": "base_url", "input_type": "url"},
                     {"key": "username", "storage": "config", "config_key": "username"},
@@ -434,6 +437,7 @@ class TestProviderYamlMetadata:
             result = await get_api_service_metadata("qingteng")
 
         assert result.name == "Qingteng"
+        assert result.docs_url == "https://docs.example.com/qingteng"
         assert result.credential_schema is not None
         assert [field["key"] for field in result.credential_schema] == ["base_url", "username", "password"]
         assert result.credential_schema[2]["secret_id"] == "qingteng_password"

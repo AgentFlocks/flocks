@@ -400,27 +400,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("tool.watcher.init_failed", {"error": str(e)})
 
-    # Start user-defined pages watcher (auto-build user custom pages)
+    # Start WebUI page watcher (auto-build user custom pages)
     try:
-        from flocks.user_defined_pages.bootstrap import reconcile_user_defined_pages
-        from flocks.user_defined_pages.watcher import set_event_loop, start_watcher
+        from flocks.contracts.webui.bootstrap import reconcile_webui_pages
+        from flocks.contracts.webui.watcher import set_event_loop, start_watcher
 
         set_event_loop(asyncio.get_running_loop())
 
         _schedule_startup_phase(
             app,
             log,
-            "user_defined_pages.bootstrap",
-            reconcile_user_defined_pages,
+            "webui_pages.bootstrap",
+            reconcile_webui_pages,
         )
 
-        def _start_user_defined_pages_watcher() -> None:
+        def _start_webui_pages_watcher() -> None:
             start_watcher()
-            log.info("user_defined_pages.watcher.initialized")
+            log.info("webui_pages.watcher.initialized")
 
-        _schedule_startup_phase(app, log, "user_defined_pages.watcher.start", _start_user_defined_pages_watcher)
+        _schedule_startup_phase(app, log, "webui_pages.watcher.start", _start_webui_pages_watcher)
     except Exception as e:
-        log.warning("user_defined_pages.watcher.init_failed", {"error": str(e)})
+        log.warning("webui_pages.watcher.init_failed", {"error": str(e)})
 
     # Start Channel Gateway (connect enabled IM channels)
     try:
@@ -539,12 +539,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("skill.watcher.stop_failed", {"error": str(e)})
 
-    # Stop user-defined pages watcher
+    # Stop WebUI page watcher
     try:
-        from flocks.user_defined_pages.watcher import stop_watcher
+        from flocks.contracts.webui.watcher import stop_watcher
         stop_watcher()
     except Exception as e:
-        log.warning("user_defined_pages.watcher.stop_failed", {"error": str(e)})
+        log.warning("webui_pages.watcher.stop_failed", {"error": str(e)})
 
     # Shutdown MCP connections
     try:
@@ -1013,7 +1013,9 @@ from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
 from flocks.server.routes.console_upgrade import router as console_upgrade_router
-from flocks.server.routes.user_defined_pages import router as user_defined_pages_router
+from flocks.server.routes.flockspro_license import router as flockspro_license_router
+from flocks.server.routes.webui import router as webui_pages_router
+from flocks.server.routes.contracts import router as contracts_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -1073,7 +1075,8 @@ app.include_router(notifications_router, prefix="/api/notifications", tags=["Not
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
-app.include_router(user_defined_pages_router, prefix="/api", tags=["UserDefinedPages"])
+app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
+app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -1149,7 +1152,32 @@ def _load_installed_package_plugins() -> None:
         log.warning("plugins.installed.load_failed", {"error": str(e)})
 
 
+def _route_registered(path: str, method: str) -> bool:
+    target_method = method.upper()
+    for route in app.routes:
+        if getattr(route, "path", None) != path:
+            continue
+        methods = getattr(route, "methods", None) or set()
+        if target_method in methods:
+            return True
+    return False
+
+
+def _install_flockspro_license_fallback() -> None:
+    status_registered = _route_registered("/api/flockspro/license/status", "GET")
+    refresh_registered = _route_registered("/api/flockspro/license/refresh", "POST")
+    if status_registered and refresh_registered:
+        log.info("flockspro.license.fallback.skipped", {
+            "status_registered": status_registered,
+            "refresh_registered": refresh_registered,
+        })
+        return
+    app.include_router(flockspro_license_router, prefix="/api/flockspro/license", tags=["FlocksProLicense"])
+    log.info("flockspro.license.fallback.installed")
+
+
 _load_installed_package_plugins()
+_install_flockspro_license_fallback()
 
 
 @app.get("/", tags=["Root"])

@@ -1,0 +1,29 @@
+name: secgate3600_policy
+description: SecGate 3600 security policy read-only queries.
+description_cn: SecGate 3600 安全策略只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: secgate3600_api
+version: "3.6.6.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - security_policy_list
+        - test
+    page_index:
+      type: integer
+    page_size:
+      type: integer
+    body:
+      type: object
+      description: 可选覆盖请求 body，用于传入策略名称或 is_detail。
+  required:
+    - action
+handler:
+  type: script
+  script_file: secgate3600.handler.py
+  function: policy

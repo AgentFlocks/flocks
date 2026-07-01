@@ -98,7 +98,7 @@ async def test_skyeye_dashboard_view_tool_uses_custom_login_flow():
 
     method, auth_url, auth_kwargs = fake_session.calls[0]
     assert method == "POST"
-    assert auth_url == "https://skyeye.local/api/v1/admin/auth"
+    assert auth_url == "https://skyeye.local/skyeye/api/v1/admin/auth"
     assert auth_kwargs["data"] == {
         "client_id": auth_kwargs["data"]["client_id"],
         "username": "tapadmin",
@@ -108,7 +108,7 @@ async def test_skyeye_dashboard_view_tool_uses_custom_login_flow():
 
     method, request_url, request_kwargs = fake_session.calls[2]
     assert method == "GET"
-    assert request_url == "https://skyeye.local/api/v1/monitor-center/dashboard/view"
+    assert request_url == "https://skyeye.local/skyeye/api/v1/monitor-center/dashboard/view"
     assert request_kwargs["params"]["name"] == "overall_view"
     assert request_kwargs["params"]["interval_time"] == 7
     assert request_kwargs["params"]["csrf_token"] == "abcdef1234567890"
@@ -142,11 +142,11 @@ async def test_skyeye_alarm_params_tool_can_use_secret_host_and_login_key():
 
     method, auth_url, _ = fake_session.calls[0]
     assert method == "POST"
-    assert auth_url == "https://skyeye.internal:443/v1/admin/auth"
+    assert auth_url == "https://skyeye.internal:443/skyeye/v1/admin/auth"
 
     method, request_url, request_kwargs = fake_session.calls[2]
     assert method == "GET"
-    assert request_url == "https://skyeye.internal:443/v1/alarm/alarm/alarm-params"
+    assert request_url == "https://skyeye.internal:443/skyeye/v1/alarm/alarm/alarm-params"
     assert request_kwargs["params"]["data_source"] == 0
     assert request_kwargs["params"]["csrf_token"] == "1234567890abcdef"
 
@@ -202,7 +202,7 @@ async def test_skyeye_alarm_list_accepts_legacy_threat_level_alias():
     assert result.success is True
     method, request_url, request_kwargs = fake_session.calls[2]
     assert method == "GET"
-    assert request_url == "https://skyeye.local/api/v1/alarm/alarm/list"
+    assert request_url == "https://skyeye.local/skyeye/api/v1/alarm/alarm/list"
     assert request_kwargs["params"]["hazard_level"] == "3"
     assert "threat_level" not in request_kwargs["params"]
 
