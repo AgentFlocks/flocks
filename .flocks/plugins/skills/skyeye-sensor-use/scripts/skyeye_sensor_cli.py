@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from argparse import Namespace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,37 @@ def resolve_auth_file() -> Path | None:
     if COOKIE_FILE.exists():
         return COOKIE_FILE
     return None
+
+
+def ensure_browser_auth_state(
+    *,
+    base_url: str,
+    username: str | None,
+    password: str | None,
+    captcha_code: str | None,
+    force_refresh: bool,
+    debug: bool,
+) -> tuple[bool, str]:
+    from skyeye_sensor_auth import ensure_auth_state, _runtime_config
+
+    args = Namespace(
+        base_url=base_url,
+        username=username,
+        password=password,
+        auth_state=str(AUTH_STATE_FILE),
+        login_path="",
+        captcha_path="",
+        captcha_code=captcha_code or "",
+        timeout=25,
+        max_captcha_retry=5,
+        no_ocr=False,
+        save_credentials=True,
+    )
+    cfg = _runtime_config(args)
+    result = ensure_auth_state(cfg, captcha_code=captcha_code or "", force_refresh=force_refresh)
+    if debug:
+        print_info(json.dumps(result, ensure_ascii=False))
+    return bool(result.get("success") or result.get("valid")), cfg.base_url
 
 
 def build_alarm_filters(
@@ -150,20 +182,55 @@ def pick_first(item: dict, *keys: str, default: str = "-") -> str:
 @click.group()
 @click.option("--token", "-t", help="CSRF Token")
 @click.option("--base-url", "-u", help="Base URL")
+@click.option("--username", help="Username for browser/CDP login")
+@click.option("--password", help="Password for browser/CDP login")
+@click.option("--auto-login", is_flag=True, help="Use saved credentials to refresh browser auth-state")
+@click.option("--refresh-auth", is_flag=True, help="Force browser/CDP login before running the command")
+@click.option("--captcha-code", help="Captcha code; OCR is used when omitted")
 @click.option("--debug", "-d", is_flag=True, help="Debug mode")
 @click.pass_context
-def cli(ctx: click.Context, token: str | None, base_url: str | None, debug: bool) -> None:
+def cli(
+    ctx: click.Context,
+    token: str | None,
+    base_url: str | None,
+    username: str | None,
+    password: str | None,
+    auto_login: bool,
+    refresh_auth: bool,
+    captcha_code: str | None,
+    debug: bool,
+) -> None:
     """SkyEye Sensor CLI."""
     ctx.ensure_object(dict)
     actual_base_url = base_url or BASE_URL
-    auth_file = resolve_auth_file()
     actual_token = token or CSRF_TOKEN
 
-    if auth_file is None and not actual_token:
-        print_error("未提供认证信息。请提供 auth-state.json、cookie.json 或 --token")
-        sys.exit(1)
+    wants_browser_login = bool(username or password or auto_login or refresh_auth)
+    if wants_browser_login:
+        try:
+            ok, resolved_base_url = ensure_browser_auth_state(
+                base_url=actual_base_url,
+                username=username,
+                password=password,
+                captcha_code=captcha_code,
+                force_refresh=refresh_auth,
+                debug=debug,
+            )
+            actual_base_url = actual_base_url or resolved_base_url
+            if not ok:
+                print_error("SkyEye Sensor 自动登录失败，请改用浏览器手动登录后保存 auth-state。")
+                sys.exit(1)
+        except Exception as exc:
+            print_error(f"SkyEye Sensor 自动登录失败: {exc}")
+            sys.exit(1)
+
     if not actual_base_url:
         print_error("未提供平台地址。请设置 SKYEYE_SENSOR_BASE_URL 或使用 --base-url。")
+        sys.exit(1)
+
+    auth_file = resolve_auth_file()
+    if auth_file is None and not actual_token:
+        print_error("未提供认证信息。请提供 auth-state.json、cookie.json 或 --token")
         sys.exit(1)
 
     ctx.obj["client"] = SkyeyeSensorClient(

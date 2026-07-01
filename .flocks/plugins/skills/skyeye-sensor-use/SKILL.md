@@ -48,7 +48,12 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 3. 如果还失败，先执行 `flocks browser --reload` 清理旧 daemon，再重新执行 `flocks browser --setup`，避免因为残留 daemon 造成干扰。
 4. 只有随后 `--doctor` 通过后，才继续后面的登录或页面操作。
 
-打开登录页并等待用户手动完成登录（含短信验证码 / MFA 等）：
+登录态来源有两种，必须先确认用户是否愿意提供 SkyEye Sensor 地址、用户名和密码：
+
+- 用户不提供账密：沿用原有浏览器登录流程。打开登录页后由用户手动完成登录（含短信验证码 / MFA 等），登录成功后保存 state。
+- 用户提供账密：调用 `scripts/skyeye_sensor_auth.py`，通过 browser daemon / CDP 驱动真实登录页自动登录。验证码图片地址为 `{BASE_URL}/skyeye/admin/code`，脚本会在浏览器会话中获取验证码图片、OCR 识别、填入页面并保存 state。
+
+手动登录时，打开登录页并等待用户完成登录：
 
 ```bash
 flocks browser -c '
@@ -65,6 +70,35 @@ print(page_info())
 # 登录成功后立即保存 state
 flocks browser state save ~/.flocks/browser/skyeye-sensor/auth-state.json
 ```
+
+提供账密时，优先执行自动登录：
+
+```bash
+SKYEYE_SENSOR_BASE_URL=https://<skyeye-sensor-domain> \
+uv run python scripts/skyeye_sensor_auth.py ensure \
+  --username '<username>' \
+  --password '<password>'
+```
+
+脚本会将用户名/密码写入 Flocks secret，并将基础配置保存到 `~/.flocks/browser/skyeye-sensor/auth-config.json`。下次 `auth-state.json` 失效时，可直接执行：
+
+```bash
+uv run python scripts/skyeye_sensor_auth.py ensure
+```
+
+也可以在查询命令前直接带账密或使用已保存账密刷新登录态：
+
+```bash
+uv run python scripts/skyeye_sensor_cli.py \
+  --base-url https://<skyeye-sensor-domain> \
+  --username '<username>' \
+  --password '<password>' \
+  alarm count
+
+uv run python scripts/skyeye_sensor_cli.py --auto-login alarm list
+```
+
+如果验证码 OCR、MFA、登录页 DOM 变化或登录成功检测失败，回退到上面的手动登录流程。
 
 ### CLI 认证失败时的恢复流程
 
