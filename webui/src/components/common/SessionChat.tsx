@@ -946,7 +946,19 @@ export function getRenderableFileUrl(url: string): string {
   }
 }
 
-export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>): boolean {
+export function shouldRenderMessage(
+  message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>,
+  options?: { isActive?: boolean },
+): boolean {
+  if (
+    message.role === 'assistant' &&
+    (message.parts?.length ?? 0) === 0 &&
+    message.finish !== 'summary' &&
+    !message.error &&
+    !options?.isActive
+  ) {
+    return false;
+  }
   if (
     message.role === 'assistant' &&
     (message.parts?.length ?? 0) === 0 &&
@@ -1569,6 +1581,7 @@ export default function SessionChat({
   const goalHydrationVersionRef = useRef(0);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
+  const suppressStreamingUntilIdleRef = useRef(false);
   const statusCheckedRef = useRef<string | null>(null);
   const {
     pendingQuestions,
@@ -1829,6 +1842,7 @@ export default function SessionChat({
         sessionBusyRef.current = false;
         activeToolPartIdsRef.current.clear();
         abortedMessageIdRef.current = null;
+        suppressStreamingUntilIdleRef.current = false;
         setContextUsageSnapshot(null);
         setContextUsageRefreshing(true);
         setContextUsageWindowTokens(0);
@@ -1844,12 +1858,18 @@ export default function SessionChat({
         const statusType = type === 'session.status' ? properties.status?.type : properties.status;
         if (statusType === 'busy') {
           sessionBusyRef.current = true;
-          if (!abortingRef.current) setIsStreaming(true);
+          if (
+            !abortingRef.current &&
+            !suppressStreamingUntilIdleRef.current
+          ) setIsStreaming(true);
           setIsCompacting(false);
           isCompactingRef.current = false;
         } else if (statusType === 'compacting') {
           sessionBusyRef.current = true;
-          if (!abortingRef.current) setIsStreaming(true);
+          if (
+            !abortingRef.current &&
+            !suppressStreamingUntilIdleRef.current
+          ) setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
           setCompactingMessage(properties.status?.message || t('chat.compacting'));
@@ -1858,6 +1878,7 @@ export default function SessionChat({
           setCompactionStages([]);
         } else if (statusType === 'idle') {
           sessionBusyRef.current = false;
+          suppressStreamingUntilIdleRef.current = false;
           activeToolPartIdsRef.current.clear();
           setIsStreaming(false);
           setIsCompacting(false);
@@ -1869,7 +1890,18 @@ export default function SessionChat({
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
-        if (properties.info.finish || properties.info.time?.completed) {
+        if (
+          properties.info.role === 'assistant' &&
+          (abortingRef.current || suppressStreamingUntilIdleRef.current)
+        ) {
+          abortedMessageIdRef.current = properties.info.id;
+          markMessageStopped(properties.info.id);
+          setIsStreaming(false);
+          setSending(false);
+          if (properties.info.finish || properties.info.time?.completed) {
+            void refreshContextUsage();
+          }
+        } else if (properties.info.finish || properties.info.time?.completed) {
           const shouldRefetch = shouldRefetchFinishedMessage({
             finishedMessageId: properties.info.id,
             abortedMessageId: abortedMessageIdRef.current,
@@ -1898,7 +1930,7 @@ export default function SessionChat({
         if (part.id) {
           if (isActiveToolPart(part)) {
             activeToolPartIdsRef.current.add(part.id);
-            if (!abortingRef.current) setIsStreaming(true);
+            if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) setIsStreaming(true);
           } else {
             activeToolPartIdsRef.current.delete(part.id);
           }
@@ -2101,6 +2133,7 @@ export default function SessionChat({
     setPendingAgentName(agentName || 'rex');
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     sessionBusyRef.current = false;
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
@@ -2143,10 +2176,10 @@ export default function SessionChat({
       try {
         const res = await client.get('/api/session/status');
         const status = res.data[sessionId];
-        if (status?.type === 'busy') {
+        if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
-        } else if (status?.type === 'compacting') {
+        } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsCompacting(true);
@@ -2464,6 +2497,8 @@ export default function SessionChat({
     if (!sessionId) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
@@ -2516,6 +2551,8 @@ export default function SessionChat({
     const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     // Force scroll to bottom when user sends a new message
     isAtBottomRef.current = true;
     setSending(true);
@@ -2828,23 +2865,27 @@ export default function SessionChat({
 
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
+    // Record the ID of the message being aborted so we can ignore its finish event later.
+    const lastAsstMsg = [...messagesRef.current].reverse().find(
+      (m) => m.role === 'assistant' && !m.finish,
+    );
+    abortedMessageIdRef.current = lastAsstMsg?.id || null;
+    abortingRef.current = true;
+    suppressStreamingUntilIdleRef.current = true;
+    sessionBusyRef.current = false;
+    if (lastAsstMsg?.id) {
+      markMessageStopped(lastAsstMsg.id);
+    }
+    setIsStreaming(false);
+    setSending(false);
     try {
-      // Record the ID of the message being aborted so we can ignore its finish event later
-      const lastAsstMsg = [...messagesRef.current].reverse().find(
-        (m) => m.role === 'assistant' && !m.finish,
-      );
-      abortedMessageIdRef.current = lastAsstMsg?.id || null;
-      abortingRef.current = true;
       await client.post(`/api/session/${sessionId}/abort`);
-      if (lastAsstMsg?.id) {
-        markMessageStopped(lastAsstMsg.id);
-      }
-      setIsStreaming(false);
       setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
     } catch (err) {
       console.error('[SessionChat] Abort failed:', err);
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
     }
   }, [markMessageStopped, sessionId]);
 
@@ -2895,6 +2936,9 @@ export default function SessionChat({
       await sessionApi.runQueuedPromptNow(sessionId, item.id);
       if (editingQueueId === item.id) handleQueuedEditCancel();
       await fetchPromptQueue();
+      abortingRef.current = false;
+      abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
       setIsStreaming(true);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
@@ -3013,6 +3057,8 @@ export default function SessionChat({
     if (!text) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(editingMessageId);
     try {
@@ -3043,6 +3089,8 @@ export default function SessionChat({
     if (!sessionId) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(messageId);
     try {
@@ -3080,10 +3128,6 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (!shouldRenderMessage(msg)) {
-        skipIndices.add(idx);
-        continue;
-      }
       if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
         skipIndices.add(idx);
         continue;
@@ -3154,16 +3198,17 @@ export default function SessionChat({
             )}
             {merged.map((msg, i) => {
               if (skipIndices.has(i)) return null;
+              const isActiveMessage =
+                isStreaming &&
+                i === merged.length - 1 &&
+                msg.role === 'assistant' &&
+                !msg.finish;
+              if (!shouldRenderMessage(msg, { isActive: isActiveMessage })) return null;
               return (
                 <ChatMessageBubble
                   key={msg.id}
                   message={msg}
-                  isActive={
-                    isStreaming &&
-                    i === merged.length - 1 &&
-                    msg.role === 'assistant' &&
-                    !msg.finish
-                  }
+                  isActive={isActiveMessage}
                   pendingQuestions={pendingQuestions}
                   onQuestionAnswer={handleQuestionAnswer}
                   onQuestionReject={handleQuestionReject}

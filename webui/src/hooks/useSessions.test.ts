@@ -324,6 +324,84 @@ describe('updateMessagePart scheduling', () => {
     expect((result.current.messages[2].parts as any[])[0].text).toBe('new reply');
   });
 
+  it('moves a replaced temp user before an already streamed assistant child', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.updateMessagePart({
+        id: 'new-text',
+        messageID: 'new-assistant',
+        sessionID: 'sess-1',
+        type: 'text',
+        text: 'new reply',
+      });
+      result.current.updateMessage({
+        id: 'new-assistant',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        parentID: 'new-user',
+        time: { created: 200 },
+      });
+      result.current.addMessage(makeMsg({
+        id: 'temp-user',
+        role: 'user',
+        parts: [{ id: 'temp-user-text', type: 'text', text: 'hello' } as any],
+      }));
+      result.current.updateMessage({
+        id: 'new-user',
+        sessionID: 'sess-1',
+        role: 'user',
+        time: { created: 100 },
+      });
+    });
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual([
+      'new-user',
+      'new-assistant',
+    ]);
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hello');
+    expect((result.current.messages[1].parts as any[])[0].text).toBe('new reply');
+  });
+
+  it('orders fetched assistant children after their parent user message', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: {
+        items: [
+          {
+            info: {
+              id: 'new-assistant',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              parentID: 'new-user',
+              time: { created: 200 },
+            },
+            parts: [],
+          },
+          {
+            info: {
+              id: 'new-user',
+              sessionID: 'sess-1',
+              role: 'user',
+              time: { created: 100 },
+            },
+            parts: [{ id: 'new-user-text', type: 'text', text: 'hello' }],
+          },
+        ],
+        hasMore: false,
+        nextBefore: null,
+      },
+    } as any);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual([
+      'new-user',
+      'new-assistant',
+    ]);
+  });
+
   it('truncateAfterMessage keeps the target by default', async () => {
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     await act(async () => {});
