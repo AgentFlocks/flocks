@@ -19,6 +19,18 @@ class DummyConsole:
         self.messages.append(" ".join(str(arg) for arg in args))
 
 
+def _make_runtime_paths(tmp_path: Path) -> service_manager.RuntimePaths:
+    return service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+
+
 def test_runtime_paths_follow_flocks_root_env(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
 
@@ -797,6 +809,26 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
     ]
 
 
+def test_start_all_without_stop_starts_watchdog_after_frontend(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "start_backend", lambda _config, _console: calls.append("backend"))
+    monkeypatch.setattr(service_manager, "start_frontend", lambda _config, _console: calls.append("webui"))
+    monkeypatch.setattr(service_manager, "start_watchdog", lambda _config, _console: calls.append("watchdog"))
+    monkeypatch.setattr(service_manager, "show_start_summary", lambda _config, _console: calls.append("summary"))
+    monkeypatch.setattr(
+        service_manager,
+        "open_default_browser",
+        lambda _url, _console: calls.append("browser"),
+    )
+
+    service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), DummyConsole())
+
+    assert calls == ["backend", "webui", "watchdog", "summary"]
+
+
 def test_start_all_stops_on_failure_before_restart(monkeypatch) -> None:
     paths = service_manager.RuntimePaths(
         root=Path("/tmp"),
@@ -1207,6 +1239,195 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     assert record is not None
     assert record.host == "0.0.0.0"
     assert record.port == 5174
+
+
+def test_start_watchdog_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    spawn_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "runtime_record_is_running", lambda _record: False)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_flocks_cli_command",
+        lambda root=None: ["python", "-m", "flocks.cli.main"],
+    )
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *args, **kwargs: spawn_calls.append({"args": args, "kwargs": kwargs}) or SimpleNamespace(pid=2468),
+    )
+
+    service_manager.start_watchdog(
+        service_manager.ServiceConfig(backend_host="0.0.0.0", backend_port=9000),
+        console,
+    )
+
+    record = service_manager.read_runtime_record(service_manager.watchdog_pid_path(paths))
+    assert record is not None
+    assert record.pid == 2468
+    assert record.port is None
+    assert record.command == (
+        "python",
+        "-m",
+        "flocks.cli.main",
+        "service-watchdog",
+        "--server-host",
+        "0.0.0.0",
+        "--server-port",
+        "9000",
+        "--webui-host",
+        "127.0.0.1",
+        "--webui-port",
+        "5173",
+        "--interval",
+        str(service_manager.WATCHDOG_CHECK_INTERVAL_SECONDS),
+    )
+    assert spawn_calls[0]["kwargs"]["log_path"] == service_manager.watchdog_log_path(paths)
+
+
+def test_watchdog_recovers_backend_when_process_alive_but_port_not_listening(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, pgid=222, host="0.0.0.0", port=9995),
+    )
+    calls: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(service_manager, "runtime_record_is_running", lambda _record: True)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: False)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda port, _pid_file, _name, _console: calls.append(("stop", port)),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "start_backend",
+        lambda config, _console: calls.append(("start", config.backend_port)),
+    )
+
+    next_count = service_manager._watchdog_tick(
+        service_manager.ServiceConfig(backend_port=8000),
+        paths,
+        0,
+    )
+
+    assert next_count == 0
+    assert calls == [("stop", 9995), ("start", 9995)]
+
+
+def test_watchdog_does_not_recover_when_port_owned_by_unexpected_pid(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, pgid=222, host="0.0.0.0", port=9995),
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(service_manager, "runtime_record_is_running", lambda _record: True)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [999])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: True)
+    monkeypatch.setattr(service_manager, "_runtime_record_pids", lambda _record: [111])
+    monkeypatch.setattr(service_manager, "_recover_unhealthy_backend", lambda *_args: calls.append("recover"))
+
+    next_count = service_manager._watchdog_tick(
+        service_manager.ServiceConfig(backend_port=9995),
+        paths,
+        0,
+    )
+
+    assert next_count == 0
+    assert calls == []
+
+
+def test_watchdog_recovers_backend_when_runtime_record_is_dead(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, pgid=222, host="127.0.0.1", port=9995),
+    )
+    calls: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(service_manager, "runtime_record_is_running", lambda _record: False)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: False)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda port, _pid_file, _name, _console: calls.append(("stop", port)),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "start_backend",
+        lambda config, _console: calls.append(("start", config.backend_port)),
+    )
+
+    next_count = service_manager._watchdog_tick(
+        service_manager.ServiceConfig(backend_port=9995),
+        paths,
+        0,
+    )
+
+    assert next_count == 0
+    assert calls == [("stop", 9995), ("start", 9995)]
+
+
+def test_watchdog_waits_for_second_health_failure_before_restart(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, pgid=222, host="127.0.0.1", port=9995),
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def get(self, _url):
+            return httpx.Response(503, json={"status": "unhealthy"})
+
+    monkeypatch.setattr(service_manager.httpx, "Client", FakeClient)
+    monkeypatch.setattr(service_manager, "runtime_record_is_running", lambda _record: True)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [111])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: True)
+    monkeypatch.setattr(service_manager, "_runtime_record_pids", lambda _record: [111])
+    monkeypatch.setattr(service_manager, "_recover_unhealthy_backend", lambda *_args: calls.append("recover"))
+
+    first_count = service_manager._watchdog_tick(
+        service_manager.ServiceConfig(backend_port=9995),
+        paths,
+        0,
+    )
+    second_count = service_manager._watchdog_tick(
+        service_manager.ServiceConfig(backend_port=9995),
+        paths,
+        first_count,
+    )
+
+    assert first_count == 1
+    assert second_count == 0
+    assert calls == ["recover"]
 
 
 def test_start_frontend_tolerates_windows_node_assertion_after_build(monkeypatch, tmp_path: Path) -> None:

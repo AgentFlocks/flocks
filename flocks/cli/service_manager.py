@@ -48,6 +48,10 @@ WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
     "src\\win\\async.c",
     "src/win/async.c",
 )
+WATCHDOG_CHECK_INTERVAL_SECONDS = 5.0
+WATCHDOG_HEALTH_FAILURE_THRESHOLD = 2
+WATCHDOG_PID_FILENAME = "watchdog.pid"
+WATCHDOG_LOG_FILENAME = "watchdog.log"
 
 
 class ServiceError(RuntimeError):
@@ -104,6 +108,15 @@ class UpgradeRuntimeInfo:
         return self.payload_present or self.pid_file_present
 
 
+@dataclass(frozen=True)
+class WatchdogProbeResult:
+    restart_needed: bool
+    health_failure: bool
+    reason: str
+    host: str
+    port: int
+
+
 def repo_root() -> Path:
     """Return the installed repository root."""
     override = os.getenv("FLOCKS_REPO_ROOT")
@@ -142,6 +155,16 @@ def ensure_runtime_dirs(paths: RuntimePaths | None = None) -> RuntimePaths:
     current.run_dir.mkdir(parents=True, exist_ok=True)
     current.log_dir.mkdir(parents=True, exist_ok=True)
     return current
+
+
+def watchdog_pid_path(paths: RuntimePaths) -> Path:
+    """Return the watchdog runtime record path."""
+    return paths.run_dir / WATCHDOG_PID_FILENAME
+
+
+def watchdog_log_path(paths: RuntimePaths) -> Path:
+    """Return the watchdog log path."""
+    return paths.log_dir / WATCHDOG_LOG_FILENAME
 
 
 def ensure_install_layout(root: Path | None = None) -> Path:
@@ -412,8 +435,8 @@ def write_runtime_record(pid_file: Path, record: RuntimeRecord) -> None:
 def process_runtime_record(
     process: subprocess.Popen,
     *,
-    host: str,
-    port: int,
+    host: str | None,
+    port: int | None,
     command: Sequence[str],
 ) -> RuntimeRecord:
     """Build runtime metadata for a freshly started service process."""
@@ -877,6 +900,17 @@ def _is_running_status_response(response: httpx.Response) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "running"
 
 
+def _is_healthy_status_response(response: httpx.Response) -> bool:
+    """Return True when the backend health endpoint reports healthy."""
+    if response.status_code != 200:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "healthy"
+
+
 def wait_for_http(
     urls: Sequence[str],
     name: str,
@@ -900,6 +934,156 @@ def wait_for_http(
                     pass
             time.sleep(delay)
     raise ServiceError(f"{name} 启动超时，请检查日志。")
+
+
+class _StdoutConsole:
+    """Console adapter for daemon logs redirected to a file."""
+
+    def print(self, *args, **_kwargs) -> None:
+        sys.stdout.write(" ".join(str(arg) for arg in args) + "\n")
+        sys.stdout.flush()
+
+
+def _watchdog_log(event: str, details: dict[str, object] | None = None) -> None:
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    suffix = ""
+    if details:
+        suffix = " " + json.dumps(details, ensure_ascii=True, sort_keys=True)
+    sys.stdout.write(f"[{timestamp}] watchdog.{event}{suffix}\n")
+    sys.stdout.flush()
+
+
+def _backend_health_url(host: str, port: int) -> str:
+    return f"http://{_format_host_for_url(access_host(host))}:{port}/api/health"
+
+
+def _watchdog_backend_endpoint(config: ServiceConfig, paths: RuntimePaths) -> tuple[RuntimeRecord | None, str, int]:
+    record = read_runtime_record(paths.backend_pid)
+    host = record.host if record is not None and record.host else config.backend_host
+    port = record.port if record is not None and record.port is not None else config.backend_port
+    return record, host, port
+
+
+def _watchdog_backend_config(config: ServiceConfig, paths: RuntimePaths) -> ServiceConfig:
+    record, host, port = _watchdog_backend_endpoint(config, paths)
+    return ServiceConfig(
+        backend_host=host,
+        backend_port=port,
+        frontend_host=config.frontend_host,
+        frontend_port=config.frontend_port,
+        no_browser=True,
+        skip_frontend_build=True,
+    )
+
+
+def _watchdog_probe_backend(
+    config: ServiceConfig,
+    paths: RuntimePaths,
+    client: httpx.Client,
+) -> WatchdogProbeResult:
+    record, host, port = _watchdog_backend_endpoint(config, paths)
+    if record is None:
+        return WatchdogProbeResult(False, False, "backend runtime record missing", host, port)
+
+    backend_running = runtime_record_is_running(record)
+    listeners = port_owner_pids(port)
+    port_in_use = port_is_in_use(port, listeners)
+    if not backend_running:
+        if port_in_use:
+            return WatchdogProbeResult(
+                False,
+                False,
+                f"backend runtime record is not running but port {port} is occupied",
+                host,
+                port,
+            )
+        return WatchdogProbeResult(True, False, "backend runtime record is not running", host, port)
+    if not port_in_use:
+        return WatchdogProbeResult(True, False, f"backend process alive but port {port} is not listening", host, port)
+
+    runtime_pids = set(_runtime_record_pids(record))
+    listener_pids = set(listeners)
+    if listener_pids and runtime_pids and listener_pids.isdisjoint(runtime_pids):
+        reason = (
+            f"backend process alive but port {port} is owned by unexpected pid(s): "
+            f"{_join_pids(sorted(listener_pids))}"
+        )
+        return WatchdogProbeResult(False, False, reason, host, port)
+
+    url = _backend_health_url(host, port)
+    try:
+        response = client.get(url)
+    except Exception as exc:
+        return WatchdogProbeResult(True, True, f"backend health check failed: {exc}", host, port)
+    if not _is_healthy_status_response(response):
+        return WatchdogProbeResult(
+            True,
+            True,
+            f"backend health check unhealthy: status={response.status_code}",
+            host,
+            port,
+        )
+    return WatchdogProbeResult(False, False, "backend healthy", host, port)
+
+
+def _recover_unhealthy_backend(config: ServiceConfig, paths: RuntimePaths, reason: str) -> None:
+    try:
+        with service_lock(paths):
+            effective_config = _watchdog_backend_config(config, paths)
+            with httpx.Client(timeout=2.0, trust_env=False) as client:
+                probe = _watchdog_probe_backend(effective_config, paths, client)
+            if not probe.restart_needed:
+                _watchdog_log("backend_recovery_skipped", {"reason": probe.reason})
+                return
+
+            console = _StdoutConsole()
+            _watchdog_log(
+                "backend_recovery_start",
+                {
+                    "reason": reason,
+                    "host": probe.host,
+                    "port": probe.port,
+                },
+            )
+            stop_one(probe.port, paths.backend_pid, "后端", console)
+            start_backend(effective_config, console)
+            _watchdog_log("backend_recovery_done", {"host": probe.host, "port": probe.port})
+    except ServiceError as exc:
+        _watchdog_log("backend_recovery_failed", {"reason": reason, "error": str(exc)})
+    except Exception as exc:
+        _watchdog_log("backend_recovery_crashed", {"reason": reason, "error": repr(exc)})
+
+
+def _watchdog_tick(
+    config: ServiceConfig,
+    paths: RuntimePaths,
+    health_failure_count: int,
+    *,
+    failure_threshold: int = WATCHDOG_HEALTH_FAILURE_THRESHOLD,
+) -> int:
+    with httpx.Client(timeout=2.0, trust_env=False) as client:
+        probe = _watchdog_probe_backend(config, paths, client)
+
+    if not probe.restart_needed:
+        return 0
+
+    if probe.health_failure:
+        health_failure_count += 1
+        _watchdog_log(
+            "backend_health_failed",
+            {
+                "count": health_failure_count,
+                "threshold": failure_threshold,
+                "reason": probe.reason,
+                "host": probe.host,
+                "port": probe.port,
+            },
+        )
+        if health_failure_count < failure_threshold:
+            return health_failure_count
+
+    _recover_unhealthy_backend(config, paths, probe.reason)
+    return 0
 
 
 def start_backend(config: ServiceConfig, console) -> None:
@@ -1097,6 +1281,95 @@ def start_frontend(config: ServiceConfig, console) -> None:
         raise
 
     console.print(f"[flocks] WebUI 已启动，日志: {paths.frontend_log}")
+
+
+def start_watchdog(config: ServiceConfig, console) -> None:
+    """Start the service watchdog daemon if needed."""
+    root = ensure_install_layout()
+    paths = ensure_runtime_dirs()
+    pid_file = watchdog_pid_path(paths)
+    log_path = watchdog_log_path(paths)
+    cleanup_stale_pid_file(pid_file)
+
+    runtime_record = read_runtime_record(pid_file)
+    if runtime_record is not None and runtime_record_is_running(runtime_record):
+        console.print(f"[flocks] Watchdog 已在运行，PID={runtime_record.pid}")
+        return
+    if runtime_record is not None:
+        pid_file.unlink(missing_ok=True)
+
+    command = resolve_flocks_cli_command(root) + [
+        "service-watchdog",
+        "--server-host",
+        config.backend_host,
+        "--server-port",
+        str(config.backend_port),
+        "--webui-host",
+        config.frontend_host,
+        "--webui-port",
+        str(config.frontend_port),
+        "--interval",
+        str(WATCHDOG_CHECK_INTERVAL_SECONDS),
+    ]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    console.print("[flocks] 启动服务 Watchdog...")
+    process = _spawn_process(command, cwd=root, log_path=log_path, env=env)
+    write_runtime_record(
+        pid_file,
+        process_runtime_record(
+            process,
+            host=None,
+            port=None,
+            command=command,
+        ),
+    )
+    _log_startup_config(log_path, "watchdog", config.backend_host, config.backend_port, read_runtime_record(pid_file))
+    console.print(f"[flocks] Watchdog 已启动，日志: {log_path}")
+
+
+def stop_watchdog(paths: RuntimePaths, console) -> None:
+    """Stop the service watchdog without touching backend/frontend ports."""
+    pid_file = watchdog_pid_path(paths)
+    cleanup_stale_pid_file(pid_file)
+    if read_runtime_record(pid_file) is None:
+        return
+    stop_one(0, pid_file, "Watchdog", console)
+
+
+def run_service_watchdog(
+    config: ServiceConfig,
+    *,
+    interval: float = WATCHDOG_CHECK_INTERVAL_SECONDS,
+    failure_threshold: int = WATCHDOG_HEALTH_FAILURE_THRESHOLD,
+) -> None:
+    """Run the backend health watchdog loop."""
+    paths = ensure_runtime_dirs()
+    _watchdog_log(
+        "started",
+        {
+            "backend_host": config.backend_host,
+            "backend_port": config.backend_port,
+            "interval": interval,
+            "failure_threshold": failure_threshold,
+        },
+    )
+    health_failure_count = 0
+    while True:
+        try:
+            health_failure_count = _watchdog_tick(
+                config,
+                paths,
+                health_failure_count,
+                failure_threshold=failure_threshold,
+            )
+        except KeyboardInterrupt:
+            _watchdog_log("stopped")
+            return
+        except Exception as exc:
+            _watchdog_log("tick_failed", {"error": repr(exc)})
+        time.sleep(interval)
 
 
 def _tracked_processes_stopped(
@@ -1323,6 +1596,7 @@ def _stop_all_locked(
     fe_port, be_port = _resolve_stop_ports(paths, config)
     try:
         _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
+        stop_watchdog(paths, console)
         stop_one(fe_port, paths.frontend_pid, "WebUI", console)
         stop_one(be_port, paths.backend_pid, "后端", console)
     finally:
@@ -1341,6 +1615,7 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     ensure_runtime_dirs()
     start_backend(config, console)
     start_frontend(config, console)
+    start_watchdog(config, console)
     show_start_summary(config, console)
     if not config.no_browser:
         open_default_browser(config.frontend_url, console)
@@ -1367,9 +1642,11 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     current = paths or runtime_paths()
     cleanup_stale_pid_file(current.backend_pid)
     cleanup_stale_pid_file(current.frontend_pid)
+    cleanup_stale_pid_file(watchdog_pid_path(current))
 
     backend_record = read_runtime_record(current.backend_pid)
     frontend_record = read_runtime_record(current.frontend_pid)
+    watchdog_record = read_runtime_record(watchdog_pid_path(current))
     backend_port = _recorded_port(current.backend_pid, ServiceConfig.backend_port)
     frontend_port = _recorded_port(current.frontend_pid, ServiceConfig.frontend_port)
     backend_host = _loopback_host(_recorded_host(current.backend_pid, ServiceConfig.backend_host))
@@ -1417,11 +1694,17 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     else:
         lines.append("[flocks] WebUI 未运行")
 
+    if runtime_record_is_running(watchdog_record):
+        lines.append(f"[flocks] Watchdog 运行中: PID={watchdog_record.pid}")
+    else:
+        lines.append("[flocks] Watchdog 未运行")
+
     if upgrade_info.payload_present:
         lines.append("[flocks] 检测到未完成的升级恢复状态")
 
     lines.append(f"[flocks] 后端日志: {current.backend_log}")
     lines.append(f"[flocks] WebUI 日志: {current.frontend_log}")
+    lines.append(f"[flocks] Watchdog 日志: {watchdog_log_path(current)}")
     return lines
 
 

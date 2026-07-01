@@ -33,9 +33,11 @@ from flocks.cli.commands.update import update_command
 from flocks.cli.service_manager import (
     ServiceConfig,
     ServiceError,
+    WATCHDOG_CHECK_INTERVAL_SECONDS,
     read_runtime_record,
     resolve_flocks_cli_command,
     restart_all,
+    run_service_watchdog,
     runtime_paths,
     show_logs,
     show_status,
@@ -398,6 +400,30 @@ def serve(
         log_level="info",
         log_config=_uvicorn_log_config(),
         access_log=False,
+    )
+
+
+@app.command(name="service-watchdog", hidden=True)
+def service_watchdog(
+    server_host: str = typer.Option("127.0.0.1", "--server-host", help="Backend server host"),
+    server_port: int = typer.Option(8000, "--server-port", help="Backend server port"),
+    webui_host: str = typer.Option("127.0.0.1", "--webui-host", help="WebUI host"),
+    webui_port: int = typer.Option(5173, "--webui-port", help="WebUI port"),
+    interval: float = typer.Option(WATCHDOG_CHECK_INTERVAL_SECONDS, "--interval", help="Health check interval"),
+):
+    """
+    Monitor daemon services and recover unhealthy backend listeners.
+    """
+    run_service_watchdog(
+        ServiceConfig(
+            backend_host=server_host,
+            backend_port=server_port,
+            frontend_host=webui_host,
+            frontend_port=webui_port,
+            no_browser=True,
+            skip_frontend_build=True,
+        ),
+        interval=interval,
     )
 
 

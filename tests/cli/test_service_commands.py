@@ -31,7 +31,7 @@ def test_cli_help_lists_service_commands(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     for command in ("start", "stop", "restart", "status", "logs", "session", "mcp", "task", "skills"):
         assert _help_contains_command(result.stdout, command)
-    for command in ("agent", "acp", "debug", "run", "serve", "auth", "models"):
+    for command in ("agent", "acp", "debug", "run", "serve", "service-watchdog", "auth", "models"):
         assert not _help_contains_command(result.stdout, command)
 
 
