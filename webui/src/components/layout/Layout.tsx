@@ -52,7 +52,10 @@ import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
-import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
+import {
+  buildWebUIContractWorkspaceSections,
+  getLocalizedWebUIContractTitle,
+} from '@/utils/webuiContractWorkspaceSections';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -429,7 +432,7 @@ export default function Layout() {
       const sceneWorkspaceItems = webuiContractWorkspaces
         .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
         .map((workspace) => ({
-          name: workspace.title,
+          name: getLocalizedWebUIContractTitle(workspace, i18n.language),
           href: workspace.route,
           icon: resolveWebUIContractPageIcon(workspace.icon),
           opensWorkspaceMenu: true,
@@ -444,7 +447,7 @@ export default function Layout() {
             ...webuiContractPages
               .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
               .map((page) => ({
-                name: page.title,
+                name: getLocalizedWebUIContractTitle(page, i18n.language),
                 href: page.route,
                 icon: resolveWebUIContractPageIcon(page.icon),
               })),
@@ -479,7 +482,7 @@ export default function Layout() {
         },
       ];
     },
-    [webuiContractPages, webuiContractWorkspaces, t],
+    [i18n.language, webuiContractPages, webuiContractWorkspaces, t],
   );
 
   const isFullScreenPage =
@@ -517,9 +520,12 @@ export default function Layout() {
     ? resolveWebUIContractPageIcon(activeWorkspaceMenu.icon)
     : null;
   const activeWorkspaceSections = useMemo(
-    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu) : []),
-    [activeWorkspaceMenu],
+    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu, i18n.language) : []),
+    [activeWorkspaceMenu, i18n.language],
   );
+  const activeWorkspaceMenuTitle = activeWorkspaceMenu
+    ? getLocalizedWebUIContractTitle(activeWorkspaceMenu, i18n.language)
+    : '';
 
   const cancelWorkspaceMenuClose = useCallback(() => {
     if (workspaceMenuCloseTimerRef.current === null) return;
@@ -866,8 +872,8 @@ export default function Layout() {
             {ActiveWorkspaceMenuIcon && (
               <ActiveWorkspaceMenuIcon className="h-5 w-5 shrink-0 text-zinc-500 dark:text-zinc-300" />
             )}
-            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenu.title}>
-              {activeWorkspaceMenu.title}
+            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenuTitle}>
+              {activeWorkspaceMenuTitle}
             </div>
             <button
               type="button"
