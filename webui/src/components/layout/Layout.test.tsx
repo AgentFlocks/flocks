@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
+import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
 
 const {
   catalogAPI,
@@ -19,6 +20,7 @@ const {
   getNotificationAckStatus,
   flocksproUsersApi,
   consoleUpgradeApi,
+  updateModalMock,
   useAuth,
   useStats,
   useWebUIContractPages,
@@ -53,6 +55,7 @@ const {
   consoleUpgradeApi: {
     getProPackageStatus: vi.fn(),
   },
+  updateModalMock: vi.fn(() => null),
   useAuth: vi.fn(),
   useStats: vi.fn(),
   useWebUIContractPages: vi.fn(() => ({
@@ -135,12 +138,17 @@ vi.mock('@/components/common/LanguageSwitcher', () => ({
 
 vi.mock('@/components/common/UpdateModal', () => ({
   UPDATE_DISMISSED_KEY: 'update-dismissed',
-  default: () => <div role="dialog" aria-label="update-modal" />,
+  default: (props: Record<string, unknown>) => {
+    updateModalMock(props);
+    return <div role="dialog" aria-label="update-modal" />;
+  },
 }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    t: (key: string, options?: Record<string, string>) => (
+      options?.version ? `${key} ${options.version}` : key
+    ),
     i18n: { language: 'zh-CN', changeLanguage: vi.fn() },
   }),
 }));
@@ -357,8 +365,20 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it('skips GitHub-backed update checks when Flocks Pro is active', async () => {
-    vi.useFakeTimers();
+  it('checks Flocks Pro bundle updates when Flocks Pro is active', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: '2026.6.22',
+      current_version: '2026.6.21',
+      current_bundle_version: '2026.6.21',
+      latest_bundle_version: '2026.6.22',
+      current_core_version: '2026.6.21',
+      latest_core_version: '2026.6.21',
+      current_pro_component_version: '2026.6.20',
+      latest_pro_component_version: '2026.6.22',
+      error: null,
+    });
     flocksproUsersApi.getLicenseStatus.mockResolvedValue({
       pro_enabled: true,
       active: true,
@@ -373,13 +393,43 @@ describe('Layout onboarding entry', () => {
 
     renderHomeWithLayout();
 
-    await flushEffects();
-    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    expect(await screen.findByRole('button', { name: 'hasNewVersion v2026.6.22' })).toBeInTheDocument();
+  });
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_600_000);
+  it('shows the Pro update modal when only the Pro component changed after dismissal', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    localStorage.setItem(UPDATE_DISMISSED_KEY, 'flockspro:v2026.6.18:v2026.6.18:v2026.6.1');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: 'v2026.6.18',
+      current_version: 'v2026.6.18',
+      current_bundle_version: 'v2026.6.18',
+      latest_bundle_version: 'v2026.6.18',
+      current_core_version: 'v2026.6.18',
+      latest_core_version: 'v2026.6.18',
+      current_pro_component_version: 'v2026.6.1',
+      latest_pro_component_version: 'v2026.6.2',
+      edition: 'flockspro',
+      error: null,
     });
-    expect(checkUpdate).not.toHaveBeenCalled();
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      pro_enabled: true,
+      active: true,
+      status: 'active',
+      license_status: 'active',
+    });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      runtime_importable: true,
+      installed_version: 'v2026.6.18',
+      flockspro_component_version: 'v2026.6.1',
+    });
+
+    renderHomeWithLayout();
+
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    await waitFor(() => expect(updateModalMock).toHaveBeenCalled());
   });
 
   it('shows Flocks Pro branding and version for member users', async () => {
@@ -402,25 +452,25 @@ describe('Layout onboarding entry', () => {
     });
     consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
       installed: true,
-      installed_version: '2026.05.22',
-      flockspro_component_version: '2026.05.22',
+      installed_version: '2026.6.21',
+      flockspro_component_version: '2026.6.20',
     });
 
     const { container } = renderHomeWithLayout();
 
     expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
-    expect(await screen.findByText('pro-v2026.05.22')).toBeInTheDocument();
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
+    expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
     expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
-    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
 
     const sidebarShell = container.querySelector('aside > div');
     const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
     const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
     expect(logoRow).not.toBeNull();
     expect(accountRow).not.toBeNull();
-    expect(within(logoRow!).queryByText('pro-v2026.05.22')).not.toBeInTheDocument();
-    expect(within(accountRow!).getByText('pro-v2026.05.22')).toBeInTheDocument();
+    expect(within(logoRow!).queryByText('v2026.6.21')).not.toBeInTheDocument();
+    expect(within(accountRow!).getByText('v2026.6.21')).toBeInTheDocument();
   });
 
   it('keeps new version reminder on the product mark while showing current version in the account area', async () => {
@@ -437,7 +487,7 @@ describe('Layout onboarding entry', () => {
 
     const { container } = renderHomeWithLayout();
 
-    const updateButton = await screen.findByRole('button', { name: 'hasNewVersion' });
+    const updateButton = await screen.findByRole('button', { name: 'hasNewVersion v2026.04.29' });
     expect(updateButton).toBeInTheDocument();
     expect(screen.getByText('v2026.04.28')).toBeInTheDocument();
 
@@ -453,7 +503,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByTitle('collapseNav'));
 
-    const collapsedUpdateButton = screen.getByRole('button', { name: 'hasNewVersion' });
+    const collapsedUpdateButton = screen.getByRole('button', { name: 'hasNewVersion v2026.04.29' });
     expect(collapsedUpdateButton).toHaveClass('h-2.5');
     expect(collapsedUpdateButton).toHaveClass('w-2.5');
     expect(screen.queryByText('newVersion')).not.toBeInTheDocument();
@@ -499,6 +549,7 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
     expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(updateModalMock).toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'logout' })).not.toBeInTheDocument();
   });
 

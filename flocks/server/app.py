@@ -1013,6 +1013,7 @@ from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
 from flocks.server.routes.console_upgrade import router as console_upgrade_router
+from flocks.server.routes.flockspro_license import router as flockspro_license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
 # Original routes with /api/ prefix
@@ -1151,7 +1152,32 @@ def _load_installed_package_plugins() -> None:
         log.warning("plugins.installed.load_failed", {"error": str(e)})
 
 
+def _route_registered(path: str, method: str) -> bool:
+    target_method = method.upper()
+    for route in app.routes:
+        if getattr(route, "path", None) != path:
+            continue
+        methods = getattr(route, "methods", None) or set()
+        if target_method in methods:
+            return True
+    return False
+
+
+def _install_flockspro_license_fallback() -> None:
+    status_registered = _route_registered("/api/flockspro/license/status", "GET")
+    refresh_registered = _route_registered("/api/flockspro/license/refresh", "POST")
+    if status_registered and refresh_registered:
+        log.info("flockspro.license.fallback.skipped", {
+            "status_registered": status_registered,
+            "refresh_registered": refresh_registered,
+        })
+        return
+    app.include_router(flockspro_license_router, prefix="/api/flockspro/license", tags=["FlocksProLicense"])
+    log.info("flockspro.license.fallback.installed")
+
+
 _load_installed_package_plugins()
+_install_flockspro_license_fallback()
 
 
 @app.get("/", tags=["Root"])

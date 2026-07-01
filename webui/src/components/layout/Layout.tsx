@@ -29,12 +29,9 @@ import { useTranslation } from 'react-i18next';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
 // the home page never needs. To keep the lazy split effective, we don't
-// re-import the dismissal helpers from the modal modules (a static named
-// import would force Rollup to bundle the whole module eagerly), and instead
-// inline the two localStorage keys here. Keep these in sync with the keys
-// declared in OnboardingModal.tsx / UpdateModal.tsx.
+// re-import dismissal helpers from the modal modules (a static named import
+// would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
-const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 function isOnboardingDismissed(): boolean {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
@@ -52,6 +49,7 @@ import {
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
+import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
@@ -74,7 +72,7 @@ interface LayoutNavSection {
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
-  return normalized ? `pro-v${normalized}` : null;
+  return normalized ? `v${normalized}` : null;
 }
 
 function formatUpdateVersion(version?: string | null): string | null {
@@ -168,13 +166,6 @@ export default function Layout() {
 
   const refreshUpdateStatus = useCallback(async (force = false) => {
     if (!flocksproStatusReady) return;
-    if (isFlocksproActive) {
-      setUpdateInfo(null);
-      setHasUpdate(false);
-      setLatestVersion(null);
-      setHasCompletedUpdateCheck(true);
-      return;
-    }
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
@@ -184,7 +175,8 @@ export default function Layout() {
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const info = await checkUpdate(i18n.language);
+      const edition = isFlocksproActive ? 'flockspro' : 'flocks';
+      const info = await checkUpdate(i18n.language, edition);
       setUpdateInfo(info);
 
       if (info.current_version) {
@@ -194,13 +186,15 @@ export default function Layout() {
       if (info.has_update && info.latest_version) {
         setHasUpdate(true);
         setLatestVersion(info.latest_version);
+        const updateDismissalKey = buildUpdateDismissalKey(info);
 
         if (
           canManageUpdates
-          && lastPromptedVersionRef.current !== info.latest_version
-          && localStorage.getItem(UPDATE_DISMISSED_KEY) !== info.current_version
+          && updateDismissalKey
+          && lastPromptedVersionRef.current !== updateDismissalKey
+          && !isUpdateDismissed(info, localStorage.getItem(UPDATE_DISMISSED_KEY))
         ) {
-          lastPromptedVersionRef.current = info.latest_version;
+          lastPromptedVersionRef.current = updateDismissalKey;
           setShowUpdate(true);
         }
         return;
@@ -271,7 +265,7 @@ export default function Layout() {
           const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
           setIsFlocksproActive(active);
           const version = active
-            ? formatProVersion(packageStatus?.flockspro_component_version || packageStatus?.installed_version)
+            ? formatProVersion(packageStatus?.installed_version || packageStatus?.flockspro_component_version)
             : null;
           setFlocksproVersion(version);
         })
@@ -480,7 +474,9 @@ export default function Layout() {
     matchPath('/contracts/webui/*', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
-    ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
+    ? updateInfo?.edition === 'flockspro' && currentVersion
+      ? formatProVersion(currentVersion)
+      : flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
     : currentVersion ? `v${currentVersion}` : null;
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
