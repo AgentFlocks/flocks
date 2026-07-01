@@ -31,6 +31,7 @@ type PluginView = 'installed' | 'marketplace';
 type ActionKind = 'install' | 'update' | 'uninstall';
 type PluginFamily = 'all' | 'agent' | 'skill' | 'mcp' | 'apiTool' | 'pythonTool' | 'generatedTool' | 'tool' | 'device' | 'workflow';
 type PluginSection = 'overview' | 'tools' | 'skills' | 'agents' | 'marketplace';
+type PluginMode = 'assets' | 'discover';
 
 const ToolPage = lazy(() => import('@/pages/Tool'));
 const SkillPage = lazy(() => import('@/pages/Skill'));
@@ -40,6 +41,11 @@ const HubPage = lazy(() => import('@/pages/Hub'));
 interface PluginText {
   title: string;
   description: string;
+  installedAssets: string;
+  discoverPlugins: string;
+  assetType: string;
+  installSource: string;
+  hubSource: string;
   installed: string;
   marketplace: string;
   installedHint: string;
@@ -79,6 +85,11 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
   zh: {
     title: '插件管理',
     description: '统一管理智能体、技能、工具、设备和工作流插件，安装后直接进入对应配置。',
+    installedAssets: '已安装插件',
+    discoverPlugins: '发现插件',
+    assetType: '插件类型',
+    installSource: '安装来源',
+    hubSource: 'Flocks Hub',
     installed: '已安装',
     marketplace: '插件广场',
     installedHint: '当前可用、可配置、可更新的插件资产。',
@@ -92,14 +103,14 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tools: '工具',
       skills: '技能',
       agents: '智能体',
-      marketplace: '插件广场',
+      marketplace: '发现插件',
     },
     sectionDescriptions: {
       overview: '统一查看插件安装状态，并执行开关、安装、卸载等插件级操作。',
       tools: '管理 MCP、API Tool、本地 Python Tool、设备工具等 Flocks 工具能力。',
       skills: '管理 Rex 和子 Agent 可加载的技能，包含启用、禁用、依赖安装和编辑。',
       agents: '管理子 Agent 配置、能力边界、工具白名单和创建入口。',
-      marketplace: '浏览可安装插件，安装前查看 manifest、依赖、权限和文件内容。',
+      marketplace: '从 Flocks Hub 浏览可安装插件，安装前查看 manifest、依赖、权限和文件内容。',
     },
     emptyTitle: '没有匹配的插件',
     emptyHint: '换一个类型或清空搜索条件。',
@@ -162,6 +173,11 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
   en: {
     title: 'Plugin Management',
     description: 'Manage agents, skills, tools, devices, and workflow plugins from one workspace.',
+    installedAssets: 'Installed plugins',
+    discoverPlugins: 'Discover plugins',
+    assetType: 'Plugin type',
+    installSource: 'Install source',
+    hubSource: 'Flocks Hub',
     installed: 'Installed',
     marketplace: 'Marketplace',
     installedHint: 'Assets that are ready to use, configure, or update.',
@@ -175,14 +191,14 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tools: 'Tools',
       skills: 'Skills',
       agents: 'Agents',
-      marketplace: 'Marketplace',
+      marketplace: 'Discover',
     },
     sectionDescriptions: {
       overview: 'Review plugin install state and run plugin-level enable, install, and uninstall actions.',
       tools: 'Manage MCP, API Tool, local Python Tool, device tools, and other Flocks tool capabilities.',
       skills: 'Manage skills that Rex and sub-agents can load, including enablement, dependencies, and editing.',
       agents: 'Manage sub-agent configuration, boundaries, tool allowlists, and creation flows.',
-      marketplace: 'Browse installable plugins and inspect manifests, dependencies, permissions, and files.',
+      marketplace: 'Browse Flocks Hub plugins and inspect manifests, dependencies, permissions, and files before installing.',
     },
     emptyTitle: 'No matching plugins',
     emptyHint: 'Try another type or clear the search.',
@@ -246,7 +262,7 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
 
 const TYPE_ORDER: HubPluginType[] = ['agent', 'skill', 'tool', 'device', 'workflow'];
 const FAMILY_ORDER: PluginFamily[] = ['agent', 'skill', 'mcp', 'apiTool', 'pythonTool', 'generatedTool', 'tool', 'device', 'workflow'];
-const SECTION_ORDER: PluginSection[] = ['agents', 'skills', 'tools', 'marketplace'];
+const ASSET_SECTION_ORDER: Array<Exclude<PluginSection, 'overview' | 'marketplace'>> = ['agents', 'skills', 'tools'];
 
 const TYPE_META: Record<HubPluginType, {
   icon: typeof Bot;
@@ -375,6 +391,7 @@ export default function PluginManagerPage() {
   const text = isZh(i18n.language) ? TEXT.zh : TEXT.en;
   const sectionParam = params.section;
   const activeSection = resolvePluginSection(sectionParam);
+  const activeMode: PluginMode = activeSection === 'marketplace' ? 'discover' : 'assets';
   const { success: showSuccess, error: showError } = useToast();
   const [items, setItems] = useState<HubCatalogEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -489,7 +506,7 @@ export default function PluginManagerPage() {
   return (
     <div className="h-full min-h-[calc(100vh-3rem)]">
       <header className="mb-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 items-center gap-2.5">
             <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md bg-red-50 text-red-600 dark:bg-red-950/40 dark:text-red-300">
               <PackageCheck className="h-5 w-5" />
@@ -504,10 +521,17 @@ export default function PluginManagerPage() {
               </p>
             </div>
           </div>
-          <div className="justify-self-center">
-            <PluginSectionNav activeSection={activeSection} text={text} />
+          <PluginModeNav activeMode={activeMode} text={text} />
+        </div>
+        <div className="mt-2 flex flex-col gap-1.5 border-t border-zinc-100 pt-2 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+            {activeMode === 'assets' ? text.assetType : text.installSource}
           </div>
-          <div aria-hidden="true" className="hidden lg:block" />
+          {activeMode === 'assets' ? (
+            <PluginAssetNav activeSection={activeSection} text={text} />
+          ) : (
+            <PluginSourceNav text={text} />
+          )}
         </div>
       </header>
 
@@ -742,16 +766,41 @@ export default function PluginManagerPage() {
   );
 }
 
-function PluginSectionNav({ activeSection, text }: { activeSection: PluginSection; text: PluginText }) {
+function PluginModeNav({ activeMode, text }: { activeMode: PluginMode; text: PluginText }) {
+  const modes: Array<{ mode: PluginMode; label: string; href: string }> = [
+    { mode: 'assets', label: text.installedAssets, href: '/plugins/agents' },
+    { mode: 'discover', label: text.discoverPlugins, href: '/plugins/marketplace' },
+  ];
+
   return (
-    <nav className="flex flex-wrap gap-1 rounded-md border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950">
-      {SECTION_ORDER.map(section => (
+    <nav className="inline-flex w-fit rounded-md border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950">
+      {modes.map(({ mode, label, href }) => (
+        <Link
+          key={mode}
+          to={href}
+          className={`rounded-[5px] px-2.5 py-1 text-sm font-medium leading-5 transition-colors ${
+            activeMode === mode
+              ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
+              : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+          }`}
+        >
+          {label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+function PluginAssetNav({ activeSection, text }: { activeSection: PluginSection; text: PluginText }) {
+  return (
+    <nav className="flex flex-wrap gap-1">
+      {ASSET_SECTION_ORDER.map(section => (
         <Link
           key={section}
           to={`/plugins/${section}`}
-          className={`rounded-[5px] px-2.5 py-1 text-sm font-medium leading-5 transition-colors ${
+          className={`rounded-md px-2.5 py-1 text-sm font-medium leading-5 transition-colors ${
             activeSection === section
-              ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
+              ? 'bg-red-50 text-red-700 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-200 dark:ring-red-800'
               : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
           }`}
         >
@@ -759,6 +808,16 @@ function PluginSectionNav({ activeSection, text }: { activeSection: PluginSectio
         </Link>
       ))}
     </nav>
+  );
+}
+
+function PluginSourceNav({ text }: { text: PluginText }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      <span className="rounded-md bg-red-50 px-2.5 py-1 text-sm font-medium leading-5 text-red-700 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-200 dark:ring-red-800">
+        {text.hubSource}
+      </span>
+    </div>
   );
 }
 
