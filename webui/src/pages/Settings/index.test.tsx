@@ -75,6 +75,8 @@ function renderSettings(path: string, theme: Theme = 'light', state?: Record<str
       <MemoryRouter initialEntries={[state ? { pathname: path, state } : path]}>
         <Routes>
           <Route path="/settings/:sectionId?" element={<SettingsPage />} />
+          <Route path="/models" element={<div>models page</div>} />
+          <Route path="/channels" element={<div>channels page</div>} />
           <Route path="/contracts/webui/workspaces/:workspaceId" element={<LocationProbe />} />
           <Route path="/" element={<LocationProbe />} />
         </Routes>
@@ -112,19 +114,23 @@ describe('SettingsPage', () => {
     expect(setTheme).toHaveBeenCalledWith('dark');
   });
 
-  it('renders existing configuration pages inside the settings shell', async () => {
-    renderSettings('/settings/models');
+  it('redirects legacy model and channel settings URLs to workspace pages', async () => {
+    const { unmount } = renderSettings('/settings/models');
 
     expect(await screen.findByText('models page')).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: 'models' })[0]).toHaveAttribute('href', '/settings/models');
-    expect(screen.getAllByRole('link', { name: 'channels' })[0]).toHaveAttribute('href', '/settings/channels');
-    expect(await screen.findAllByRole('link', { name: 'auditLogs' })).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
+
+    unmount();
+    renderSettings('/settings/channels');
+
+    expect(await screen.findByText('channels page')).toBeInTheDocument();
   });
 
   it('returns to the page captured before opening settings', async () => {
     const user = userEvent.setup();
 
-    renderSettings('/settings/models', 'light', {
+    renderSettings('/settings/system-logs', 'light', {
       from: {
         pathname: '/contracts/webui/workspaces/soc_ui',
         search: '?view=posture',
@@ -132,9 +138,9 @@ describe('SettingsPage', () => {
       },
     });
 
-    await screen.findAllByRole('link', { name: 'auditLogs' });
-    await user.click(screen.getAllByRole('link', { name: 'channels' })[0]);
-    expect(await screen.findByText('channels page')).toBeInTheDocument();
+    expect(await screen.findByText('system logs page')).toBeInTheDocument();
+    await user.click(screen.getAllByRole('link', { name: 'accountManagement' })[0]);
+    expect(await screen.findByText('account page')).toBeInTheDocument();
 
     await user.click(screen.getAllByRole('button', { name: 'settingsBack' })[0]);
 
@@ -152,6 +158,8 @@ describe('SettingsPage', () => {
     const mobileNav = screen.getByRole('navigation', { name: 'settingsTitle' });
     expect(within(mobileNav).getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
     expect(within(mobileNav).getByRole('link', { name: 'auditLogs' })).toHaveAttribute('href', '/settings/audit-logs');
+    expect(within(mobileNav).queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
+    expect(within(mobileNav).queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
   });
 
   it('renders audit logs in settings for Flocks Pro admins', async () => {

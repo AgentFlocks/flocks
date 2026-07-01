@@ -135,7 +135,7 @@ vi.mock('@/components/common/LanguageSwitcher', () => ({
 
 vi.mock('@/components/common/UpdateModal', () => ({
   UPDATE_DISMISSED_KEY: 'update-dismissed',
-  default: () => null,
+  default: () => <div role="dialog" aria-label="update-modal" />,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -406,13 +406,57 @@ describe('Layout onboarding entry', () => {
       flockspro_component_version: '2026.05.22',
     });
 
-    renderHomeWithLayout();
+    const { container } = renderHomeWithLayout();
 
     expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
     expect(await screen.findByText('pro-v2026.05.22')).toBeInTheDocument();
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
     expect(checkUpdate).not.toHaveBeenCalled();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).queryByText('pro-v2026.05.22')).not.toBeInTheDocument();
+    expect(within(accountRow!).getByText('pro-v2026.05.22')).toBeInTheDocument();
+  });
+
+  it('keeps new version reminder on the product mark while showing current version in the account area', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: '2026.04.29',
+      current_version: '2026.04.28',
+      release_notes: 'Release line',
+      release_url: 'https://example.com/release',
+      error: null,
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    const updateButton = await screen.findByRole('button', { name: 'hasNewVersion' });
+    expect(updateButton).toBeInTheDocument();
+    expect(screen.getByText('v2026.04.28')).toBeInTheDocument();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).getByText('Flocks').closest('button')).toBeNull();
+    expect(within(logoRow!).queryByText('v2026.04.28')).not.toBeInTheDocument();
+    expect(within(logoRow!).getByText('newVersion')).toBeInTheDocument();
+    expect(within(accountRow!).getByText('v2026.04.28')).toBeInTheDocument();
+
+    await user.click(screen.getByTitle('collapseNav'));
+
+    const collapsedUpdateButton = screen.getByRole('button', { name: 'hasNewVersion' });
+    expect(collapsedUpdateButton).toHaveClass('h-2.5');
+    expect(collapsedUpdateButton).toHaveClass('w-2.5');
+    expect(screen.queryByText('newVersion')).not.toBeInTheDocument();
   });
 
   it('opens the account menu with settings and logout actions', async () => {
@@ -436,10 +480,26 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
+    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
     expect(logout).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the update dialog from the account menu', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('admin.roleAdmin')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+    await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
+
+    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'logout' })).not.toBeInTheDocument();
   });
 
   it('keeps desktop layout animation while collapsing the sidebar', async () => {
@@ -825,6 +885,7 @@ describe('Layout WebUI contract pages navigation', () => {
       'href',
       '/contracts/webui/workspaces/soc_ui',
     );
+    expect(socWorkspaceLink.querySelectorAll('svg')).toHaveLength(2);
     expect(screen.queryByRole('link', { name: '告警运营' })).not.toBeInTheDocument();
 
     const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
@@ -842,8 +903,8 @@ describe('Layout WebUI contract pages navigation', () => {
       .find((heading) => heading.textContent === 'agentHub')
       ?.parentElement;
     expect(agentSection?.querySelector('a[href="/devices"]')).toBeNull();
-    expect(agentSection?.querySelector('a[href="/models"]')).toBeNull();
-    expect(agentSection?.querySelector('a[href="/channels"]')).toBeNull();
+    expect(agentSection?.querySelector('a[href="/models"]')).not.toBeNull();
+    expect(agentSection?.querySelector('a[href="/channels"]')).not.toBeNull();
 
     await user.click(socWorkspaceLink);
 

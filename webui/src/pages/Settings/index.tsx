@@ -5,11 +5,9 @@ import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft,
   ArrowUpCircle,
-  Brain,
   Check,
   Languages,
   Moon,
-  Radio,
   ScrollText,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -25,11 +23,9 @@ import { flocksproUsersApi } from '@/api/flocksproUsers';
 const ConfigPage = lazy(() => import('@/pages/Config'));
 const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
-const ModelPage = lazy(() => import('@/pages/Model'));
-const ChannelPage = lazy(() => import('@/pages/Channel'));
 const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 
-type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro' | 'models' | 'channels';
+type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -60,9 +56,7 @@ function isSettingsSectionId(value: string | undefined): value is SettingsSectio
     value === 'account' ||
     value === 'system-logs' ||
     value === 'audit-logs' ||
-    value === 'flockspro' ||
-    value === 'models' ||
-    value === 'channels'
+    value === 'flockspro'
   );
 }
 
@@ -214,8 +208,6 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}
       {sectionId === 'flockspro' && <FlocksproUpgradePage />}
-      {sectionId === 'models' && <ModelPage />}
-      {sectionId === 'channels' && <ChannelPage />}
     </Suspense>
   );
 }
@@ -288,13 +280,6 @@ export default function SettingsPage() {
           { id: 'flockspro', name: t('flocksproUpgrade'), icon: ArrowUpCircle, adminOnly: true },
         ],
       },
-      {
-        name: t('settingsGroupIntegrations'),
-        items: [
-          { id: 'models', name: t('models'), icon: Brain },
-          { id: 'channels', name: t('channels'), icon: Radio },
-        ],
-      },
     ],
     [t],
   );
@@ -312,6 +297,14 @@ export default function SettingsPage() {
 
   if (!sectionId) {
     return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
+  }
+
+  if (sectionId === 'models') {
+    return <Navigate to="/models" replace />;
+  }
+
+  if (sectionId === 'channels') {
+    return <Navigate to="/channels" replace />;
   }
 
   if (!isSettingsSectionId(sectionId)) {

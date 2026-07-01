@@ -75,6 +75,7 @@ class Binding:
     source_root: Path
     driver_available_fields: frozenset[str]
     driver_allowlist_roots: tuple[Path, ...]
+    driver_options: dict[str, Any] = field(default_factory=dict)
     capabilities: frozenset[str] = frozenset({"query"})
 
 

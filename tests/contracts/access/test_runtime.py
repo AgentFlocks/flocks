@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,33 @@ def _write_alert_assets(store: WebUIPagesStore, records: list[dict[str, Any]]) -
         "\n".join(json.dumps(line, ensure_ascii=False) for line in lines),
         encoding="utf-8",
     )
+
+
+def _write_alert_sqlite(db_path: Path, records: list[dict[str, Any]]) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE alert_records (
+            id TEXT PRIMARY KEY,
+            asset_date TEXT NOT NULL,
+            record_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO alert_records (id, asset_date, record_json) VALUES (?, ?, ?)",
+        [
+            (
+                str(record.get("id") or index),
+                str(record.get("asset_date") or "2026-06-25"),
+                json.dumps(record, ensure_ascii=False),
+            )
+            for index, record in enumerate(records, start=1)
+        ],
+    )
+    connection.commit()
+    connection.close()
 
 
 def _alert_record(**overrides: Any) -> dict[str, Any]:
@@ -99,24 +127,36 @@ def _contract() -> Contract:
 
 
 class _BindingResolver:
-    def __init__(self, store: WebUIPagesStore, *, capabilities: frozenset[str] | None = None) -> None:
+    def __init__(
+        self,
+        store: WebUIPagesStore,
+        *,
+        capabilities: frozenset[str] | None = None,
+        adapter_kind: str = "builtin-jsonl",
+        source_root: Path | None = None,
+        driver_options: dict[str, Any] | None = None,
+    ) -> None:
         self._store = store
         self._capabilities = capabilities or frozenset({"query", "mutation"})
+        self._adapter_kind = adapter_kind
+        self._source_root = source_root
+        self._driver_options = driver_options or {}
 
     def resolve(self, *, page_id: str, slot_id: str, contract_id: str, contract_version: str) -> Binding:
-        source_root = self._store.asset_path(SOURCE_PAGE_ID, "")
+        source_root = self._source_root or self._store.asset_path(SOURCE_PAGE_ID, "")
         return Binding(
-            binding_id="test-jsonl",
+            binding_id=f"test-{self._adapter_kind}",
             binding_version=1,
             page_id=page_id,
             slot_id=slot_id,
             contract_id=contract_id,
             contract_version=contract_version,
-            adapter_kind="builtin-jsonl",
+            adapter_kind=self._adapter_kind,
             source_page_id=SOURCE_PAGE_ID,
             source_root=source_root,
             driver_available_fields=DRIVER_FIELDS,
-            driver_allowlist_roots=(source_root,),
+            driver_allowlist_roots=(source_root if source_root.is_dir() else source_root.parent,),
+            driver_options=self._driver_options,
             capabilities=self._capabilities,
         )
 
@@ -169,12 +209,25 @@ class _ResponsePipeline:
         }
 
 
-def _plugin(store: WebUIPagesStore, *, capabilities: frozenset[str] | None = None) -> WebUIContractPlugin:
+def _plugin(
+    store: WebUIPagesStore,
+    *,
+    capabilities: frozenset[str] | None = None,
+    adapter_kind: str = "builtin-jsonl",
+    source_root: Path | None = None,
+    driver_options: dict[str, Any] | None = None,
+) -> WebUIContractPlugin:
     overlay_store = OverlayStore()
     return WebUIContractPlugin(
         plugin_id="test-alerts",
         contracts=(_contract(),),
-        binding_resolver=_BindingResolver(store, capabilities=capabilities),
+        binding_resolver=_BindingResolver(
+            store,
+            capabilities=capabilities,
+            adapter_kind=adapter_kind,
+            source_root=source_root,
+            driver_options=driver_options,
+        ),
         adapter=_Adapter(),
         response_pipeline=_ResponsePipeline(overlay_store),
         overlay_store=overlay_store,
@@ -214,6 +267,45 @@ def test_query_uses_shared_runtime_and_jsonl_driver(tmp_path: Path, monkeypatch:
     assert response.body["items"][0]["entityId"] == "alert:alert-1"
     assert response.body["items"][0]["status"] == "open"
     assert response.body["meta"]["sourcePageId"] == SOURCE_PAGE_ID
+
+
+def test_query_can_use_sqlite_json_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "soc_alerts_investigation.db"
+    _write_alert_sqlite(
+        db_path,
+        [
+            _alert_record(id="allowed", status="open", severity="high", asset_date="2026-06-25"),
+            _alert_record(id="hidden", status="closed", severity="low", asset_date="2026-06-25"),
+            _alert_record(id="outside-date", status="open", severity="high", asset_date="2026-06-26"),
+        ],
+    )
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={
+                    "table": "alert_records",
+                    "recordColumn": "record_json",
+                    "dateColumn": "asset_date",
+                },
+            ),
+        ),
+    )
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"date": "2026-06-25", "filters": {"status": ["open"]}, "limit": 10}},
+        principal=AuthUser(id="u1", username="alice", role="admin"),
+    )
+
+    assert response.body["summary"]["totalRaw"] == 2
+    assert [item["id"] for item in response.body["items"]] == ["allowed"]
+    assert response.body["items"][0]["entityId"] == "alert:allowed"
 
 
 def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

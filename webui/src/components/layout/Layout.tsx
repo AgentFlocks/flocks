@@ -3,10 +3,12 @@ import {
   Home,
   MessageSquare,
   Bot,
+  Brain,
   Workflow,
   ListTodo,
   Wrench,
   BookOpen,
+  Radio,
   X,
   ChevronLeft,
   ChevronRight,
@@ -19,6 +21,8 @@ import {
   ShieldCheck,
   LogOut,
   Settings,
+  ArrowUpCircle,
+  RefreshCw,
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
@@ -414,13 +418,16 @@ export default function Layout() {
     () => {
       const sceneWorkspaceItems = webuiContractWorkspaces
         .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
-        .map((workspace) => ({
-          name: workspace.title,
-          href: workspace.route,
-          icon: resolveWebUIContractPageIcon(workspace.icon),
-          opensWorkspaceMenu: true,
-          workspaceId: workspace.id,
-        }));
+        .map((workspace) => {
+          const isSocWorkspace = workspace.id === 'soc_ui' || workspace.title.toLowerCase().includes('soc');
+          return {
+            name: workspace.title,
+            href: workspace.route,
+            icon: isSocWorkspace ? ShieldCheck : resolveWebUIContractPageIcon(workspace.icon),
+            opensWorkspaceMenu: true,
+            workspaceId: workspace.id,
+          };
+        });
 
       return [
         {
@@ -452,6 +459,8 @@ export default function Layout() {
             { name: t('skills'), href: '/skills', icon: BookOpen },
             { name: t('tools'), href: '/tools', icon: Wrench },
             { name: t('hub'), href: '/hub', icon: Archive },
+            { name: t('models'), href: '/models', icon: Brain },
+            { name: t('channels'), href: '/channels', icon: Radio },
           ],
         },
         {
@@ -479,9 +488,11 @@ export default function Layout() {
     : currentVersion ? `v${currentVersion}` : null;
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
-  const versionButtonTitle = hasUpdate && canManageUpdates
+  const hasVisibleUpdate = hasUpdate && canManageUpdates;
+  const showFlocksproUpgradeEntry = canManageUpdates && !isFlocksproActive;
+  const productUpdateTitle = hasVisibleUpdate
     ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' })
-    : t('versionInfo');
+    : productName;
   const settingsReturnState = {
     from: {
       pathname: location.pathname,
@@ -542,6 +553,12 @@ export default function Layout() {
     });
   }, []);
 
+  const openManualUpdateCheck = useCallback(() => {
+    setAccountMenuOpen(false);
+    setUpdateInfo(null);
+    setShowUpdate(true);
+  }, []);
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Modals render lazily — fallback={null} keeps the chunk download
@@ -593,30 +610,36 @@ export default function Layout() {
           <div className={`flex items-center h-16 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
             {collapsed ? (
               <div
-                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+                className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
                 title={productName}
               >
                 <Sparkles className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
-              </div>
-            ) : (
-              <>
-                <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                  <span className="min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
+                {hasVisibleUpdate && (
                   <button
                     type="button"
                     onClick={() => setShowUpdate(true)}
-                    title={versionButtonTitle}
-                    className={`relative shrink-0 rounded px-1 py-0.5 text-[11px] font-semibold leading-none transition-colors ${
-                      hasUpdate && canManageUpdates
-                        ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/60'
-                        : 'text-zinc-400 hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200'
-                    }`}
-                  >
-                    {hasUpdate && canManageUpdates ? t('newVersion') : displayVersion || '...'}
-                    {hasUpdate && canManageUpdates && (
-                      <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400" />
-                    )}
-                  </button>
+                    className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-zinc-100 transition-colors hover:bg-amber-500 dark:ring-zinc-950"
+                    title={productUpdateTitle}
+                    aria-label={productUpdateTitle}
+                  />
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
+                  {hasVisibleUpdate && (
+                    <button
+                      type="button"
+                      onClick={() => setShowUpdate(true)}
+                      title={productUpdateTitle}
+                      aria-label={productUpdateTitle}
+                      className="relative inline-flex h-4 shrink-0 items-center rounded-sm bg-amber-50 px-1 text-[10px] font-bold leading-none text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-950/70 dark:text-amber-300 dark:hover:bg-amber-900"
+                    >
+                      {t('newVersion')}
+                      <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400 ring-1 ring-zinc-100 dark:ring-zinc-950" />
+                    </button>
+                  )}
                 </div>
                 <button
                   onClick={() => setSidebarOpen(false)}
@@ -681,7 +704,14 @@ export default function Layout() {
                           className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
                         />
                         {!collapsed && (
-                          <span className="truncate">{item.name}</span>
+                          <>
+                            <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                            {item.opensWorkspaceMenu && (
+                              <ChevronRight
+                                className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
+                              />
+                            )}
+                          </>
                         )}
                       </Link>
                     );
@@ -700,6 +730,28 @@ export default function Layout() {
               <div className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
                 collapsed ? 'bottom-2 left-full ml-2 w-48' : 'bottom-full left-3 right-3 mb-2'
               }`}>
+                {showFlocksproUpgradeEntry && (
+                  <Link
+                    to="/settings/flockspro"
+                    state={settingsReturnState}
+                    onClick={() => {
+                      setAccountMenuOpen(false);
+                      setSidebarOpen(false);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                  >
+                    <ArrowUpCircle className="h-4 w-4 text-zinc-400" />
+                    {t('flocksproUpgrade')}
+                  </Link>
+                )}
+                <button
+                  type="button"
+                  onClick={openManualUpdateCheck}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                >
+                  <RefreshCw className="h-4 w-4 text-zinc-400" />
+                  {t('checkUpdate')}
+                </button>
                 <Link
                   to="/settings/preferences"
                   state={settingsReturnState}
@@ -741,7 +793,7 @@ export default function Layout() {
               <button
                 type="button"
                 onClick={() => setAccountMenuOpen((value) => !value)}
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-white/70 dark:hover:bg-zinc-900"
+                className="relative flex min-h-[62px] w-full items-center gap-2 rounded-lg px-2 py-2 pr-7 text-left transition-colors hover:bg-white/70 dark:hover:bg-zinc-900"
                 aria-expanded={accountMenuOpen}
                 aria-label={user?.username ? `${user.username} ${t('settings')}` : t('settings')}
               >
@@ -749,14 +801,24 @@ export default function Layout() {
                   {accountInitial}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">
-                    {user?.username || productName}
+                  <span className="flex min-w-0 items-baseline gap-1.5">
+                    <span className="min-w-0 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+                      {user?.username || productName}
+                    </span>
+                    <span className="shrink-0 whitespace-nowrap text-xs text-zinc-400 dark:text-zinc-500">
+                      {accountRoleLabel}
+                    </span>
                   </span>
-                  <span className="block truncate text-xs text-zinc-400 dark:text-zinc-500">
-                    {accountRoleLabel}
-                  </span>
+                  {displayVersion && (
+                    <span
+                      className="mt-1 inline-flex w-fit rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold leading-none text-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500"
+                      title={t('versionInfo')}
+                    >
+                      {displayVersion}
+                    </span>
+                  )}
                 </span>
-                <ChevronUp className={`h-4 w-4 shrink-0 text-zinc-400 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
+                <ChevronUp className={`absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
               </button>
             )}
           </div>
@@ -784,7 +846,7 @@ export default function Layout() {
           aria-label={tWebUIContractPage('workspace.sectionNavigation')}
           onMouseEnter={cancelWorkspaceMenuClose}
           onMouseLeave={scheduleWorkspaceMenuClose}
-          className={`fixed inset-y-0 z-40 flex w-52 max-w-[calc(100vw-4rem)] flex-col border-r border-zinc-200 bg-zinc-100 text-zinc-600 shadow-2xl shadow-zinc-900/10 transition-[left] duration-300 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:shadow-black/30 ${
+          className={`fixed inset-y-0 z-[60] flex w-52 max-w-[calc(100vw-4rem)] flex-col border-r border-zinc-200 bg-zinc-100 text-zinc-600 shadow-2xl shadow-zinc-900/10 transition-[left] duration-300 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:shadow-black/30 ${
             collapsed ? 'left-16' : 'left-52'
           }`}
         >

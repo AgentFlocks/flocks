@@ -25,6 +25,8 @@ const TaskPage = lazy(() => import('@/pages/Task'));
 const ToolPage = lazy(() => import('@/pages/Tool'));
 const HubPage = lazy(() => import('@/pages/Hub'));
 const SkillPage = lazy(() => import('@/pages/Skill'));
+const ModelPage = lazy(() => import('@/pages/Model'));
+const ChannelPage = lazy(() => import('@/pages/Channel'));
 const PermissionPage = lazy(() => import('@/pages/Permission'));
 const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
@@ -149,7 +151,7 @@ export function Routes() {
         {/* Agent Smith */}
         <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
         <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
-        <Route path="models" element={<Navigate to="/settings/models" replace />} />
+        <Route path="models" element={<LazyRoute><ModelPage /></LazyRoute>} />
         <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
@@ -157,7 +159,7 @@ export function Routes() {
         <Route path="config" element={<Navigate to="/settings/account" replace />} />
         <Route path="config/*" element={<Navigate to="/settings/account" replace />} />
         <Route path="system-logs" element={<Navigate to="/settings/system-logs" replace />} />
-        <Route path="channels" element={<Navigate to="/settings/channels" replace />} />
+        <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
         <Route path="audit-logs" element={<Navigate to="/settings/audit-logs" replace />} />
