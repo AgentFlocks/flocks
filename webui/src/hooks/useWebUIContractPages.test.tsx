@@ -4,13 +4,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useWebUIContractPages } from './useWebUIContractPages';
 import { setupSSEMock } from '@/test/mocks/sse';
 
-const { listMock } = vi.hoisted(() => ({
+const { listMock, listWorkspacesMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
+  listWorkspacesMock: vi.fn(),
 }));
 
 vi.mock('@/api/webuiContractPages', () => ({
   webuiContractPagesAPI: {
     list: listMock,
+    listWorkspaces: listWorkspacesMock,
   },
 }));
 
@@ -19,6 +21,7 @@ describe('useWebUIContractPages', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    listWorkspacesMock.mockResolvedValue({ data: [] });
   });
 
   it('loads enabled WebUI contract pages for navigation', async () => {
@@ -46,7 +49,9 @@ describe('useWebUIContractPages', () => {
 
     expect(result.current.pages).toHaveLength(1);
     expect(result.current.pages[0].title).toBe('仪表盘');
+    expect(result.current.workspaces).toHaveLength(0);
     expect(listMock).toHaveBeenCalledWith(true);
+    expect(listWorkspacesMock).toHaveBeenCalledWith(true);
   });
 
   it('refetches when contracts.webui.pages.nav_changed SSE event arrives', async () => {
@@ -67,6 +72,7 @@ describe('useWebUIContractPages', () => {
           },
         ],
       });
+    listWorkspacesMock.mockResolvedValue({ data: [] });
 
     const { result } = renderHook(() => useWebUIContractPages());
 
@@ -84,5 +90,6 @@ describe('useWebUIContractPages', () => {
       expect(result.current.pages).toHaveLength(1);
     });
     expect(listMock).toHaveBeenCalledTimes(2);
+    expect(listWorkspacesMock).toHaveBeenCalledTimes(2);
   });
 });

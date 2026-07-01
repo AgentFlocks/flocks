@@ -23,17 +23,15 @@ const WorkflowDetail = lazy(() => import('@/pages/WorkflowDetail'));
 const TaskPage = lazy(() => import('@/pages/Task'));
 const PluginManagerPage = lazy(() => import('@/pages/PluginManager'));
 const ModelPage = lazy(() => import('@/pages/Model'));
-const ConfigPage = lazy(() => import('@/pages/Config'));
 const ChannelPage = lazy(() => import('@/pages/Channel'));
 const PermissionPage = lazy(() => import('@/pages/Permission'));
 const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
-const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
 const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
-const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
-const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
+const SettingsPage = lazy(() => import('@/pages/Settings'));
 const WebUIContractPageHost = lazy(() => import('@/pages/WebUIContractPageHost'));
+const WebUIContractWorkspaceHost = lazy(() => import('@/pages/WebUIContractWorkspaceHost'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -127,8 +125,10 @@ export function Routes() {
     <RouterRoutes>
       <Route path="/login" element={<Navigate to="/" replace />} />
       <Route path="/setup-admin" element={<Navigate to="/" replace />} />
+      <Route path="/settings/:sectionId?" element={<LazyRoute><SettingsPage /></LazyRoute>} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
+        <Route path="contracts/webui/workspaces/:workspaceId/:pageId?" element={<LazyRoute><WebUIContractWorkspaceHost /></LazyRoute>} />
         <Route path="contracts/webui/:pageId/*" element={<LazyRoute><WebUIContractPageHost /></LazyRoute>} />
         <Route path="user-defined-pages/:pageId/*" element={<LegacyWebUIContractPageRedirect />} />
 
@@ -155,18 +155,17 @@ export function Routes() {
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/plugins/tools" replace />} />
 
-        {/* 系统中心 */}
-        <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />
-        <Route path="config/*" element={<Navigate to="/config" replace />} />
-        <Route path="system-logs" element={<LazyRoute><SystemLogPage /></LazyRoute>} />
+        <Route path="config" element={<Navigate to="/settings/account" replace />} />
+        <Route path="config/*" element={<Navigate to="/settings/account" replace />} />
+        <Route path="system-logs" element={<Navigate to="/settings/system-logs" replace />} />
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
-        <Route path="audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
-        <Route path="admin/users" element={<Navigate to="/config" replace />} />
+        <Route path="audit-logs" element={<Navigate to="/settings/audit-logs" replace />} />
+        <Route path="admin/users" element={<Navigate to="/settings/account" replace />} />
         <Route
           path="flockspro-upgrade"
-          element={<AdminOnlyRoute><LazyRoute><FlocksproUpgradePage /></LazyRoute></AdminOnlyRoute>}
+          element={<AdminOnlyRoute><Navigate to="/settings/flockspro" replace /></AdminOnlyRoute>}
         />
         <Route
           path="flockspro-upgrade/callback"

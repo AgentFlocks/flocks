@@ -1,9 +1,10 @@
-"""Driver proxy and builtin JSONL driver for data access contracts."""
+"""Driver proxy and builtin drivers for data access contracts."""
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -16,20 +17,27 @@ JSON_DATA_SUFFIXES = frozenset({".jsonl", ".json"})
 
 
 class DriverProxy:
-    def __init__(self, executor: "JsonlDriverExecutor | None" = None) -> None:
-        self._executor = executor or JsonlDriverExecutor()
+    def __init__(
+        self,
+        jsonl_executor: "JsonlDriverExecutor | None" = None,
+        sqlite_executor: "SqliteJsonDriverExecutor | None" = None,
+    ) -> None:
+        self._jsonl_executor = jsonl_executor or JsonlDriverExecutor()
+        self._sqlite_executor = sqlite_executor or SqliteJsonDriverExecutor()
 
     def execute(self, plan: QueryPlan) -> DriverResult:
         self._validate_plan(plan)
-        return self._executor.execute(plan)
+        if plan.binding.adapter_kind == "builtin-sqlite-json":
+            return self._sqlite_executor.execute(plan)
+        return self._jsonl_executor.execute(plan)
 
     def _validate_plan(self, plan: QueryPlan) -> None:
-        if plan.binding.adapter_kind != "builtin-jsonl":
+        if plan.binding.adapter_kind not in {"builtin-jsonl", "builtin-sqlite-json"}:
             raise ContractRuntimeError(
                 "adapter_sandbox_unavailable",
                 status_code=400,
                 user_message="WebUI contract adapter is not available.",
-                admin_message=f"Unsupported adapter kind for MVP: {plan.binding.adapter_kind}",
+                admin_message=f"Unsupported adapter kind: {plan.binding.adapter_kind}",
             )
 
         missing = plan.driver_projection - plan.binding.driver_available_fields
@@ -39,7 +47,102 @@ class DriverProxy:
                 status_code=400,
                 user_message="WebUI contract data source cannot provide required fields.",
                 admin_message=f"Driver projection contains unavailable fields: {sorted(missing)}",
+        )
+
+
+class SqliteJsonDriverExecutor:
+    def execute(self, plan: QueryPlan) -> DriverResult:
+        db_path = plan.binding.source_root
+        self._assert_allowed(db_path, plan.binding.driver_allowlist_roots)
+        if not db_path.is_file():
+            raise ContractRuntimeError(
+                "data_source_unavailable",
+                status_code=404,
+                user_message="WebUI contract SQLite database is not available.",
+                admin_message=f"SQLite source does not exist: {db_path}",
             )
+
+        options = plan.binding.driver_options
+        table = _sqlite_identifier(options.get("table"), "records")
+        record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
+        date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
+        query = f"SELECT {record_column} FROM {table}"
+        query_params: list[Any] = []
+        start_date, end_date = JsonlDriverExecutor()._request_date_range(plan.params)
+        if start_date and end_date and date_column:
+            query += f" WHERE {date_column} BETWEEN ? AND ?"
+            query_params.extend([start_date, end_date])
+        query += " ORDER BY rowid"
+
+        rows: list[dict[str, Any]] = []
+        seen_record_ids: set[str] = set()
+        total_raw = 0
+        duplicates = 0
+        filtered_unique = 0
+        parse_errors = 0
+        try:
+            connection = sqlite3.connect(db_path)
+            cursor = connection.execute(query, query_params)
+            raw_records = cursor.fetchall()
+            connection.close()
+        except sqlite3.Error as exc:
+            raise ContractRuntimeError(
+                "data_source_unavailable",
+                status_code=500,
+                user_message="WebUI contract SQLite database cannot be queried.",
+                admin_message=f"SQLite query failed for {db_path}: {exc}",
+            ) from exc
+
+        for (record_value,) in raw_records:
+            try:
+                record = json.loads(record_value) if isinstance(record_value, str) else None
+            except json.JSONDecodeError:
+                record = None
+            if not isinstance(record, dict):
+                parse_errors += 1
+                continue
+            if record.get("_type") == "file_header":
+                continue
+
+            total_raw += 1
+            if record.get("is_duplicate") is True:
+                duplicates += 1
+                continue
+            if not self._matches_predicates(record, plan.policy_plan.driver_predicates):
+                continue
+
+            record_id = _read_string(record.get("id"), "")
+            if record_id:
+                if record_id in seen_record_ids:
+                    duplicates += 1
+                    continue
+                seen_record_ids.add(record_id)
+
+            filtered_unique += 1
+            if len(rows) < plan.limit:
+                rows.append(
+                    {
+                        field: record[field]
+                        for field in plan.driver_projection
+                        if field in record
+                    }
+                )
+
+        return DriverResult(
+            rows=rows,
+            source_files=(db_path,),
+            total_raw=total_raw,
+            total_unique=max(total_raw - duplicates, 0),
+            duplicates=duplicates,
+            filtered_unique=filtered_unique,
+            parse_errors=parse_errors,
+        )
+
+    def _assert_allowed(self, path: Path, allowlist_roots: tuple[Path, ...]) -> None:
+        JsonlDriverExecutor()._assert_allowed(path, allowlist_roots)
+
+    def _matches_predicates(self, record: dict[str, Any], predicates: tuple[Predicate, ...]) -> bool:
+        return JsonlDriverExecutor()._matches_predicates(record, predicates)
 
 
 class JsonlDriverExecutor:
@@ -117,11 +220,11 @@ class JsonlDriverExecutor:
             matched = [
                 path
                 for path in all_files
-                if (asset_date := _asset_file_date(root, path)) and start_date <= asset_date <= end_date
+                if (file_date := _data_file_date(root, path)) and start_date <= file_date <= end_date
             ]
             return matched
 
-        dated_files = [(date, path) for path in all_files if (date := _asset_file_date(root, path))]
+        dated_files = [(date, path) for path in all_files if (date := _data_file_date(root, path))]
         if dated_files:
             latest_date = max(date for date, _path in dated_files)
             return [path for date, path in dated_files if date == latest_date]
@@ -180,7 +283,7 @@ class JsonlDriverExecutor:
         return True
 
 
-def _asset_file_date(root: Path, path: Path) -> str:
+def _data_file_date(root: Path, path: Path) -> str:
     try:
         parts = path.resolve().relative_to(root.resolve()).parts
     except ValueError:
@@ -211,3 +314,15 @@ def _normalize_compare(value: Any) -> str:
 
 def _read_string(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) and value else fallback
+
+
+def _sqlite_identifier(value: Any, fallback: str) -> str:
+    text = str(value or fallback).strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        raise ContractRuntimeError(
+            "data_source_unavailable",
+            status_code=400,
+            user_message="WebUI contract SQLite source is misconfigured.",
+            admin_message=f"Invalid SQLite identifier: {text}",
+        )
+    return text

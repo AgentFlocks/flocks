@@ -19,6 +19,7 @@
       "modified": "修改时间"
     },
     "download": "下载",
+    "reveal": "打开所在目录",
     "delete": "删除",
     "edit": "编辑",
     "save": "保存",
@@ -28,6 +29,26 @@
     "binaryPreview": "二进制文件无法预览",
     "truncatedPreview": "文件较大，当前仅预览前 {{limit}} 内容。为避免误保存截断内容，已禁用在线编辑；如需完整内容请下载文件。",
     "downloadFile": "下载文件",
+    "preview": {
+      "previewMode": "预览",
+      "sourceMode": "源码",
+      "fullscreen": "全屏预览",
+      "resize": "拖拽调整预览宽度",
+      "htmlSandbox": "HTML 已在受限沙箱中渲染，脚本不会执行。",
+      "jsonParseFailed": "JSON 解析失败，已按原始文本显示。",
+      "jsonlParseFailed": "{{count}} 行 JSONL 解析失败，已保留原始文本。",
+      "pdfLoading": "正在加载 PDF...",
+      "pdfRendering": "正在渲染页面...",
+      "pdfLoadFailed": "PDF 预览加载失败",
+      "pdfCanvasUnavailable": "当前环境不支持 Canvas 渲染。",
+      "pageIndicator": "{{page}} / {{total}}",
+      "previousPage": "上一页",
+      "nextPage": "下一页",
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
+      "unsupportedTitle": "无法预览此文件",
+      "unsupportedDesc": "该文件类型暂不支持在线预览。你可以下载文件，或在本机文件管理器中打开所在目录。"
+    },
     "toast": {
       "loadDirFailed": "加载目录失败",
       "readFileFailed": "读取文件失败",
@@ -38,7 +59,9 @@
       "uploadSuccess": "上传成功 {{count}} 个文件",
       "uploadPartialFail": "{{count}} 个文件上传失败",
       "uploadFailed": "上传失败",
-      "createDirFailed": "创建目录失败"
+      "createDirFailed": "创建目录失败",
+      "revealSuccess": "已打开所在目录",
+      "revealFailed": "打开目录失败"
     },
     "confirm": {
       "deleteTitle": "确认删除",

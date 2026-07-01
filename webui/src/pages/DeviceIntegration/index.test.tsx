@@ -673,6 +673,9 @@ describe('DeviceIntegrationPage', () => {
       agent: 'rex',
       model: { providerID: 'openai', modelID: 'gpt-4.1' },
     })));
+    await waitFor(() => {
+      expect(mocks.getDevice).toHaveBeenCalledWith('device-new');
+    });
     expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('不要再询问接入方式');
     expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('直接调用这台设备的可用工具完成连通测试');
     expect(mocks.createAndSend.mock.calls.at(-1)?.[0].text).toContain('明确使用上面的 device_id 作为目标设备');
@@ -746,7 +749,7 @@ describe('DeviceIntegrationPage', () => {
     await waitFor(() => {
       expect(mocks.hubInstall).toHaveBeenCalledWith('device', 'onesig_v2_5_3_D20250710');
     });
-    expect(mocks.syncDevices).not.toHaveBeenCalled();
+    expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
     expect(mocks.listTemplates).toHaveBeenLastCalledWith({ refresh: true });
     expect(mocks.navigate).not.toHaveBeenCalled();
     await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
@@ -1495,6 +1498,70 @@ describe('DeviceIntegrationPage', () => {
     expect(prompt).toContain('必须使用上面的 device_id 作为目标设备');
     expect(prompt).toContain('password (Password): 已填写（敏感值未发送明文）');
     expect(prompt).not.toContain('p***word');
+  });
+
+  it('uses credential defaults as real values for existing devices when saved fields are empty', async () => {
+    const user = userEvent.setup();
+    const initialDevice = {
+      id: 'device-1',
+      group_id: 'group-1',
+      name: 'Eagle Sensor',
+      storage_key: 'eagle_sensor_v1_0',
+      service_id: 'eagle_sensor_device',
+      enabled: true,
+      verify_ssl: false,
+      fields: {
+        base_url: 'https://eagle-sensor.threatbook-inc.cn',
+      },
+      fields_set: { base_url: true },
+      status: 'unknown',
+      created_at: 0,
+      updated_at: 0,
+    };
+    mocks.listDevices.mockResolvedValue({ data: [initialDevice] });
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          plugin_id: 'eagle_sensor_v1_0',
+          storage_key: 'eagle_sensor_v1_0',
+          service_id: 'eagle_sensor_device',
+          name: 'Eagle Sensor',
+          vendor: 'threatbook',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: 'Base URL',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+            {
+              key: 'auth_state_path',
+              label: 'Auth State Path',
+              storage: 'config',
+              sensitive: false,
+              required: false,
+              input_type: 'text',
+              config_key: 'auth_state_path',
+              default_value: '~/.flocks/browser/eagle-sensor/auth-state.json',
+            },
+          ],
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('Eagle Sensor'));
+    expect(await screen.findByDisplayValue('~/.flocks/browser/eagle-sensor/auth-state.json')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /测试设备/ }));
+
+    await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalled());
+    const prompt = mocks.createAndSend.mock.calls.at(-1)?.[0].text;
+    expect(prompt).toContain('auth_state_path (Auth State Path): ~/.flocks/browser/eagle-sensor/auth-state.json');
+    expect(prompt).not.toContain('auth_state_path (Auth State Path): 未填写');
   });
 
   it('refreshes the device card status after Rex assisted testing writes a result', async () => {

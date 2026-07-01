@@ -19,7 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from flocks.server.auth import require_admin, require_user
 from flocks.contracts.webui.builder import WebUIPageBuilder
 from flocks.contracts.webui.api_runtime import WebUIPageApiRuntime
-from flocks.contracts.webui.models import WebUIPageBuildMeta, WebUIPageDetail, WebUIPageListItem, WebUIPageManifest
+from flocks.contracts.webui.models import (
+    WebUIPageBuildMeta,
+    WebUIPageDetail,
+    WebUIPageListItem,
+    WebUIPageManifest,
+    WebUIWorkspaceListItem,
+)
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
@@ -145,6 +151,11 @@ def _normalize_import_manifest(extracted_root: Path, page_id: str) -> None:
 @router.get("/contracts/webui/pages", response_model=list[WebUIPageListItem])
 async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly")):
     return _store.list_pages(enabled_only=enabled_only)
+
+
+@router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
+async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
+    return _store.list_workspaces(enabled_only=enabled_only)
 
 
 @router.post("/contracts/webui/pages", response_model=WebUIPageDetail, status_code=status.HTTP_201_CREATED)

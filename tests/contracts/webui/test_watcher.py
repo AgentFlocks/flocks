@@ -1,3 +1,6 @@
+import json
+
+from flocks.contracts.webui.store import WebUIPagesStore
 from flocks.contracts.webui import watcher as watcher_module
 from flocks.contracts.webui.watcher import WebUIPagesWatcher, _PendingAction
 
@@ -34,3 +37,70 @@ def test_watcher_api_change_uses_main_loop_bridge(monkeypatch):
     assert bridge_calls == ["called"]
     assert emitted[0][0] == "contracts.webui.pages.api_changed"
     assert emitted[0][1]["id"] == "demo-page"
+
+
+def test_watcher_classifies_nested_page_api_change(tmp_path):
+    root = tmp_path / "webui_pages"
+    page_dir = root / "scene_workspace" / "investigation_list"
+    (page_dir / "api").mkdir(parents=True)
+    (page_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "investigation-list",
+                "title": "Investigation List",
+                "route": "/contracts/webui/investigation-list",
+                "icon": "AlertTriangle",
+                "order": 20,
+                "enabled": True,
+                "placement": "home.after",
+                "entry": "src/index.tsx",
+                "updatedAt": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = WebUIPagesStore(root=root, project_root=None, legacy_root=None)
+    watcher = WebUIPagesWatcher(store=store, builder=_BuilderStub(), api_runtime=_RuntimeStub())
+
+    page_id, pending = watcher._classify_event(
+        page_dir / "api" / "handlers.py",
+        root,
+        event_type="modified",
+        is_directory=False,
+    )
+
+    assert page_id == "investigation-list"
+    assert pending.api_changed
+
+
+def test_watcher_classifies_workspace_manifest_change(tmp_path):
+    root = tmp_path / "webui_pages"
+    workspace_dir = root / "scene_workspace"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "workspace.json").write_text(
+        json.dumps(
+            {
+                "id": "scene_workspace",
+                "title": "场景工作区",
+                "icon": "ShieldCheck",
+                "order": 10,
+                "enabled": True,
+                "placement": "sceneWorkspace",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = WebUIPagesStore(root=root, project_root=None, legacy_root=None)
+    watcher = WebUIPagesWatcher(store=store, builder=_BuilderStub(), api_runtime=_RuntimeStub())
+
+    page_id, pending = watcher._classify_event(
+        workspace_dir / "workspace.json",
+        root,
+        event_type="modified",
+        is_directory=False,
+    )
+
+    assert page_id == "scene_workspace"
+    assert pending.manifest_changed

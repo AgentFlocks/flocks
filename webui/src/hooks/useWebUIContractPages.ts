@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import i18n from '@/i18n';
-import { webuiContractPagesAPI, type WebUIContractPageListItem } from '@/api/webuiContractPages';
+import {
+  webuiContractPagesAPI,
+  type WebUIContractPageListItem,
+  type WebUIContractWorkspaceListItem,
+} from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
 
 export function useWebUIContractPages() {
   const [pages, setPages] = useState<WebUIContractPageListItem[]>([]);
+  const [workspaces, setWorkspaces] = useState<WebUIContractWorkspaceListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadingRef = useRef(false);
@@ -16,10 +21,15 @@ export function useWebUIContractPages() {
     if (!silent) setLoading(true);
     setError(null);
     try {
-      const response = await webuiContractPagesAPI.list(true);
-      setPages(Array.isArray(response.data) ? response.data : []);
+      const [pagesResponse, workspacesResponse] = await Promise.all([
+        webuiContractPagesAPI.list(true),
+        webuiContractPagesAPI.listWorkspaces(true),
+      ]);
+      setPages(Array.isArray(pagesResponse.data) ? pagesResponse.data : []);
+      setWorkspaces(Array.isArray(workspacesResponse.data) ? workspacesResponse.data : []);
     } catch (err: unknown) {
       setPages([]);
+      setWorkspaces([]);
       setError(err instanceof Error ? err.message : i18n.t('nav.fetchFailed', { ns: 'webuiContractPage' }));
     } finally {
       loadingRef.current = false;
@@ -67,6 +77,7 @@ export function useWebUIContractPages() {
 
   return {
     pages,
+    workspaces,
     loading,
     error,
     refetch: () => fetchPages(),

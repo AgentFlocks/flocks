@@ -13,9 +13,9 @@ from flocks.contracts.webui.store import WebUIPagesStore
 from tests.contracts.access.test_runtime import (
     CONTRACT_ID,
     PAGE_ID,
-    _alert_record,
+    _contract_record,
     _plugin,
-    _write_alert_assets,
+    _write_contract_assets,
 )
 
 
@@ -47,7 +47,7 @@ def contract_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = tmp_path / "contracts-webui"
     monkeypatch.setenv("FLOCKS_CONTRACTS_WEBUI_ROOT", str(root))
     store = WebUIPagesStore(root=root)
-    _write_alert_assets(store, [_alert_record(id="alert-route-1")])
+    _write_contract_assets(store, [_contract_record(id="record-route-1")])
     contracts_routes.reset_route_dependencies(runtime=OperationRuntime(plugins=(_plugin(store),)))
     return store
 
@@ -57,11 +57,11 @@ def contract_pages_with_policy_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     root = tmp_path / "contracts-webui-policy"
     monkeypatch.setenv("FLOCKS_CONTRACTS_WEBUI_ROOT", str(root))
     store = WebUIPagesStore(root=root)
-    _write_alert_assets(
+    _write_contract_assets(
         store,
         [
-            _alert_record(id="allowed", tenant="tenant-a", asset_group="core"),
-            _alert_record(id="blocked", tenant="tenant-b", asset_group="core"),
+            _contract_record(id="allowed", tenant="tenant-a", asset_group="core"),
+            _contract_record(id="blocked", tenant="tenant-b", asset_group="core"),
         ],
     )
     contracts_routes.reset_route_dependencies(runtime=OperationRuntime(plugins=(_plugin(store),)))
@@ -78,7 +78,7 @@ async def test_contract_operation_route(client: AsyncClient, contract_pages: Web
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["summary"]["totalRaw"] == 1
-    assert body["items"][0]["id"] == "alert-route-1"
+    assert body["items"][0]["id"] == "record-route-1"
 
 
 @pytest.mark.asyncio
