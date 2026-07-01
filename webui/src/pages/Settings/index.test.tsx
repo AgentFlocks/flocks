@@ -166,6 +166,7 @@ describe('SettingsPage', () => {
     renderSettings('/settings/audit-logs');
 
     expect(await screen.findByText('audit logs page')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'auditLogs' })[0]).toHaveAttribute('href', '/settings/audit-logs');
     expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
   });
 

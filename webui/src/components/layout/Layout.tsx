@@ -81,6 +81,20 @@ function formatUpdateVersion(version?: string | null): string | null {
   return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
 }
 
+function currentProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
+  if (isFlocksproActive || info.edition === 'flockspro') {
+    return info.current_bundle_version || info.current_version || null;
+  }
+  return info.current_version || null;
+}
+
+function latestProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
+  if (isFlocksproActive || info.edition === 'flockspro') {
+    return info.latest_bundle_version || info.latest_version || null;
+  }
+  return info.latest_version || null;
+}
+
 function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
   if (!info || info.error || !releaseNotes) return null;
@@ -179,13 +193,16 @@ export default function Layout() {
       const info = await checkUpdate(i18n.language, edition);
       setUpdateInfo(info);
 
-      if (info.current_version) {
-        setCurrentVersion(info.current_version);
+      const displayCurrentVersion = currentProductVersion(info, edition === 'flockspro');
+      const displayLatestVersion = latestProductVersion(info, edition === 'flockspro');
+
+      if (displayCurrentVersion) {
+        setCurrentVersion(displayCurrentVersion);
       }
 
-      if (info.has_update && info.latest_version) {
+      if (info.has_update && displayLatestVersion) {
         setHasUpdate(true);
-        setLatestVersion(info.latest_version);
+        setLatestVersion(displayLatestVersion);
         const updateDismissalKey = buildUpdateDismissalKey(info);
 
         if (
@@ -202,7 +219,7 @@ export default function Layout() {
 
       if (!info.error) {
         setHasUpdate(false);
-        setLatestVersion(info.latest_version);
+        setLatestVersion(displayLatestVersion);
       }
     } catch {
       // Keep the last known update state on transient failures.
@@ -474,14 +491,14 @@ export default function Layout() {
     matchPath('/contracts/webui/*', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
-    ? updateInfo?.edition === 'flockspro' && currentVersion
-      ? formatProVersion(currentVersion)
+    ? updateInfo?.edition === 'flockspro'
+      ? formatProVersion(currentProductVersion(updateInfo, true))
       : flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
-    : currentVersion ? `v${currentVersion}` : null;
+    : formatUpdateVersion(currentVersion);
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
   const hasVisibleUpdate = hasUpdate && canManageUpdates;
-  const showFlocksproUpgradeEntry = canManageUpdates && !isFlocksproActive;
+  const showFlocksproUpgradeEntry = canManageUpdates;
   const productUpdateTitle = hasVisibleUpdate
     ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' })
     : productName;

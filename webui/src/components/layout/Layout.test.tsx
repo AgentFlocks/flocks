@@ -473,6 +473,63 @@ describe('Layout onboarding entry', () => {
     expect(within(accountRow!).getByText('v2026.6.21')).toBeInTheDocument();
   });
 
+  it('keeps Pro account actions and version placement aligned with the standard layout', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: null,
+      current_version: '2026.6.20',
+      current_bundle_version: '2026.6.22',
+      latest_bundle_version: null,
+      current_core_version: '2026.6.20',
+      latest_core_version: '2026.6.20',
+      current_pro_component_version: '2026.6.22',
+      latest_pro_component_version: '2026.6.22',
+      edition: 'flockspro',
+      error: null,
+    });
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      pro_enabled: true,
+      active: true,
+      status: 'active',
+      license_status: 'active',
+    });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      installed_version: '2026.6.21',
+      flockspro_component_version: '2026.6.21',
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
+    expect(await screen.findByText('v2026.6.22')).toBeInTheDocument();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).queryByText('v2026.6.22')).not.toBeInTheDocument();
+    expect(within(accountRow!).getByText('v2026.6.22')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+
+    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+
+    await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
+
+    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(updateModalMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        edition: 'flockspro',
+      }),
+    );
+  });
+
   it('keeps new version reminder on the product mark while showing current version in the account area', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
