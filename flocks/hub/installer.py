@@ -180,6 +180,33 @@ async def update_plugin(plugin_type: PluginType, plugin_id: str, *, scope: str =
     return await install_plugin(plugin_type, plugin_id, scope=scope)
 
 
+def _set_api_services_enabled(storage_keys: list[str], enabled: bool) -> None:
+    if not storage_keys:
+        return
+    from flocks.config.config_writer import ConfigWriter
+
+    for storage_key in storage_keys:
+        current = ConfigWriter.get_api_service_raw(storage_key)
+        service_config = dict(current) if isinstance(current, dict) else {}
+        service_config["enabled"] = enabled
+        ConfigWriter.set_api_service(storage_key, service_config)
+
+
+async def set_plugin_enabled(plugin_type: PluginType, plugin_id: str, enabled: bool) -> InstalledPluginRecord:
+    record = local.set_installed_record_enabled(plugin_type, plugin_id, enabled)
+    install_path = Path(record.installPath) if record.installPath else local.infer_local_install(plugin_type, plugin_id)
+
+    if plugin_type == "skill":
+        from flocks.skill.skill import Skill
+
+        Skill.set_disabled(plugin_id, not enabled)
+    elif plugin_type in {"tool", "device"} and install_path is not None:
+        _set_api_services_enabled(_collect_storage_keys(install_path), enabled)
+
+    await _refresh_runtime(plugin_type)
+    return record
+
+
 def _collect_storage_keys(install_path: Path) -> list[str]:
     """Return ``api_services`` storage keys declared inside *install_path*.
 

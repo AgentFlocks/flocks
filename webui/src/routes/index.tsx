@@ -13,7 +13,6 @@ import { useAuth } from '@/contexts/AuthContext';
 // transitive deps (SessionChat ~2.7k LOC + react-markdown + rehype/remark +
 // highlight.js) are not pulled into the main entry chunk.
 const SessionPage = lazy(() => import('@/pages/Session'));
-const AgentPage = lazy(() => import('@/pages/Agent'));
 const LoginPage = lazy(() => import('@/pages/Login'));
 const SetupAdminPage = lazy(() => import('@/pages/SetupAdmin'));
 const ForceChangePasswordPage = lazy(() => import('@/pages/ForceChangePassword'));
@@ -22,10 +21,8 @@ const WorkflowCreate = lazy(() => import('@/pages/WorkflowCreate'));
 const WorkflowEditor = lazy(() => import('@/pages/WorkflowEditor'));
 const WorkflowDetail = lazy(() => import('@/pages/WorkflowDetail'));
 const TaskPage = lazy(() => import('@/pages/Task'));
-const ToolPage = lazy(() => import('@/pages/Tool'));
-const HubPage = lazy(() => import('@/pages/Hub'));
+const PluginManagerPage = lazy(() => import('@/pages/PluginManager'));
 const ModelPage = lazy(() => import('@/pages/Model'));
-const SkillPage = lazy(() => import('@/pages/Skill'));
 const ConfigPage = lazy(() => import('@/pages/Config'));
 const ChannelPage = lazy(() => import('@/pages/Channel'));
 const PermissionPage = lazy(() => import('@/pages/Permission'));
@@ -137,7 +134,7 @@ export function Routes() {
 
         {/* AI 工作台 */}
         <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
-        <Route path="agents" element={<LazyRoute><AgentPage /></LazyRoute>} />
+        <Route path="agents" element={<Navigate to="/plugins/agents" replace />} />
         <Route path="workflows" element={<LazyRoute><WorkflowListPage /></LazyRoute>} />
         <Route path="workflows/new" element={<LazyRoute><WorkflowCreate /></LazyRoute>} />
         <Route path="workflows/:id" element={<LazyRoute><WorkflowDetail /></LazyRoute>} />
@@ -149,12 +146,14 @@ export function Routes() {
         <Route path="devices" element={<LazyRoute><DeviceIntegrationPage /></LazyRoute>} />
 
         {/* Agent Smith */}
-        <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
-        <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
+        <Route path="plugins" element={<Navigate to="/plugins/agents" replace />} />
+        <Route path="plugins/:section" element={<LazyRoute><PluginManagerPage /></LazyRoute>} />
+        <Route path="tools" element={<Navigate to="/plugins/tools" replace />} />
+        <Route path="hub" element={<Navigate to="/plugins/marketplace" replace />} />
         <Route path="models" element={<LazyRoute><ModelPage /></LazyRoute>} />
-        <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
+        <Route path="skills" element={<Navigate to="/plugins/skills" replace />} />
         {/* MCP 已整合到工具清单页面 */}
-        <Route path="mcp" element={<Navigate to="/tools" replace />} />
+        <Route path="mcp" element={<Navigate to="/plugins/tools" replace />} />
 
         {/* 系统中心 */}
         <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />

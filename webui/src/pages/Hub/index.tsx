@@ -249,7 +249,11 @@ function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot):
   return counts;
 }
 
-export default function HubPage() {
+interface HubPageProps {
+  embedded?: boolean;
+}
+
+export default function HubPage({ embedded = false }: HubPageProps = {}) {
   const { i18n } = useTranslation();
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
@@ -383,39 +387,70 @@ export default function HubPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader
-        title="Flocks Hub"
-        description={text.description}
-        icon={<Archive className="w-8 h-8" />}
-        action={
-          <div className="flex items-center gap-2">
-            <div className="relative w-80 2xl:w-96">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                placeholder={text.searchPlaceholder}
-                className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white/90 focus:ring-2 focus:ring-slate-200 focus:border-slate-400"
-              />
-            </div>
+      {embedded ? (
+        <div className="flex flex-wrap items-center gap-3 border-b border-gray-100 px-4 py-2">
+          <div className="relative w-80 max-w-full">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={text.searchPlaceholder}
+              className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-9 pr-3 text-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-300"
+            />
+          </div>
+          <div className="ml-auto flex items-center gap-2">
             <button
               onClick={() => setViewMode(viewMode === 'table' ? 'tree' : 'table')}
-              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
             >
-              {viewMode === 'table' ? <Folder className="w-4 h-4" /> : <Table2 className="w-4 h-4" />}
+              {viewMode === 'table' ? <Folder className="h-4 w-4" /> : <Table2 className="h-4 w-4" />}
               {viewMode === 'table' ? text.treeView : text.tableView}
             </button>
             <button
               onClick={handleRefresh}
               disabled={refreshing}
-              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+              className="inline-flex items-center rounded-lg border border-gray-200 p-2 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50"
+              title={text.refresh}
             >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-              {text.refresh}
+              <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
             </button>
           </div>
-        }
-      />
+        </div>
+      ) : (
+        <PageHeader
+          title="Flocks Hub"
+          description={text.description}
+          icon={<Archive className="w-8 h-8" />}
+          action={
+            <div className="flex items-center gap-2">
+              <div className="relative w-80 2xl:w-96">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder={text.searchPlaceholder}
+                  className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white/90 focus:ring-2 focus:ring-slate-200 focus:border-slate-400"
+                />
+              </div>
+              <button
+                onClick={() => setViewMode(viewMode === 'table' ? 'tree' : 'table')}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+              >
+                {viewMode === 'table' ? <Folder className="w-4 h-4" /> : <Table2 className="w-4 h-4" />}
+                {viewMode === 'table' ? text.treeView : text.tableView}
+              </button>
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                {text.refresh}
+              </button>
+            </div>
+          }
+        />
+      )}
 
       <div className="px-4 pb-3">
         <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-slate-50 via-white to-white shadow-sm overflow-hidden">

@@ -48,7 +48,11 @@ import AgentSheet from './AgentSheet';
 // Main Page Component
 // ============================================================================
 
-export default function AgentPage() {
+interface AgentPageProps {
+  embedded?: boolean;
+}
+
+export default function AgentPage({ embedded = false }: AgentPageProps = {}) {
   const { t, i18n } = useTranslation('agent');
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [showCreateSheet, setShowCreateSheet] = useState(false);
@@ -133,17 +137,28 @@ export default function AgentPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader
-        title={t('pageTitle')}
-        description={t('pageDescription')}
-        icon={<Bot className="w-8 h-8" />}
-      />
+      {!embedded && (
+        <PageHeader
+          title={t('pageTitle')}
+          description={t('pageDescription')}
+          icon={<Bot className="w-8 h-8" />}
+        />
+      )}
 
       {/* Toolbar — mirrors the Skill page toolbar style */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
-        <span className="text-xs text-gray-400 select-none">
-          {t('totalCount', { total: primaryAgents.length + subAgents.length })}
-        </span>
+        {embedded && primaryAgents[0] && (
+          <PrimaryAgentToolbarItem
+            agent={primaryAgents[0]}
+            displayLang={i18n.language}
+            onClick={() => setEditingAgent(primaryAgents[0])}
+          />
+        )}
+        {!embedded && (
+          <span className="text-xs text-gray-400 select-none">
+            {t('totalCount', { total: primaryAgents.length + subAgents.length })}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={handleRefresh}
@@ -188,7 +203,7 @@ export default function AgentPage() {
           />
         ) : (
           <>
-            {primaryAgents.length > 0 && (
+            {!embedded && primaryAgents.length > 0 && (
               <AgentSection
                 title={t('section.primary.title')}
                 subtitle={t('section.primary.subtitle')}
@@ -396,18 +411,20 @@ function AgentSection({
   return (
     <div>
       {/* Section header: left accent stripe */}
-      <div className="flex items-start gap-3 pl-3 border-l-2 border-slate-300">
-        <span className="text-slate-400 mt-0.5">{icon}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
-            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
-              {agents.length}
-            </span>
+      {showSourceFilter && (
+        <div className="flex items-start gap-3 pl-3 border-l-2 border-slate-300">
+          <span className="text-slate-400 mt-0.5">{icon}</span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
+              <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
+                {agents.length}
+              </span>
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
           </div>
-          <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
         </div>
-      </div>
+      )}
 
       {/* Source filter — segmented control, same style as Skill page */}
       {showSourceFilter && (
@@ -444,11 +461,22 @@ function AgentSection({
       {/* Grid area — min-height anchors the layout so filter switches don't
           collapse the section height and cause visual jumps. */}
       <div style={GRID_MIN_H ? { minHeight: GRID_MIN_H } : undefined}>
-        {!showSourceFilter && <div className="mb-3" />}
         {displayed.length === 0 ? (
           <p className="text-xs text-gray-400 py-4">
             {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
           </p>
+        ) : !showSourceFilter ? (
+          <div className="space-y-2">
+            {displayed.map((agent) => (
+              <PrimaryAgentRow
+                key={agent.name}
+                agent={agent}
+                displayLang={displayLang}
+                isSelected={selectedAgent?.name === agent.name}
+                onClick={() => onSelect(agent)}
+              />
+            ))}
+          </div>
         ) : (
           <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {displayed.map((agent) => (
@@ -476,6 +504,111 @@ function AgentSection({
           onPageChange={setPage}
         />
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Primary Agent Toolbar Entry
+// ============================================================================
+
+function PrimaryAgentToolbarItem({
+  agent,
+  displayLang,
+  onClick,
+}: Pick<AgentCardProps, 'agent' | 'displayLang' | 'onClick'>) {
+  const { t } = useTranslation('agent');
+  const displayName = getAgentDisplayName(agent, displayLang);
+  const displayDesc = getAgentDisplayDescription(agent, displayLang);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex min-w-0 max-w-[720px] items-center gap-2 rounded-lg border border-gray-200 bg-slate-50/60 px-2.5 py-1.5 text-left transition-colors hover:border-gray-300 hover:bg-white"
+      title={displayDesc || displayName}
+    >
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white text-slate-500 ring-1 ring-gray-200">
+        <Bot className="h-3.5 w-3.5" />
+      </span>
+      <span className="min-w-0">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-xs font-semibold text-gray-900">{displayName}</span>
+          <span className="rounded border border-blue-100 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-600">
+            {t('badge.native')}
+          </span>
+        </span>
+        <span className="block truncate text-[11px] leading-4 text-gray-500">
+          {displayDesc || t('common:empty.noDescription')}
+        </span>
+      </span>
+      <span className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-gray-500 transition-colors group-hover:bg-white group-hover:text-slate-700">
+        <Pencil className="h-3 w-3" />
+        {t('badge.edit')}
+      </span>
+    </button>
+  );
+}
+
+// ============================================================================
+// Primary Agent Row
+// ============================================================================
+
+function PrimaryAgentRow({
+  agent,
+  displayLang,
+  isSelected,
+  onClick,
+}: Pick<AgentCardProps, 'agent' | 'displayLang' | 'isSelected' | 'onClick'>) {
+  const { t } = useTranslation('agent');
+  const displayName = getAgentDisplayName(agent, displayLang);
+  const displayDesc = getAgentDisplayDescription(agent, displayLang);
+
+  return (
+    <div
+      className={`
+        group flex cursor-pointer items-center gap-3 rounded-lg border bg-white px-3 py-2.5 transition-all
+        ${isSelected
+          ? 'border-slate-400 shadow-sm ring-2 ring-slate-100'
+          : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50/60'
+        }
+      `}
+      onClick={onClick}
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-slate-500 ring-1 ring-slate-200">
+        <Bot className="h-4 w-4" />
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="truncate text-sm font-semibold text-gray-900">{displayName}</span>
+          <span className="inline-flex items-center rounded border border-blue-100 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">
+            {t('badge.native')}
+          </span>
+          {agent.model && (
+            <span className="inline-flex max-w-[220px] items-center gap-1 rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+              <Cpu className="h-3 w-3 shrink-0" />
+              <span className="truncate">{agent.model.modelID}</span>
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 truncate text-xs text-gray-500">
+          {displayDesc || t('common:empty.noDescription')}
+        </p>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onClick(); }}
+          title={t('badge.edit')}
+          aria-label={t('badge.edit')}
+          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-slate-700"
+        >
+          <Pencil className="h-3 w-3" />
+          {t('badge.edit')}
+        </button>
+      </div>
     </div>
   );
 }

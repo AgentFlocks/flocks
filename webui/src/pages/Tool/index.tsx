@@ -142,7 +142,11 @@ const EMPTY_FILTERS: ColumnFilters = {
 // Main Page
 // ============================================================================
 
-export default function ToolPage() {
+interface ToolPageProps {
+  embedded?: boolean;
+}
+
+export default function ToolPage({ embedded = false }: ToolPageProps = {}) {
   const { t, i18n } = useTranslation('tool');
 
   const TABS: TabConfig[] = [
@@ -432,99 +436,177 @@ export default function ToolPage() {
   }
 
   return (
-    <div className="space-y-6 min-w-0">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="text-red-600">
-            <Wrench className="w-8 h-8" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            <span className="font-semibold text-gray-700">{tools.length}</span> {t('statusBadge.active')}
-            <span className="mx-1.5 text-gray-300">·</span>
-            <span className="font-semibold text-gray-700">{catalogEntries.length}</span> {t('statusBadge.inactive')}
-          </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            title={refreshDone ? t('button.refreshDone') : t('button.refreshList')}
-            className={`inline-flex items-center px-3 py-2 border rounded-lg text-sm font-medium transition-all ${
-              refreshDone
-                ? 'border-green-300 text-green-600 bg-green-50'
-                : 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50'
-            }`}
-          >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
-          <button
-            onClick={() => setShowMCPSheet(true)}
-            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
-          >
-            <Database className="w-4 h-4 mr-1.5" />
-            {t('button.addMCP')}
-          </button>
-          <button
-            onClick={() => setShowAPISheet(true)}
-            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
-          >
-            <Cloud className="w-4 h-4 mr-1.5" />
-            {t('button.addAPI')}
-          </button>
-          <button
-            onClick={() => setShowGenerateSheet(true)}
-            className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-colors shadow-sm"
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
-            {t('button.createTool')}
-          </button>
-        </div>
-      </div>
-
-      {/* Tabs row with search */}
-      <div className="border-b border-gray-200">
-        <div className="flex items-center justify-between">
-          <nav className="-mb-px flex space-x-8">
-            {TABS.map((tab) => (
-              <button
-                key={tab.key}
-                onClick={() => handleTabChange(tab.key)}
-                className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
-                  activeTab === tab.key
-                    ? 'border-slate-600 text-slate-800'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                <div className="flex items-center">
-                  <span className={activeTab === tab.key ? 'text-slate-700' : 'text-gray-400'}>
-                    {tab.icon}
-                  </span>
-                  <span className="ml-2">{tab.label}</span>
-                  <span className="ml-2 bg-gray-100 text-gray-900 py-0.5 px-2.5 rounded-full text-xs font-medium">
-                    {tabCounts[tab.key] || 0}
-                  </span>
-                </div>
-              </button>
-            ))}
-          </nav>
-
-          {/* Search - right aligned, same row */}
-          <div className="relative mb-px">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+    <div className={`${embedded ? 'space-y-3' : 'space-y-6'} min-w-0`}>
+      {embedded ? (
+        <div className="flex flex-wrap items-center gap-3 border-b border-gray-100 px-4 py-2">
+          <div className="relative w-64">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
               placeholder={t('search.placeholder')}
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
-              className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white"
+              className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-9 pr-3 text-sm outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-300"
             />
           </div>
+
+          <div className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-sm">
+            {TABS.map((tab) => {
+              const active = activeTab === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => handleTabChange(tab.key)}
+                  className={`rounded-md px-3 py-1.5 font-medium transition-colors ${
+                    active
+                      ? 'bg-slate-700 text-white'
+                      : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                  }`}
+                >
+                  <span>{tab.label}</span>
+                  <span className={`ml-1.5 inline-block min-w-[1.25rem] rounded px-1 text-xs tabular-nums ${
+                    active ? 'bg-white/15 text-white' : 'bg-gray-100 text-gray-500'
+                  }`}>
+                    {tabCounts[tab.key] || 0}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title={refreshDone ? t('button.refreshDone') : t('button.refreshList')}
+              className={`inline-flex items-center rounded-lg border p-2 transition-all ${
+                refreshDone
+                  ? 'border-green-200 text-green-600'
+                  : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
+              }`}
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={() => setShowMCPSheet(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              <Database className="h-4 w-4" />
+              {t('button.addMCP')}
+            </button>
+            <button
+              onClick={() => setShowAPISheet(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              <Cloud className="h-4 w-4" />
+              {t('button.addAPI')}
+            </button>
+            <button
+              onClick={() => setShowGenerateSheet(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-red-700"
+            >
+              <Plus className="h-4 w-4" />
+              {t('button.createTool')}
+            </button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <>
+        {/* Page Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="text-red-600">
+              <Wrench className="w-8 h-8" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
+            <p className="mt-1 text-sm text-gray-500">
+              <span className="font-semibold text-gray-700">{tools.length}</span> {t('statusBadge.active')}
+              <span className="mx-1.5 text-gray-300">·</span>
+              <span className="font-semibold text-gray-700">{catalogEntries.length}</span> {t('statusBadge.inactive')}
+            </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title={refreshDone ? t('button.refreshDone') : t('button.refreshList')}
+              className={`inline-flex items-center px-3 py-2 border rounded-lg text-sm font-medium transition-all ${
+                refreshDone
+                  ? 'border-green-300 text-green-600 bg-green-50'
+                  : 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50'
+              }`}
+            >
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={() => setShowMCPSheet(true)}
+              className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
+            >
+              <Database className="w-4 h-4 mr-1.5" />
+              {t('button.addMCP')}
+            </button>
+            <button
+              onClick={() => setShowAPISheet(true)}
+              className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
+            >
+              <Cloud className="w-4 h-4 mr-1.5" />
+              {t('button.addAPI')}
+            </button>
+            <button
+              onClick={() => setShowGenerateSheet(true)}
+              className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-colors shadow-sm"
+            >
+              <Plus className="w-4 h-4 mr-1.5" />
+              {t('button.createTool')}
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs row with search */}
+        <div className="border-b border-gray-200">
+          <div className="flex items-center justify-between">
+            <nav className="-mb-px flex space-x-8">
+              {TABS.map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => handleTabChange(tab.key)}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
+                    activeTab === tab.key
+                      ? 'border-slate-600 text-slate-800'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  <div className="flex items-center">
+                    <span className={activeTab === tab.key ? 'text-slate-700' : 'text-gray-400'}>
+                      {tab.icon}
+                    </span>
+                    <span className="ml-2">{tab.label}</span>
+                    <span className="ml-2 bg-gray-100 text-gray-900 py-0.5 px-2.5 rounded-full text-xs font-medium">
+                      {tabCounts[tab.key] || 0}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </nav>
+
+            {/* Search - right aligned, same row */}
+            <div className="relative mb-px">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder={t('search.placeholder')}
+                value={searchQuery}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white"
+              />
+            </div>
+          </div>
+        </div>
+        </>
+      )}
 
       {/* Tab Content */}
       {activeTab === 'mcp' ? (
@@ -3814,4 +3896,3 @@ const LANG_COLORS: Record<string, string> = {
 // CatalogBrowser removed — catalog UI is now inline in MCPTabContent / APITabContent
 
 // (CatalogBrowser component removed — catalog UI is inline in MCPTabContent / APITabContent)
-

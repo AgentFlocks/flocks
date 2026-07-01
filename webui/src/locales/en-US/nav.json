@@ -6,6 +6,7 @@
   "tasks": "Task Center",
   "workspace": "Workspace",
   "agentHub": "Agent Studio",
+  "plugins": "Plugins",
   "agents": "Agents",
   "workflows": "Workflows",
   "hub": "Flocks Hub",

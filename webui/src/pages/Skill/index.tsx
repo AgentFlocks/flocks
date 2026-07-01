@@ -26,7 +26,11 @@ import SkillInstallDialog from './SkillInstallDialog';
 
 const PAGE_SIZE = 25;
 
-export default function SkillPage() {
+interface SkillPageProps {
+  embedded?: boolean;
+}
+
+export default function SkillPage({ embedded = false }: SkillPageProps = {}) {
   const { t } = useTranslation('skill');
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
@@ -295,11 +299,13 @@ export default function SkillPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader
-        title={t('pageTitle')}
-        description={t('pageDescription')}
-        icon={<BookOpen className="w-8 h-8" />}
-      />
+      {!embedded && (
+        <PageHeader
+          title={t('pageTitle')}
+          description={t('pageDescription')}
+          icon={<BookOpen className="w-8 h-8" />}
+        />
+      )}
 
       {/* Toolbar: 搜索 · 来源 chips · 刷新/安装/创建 */}
       <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3">
