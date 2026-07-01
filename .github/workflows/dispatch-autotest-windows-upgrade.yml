@@ -95,7 +95,7 @@ jobs:
             echo "- Source sha: ${GITHUB_SHA_VALUE}"
             echo "- Rollback version: ${INPUT_ROLLBACK_VERSION:-}"
             echo "- Run force fallback: ${INPUT_RUN_FORCE_FALLBACK:-false}"
-            echo "- Expected autotest artifact prefix: flocks-windows-upgrade-${release_tag}-run-"
+            echo "- Expected autotest artifact prefix: flocks-windows-upgrade-${release_tag}-time"
             echo "- Autotest workflow: https://github.com/AgentFlocks/flocks_autotest/actions/workflows/flocks-release-dispatch.yml"
           } >> "$GITHUB_STEP_SUMMARY"
 
