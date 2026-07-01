@@ -681,7 +681,7 @@ def _should_log_request(path: str, status_code: int) -> bool:
 # CORS Configuration
 #
 # Priority order:
-#   1. Runtime env vars exported by ``start_backend()`` → add the concrete
+#   1. Runtime env vars exported by the supervised backend launcher → add the concrete
 #      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.

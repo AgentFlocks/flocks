@@ -16,8 +16,6 @@ def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
         "127.0.0.1",
         "--frontend-port",
         "5173",
-        "--backend-pid-file",
-        str(tmp_path / "backend.pid"),
         "--install-root",
         str(tmp_path),
         "--uv-path",
@@ -49,18 +47,13 @@ def test_run_waits_for_parent_and_backend_port_before_spawning(
     monkeypatch.setattr(
         restart_handoff,
         "_ensure_backend_port_free",
-        lambda backend_port, backend_pid_file: events.append(f"free-port:{backend_port}:{backend_pid_file.name}") or True,
+        lambda backend_port: events.append(f"free-port:{backend_port}") or True,
     )
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
         lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
         or SimpleNamespace(pid=4321),
-    )
-    monkeypatch.setattr(
-        restart_handoff,
-        "_record_backend_runtime_if_direct_serve",
-        lambda process, argv, **kwargs: events.append(f"record:{process.pid}:{list(argv)}:{kwargs['backend_port']}"),
     )
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
 
@@ -69,10 +62,9 @@ def test_run_waits_for_parent_and_backend_port_before_spawning(
     assert code == 0
     assert events[1:] == [
         "wait-parent:1234",
-        "free-port:8000:backend.pid",
+        "free-port:8000",
         "tasks",
         f"spawn:{restart_argv}:{tmp_path}:True",
-        f"record:4321:{restart_argv}:8000",
         "log:restart_spawned pid=4321",
     ]
 
@@ -101,7 +93,7 @@ def test_run_does_not_spawn_when_upgrade_tasks_fail(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port, backend_pid_file: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: "sync failed")
     monkeypatch.setattr(restart_handoff, "_rollback_failed_upgrade", lambda args, error: events.append(f"rollback:{error}"))
     monkeypatch.setattr(
@@ -132,7 +124,7 @@ def test_run_rolls_back_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port, backend_pid_file: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", crash)
     monkeypatch.setattr(restart_handoff, "_rollback_failed_upgrade", lambda args, error: events.append(f"rollback:{error}"))
     monkeypatch.setattr(
@@ -149,10 +141,9 @@ def test_run_rolls_back_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_
     assert "spawn" not in events
 
 
-def test_ensure_backend_port_free_stops_backend_after_wait_timeout(monkeypatch, tmp_path: Path) -> None:
+def test_ensure_backend_port_free_waits_again_after_timeout(monkeypatch) -> None:
     events: list[str] = []
     wait_results = iter([False, True])
-    backend_pid_file = tmp_path / "backend.pid"
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(
@@ -160,16 +151,10 @@ def test_ensure_backend_port_free_stops_backend_after_wait_timeout(monkeypatch, 
         "_wait_for_backend_port_free",
         lambda port, **kwargs: events.append(f"wait:{port}:{kwargs.get('timeout_seconds')}") or next(wait_results),
     )
-    monkeypatch.setattr(
-        restart_handoff.service_manager,
-        "stop_one",
-        lambda port, pid_file, name, console: events.append(f"stop:{port}:{pid_file.name}:{name}"),
-    )
 
-    assert restart_handoff._ensure_backend_port_free(8000, backend_pid_file) is True
+    assert restart_handoff._ensure_backend_port_free(8000) is True
     assert events == [
         "wait:8000:None",
-        "log:backend_port_still_in_use port=8000; stopping backend",
-        "stop:8000:backend.pid:backend",
+        "log:backend_port_still_in_use port=8000",
         "wait:8000:20.0",
     ]

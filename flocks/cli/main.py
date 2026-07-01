@@ -33,17 +33,16 @@ from flocks.cli.commands.update import update_command
 from flocks.cli.service_manager import (
     ServiceConfig,
     ServiceError,
-    WATCHDOG_CHECK_INTERVAL_SECONDS,
-    read_runtime_record,
     resolve_flocks_cli_command,
     restart_all,
-    run_service_watchdog,
     runtime_paths,
     show_logs,
     show_status,
     start_all,
     stop_all,
 )
+from flocks.cli.service_control import read_supervisor_status
+from flocks.cli.service_supervisor import run_service_daemon
 from flocks.config.config import Config
 from flocks.utils.log import Log, LogLevel
 
@@ -213,21 +212,21 @@ def _resolve_port(
 
 
 def _restart_runtime_defaults() -> dict[str, Any]:
-    """Load host/port defaults from the last recorded service runtime."""
-    paths = runtime_paths()
-    backend = read_runtime_record(paths.backend_pid)
-    frontend = read_runtime_record(paths.frontend_pid)
+    """Load host/port defaults from the running supervisor when available."""
     defaults: dict[str, Any] = {}
-    if backend is not None:
-        if backend.host:
-            defaults["default_server_host"] = backend.host
-        if backend.port is not None:
-            defaults["default_server_port"] = backend.port
-    if frontend is not None:
-        if frontend.host:
-            defaults["default_webui_host"] = frontend.host
-        if frontend.port is not None:
-            defaults["default_webui_port"] = frontend.port
+    try:
+        payload = read_supervisor_status(paths=runtime_paths(), timeout=1.0)
+    except Exception:
+        return defaults
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    if isinstance(config.get("backend_host"), str):
+        defaults["default_server_host"] = config["backend_host"]
+    if isinstance(config.get("backend_port"), int):
+        defaults["default_server_port"] = config["backend_port"]
+    if isinstance(config.get("frontend_host"), str):
+        defaults["default_webui_host"] = config["frontend_host"]
+    if isinstance(config.get("frontend_port"), int):
+        defaults["default_webui_port"] = config["frontend_port"]
     return defaults
 
 
@@ -403,27 +402,26 @@ def serve(
     )
 
 
-@app.command(name="service-watchdog", hidden=True)
-def service_watchdog(
+@app.command(name="service-daemon", hidden=True)
+def service_daemon(
     server_host: str = typer.Option("127.0.0.1", "--server-host", help="Backend server host"),
     server_port: int = typer.Option(8000, "--server-port", help="Backend server port"),
     webui_host: str = typer.Option("127.0.0.1", "--webui-host", help="WebUI host"),
     webui_port: int = typer.Option(5173, "--webui-port", help="WebUI port"),
-    interval: float = typer.Option(WATCHDOG_CHECK_INTERVAL_SECONDS, "--interval", help="Health check interval"),
+    skip_webui_build: bool = typer.Option(False, "--skip-webui-build", help="Skip WebUI build before preview start"),
 ):
     """
-    Monitor daemon services and recover unhealthy backend listeners.
+    Run the Flocks service supervisor daemon.
     """
-    run_service_watchdog(
+    run_service_daemon(
         ServiceConfig(
             backend_host=server_host,
             backend_port=server_port,
             frontend_host=webui_host,
             frontend_port=webui_port,
             no_browser=True,
-            skip_frontend_build=True,
+            skip_frontend_build=skip_webui_build,
         ),
-        interval=interval,
     )
 
 

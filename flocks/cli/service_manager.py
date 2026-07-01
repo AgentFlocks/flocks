@@ -21,16 +21,19 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import httpx
 
-from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - unavailable on Windows
-    fcntl = None
+from flocks.cli.service_control import (
+    post_control_json,
+    read_control_json,
+    service_config_payload,
+    supervisor_control_client,
+    supervisor_is_running,
+    supervisor_log_path,
+    supervisor_socket_path,
+)
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
@@ -48,10 +51,8 @@ WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
     "src\\win\\async.c",
     "src/win/async.c",
 )
-WATCHDOG_CHECK_INTERVAL_SECONDS = 5.0
-WATCHDOG_HEALTH_FAILURE_THRESHOLD = 2
 WATCHDOG_PID_FILENAME = "watchdog.pid"
-WATCHDOG_LOG_FILENAME = "watchdog.log"
+SUPERVISOR_START_TIMEOUT_SECONDS = 180.0
 
 
 class ServiceError(RuntimeError):
@@ -108,15 +109,6 @@ class UpgradeRuntimeInfo:
         return self.payload_present or self.pid_file_present
 
 
-@dataclass(frozen=True)
-class WatchdogProbeResult:
-    restart_needed: bool
-    health_failure: bool
-    reason: str
-    host: str
-    port: int
-
-
 def repo_root() -> Path:
     """Return the installed repository root."""
     override = os.getenv("FLOCKS_REPO_ROOT")
@@ -160,11 +152,6 @@ def ensure_runtime_dirs(paths: RuntimePaths | None = None) -> RuntimePaths:
 def watchdog_pid_path(paths: RuntimePaths) -> Path:
     """Return the watchdog runtime record path."""
     return paths.run_dir / WATCHDOG_PID_FILENAME
-
-
-def watchdog_log_path(paths: RuntimePaths) -> Path:
-    """Return the watchdog log path."""
-    return paths.log_dir / WATCHDOG_LOG_FILENAME
 
 
 def ensure_install_layout(root: Path | None = None) -> Path:
@@ -416,22 +403,6 @@ def read_runtime_record(pid_file: Path) -> RuntimeRecord | None:
     return _parse_runtime_record(raw)
 
 
-def write_runtime_record(pid_file: Path, record: RuntimeRecord) -> None:
-    """Persist runtime metadata in a backward-compatible JSON format."""
-    payload: dict[str, object] = {"pid": record.pid}
-    if record.pgid is not None:
-        payload["pgid"] = record.pgid
-    if record.host is not None:
-        payload["host"] = record.host
-    if record.port is not None:
-        payload["port"] = record.port
-    if record.command:
-        payload["command"] = list(record.command)
-    if record.started_at is not None:
-        payload["started_at"] = record.started_at
-    pid_file.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
-
-
 def process_runtime_record(
     process: subprocess.Popen,
     *,
@@ -460,11 +431,6 @@ def read_pid(pid_file: Path) -> int | None:
     """Read a pid file if it exists and contains a valid integer."""
     record = read_runtime_record(pid_file)
     return record.pid if record else None
-
-
-def write_pid(pid_file: Path, pid: int) -> None:
-    """Persist a process id."""
-    write_runtime_record(pid_file, RuntimeRecord(pid=pid))
 
 
 def _unix_process_stat(pid: int) -> str | None:
@@ -789,12 +755,6 @@ def _resolve_upgrade_runtime(console, *, frontend_port: int, attempt_recover: bo
     return result
 
 
-def _effective_frontend_port(paths: RuntimePaths, default: int) -> int:
-    recorded_port = _recorded_port(paths.frontend_pid, default)
-    upgrade_info = _read_upgrade_runtime_info(recorded_port)
-    return upgrade_info.frontend_port or recorded_port
-
-
 def cleanup_stale_pid_file(pid_file: Path) -> None:
     """Remove pid files that no longer point to running processes."""
     if not pid_file.exists():
@@ -808,20 +768,6 @@ def cleanup_stale_pid_file(pid_file: Path) -> None:
     record = _parse_runtime_record(raw)
     if record is None or not runtime_record_is_running(record):
         pid_file.unlink(missing_ok=True)
-
-
-def backend_is_running(config: ServiceConfig, paths: RuntimePaths | None = None) -> bool:
-    """Return True if the tracked backend process is running."""
-    current = paths or runtime_paths()
-    cleanup_stale_pid_file(current.backend_pid)
-    return runtime_record_is_running(read_runtime_record(current.backend_pid)) or port_is_in_use(config.backend_port)
-
-
-def frontend_is_running(config: ServiceConfig, paths: RuntimePaths | None = None) -> bool:
-    """Return True if the tracked frontend process is running."""
-    current = paths or runtime_paths()
-    cleanup_stale_pid_file(current.frontend_pid)
-    return runtime_record_is_running(read_runtime_record(current.frontend_pid)) or port_is_in_use(config.frontend_port)
 
 
 def _port_owner_lookup_available() -> bool:
@@ -944,179 +890,50 @@ class _StdoutConsole:
         sys.stdout.flush()
 
 
-def _watchdog_log(event: str, details: dict[str, object] | None = None) -> None:
-    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
-    suffix = ""
-    if details:
-        suffix = " " + json.dumps(details, ensure_ascii=True, sort_keys=True)
-    sys.stdout.write(f"[{timestamp}] watchdog.{event}{suffix}\n")
-    sys.stdout.flush()
-
-
 def _backend_health_url(host: str, port: int) -> str:
     return f"http://{_format_host_for_url(access_host(host))}:{port}/api/health"
 
 
-def _watchdog_backend_endpoint(config: ServiceConfig, paths: RuntimePaths) -> tuple[RuntimeRecord | None, str, int]:
-    record = read_runtime_record(paths.backend_pid)
-    host = record.host if record is not None and record.host else config.backend_host
-    port = record.port if record is not None and record.port is not None else config.backend_port
-    return record, host, port
-
-
-def _watchdog_backend_config(config: ServiceConfig, paths: RuntimePaths) -> ServiceConfig:
-    record, host, port = _watchdog_backend_endpoint(config, paths)
-    return ServiceConfig(
-        backend_host=host,
-        backend_port=port,
-        frontend_host=config.frontend_host,
-        frontend_port=config.frontend_port,
-        no_browser=True,
-        skip_frontend_build=True,
-    )
-
-
-def _watchdog_probe_backend(
-    config: ServiceConfig,
-    paths: RuntimePaths,
-    client: httpx.Client,
-) -> WatchdogProbeResult:
-    record, host, port = _watchdog_backend_endpoint(config, paths)
-    if record is None:
-        return WatchdogProbeResult(False, False, "backend runtime record missing", host, port)
-
-    backend_running = runtime_record_is_running(record)
-    listeners = port_owner_pids(port)
-    port_in_use = port_is_in_use(port, listeners)
-    if not backend_running:
-        if port_in_use:
-            return WatchdogProbeResult(
-                False,
-                False,
-                f"backend runtime record is not running but port {port} is occupied",
-                host,
-                port,
-            )
-        return WatchdogProbeResult(True, False, "backend runtime record is not running", host, port)
-    if not port_in_use:
-        return WatchdogProbeResult(True, False, f"backend process alive but port {port} is not listening", host, port)
-
-    runtime_pids = set(_runtime_record_pids(record))
-    listener_pids = set(listeners)
-    if listener_pids and runtime_pids and listener_pids.isdisjoint(runtime_pids):
-        reason = (
-            f"backend process alive but port {port} is owned by unexpected pid(s): "
-            f"{_join_pids(sorted(listener_pids))}"
-        )
-        return WatchdogProbeResult(False, False, reason, host, port)
-
-    url = _backend_health_url(host, port)
-    try:
-        response = client.get(url)
-    except Exception as exc:
-        return WatchdogProbeResult(True, True, f"backend health check failed: {exc}", host, port)
-    if not _is_healthy_status_response(response):
-        return WatchdogProbeResult(
-            True,
-            True,
-            f"backend health check unhealthy: status={response.status_code}",
-            host,
-            port,
-        )
-    return WatchdogProbeResult(False, False, "backend healthy", host, port)
-
-
-def _recover_unhealthy_backend(config: ServiceConfig, paths: RuntimePaths, reason: str) -> None:
-    try:
-        with service_lock(paths):
-            effective_config = _watchdog_backend_config(config, paths)
-            with httpx.Client(timeout=2.0, trust_env=False) as client:
-                probe = _watchdog_probe_backend(effective_config, paths, client)
-            if not probe.restart_needed:
-                _watchdog_log("backend_recovery_skipped", {"reason": probe.reason})
-                return
-
-            console = _StdoutConsole()
-            _watchdog_log(
-                "backend_recovery_start",
-                {
-                    "reason": reason,
-                    "host": probe.host,
-                    "port": probe.port,
-                },
-            )
-            stop_one(probe.port, paths.backend_pid, "后端", console)
-            start_backend(effective_config, console)
-            _watchdog_log("backend_recovery_done", {"host": probe.host, "port": probe.port})
-    except ServiceError as exc:
-        _watchdog_log("backend_recovery_failed", {"reason": reason, "error": str(exc)})
-    except Exception as exc:
-        _watchdog_log("backend_recovery_crashed", {"reason": reason, "error": repr(exc)})
-
-
-def _watchdog_tick(
-    config: ServiceConfig,
-    paths: RuntimePaths,
-    health_failure_count: int,
+def _terminate_process(
+    process: subprocess.Popen | None,
+    name: str,
+    console,
     *,
-    failure_threshold: int = WATCHDOG_HEALTH_FAILURE_THRESHOLD,
-) -> int:
-    with httpx.Client(timeout=2.0, trust_env=False) as client:
-        probe = _watchdog_probe_backend(config, paths, client)
+    timeout: float = 10.0,
+) -> None:
+    """Terminate a process and its process group without scanning service ports."""
+    if process is None:
+        return
+    if process.poll() is not None:
+        return
 
-    if not probe.restart_needed:
-        return 0
+    record = process_runtime_record(process, host=None, port=None, command=())
+    console.print(f"[flocks] 停止 {name}（PID={process.pid}）...")
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)
+    else:
+        if record.pgid is not None:
+            signal_process_group(signal.SIGTERM, record.pgid)
+        else:
+            signal_pid_list(signal.SIGTERM, collect_process_tree_pids(process.pid))
 
-    if probe.health_failure:
-        health_failure_count += 1
-        _watchdog_log(
-            "backend_health_failed",
-            {
-                "count": health_failure_count,
-                "threshold": failure_threshold,
-                "reason": probe.reason,
-                "host": probe.host,
-                "port": probe.port,
-            },
-        )
-        if health_failure_count < failure_threshold:
-            return health_failure_count
-
-    _recover_unhealthy_backend(config, paths, probe.reason)
-    return 0
-
-
-def start_backend(config: ServiceConfig, console) -> None:
-    """Start the backend API service if needed."""
-    root = ensure_install_layout()
-    paths = ensure_runtime_dirs()
-    cleanup_stale_pid_file(paths.backend_pid)
-
-    runtime_record = read_runtime_record(paths.backend_pid)
-    tracked_pid = runtime_record.pid if runtime_record else None
-    listeners = port_owner_pids(config.backend_port)
-    if listeners:
-        if tracked_pid and tracked_pid in listeners:
-            console.print(f"[flocks] 后端已在运行，PID={tracked_pid}")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None and not process_group_is_running(record.pgid):
             return
-        raise ServiceError(
-            f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-            "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
-        )
-    if port_is_in_use(config.backend_port, listeners):
-        raise ServiceError(
-            f"后端端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
-            "请先安装 lsof 或手动清理残留进程。"
-        )
+        time.sleep(0.25)
 
-    if runtime_record is not None and runtime_record_is_running(runtime_record):
-        raise ServiceError(
-            "后端运行记录仍存活，但端口未监听；请先执行 `flocks stop` 清理异常状态后重试。"
-        )
+    console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)
+    else:
+        if record.pgid is not None:
+            signal_process_group(signal.SIGKILL, record.pgid)
+        signal_pid_list(signal.SIGKILL, collect_process_tree_pids(process.pid))
 
-    if runtime_record is not None:
-        paths.backend_pid.unlink(missing_ok=True)
 
+def _backend_command_and_env(root: Path, config: ServiceConfig) -> tuple[list[str], dict[str, str]]:
+    """Build the backend service command and environment."""
     command = resolve_flocks_cli_command(root) + [
         "serve",
         "--host",
@@ -1124,30 +941,46 @@ def start_backend(config: ServiceConfig, console) -> None:
         "--port",
         str(config.backend_port),
     ]
+    env = os.environ.copy()
+    env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
+    env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
+    return command, env
 
-    backend_env = os.environ.copy()
-    backend_env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
-    backend_env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
-    backend_env["PYTHONUNBUFFERED"] = "1"
-    backend_env.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
 
+def _start_backend_process(
+    config: ServiceConfig,
+    console,
+    *,
+    paths: RuntimePaths | None = None,
+) -> subprocess.Popen:
+    """Start the backend child process for the supervisor."""
+    root = ensure_install_layout()
+    current = paths if paths is not None else ensure_runtime_dirs()
+
+    listeners = port_owner_pids(config.backend_port)
+    if listeners:
+        raise ServiceError(
+            f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
+            "请先执行 `flocks stop` 或手动清理残留进程。"
+        )
+    if port_is_in_use(config.backend_port, listeners):
+        raise ServiceError(
+            f"后端端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
+            "请先安装 lsof 或手动清理残留进程。"
+        )
+
+    command, env = _backend_command_and_env(root, config)
     console.print("[flocks] 启动后端服务...")
-    process = _spawn_process(
-        command,
-        cwd=root,
-        log_path=paths.backend_log,
-        env=backend_env,
+    process = _spawn_process(command, cwd=root, log_path=current.backend_log, env=env)
+    record = process_runtime_record(
+        process,
+        host=config.backend_host,
+        port=config.backend_port,
+        command=command,
     )
-    write_runtime_record(
-        paths.backend_pid,
-        process_runtime_record(
-            process,
-            host=config.backend_host,
-            port=config.backend_port,
-            command=command,
-        ),
-    )
-    _log_startup_config(paths.backend_log, "backend", config.backend_host, config.backend_port, read_runtime_record(paths.backend_pid))
+    _log_startup_config(current.backend_log, "backend", config.backend_host, config.backend_port, record)
 
     try:
         wait_for_http(
@@ -1157,27 +990,24 @@ def start_backend(config: ServiceConfig, console) -> None:
             validator=_is_running_status_response,
         )
     except ServiceError:
-        _emit_service_log_tail(console, paths.backend_log, "后端")
-        stop_one(config.backend_port, paths.backend_pid, "后端", console)
+        _emit_service_log_tail(console, current.backend_log, "后端")
+        _terminate_process(process, "后端", console)
         raise
+    return process
 
-    console.print(f"[flocks] 后端已启动，日志: {paths.backend_log}")
 
-
-def start_frontend(config: ServiceConfig, console) -> None:
-    """Build and start the WebUI preview service if needed."""
+def _start_frontend_process(
+    config: ServiceConfig,
+    console,
+    *,
+    paths: RuntimePaths | None = None,
+) -> subprocess.Popen:
+    """Build and start the WebUI child process."""
     root = ensure_install_layout()
-    paths = ensure_runtime_dirs()
-    cleanup_stale_pid_file(paths.frontend_pid)
+    current = paths if paths is not None else ensure_runtime_dirs()
 
-    runtime_record = read_runtime_record(paths.frontend_pid)
-    tracked_pid = runtime_record.pid if runtime_record else None
     listeners = port_owner_pids(config.frontend_port)
     if listeners:
-        if tracked_pid and tracked_pid in listeners:
-            console.print(f"[flocks] WebUI 已在运行，PID={tracked_pid}")
-            return
-
         upgrade_info = _read_upgrade_runtime_info(config.frontend_port)
         if upgrade_info.page_active:
             _resolve_upgrade_runtime(
@@ -1185,39 +1015,23 @@ def start_frontend(config: ServiceConfig, console) -> None:
                 frontend_port=upgrade_info.frontend_port or config.frontend_port,
                 attempt_recover=False,
             )
-            cleanup_stale_pid_file(paths.frontend_pid)
-            runtime_record = read_runtime_record(paths.frontend_pid)
-            tracked_pid = runtime_record.pid if runtime_record else None
             listeners = port_owner_pids(config.frontend_port)
-            if tracked_pid and tracked_pid in listeners:
-                console.print(f"[flocks] WebUI 已在运行，PID={tracked_pid}")
-                return
-            if not listeners:
-                tracked_pid = runtime_record.pid if runtime_record else None
-            else:
+            if listeners:
                 raise ServiceError(
                     f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-                    "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
+                    "请先执行 `flocks stop` 或手动清理残留进程。"
                 )
 
         else:
             raise ServiceError(
                 f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-                "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
+                "请先执行 `flocks stop` 或手动清理残留进程。"
             )
     elif port_is_in_use(config.frontend_port, listeners):
         raise ServiceError(
             f"WebUI 端口 {config.frontend_port} 已被占用，但当前环境无法识别占用 PID；"
             "请先安装 lsof 或手动清理残留进程。"
         )
-
-    if runtime_record is not None and runtime_record_is_running(runtime_record):
-        raise ServiceError(
-            "WebUI 运行记录仍存活，但端口未监听；请先执行 `flocks stop` 清理异常状态后重试。"
-        )
-
-    if runtime_record is not None:
-        paths.frontend_pid.unlink(missing_ok=True)
 
     npm = resolve_npm_executable()
     if not npm:
@@ -1256,158 +1070,53 @@ def start_frontend(config: ServiceConfig, console) -> None:
     ]
 
     console.print("[flocks] 启动 WebUI...")
-    process = _spawn_process(
-        command,
-        cwd=webui_dir,
-        log_path=paths.frontend_log,
-        env=frontend_env,
+    process = _spawn_process(command, cwd=webui_dir, log_path=current.frontend_log, env=frontend_env)
+    record = process_runtime_record(
+        process,
+        host=config.frontend_host,
+        port=config.frontend_port,
+        command=command,
     )
-    write_runtime_record(
-        paths.frontend_pid,
-        process_runtime_record(
-            process,
-            host=config.frontend_host,
-            port=config.frontend_port,
-            command=command,
-        ),
-    )
-    _log_startup_config(paths.frontend_log, "webui", config.frontend_host, config.frontend_port, read_runtime_record(paths.frontend_pid))
+    _log_startup_config(current.frontend_log, "webui", config.frontend_host, config.frontend_port, record)
 
     try:
         wait_for_http([config.frontend_url], "WebUI")
     except ServiceError:
-        _emit_service_log_tail(console, paths.frontend_log, "WebUI")
-        stop_one(config.frontend_port, paths.frontend_pid, "WebUI", console)
+        _emit_service_log_tail(console, current.frontend_log, "WebUI")
+        _terminate_process(process, "WebUI", console)
         raise
 
-    console.print(f"[flocks] WebUI 已启动，日志: {paths.frontend_log}")
+    return process
 
 
-def start_watchdog(config: ServiceConfig, console) -> None:
-    """Start the service watchdog daemon if needed."""
-    root = ensure_install_layout()
-    paths = ensure_runtime_dirs()
-    pid_file = watchdog_pid_path(paths)
-    log_path = watchdog_log_path(paths)
+def stop_runtime_record_process(pid_file: Path, name: str, console) -> None:
+    """Stop a legacy pid/runtime record without scanning ports."""
     cleanup_stale_pid_file(pid_file)
-
-    runtime_record = read_runtime_record(pid_file)
-    if runtime_record is not None and runtime_record_is_running(runtime_record):
-        console.print(f"[flocks] Watchdog 已在运行，PID={runtime_record.pid}")
-        return
-    if runtime_record is not None:
-        pid_file.unlink(missing_ok=True)
-
-    command = resolve_flocks_cli_command(root) + [
-        "service-watchdog",
-        "--server-host",
-        config.backend_host,
-        "--server-port",
-        str(config.backend_port),
-        "--webui-host",
-        config.frontend_host,
-        "--webui-port",
-        str(config.frontend_port),
-        "--interval",
-        str(WATCHDOG_CHECK_INTERVAL_SECONDS),
-    ]
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-
-    console.print("[flocks] 启动服务 Watchdog...")
-    process = _spawn_process(command, cwd=root, log_path=log_path, env=env)
-    write_runtime_record(
-        pid_file,
-        process_runtime_record(
-            process,
-            host=None,
-            port=None,
-            command=command,
-        ),
-    )
-    _log_startup_config(log_path, "watchdog", config.backend_host, config.backend_port, read_runtime_record(pid_file))
-    console.print(f"[flocks] Watchdog 已启动，日志: {log_path}")
-
-
-def stop_watchdog(paths: RuntimePaths, console) -> None:
-    """Stop the service watchdog without touching backend/frontend ports."""
-    pid_file = watchdog_pid_path(paths)
-    cleanup_stale_pid_file(pid_file)
-    if read_runtime_record(pid_file) is None:
-        return
-    stop_one(0, pid_file, "Watchdog", console)
-
-
-def run_service_watchdog(
-    config: ServiceConfig,
-    *,
-    interval: float = WATCHDOG_CHECK_INTERVAL_SECONDS,
-    failure_threshold: int = WATCHDOG_HEALTH_FAILURE_THRESHOLD,
-) -> None:
-    """Run the backend health watchdog loop."""
-    paths = ensure_runtime_dirs()
-    _watchdog_log(
-        "started",
-        {
-            "backend_host": config.backend_host,
-            "backend_port": config.backend_port,
-            "interval": interval,
-            "failure_threshold": failure_threshold,
-        },
-    )
-    health_failure_count = 0
-    while True:
-        try:
-            health_failure_count = _watchdog_tick(
-                config,
-                paths,
-                health_failure_count,
-                failure_threshold=failure_threshold,
-            )
-        except KeyboardInterrupt:
-            _watchdog_log("stopped")
-            return
-        except Exception as exc:
-            _watchdog_log("tick_failed", {"error": repr(exc)})
-        time.sleep(interval)
-
-
-def _tracked_processes_stopped(
-    port: int,
-    record: RuntimeRecord | None,
-    tracked_pids: Iterable[int],
-) -> bool:
-    """Return True when the tracked service no longer has running processes."""
-    listeners = port_owner_pids(port)
-    if port_is_in_use(port, listeners):
-        return False
-    if runtime_record_is_running(record):
-        return False
-    return not any(pid_is_running(pid) for pid in tracked_pids)
-
-
-def _runtime_record_pids(record: RuntimeRecord | None) -> list[int]:
-    """Collect the latest pids implied by a runtime record."""
+    record = read_runtime_record(pid_file)
     if record is None:
-        return []
+        pid_file.unlink(missing_ok=True)
+        return
 
-    result: list[int] = []
-    if record.pid > 0:
-        result = append_unique_pids(result, collect_process_tree_pids(record.pid))
-    if record.pgid is not None and sys.platform != "win32":
-        result = append_unique_pids(result, _process_group_member_pids(record.pgid))
-    return result
+    targets = collect_process_tree_pids(record.pid)
+    console.print(f"[flocks] 清理旧 {name} 进程（PID={record.pid}）...")
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(record.pid), "/T", "/F"], check=False, capture_output=True)
+    else:
+        if record.pgid is not None:
+            signal_process_group(signal.SIGTERM, record.pgid)
+        else:
+            signal_pid_list(signal.SIGTERM, targets)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not runtime_record_is_running(record):
+                pid_file.unlink(missing_ok=True)
+                return
+            time.sleep(0.25)
+        if record.pgid is not None:
+            signal_process_group(signal.SIGKILL, record.pgid)
+        signal_pid_list(signal.SIGKILL, targets)
 
-
-def _current_stop_targets(
-    port: int,
-    record: RuntimeRecord | None,
-    tracked_pids: Iterable[int],
-) -> list[int]:
-    """Refresh the pid list that stop_one() should verify or force kill."""
-    result = append_unique_pids([], tracked_pids)
-    result = append_unique_pids(result, _runtime_record_pids(record))
-    return append_unique_pids(result, port_owner_pids(port))
+    pid_file.unlink(missing_ok=True)
 
 
 def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
@@ -1418,137 +1127,6 @@ def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
         os.killpg(pgid, sig)
     except OSError:
         pass
-
-
-def stop_one(port: int, pid_file: Path, name: str, console) -> None:
-    """Stop a single service by tracked pid and/or listening port."""
-    cleanup_stale_pid_file(pid_file)
-    runtime_record = read_runtime_record(pid_file)
-    tracked_pid = runtime_record.pid if runtime_record else None
-    listeners = port_owner_pids(port)
-
-    target_pids: list[int] = []
-    if tracked_pid is not None:
-        target_pids = append_unique_pids(target_pids, collect_process_tree_pids(tracked_pid))
-    target_pids = append_unique_pids(target_pids, listeners)
-    if sys.platform == "win32" and runtime_record is not None:
-        filtered_targets: list[int] = []
-        for pid in target_pids:
-            if pid in listeners:
-                filtered_targets = append_unique_pids(filtered_targets, [pid])
-                continue
-            if pid == runtime_record.pid and not _windows_runtime_record_matches_pid(runtime_record, pid, listeners):
-                continue
-            filtered_targets = append_unique_pids(filtered_targets, [pid])
-        target_pids = filtered_targets
-
-    group_running = process_group_is_running(runtime_record.pgid if runtime_record else None)
-    if not target_pids and not group_running:
-        if port_is_in_use(port, listeners):
-            raise ServiceError(
-                f"{name} 端口 {port} 已被占用，但当前环境无法识别占用 PID；"
-                "请先安装 lsof 或手动处理该进程。"
-            )
-        pid_file.unlink(missing_ok=True)
-        console.print(f"[flocks] {name} 未运行。")
-        return
-
-    details = _join_pids(target_pids) if target_pids else "none"
-    if runtime_record and runtime_record.pgid is not None and sys.platform != "win32":
-        details = f"{details}; PGID={runtime_record.pgid}"
-    console.print(f"[flocks] 停止 {name}（端口 {port}，PID: {details}）...")
-
-    if sys.platform == "win32":
-        for pid in target_pids:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
-    else:
-        if runtime_record and runtime_record.pgid is not None:
-            signal_process_group(signal.SIGTERM, runtime_record.pgid)
-        else:
-            signal_pid_list(signal.SIGTERM, target_pids)
-        for _ in range(10):
-            current_targets = _current_stop_targets(port, runtime_record, target_pids)
-            if _tracked_processes_stopped(port, runtime_record, current_targets):
-                pid_file.unlink(missing_ok=True)
-                console.print(f"[flocks] {name} 已停止。")
-                return
-            time.sleep(1)
-
-        console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
-        force_targets = _current_stop_targets(port, runtime_record, target_pids)
-        if runtime_record and runtime_record.pgid is not None:
-            signal_process_group(signal.SIGKILL, runtime_record.pgid)
-        signal_pid_list(signal.SIGKILL, force_targets)
-
-    for _ in range(10):
-        force_targets = _current_stop_targets(port, runtime_record, target_pids)
-        if _tracked_processes_stopped(port, runtime_record, force_targets):
-            pid_file.unlink(missing_ok=True)
-            console.print(f"[flocks] {name} 已停止。")
-            return
-        if sys.platform == "win32":
-            for pid in force_targets:
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
-        else:
-            if runtime_record and runtime_record.pgid is not None:
-                signal_process_group(signal.SIGKILL, runtime_record.pgid)
-            signal_pid_list(signal.SIGKILL, force_targets)
-        time.sleep(1)
-
-    raise ServiceError(f"{name} 未在预期时间内退出，请手动检查端口 {port}。")
-
-
-def _recorded_port(pid_file: Path, default: int) -> int:
-    """Return the port from a runtime record, falling back to *default*."""
-    record = read_runtime_record(pid_file)
-    if record is not None and record.port is not None:
-        return record.port
-    return default
-
-
-def _recorded_host(pid_file: Path, default: str) -> str:
-    """Return the host from a runtime record, falling back to *default*."""
-    record = read_runtime_record(pid_file)
-    if record is not None and record.host:
-        return record.host
-    return default
-
-
-@contextlib.contextmanager
-def service_lock(paths: RuntimePaths):
-    """Serialize lifecycle commands with a cross-process lock file."""
-    lock_path = paths.run_dir / "service.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+", encoding="utf-8")
-    unlock_windows = None
-    try:
-        try:
-            if sys.platform == "win32":
-                import msvcrt
-
-                handle.seek(0)
-                handle.write("0")
-                handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                unlock_windows = msvcrt
-            else:
-                if fcntl is None:  # pragma: no cover - defensive
-                    raise OSError("fcntl unavailable")
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            raise ServiceError("另一个 flocks 命令正在执行，请稍后重试。") from error
-        yield
-    finally:
-        try:
-            if unlock_windows is not None:
-                handle.seek(0)
-                unlock_windows.locking(handle.fileno(), unlock_windows.LK_UNLCK, 1)
-            elif fcntl is not None and sys.platform != "win32":
-                fcntl.flock(handle, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        handle.close()
 
 
 def _log_startup_config(
@@ -1568,144 +1146,173 @@ def _log_startup_config(
         handle.write(line)
 
 
-def _resolve_stop_ports(
+def _wait_for_supervisor_ready(
     paths: RuntimePaths,
-    config: ServiceConfig | None = None,
-) -> tuple[int, int]:
-    """Resolve frontend/backend ports for stop flows.
-
-    When a runtime record is missing or uses the legacy pid-only format,
-    ``start`` and ``restart`` should fall back to the current CLI config
-    rather than the static default ports.
-    """
-    frontend_default = config.frontend_port if config is not None else ServiceConfig.frontend_port
-    backend_default = config.backend_port if config is not None else ServiceConfig.backend_port
-    return (
-        _effective_frontend_port(paths, frontend_default),
-        _recorded_port(paths.backend_pid, backend_default),
-    )
-
-
-def _stop_all_locked(
-    paths: RuntimePaths,
-    console,
     *,
-    config: ServiceConfig | None = None,
-) -> None:
-    """Stop frontend then backend while reusing the caller's lock."""
-    fe_port, be_port = _resolve_stop_ports(paths, config)
-    try:
-        _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
-        stop_watchdog(paths, console)
-        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
-        stop_one(be_port, paths.backend_pid, "后端", console)
-    finally:
-        stop_all_browser_daemons()
+    process: subprocess.Popen | None = None,
+    timeout: float = SUPERVISOR_START_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Wait for the supervisor control API and managed services to become ready."""
+    deadline = time.monotonic() + timeout
+    last_payload: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            raise ServiceError(f"Supervisor 启动失败，退出码: {process.returncode}")
+        try:
+            payload = read_control_json("/status", paths=paths, timeout=1.0)
+            last_payload = payload
+            backend_state = ((payload.get("backend") or {}).get("state") if isinstance(payload.get("backend"), dict) else None)
+            webui_state = ((payload.get("webui") or {}).get("state") if isinstance(payload.get("webui"), dict) else None)
+            if backend_state == "healthy" and webui_state == "healthy":
+                return payload
+            if backend_state == "degraded" or webui_state == "degraded":
+                return payload
+        except Exception:
+            pass
+        time.sleep(0.5)
+    if last_payload is not None:
+        return last_payload
+    raise ServiceError("Supervisor 启动超时，请检查日志。")
+
+
+def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, console) -> subprocess.Popen:
+    """Spawn the detached service supervisor daemon."""
+    root = ensure_install_layout()
+    log_path = supervisor_log_path(paths)
+    if sys.platform != "win32":
+        supervisor_socket_path(paths).unlink(missing_ok=True)
+    command = resolve_flocks_cli_command(root) + [
+        "service-daemon",
+        "--server-host",
+        config.backend_host,
+        "--server-port",
+        str(config.backend_port),
+        "--webui-host",
+        config.frontend_host,
+        "--webui-port",
+        str(config.frontend_port),
+    ]
+    if config.skip_frontend_build:
+        command.append("--skip-webui-build")
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    console.print("[flocks] 启动 Supervisor daemon...")
+    return _spawn_process(command, cwd=root, log_path=log_path, env=env)
 
 
 def stop_all(console) -> None:
-    """Stop frontend then backend using ports persisted in runtime records."""
+    """Stop managed services through the supervisor control API."""
     paths = ensure_runtime_dirs()
-    with service_lock(paths):
-        _stop_all_locked(paths, console)
+    if not supervisor_is_running(paths):
+        console.print("[flocks] Supervisor 未运行。")
+        return
+    try:
+        post_control_json("/stop", paths=paths, timeout=2.0)
+    except Exception as exc:
+        raise ServiceError(f"无法请求 Supervisor 停止: {exc}") from exc
+
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if not supervisor_is_running(paths):
+            console.print("[flocks] Supervisor 已停止。")
+            return
+        time.sleep(0.5)
+    raise ServiceError("Supervisor 未在预期时间内退出。")
 
 
 def _start_all_without_stop(config: ServiceConfig, console) -> None:
-    """Start backend and frontend, then print access summary."""
-    ensure_runtime_dirs()
-    start_backend(config, console)
-    start_frontend(config, console)
-    start_watchdog(config, console)
+    """Start the supervisor daemon, then print access summary."""
+    paths = ensure_runtime_dirs()
+    process = _start_supervisor_process(config, paths, console)
+    payload = _wait_for_supervisor_ready(paths, process=process)
     show_start_summary(config, console)
+    _print_status_payload(payload, console)
     if not config.no_browser:
         open_default_browser(config.frontend_url, console)
 
 
 def start_all(config: ServiceConfig, console) -> None:
-    """Ensure backend and frontend are restarted with a clean state."""
+    """Ensure the supervisor daemon is running."""
     paths = ensure_runtime_dirs()
-    with service_lock(paths):
-        _stop_all_locked(paths, console, config=config)
-        _start_all_without_stop(config, console)
+    if supervisor_is_running(paths):
+        console.print("[flocks] Supervisor 已在运行。")
+        show_status(console)
+        if not config.no_browser:
+            try:
+                payload = read_control_json("/status", paths=paths, timeout=1.0)
+                url = _frontend_url_from_status_payload(payload, config.frontend_url)
+            except Exception:
+                url = config.frontend_url
+            open_default_browser(url, console)
+        return
+    _start_all_without_stop(config, console)
 
 
 def restart_all(config: ServiceConfig, console) -> None:
-    """Restart backend and frontend."""
+    """Restart backend and frontend through the supervisor control API."""
     paths = ensure_runtime_dirs()
-    with service_lock(paths):
-        _stop_all_locked(paths, console, config=config)
-        _start_all_without_stop(config, console)
+    if not supervisor_is_running(paths):
+        start_all(config, console)
+        return
+    try:
+        payload = post_control_json("/restart", payload=service_config_payload(config), paths=paths, timeout=180.0)
+    except Exception as exc:
+        raise ServiceError(f"无法请求 Supervisor 重启: {exc}") from exc
+    _print_status_payload(payload, console)
 
 
 def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
-    """Return a human-readable status summary."""
+    """Return a human-readable status summary from the supervisor control API."""
     current = paths or runtime_paths()
-    cleanup_stale_pid_file(current.backend_pid)
-    cleanup_stale_pid_file(current.frontend_pid)
-    cleanup_stale_pid_file(watchdog_pid_path(current))
+    try:
+        payload = read_control_json("/status", paths=current)
+    except Exception:
+        return [
+            "[flocks] Supervisor 未运行",
+            f"[flocks] Supervisor 日志: {supervisor_log_path(current)}",
+        ]
+    return _status_lines_from_payload(payload)
 
-    backend_record = read_runtime_record(current.backend_pid)
-    frontend_record = read_runtime_record(current.frontend_pid)
-    watchdog_record = read_runtime_record(watchdog_pid_path(current))
-    backend_port = _recorded_port(current.backend_pid, ServiceConfig.backend_port)
-    frontend_port = _recorded_port(current.frontend_pid, ServiceConfig.frontend_port)
-    backend_host = _loopback_host(_recorded_host(current.backend_pid, ServiceConfig.backend_host))
-    frontend_host = _loopback_host(_recorded_host(current.frontend_pid, ServiceConfig.frontend_host))
-    upgrade_info = _read_upgrade_runtime_info(frontend_port)
-    if frontend_record is None and upgrade_info.frontend_port is not None:
-        frontend_port = upgrade_info.frontend_port
-    if frontend_record is None and upgrade_info.frontend_host:
-        frontend_host = _loopback_host(upgrade_info.frontend_host)
-    backend_pid = backend_record.pid if backend_record else None
-    frontend_pid = frontend_record.pid if frontend_record else None
-    backend_listeners = port_owner_pids(backend_port)
-    frontend_listeners = port_owner_pids(frontend_port)
-    backend_in_use = port_is_in_use(backend_port, backend_listeners)
-    frontend_in_use = port_is_in_use(frontend_port, frontend_listeners)
 
-    lines: list[str] = []
-    if backend_listeners:
-        lines.append(
-            f"[flocks] 后端运行中: PID={_join_pids(backend_listeners)} URL=http://{backend_host}:{backend_port}"
-        )
-    elif backend_in_use:
-        lines.append(f"[flocks] 后端运行中: PID=unknown URL=http://{backend_host}:{backend_port}")
-    elif pid_is_running(backend_pid):
-        lines.append(f"[flocks] 后端主进程仍在运行，但端口 {backend_port} 未监听: PID={backend_pid}")
-    elif process_group_is_running(backend_record.pgid if backend_record else None):
-        lines.append(f"[flocks] 后端进程组仍在运行，但端口 {backend_port} 未监听: PGID={backend_record.pgid}")
-    else:
-        lines.append("[flocks] 后端未运行")
-
-    if upgrade_info.page_active:
-        lines.append(
-            f"[flocks] WebUI 临时升级页运行中: PID={_join_pids(upgrade_info.listener_pids)} URL=http://{frontend_host}:{frontend_port}"
-        )
-    elif frontend_listeners:
-        lines.append(
-            f"[flocks] WebUI 运行中: PID={_join_pids(frontend_listeners)} URL=http://{frontend_host}:{frontend_port}"
-        )
-    elif frontend_in_use:
-        lines.append(f"[flocks] WebUI 运行中: PID=unknown URL=http://{frontend_host}:{frontend_port}")
-    elif pid_is_running(frontend_pid):
-        lines.append(f"[flocks] WebUI 主进程仍在运行，但端口 {frontend_port} 未监听: PID={frontend_pid}")
-    elif process_group_is_running(frontend_record.pgid if frontend_record else None):
-        lines.append(f"[flocks] WebUI 进程组仍在运行，但端口 {frontend_port} 未监听: PGID={frontend_record.pgid}")
-    else:
-        lines.append("[flocks] WebUI 未运行")
-
-    if runtime_record_is_running(watchdog_record):
-        lines.append(f"[flocks] Watchdog 运行中: PID={watchdog_record.pid}")
-    else:
-        lines.append("[flocks] Watchdog 未运行")
-
-    if upgrade_info.payload_present:
-        lines.append("[flocks] 检测到未完成的升级恢复状态")
-
-    lines.append(f"[flocks] 后端日志: {current.backend_log}")
-    lines.append(f"[flocks] WebUI 日志: {current.frontend_log}")
-    lines.append(f"[flocks] Watchdog 日志: {watchdog_log_path(current)}")
+def _status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
+    daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
+    backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
+    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
+    lines = [
+        f"[flocks] Supervisor 运行中: PID={daemon.get('pid')} state={daemon.get('state')}",
+        _service_status_line("后端", backend),
+        _service_status_line("WebUI", webui),
+        f"[flocks] Supervisor 日志: {daemon.get('log_path')}",
+    ]
+    for service in (backend, webui):
+        log_path = service.get("log_path")
+        if log_path:
+            lines.append(f"[flocks] {service.get('state')} 日志: {log_path}")
     return lines
+
+
+def _service_status_line(label: str, payload: dict[str, Any]) -> str:
+    host = _loopback_host(str(payload.get("host") or "127.0.0.1"))
+    port = payload.get("port")
+    pid = payload.get("pid")
+    state = payload.get("state") or "unknown"
+    error = payload.get("last_error")
+    suffix = f" last_error={error}" if error else ""
+    return f"[flocks] {label}: state={state} PID={pid} URL=http://{host}:{port}{suffix}"
+
+
+def _frontend_url_from_status_payload(payload: dict[str, Any], fallback: str) -> str:
+    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
+    host = webui.get("host")
+    port = webui.get("port")
+    if isinstance(host, str) and isinstance(port, int):
+        return f"http://{_format_host_for_url(_loopback_host(host))}:{port}"
+    return fallback
+
+
+def _print_status_payload(payload: dict[str, Any], console) -> None:
+    for line in _status_lines_from_payload(payload):
+        console.print(line)
 
 
 def show_status(console) -> None:
@@ -1737,42 +1344,39 @@ def show_logs(
     follow: bool = True,
     lines: int = 50,
 ) -> None:
-    """Print recent service logs and optionally follow them."""
+    """Print recent service logs through the supervisor control API."""
     paths = ensure_runtime_dirs()
-    selections = selected_log_paths(paths, backend=backend, webui=webui)
-    prefixes = {paths.backend_log: "backend", paths.frontend_log: "webui"}
-
-    for path in selections:
-        path.touch(exist_ok=True)
-        console.print(f"[{prefixes[path]}] --- {path} ---")
-        for line in tail_lines(path, lines):
-            console.print(f"[{prefixes[path]}] {line}")
-
+    service = "all"
+    if backend and not webui:
+        service = "backend"
+    elif webui and not backend:
+        service = "webui"
+    params = {"service": service, "lines": str(lines), "follow": "true" if follow else "false"}
     if not follow:
+        try:
+            payload = read_control_json(f"/logs?service={service}&lines={lines}&follow=false", paths=paths, timeout=5.0)
+        except Exception as exc:
+            raise ServiceError(f"无法通过 Supervisor 读取日志: {exc}") from exc
+        logs = payload.get("logs") if isinstance(payload.get("logs"), dict) else {}
+        for prefix, entry in logs.items():
+            if not isinstance(entry, dict):
+                continue
+            console.print(f"[{prefix}] --- {entry.get('path')} ---")
+            for line in entry.get("lines") or []:
+                console.print(f"[{prefix}] {line}")
         return
 
     console.print("[flocks] 按 Ctrl+C 退出日志跟随。")
-    handles = {}
     try:
-        for path in selections:
-            handle = path.open("r", encoding="utf-8", errors="replace")
-            handle.seek(0, os.SEEK_END)
-            handles[path] = handle
-
-        while True:
-            emitted = False
-            for path, handle in handles.items():
-                while True:
-                    line = handle.readline()
-                    if not line:
-                        break
-                    emitted = True
-                    console.print(f"[{prefixes[path]}] {line.rstrip()}")
-            if not emitted:
-                time.sleep(FOLLOW_POLL_INTERVAL)
-    finally:
-        for handle in handles.values():
-            handle.close()
+        with supervisor_control_client(paths, timeout=None) as client:
+            with client.stream("GET", "/logs", params=params) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    console.print(line)
+    except KeyboardInterrupt:
+        return
+    except Exception as exc:
+        raise ServiceError(f"无法通过 Supervisor 跟随日志: {exc}") from exc
 
 
 def selected_log_paths(

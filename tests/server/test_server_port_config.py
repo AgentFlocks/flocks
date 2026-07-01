@@ -240,24 +240,28 @@ class TestCommandLinePortConfiguration:
         assert captured["config"].frontend_host == "127.0.0.1"
         assert captured["config"].frontend_port == 5273
 
-    def test_restart_reuses_runtime_recorded_host_and_port(self, monkeypatch, tmp_path: Path):
-        """Test restart reuses last runtime host/port when CLI and env omit them."""
+    def test_restart_reuses_supervisor_recorded_host_and_port(self, monkeypatch, tmp_path: Path):
+        """Test restart reuses supervisor host/port when CLI and env omit them."""
         captured = {}
-        paths = SimpleNamespace(
-            backend_pid=tmp_path / "backend.pid",
-            frontend_pid=tmp_path / "webui.pid",
-        )
-        records = {
-            paths.backend_pid: SimpleNamespace(host="0.0.0.0", port=9000),
-            paths.frontend_pid: SimpleNamespace(host="0.0.0.0", port=5174),
-        }
+        paths = SimpleNamespace(run_dir=tmp_path)
 
         def fake_restart_all(config, _console):
             captured["config"] = config
 
         monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
         monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
-        monkeypatch.setattr(cli_main, "read_runtime_record", lambda path: records.get(path))
+        monkeypatch.setattr(
+            cli_main,
+            "read_supervisor_status",
+            lambda **_kwargs: {
+                "config": {
+                    "backend_host": "0.0.0.0",
+                    "backend_port": 9000,
+                    "frontend_host": "0.0.0.0",
+                    "frontend_port": 5174,
+                }
+            },
+        )
         Config._global_config = None
 
         result = CliRunner().invoke(cli_main.app, ["restart"])
@@ -268,13 +272,10 @@ class TestCommandLinePortConfiguration:
         assert captured["config"].frontend_host == "0.0.0.0"
         assert captured["config"].frontend_port == 5174
 
-    def test_restart_cli_options_override_runtime_record(self, monkeypatch, tmp_path: Path):
-        """Test explicit restart CLI options override runtime-recorded host/port."""
+    def test_restart_cli_options_override_supervisor_record(self, monkeypatch, tmp_path: Path):
+        """Test explicit restart CLI options override supervisor host/port."""
         captured = {}
-        paths = SimpleNamespace(
-            backend_pid=tmp_path / "backend.pid",
-            frontend_pid=tmp_path / "webui.pid",
-        )
+        paths = SimpleNamespace(run_dir=tmp_path)
 
         def fake_restart_all(config, _console):
             captured["config"] = config
@@ -283,11 +284,15 @@ class TestCommandLinePortConfiguration:
         monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
         monkeypatch.setattr(
             cli_main,
-            "read_runtime_record",
-            lambda path: SimpleNamespace(
-                host="0.0.0.0",
-                port=9000 if Path(path) == paths.backend_pid else 5174,
-            ),
+            "read_supervisor_status",
+            lambda **_kwargs: {
+                "config": {
+                    "backend_host": "0.0.0.0",
+                    "backend_port": 9000,
+                    "frontend_host": "0.0.0.0",
+                    "frontend_port": 5174,
+                }
+            },
         )
         Config._global_config = None
 
@@ -312,13 +317,10 @@ class TestCommandLinePortConfiguration:
         assert captured["config"].frontend_host == "127.0.0.1"
         assert captured["config"].frontend_port == 5273
 
-    def test_restart_environment_overrides_runtime_record(self, monkeypatch, tmp_path: Path):
-        """Test restart environment variables still override runtime-recorded host/port."""
+    def test_restart_environment_overrides_supervisor_record(self, monkeypatch, tmp_path: Path):
+        """Test restart environment variables still override supervisor host/port."""
         captured = {}
-        paths = SimpleNamespace(
-            backend_pid=tmp_path / "backend.pid",
-            frontend_pid=tmp_path / "webui.pid",
-        )
+        paths = SimpleNamespace(run_dir=tmp_path)
 
         def fake_restart_all(config, _console):
             captured["config"] = config
@@ -327,11 +329,15 @@ class TestCommandLinePortConfiguration:
         monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
         monkeypatch.setattr(
             cli_main,
-            "read_runtime_record",
-            lambda path: SimpleNamespace(
-                host="0.0.0.0",
-                port=9000 if Path(path) == paths.backend_pid else 5174,
-            ),
+            "read_supervisor_status",
+            lambda **_kwargs: {
+                "config": {
+                    "backend_host": "0.0.0.0",
+                    "backend_port": 9000,
+                    "frontend_host": "0.0.0.0",
+                    "frontend_port": 5174,
+                }
+            },
         )
         monkeypatch.setenv("FLOCKS_SERVER_HOST", "127.0.0.1")
         monkeypatch.setenv("FLOCKS_SERVER_PORT", "9101")

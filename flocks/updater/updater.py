@@ -1888,13 +1888,19 @@ class _NullConsole:
 
 def _current_service_config():
     from flocks.cli import service_manager
+    from flocks.cli.service_control import read_supervisor_status
 
-    paths = service_manager.ensure_runtime_dirs()
+    try:
+        payload = read_supervisor_status(paths=service_manager.runtime_paths(), timeout=1.0)
+    except Exception:
+        payload = {}
+
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
     return service_manager.ServiceConfig(
-        backend_host=service_manager._recorded_host(paths.backend_pid, service_manager.ServiceConfig.backend_host),
-        backend_port=service_manager._recorded_port(paths.backend_pid, service_manager.ServiceConfig.backend_port),
-        frontend_host=service_manager._recorded_host(paths.frontend_pid, service_manager.ServiceConfig.frontend_host),
-        frontend_port=service_manager._recorded_port(paths.frontend_pid, service_manager.ServiceConfig.frontend_port),
+        backend_host=str(config.get("backend_host") or service_manager.ServiceConfig.backend_host),
+        backend_port=int(config.get("backend_port") or service_manager.ServiceConfig.backend_port),
+        frontend_host=str(config.get("frontend_host") or service_manager.ServiceConfig.frontend_host),
+        frontend_port=int(config.get("frontend_port") or service_manager.ServiceConfig.frontend_port),
         no_browser=True,
         skip_frontend_build=True,
     )
@@ -2068,6 +2074,7 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
 
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     from flocks.cli import service_manager
+    from flocks.cli.service_control import post_control_json
 
     config = _current_service_config()
     payload: dict[str, Any] = {
@@ -2082,9 +2089,8 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     _persist_upgrade_state(payload, last_error=None)
 
     console = _NullConsole()
-    paths = service_manager.ensure_runtime_dirs()
-    frontend_port = service_manager._recorded_port(paths.frontend_pid, config.frontend_port)
-    service_manager.stop_one(frontend_port, paths.frontend_pid, "WebUI", console)
+    paths = service_manager.runtime_paths()
+    post_control_json("/stop/webui", paths=paths, timeout=30.0)
 
     try:
         payload.update(_start_upgrade_page_server(config, version))
@@ -2097,7 +2103,7 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
         _stop_upgrade_page_server(frontend_port=config.frontend_port)
         _clear_upgrade_state()
         try:
-            service_manager.start_frontend(config, console)
+            _start_frontend_with_fallback(config, console, allow_build_fallback=False)
         except Exception as restart_error:
             log.error("updater.frontend.restore_failed", {"error": str(restart_error)})
         raise
@@ -2181,14 +2187,24 @@ def read_upgrade_runtime_state(frontend_port: int | None = None) -> dict[str, An
 
 
 def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool) -> None:
-    from flocks.cli import service_manager
+    from flocks.cli.service_control import post_control_json, service_config_payload
 
     try:
-        service_manager.start_frontend(config, console)
+        payload = post_control_json(
+            "/restart/webui",
+            payload=service_config_payload(config),
+            paths=None,
+            timeout=180.0,
+        )
+        webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
+        if webui.get("state") != "healthy":
+            raise RuntimeError(str(webui.get("last_error") or "WebUI restart did not become healthy"))
         return
     except Exception:
         if not allow_build_fallback or not config.skip_frontend_build:
             raise
+
+    from flocks.cli import service_manager
 
     rebuilt_config = service_manager.ServiceConfig(
         backend_host=config.backend_host,
@@ -2198,7 +2214,12 @@ def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool
         no_browser=config.no_browser,
         skip_frontend_build=False,
     )
-    service_manager.start_frontend(rebuilt_config, console)
+    payload = service_config_payload(rebuilt_config)
+    payload["force_frontend_build"] = True
+    result = post_control_json("/restart/webui", payload=payload, paths=None, timeout=180.0)
+    webui = result.get("webui") if isinstance(result.get("webui"), dict) else {}
+    if webui.get("state") != "healthy":
+        raise RuntimeError(str(webui.get("last_error") or "WebUI restart did not become healthy"))
 
 
 def cleanup_orphan_upgrade_state(*, frontend_port: int | None = None) -> bool:
@@ -3442,13 +3463,10 @@ def _build_restart_handoff_argv(
     cleanup_dir: Path | None = None,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
-    from flocks.cli import service_manager
-
     if not restart_argv:
         raise ValueError("restart command is empty")
 
     config = _current_service_config()
-    paths = service_manager.ensure_runtime_dirs()
     argv = [
         restart_argv[0],
         "-m",
@@ -3463,8 +3481,6 @@ def _build_restart_handoff_argv(
         str(config.frontend_host),
         "--frontend-port",
         str(config.frontend_port),
-        "--backend-pid-file",
-        str(paths.backend_pid),
         "--install-root",
         str(install_root),
         "--uv-path",

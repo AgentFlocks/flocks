@@ -26,11 +26,6 @@ POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 
 
-class _NullConsole:
-    def print(self, *args, **kwargs) -> None:
-        return None
-
-
 def _record_handoff_log(message: str) -> None:
     append_upgrade_text_log(f"restart_handoff {message}")
 
@@ -68,50 +63,12 @@ def _wait_for_backend_port_free(
     return not _backend_port_in_use(port)
 
 
-def _ensure_backend_port_free(backend_port: int, backend_pid_file: Path) -> bool:
+def _ensure_backend_port_free(backend_port: int) -> bool:
     if _wait_for_backend_port_free(backend_port):
         return True
 
-    _record_handoff_log(f"backend_port_still_in_use port={backend_port}; stopping backend")
-    try:
-        service_manager.stop_one(backend_port, backend_pid_file, "backend", _NullConsole())
-    except Exception as exc:
-        _record_handoff_log(f"backend_stop_failed port={backend_port} error={exc}")
-        return False
-
+    _record_handoff_log(f"backend_port_still_in_use port={backend_port}")
     return _wait_for_backend_port_free(backend_port, timeout_seconds=POST_STOP_PORT_TIMEOUT_SECONDS)
-
-
-def _cli_subcommand(argv: Sequence[str]) -> str | None:
-    for index, value in enumerate(argv[:-2]):
-        if value == "-m" and argv[index + 1] == "flocks.cli.main":
-            return argv[index + 2]
-    return None
-
-
-def _record_backend_runtime_if_direct_serve(
-    process: subprocess.Popen,
-    restart_argv: Sequence[str],
-    *,
-    backend_host: str,
-    backend_port: int,
-    backend_pid_file: Path,
-) -> None:
-    if _cli_subcommand(restart_argv) != "serve":
-        return
-
-    try:
-        service_manager.write_runtime_record(
-            backend_pid_file,
-            service_manager.process_runtime_record(
-                process,
-                host=backend_host,
-                port=backend_port,
-                command=restart_argv,
-            ),
-        )
-    except Exception as exc:
-        _record_handoff_log(f"backend_runtime_record_failed error={exc}")
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -121,7 +78,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend-port", type=int, required=True)
     parser.add_argument("--frontend-host", required=True)
     parser.add_argument("--frontend-port", type=int, required=True)
-    parser.add_argument("--backend-pid-file", required=True)
     parser.add_argument("--install-root", required=True)
     parser.add_argument("--uv-path", required=True)
     parser.add_argument("--sync-timeout", type=int, required=True)
@@ -200,8 +156,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    backend_pid_file = Path(args.backend_pid_file)
-    if not _ensure_backend_port_free(args.backend_port, backend_pid_file):
+    if not _ensure_backend_port_free(args.backend_port):
         _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
         _cleanup_dir(args.cleanup_dir)
         return 1
@@ -226,13 +181,6 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    _record_backend_runtime_if_direct_serve(
-        process,
-        restart_argv,
-        backend_host=args.backend_host,
-        backend_port=args.backend_port,
-        backend_pid_file=backend_pid_file,
-    )
     _record_handoff_log(f"restart_spawned pid={process.pid}")
     _cleanup_dir(args.cleanup_dir)
     return 0
