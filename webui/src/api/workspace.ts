@@ -111,6 +111,12 @@ export const workspaceAPI = {
   readMemoryFile: (path: string) =>
     client.get<WorkspaceFileContentResponse>('/api/workspace/memory/file', { params: { path } }),
 
+  memoryDownloadUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/memory/download?path=${encodeURIComponent(path)}`,
+
+  memoryPreviewUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/memory/preview?path=${encodeURIComponent(path)}`,
+
   // Stats
   stats: () =>
     client.get<WorkspaceStats>('/api/workspace/stats'),

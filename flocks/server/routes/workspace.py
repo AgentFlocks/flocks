@@ -27,8 +27,10 @@ File operations (workspace only)
   POST   /api/workspace/reveal        open containing folder in system file manager
 
 Memory view (read-only, points to data/memory/)
-  GET /api/workspace/memory/list  list memory files
-  GET /api/workspace/memory/file  read memory file content
+  GET /api/workspace/memory/list      list memory files
+  GET /api/workspace/memory/file      read memory file content
+  GET /api/workspace/memory/preview   preview single memory file inline
+  GET /api/workspace/memory/download  download single memory file
 
 Stats
   GET /api/workspace/stats        workspace + memory totals
@@ -76,6 +78,7 @@ _ALLOWED_PREVIEW_MEDIA_TYPES = {
     "image/jpeg",
     "image/gif",
     "image/webp",
+    "image/svg+xml",
 }
 
 
@@ -171,6 +174,38 @@ def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
     if truncated:
         data = data[:max_bytes]
     return data.decode("utf-8", errors="replace"), truncated
+
+
+def _inline_preview_response(target: Path) -> FileResponse:
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if media_type not in _ALLOWED_PREVIEW_MEDIA_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="File type is not supported for inline preview",
+        )
+    headers = {
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if media_type == "image/svg+xml":
+        headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; script-src 'none'; "
+            "object-src 'none'; base-uri 'none'; img-src data: blob:; "
+            "style-src 'unsafe-inline'"
+        )
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        headers=headers,
+    )
+
+
+def _download_response(target: Path) -> FileResponse:
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+    )
 
 
 def _reveal_in_file_manager(target: Path) -> str:
@@ -444,17 +479,7 @@ async def preview_file(
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    if media_type not in _ALLOWED_PREVIEW_MEDIA_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="File type is not supported for inline preview",
-        )
-    return FileResponse(
-        path=str(target),
-        media_type=media_type,
-        headers={"Content-Disposition": "inline"},
-    )
+    return _inline_preview_response(target)
 
 
 @router.get("/download", summary="Download single file")
@@ -470,11 +495,7 @@ async def download_file(
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-    return FileResponse(
-        path=str(target),
-        filename=target.name,
-        media_type="application/octet-stream",
-    )
+    return _download_response(target)
 
 
 class ZipDownloadRequest(BaseModel):
@@ -591,6 +612,11 @@ async def read_memory_file(
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    if not WorkspaceManager.is_text_file(target):
+        raise HTTPException(
+            status_code=400,
+            detail="Binary file — use /memory/download endpoint instead",
+        )
     max_read_bytes = _max_read_bytes()
     try:
         content, truncated = await asyncio.to_thread(
@@ -607,6 +633,38 @@ async def read_memory_file(
         "size": target.stat().st_size,
         "preview_limit_bytes": max_read_bytes,
     }
+
+
+@router.get("/memory/preview", summary="Preview single memory file inline")
+async def preview_memory_file(
+    path: str = Query(..., description="Relative path inside memory directory"),
+):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_memory_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    return _inline_preview_response(target)
+
+
+@router.get("/memory/download", summary="Download single memory file")
+async def download_memory_file(
+    path: str = Query(..., description="Relative path inside memory directory"),
+):
+    mgr = _get_manager()
+    try:
+        target = mgr.resolve_memory_path(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    return _download_response(target)
 
 
 # ─── stats ──────────────────────────────────────────────────────────────────

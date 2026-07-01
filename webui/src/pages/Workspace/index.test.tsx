@@ -175,6 +175,8 @@ vi.mock('@/api/workspace', async () => {
       readMemoryFile: mocks.readMemoryFile,
       downloadUrl: (path: string) => `/api/workspace/download?path=${encodeURIComponent(path)}`,
       previewUrl: (path: string) => `/api/workspace/preview?path=${encodeURIComponent(path)}`,
+      memoryDownloadUrl: (path: string) => `/api/workspace/memory/download?path=${encodeURIComponent(path)}`,
+      memoryPreviewUrl: (path: string) => `/api/workspace/memory/preview?path=${encodeURIComponent(path)}`,
     },
   };
 });
@@ -202,6 +204,7 @@ function file(name: string, path: string, isTextFile = true) {
 describe('WorkspacePage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.list.mockResolvedValue({ data: [] });
     mocks.readFile.mockResolvedValue({ data: { content: '' } });
     mocks.writeFile.mockResolvedValue({ data: { written: true } });
     mocks.deleteFile.mockResolvedValue({ data: { deleted: true } });
@@ -372,6 +375,116 @@ describe('WorkspacePage', () => {
     expect(pdfMocks.renderPage).toHaveBeenCalled();
     expect(screen.getByTitle('Previous page')).toBeDisabled();
     expect(screen.getByTitle('Next page')).toBeEnabled();
+  });
+
+  it('Memory Markdown 文件复用预览渲染和全屏预览', async () => {
+    mocks.listMemory.mockResolvedValue({
+      data: [file('MEMORY.md', 'MEMORY.md')],
+    });
+    mocks.readMemoryFile.mockResolvedValue({
+      data: {
+        path: 'MEMORY.md',
+        content: '# Memory\n\n**Fact**',
+        truncated: false,
+      },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(screen.getByRole('button', { name: 'Memory' }));
+    await user.click(await screen.findByText('MEMORY.md'));
+
+    expect(await screen.findByRole('heading', { name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Source' })).toBeInTheDocument();
+
+    await user.click(screen.getByTitle('Fullscreen preview'));
+    expect(screen.getAllByRole('heading', { name: 'Memory' })).toHaveLength(2);
+  });
+
+  it('Memory PDF 文件使用 memory inline preview 地址展示', async () => {
+    mocks.listMemory.mockResolvedValue({
+      data: [file('profile.pdf', 'nested/profile.pdf', false)],
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(screen.getByRole('button', { name: 'Memory' }));
+    await user.click(await screen.findByText('profile.pdf'));
+
+    await waitFor(() => {
+      expect(pdfMocks.getDocument).toHaveBeenCalledWith({
+        url: '/api/workspace/memory/preview?path=nested%2Fprofile.pdf',
+        withCredentials: true,
+      });
+    });
+    expect(mocks.readMemoryFile).not.toHaveBeenCalled();
+  });
+
+  it('Memory SVG 文件使用图片预览展示', async () => {
+    mocks.listMemory.mockResolvedValue({
+      data: [file('logo.svg', 'icons/logo.svg', false)],
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(screen.getByRole('button', { name: 'Memory' }));
+    await user.click(await screen.findByText('logo.svg'));
+
+    const image = await screen.findByRole('img', { name: 'logo.svg' });
+    expect(image).toHaveAttribute('src', '/api/workspace/memory/preview?path=icons%2Flogo.svg');
+    expect(mocks.readMemoryFile).not.toHaveBeenCalled();
+  });
+
+  it('Memory 文本文件快速切换时忽略过期读取结果', async () => {
+    let resolveFirst!: (value: { data: { path: string; content: string; truncated: boolean } }) => void;
+    const firstRead = new Promise<{ data: { path: string; content: string; truncated: boolean } }>((resolve) => {
+      resolveFirst = resolve;
+    });
+
+    mocks.listMemory.mockResolvedValue({
+      data: [
+        file('first.md', 'first.md'),
+        file('second.md', 'second.md'),
+      ],
+    });
+    mocks.readMemoryFile.mockImplementation((path: string) => {
+      if (path === 'first.md') {
+        return firstRead;
+      }
+      return Promise.resolve({
+        data: {
+          path: 'second.md',
+          content: '# Second',
+          truncated: false,
+        },
+      });
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(screen.getByRole('button', { name: 'Memory' }));
+    await user.click(await screen.findByText('first.md'));
+    await user.click(await screen.findByText('second.md'));
+
+    expect(await screen.findByRole('heading', { name: 'Second' })).toBeInTheDocument();
+
+    resolveFirst({
+      data: {
+        path: 'first.md',
+        content: '# First',
+        truncated: false,
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'First' })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
   });
 
   it('不支持预览的文件显示下载和打开目录入口', async () => {

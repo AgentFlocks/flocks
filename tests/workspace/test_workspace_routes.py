@@ -8,8 +8,9 @@ Covered endpoints
 -----------------
 Directory:  GET /tree, GET /list, POST /dir, DELETE /dir
 File:       POST /upload, GET /file, PUT /file, DELETE /file,
-            GET /download, POST /download/zip, POST /move
-Memory:     GET /memory/list, GET /memory/file
+            GET /preview, GET /download, POST /download/zip, POST /move
+Memory:     GET /memory/list, GET /memory/file, GET /memory/preview,
+            GET /memory/download
 Stats:      GET /stats
 """
 
@@ -515,11 +516,15 @@ class TestPreview:
         r = _client(workspace_client).get("/api/workspace/preview?path=outputs/demo.html")
         assert r.status_code == 415
 
-    def test_preview_svg_rejected(self, workspace_client):
+    def test_preview_svg_inline_with_security_headers(self, workspace_client):
         ws = _ws(workspace_client)
         (ws / "outputs" / "image.svg").write_text("<svg><script>alert(1)</script></svg>")
         r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.svg")
-        assert r.status_code == 415
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert "inline" in r.headers.get("content-disposition", "")
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert "script-src 'none'" in r.headers["content-security-policy"]
 
     def test_preview_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/preview?path=missing.pdf")
@@ -688,6 +693,13 @@ class TestMemoryView:
         assert "Key facts" in data["content"]
         assert data["truncated"] is False
 
+    def test_read_memory_binary_returns_400(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=image.png")
+        assert r.status_code == 400
+        assert "Binary file" in r.json()["detail"]
+
     def test_read_large_memory_file_returns_truncated_preview(self, workspace_client, monkeypatch):
         monkeypatch.setenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", "8")
         mem = _mem(workspace_client)
@@ -715,6 +727,40 @@ class TestMemoryView:
         r = _client(workspace_client).get("/api/workspace/memory/file?path=daily/2026-03-14.md")
         assert r.status_code == 200
         assert r.json()["content"] == "daily note"
+
+    def test_preview_memory_pdf_inline(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "report.pdf").write_bytes(b"%PDF-1.4\n")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=report.pdf")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_memory_svg_inline_with_security_headers(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "logo.svg").write_text("<svg><script>alert(1)</script></svg>")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=logo.svg")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert "script-src 'none'" in r.headers["content-security-policy"]
+
+    def test_preview_memory_unsupported_returns_415(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "archive.zip").write_bytes(b"PK\x03\x04")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=archive.zip")
+        assert r.status_code == 415
+
+    def test_download_memory_file(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/memory/download?path=image.png")
+        assert r.status_code == 200
+        assert r.content == b"\x89PNG\r\n\x1a\n"
+        assert r.headers["content-type"].startswith("application/octet-stream")
+
+    def test_memory_preview_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=../../etc/passwd")
+        assert r.status_code == 400
 
     def test_memory_write_not_allowed(self, workspace_client):
         """Memory directory has no write endpoint — PUT /file with memory path is confined to workspace."""

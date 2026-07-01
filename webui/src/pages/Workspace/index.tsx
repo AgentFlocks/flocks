@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'r
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
   X, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
-  Brain, FileText, AlertTriangle, Search, ArrowLeft, Maximize2,
+  Brain, AlertTriangle, Search, ArrowLeft, Maximize2,
   Code2, Eye, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -25,9 +25,23 @@ type SortDirection = 'asc' | 'desc';
 type PreviewKind = 'markdown' | 'html' | 'json' | 'jsonl' | 'csv' | 'text' | 'image' | 'pdf' | 'unsupported';
 type PreviewMode = 'preview' | 'source';
 
-const PREVIEW_PANEL_DEFAULT_WIDTH = 620;
+interface PreviewFileAccess {
+  previewUrl: (path: string) => string;
+  downloadUrl: (path: string) => string;
+}
+
+const WORKSPACE_PREVIEW_FILE_ACCESS: PreviewFileAccess = {
+  previewUrl: (path) => workspaceAPI.previewUrl(path),
+  downloadUrl: (path) => workspaceAPI.downloadUrl(path),
+};
+
+const MEMORY_PREVIEW_FILE_ACCESS: PreviewFileAccess = {
+  previewUrl: (path) => workspaceAPI.memoryPreviewUrl(path),
+  downloadUrl: (path) => workspaceAPI.memoryDownloadUrl(path),
+};
+
+const PREVIEW_PANEL_DEFAULT_RATIO = 0.5;
 const PREVIEW_PANEL_MIN_WIDTH = 420;
-const PREVIEW_PANEL_MAX_WIDTH = 960;
 const PREVIEW_PANEL_MIN_LIST_WIDTH = 360;
 const PDF_MIN_SCALE = 0.6;
 const PDF_MAX_SCALE = 2.2;
@@ -39,6 +53,22 @@ const IMAGE_MAX_SCALE = 3;
 const IMAGE_SCALE_STEP = 0.25;
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+function getViewportWidth(): number {
+  return typeof window === 'undefined' ? PREVIEW_PANEL_MIN_WIDTH * 2 : window.innerWidth;
+}
+
+function getPreviewPanelMaxWidth(containerWidth = getViewportWidth()): number {
+  return Math.max(PREVIEW_PANEL_MIN_WIDTH, containerWidth - PREVIEW_PANEL_MIN_LIST_WIDTH);
+}
+
+function getDefaultPreviewPanelWidth(containerWidth = getViewportWidth()): number {
+  const targetWidth = Math.floor(containerWidth * PREVIEW_PANEL_DEFAULT_RATIO);
+  return Math.min(
+    getPreviewPanelMaxWidth(containerWidth),
+    Math.max(PREVIEW_PANEL_MIN_WIDTH, targetWidth),
+  );
+}
 
 interface SortState {
   field: SortField;
@@ -177,14 +207,16 @@ function fileExtension(name: string): string {
 
 function getPreviewKind(node: WorkspaceNode): PreviewKind {
   const ext = fileExtension(node.name);
-  if (['md', 'markdown'].includes(ext)) return 'markdown';
-  if (['html', 'htm'].includes(ext)) return 'html';
-  if (ext === 'json') return 'json';
-  if (ext === 'jsonl') return 'jsonl';
-  if (ext === 'csv') return 'csv';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return 'image';
   if (ext === 'pdf') return 'pdf';
-  if (node.is_text_file) return 'text';
+  if (node.is_text_file) {
+    if (['md', 'markdown'].includes(ext)) return 'markdown';
+    if (['html', 'htm'].includes(ext)) return 'html';
+    if (ext === 'json') return 'json';
+    if (ext === 'jsonl') return 'jsonl';
+    if (ext === 'csv') return 'csv';
+    return 'text';
+  }
   return 'unsupported';
 }
 
@@ -302,7 +334,15 @@ function CsvPreview({ content }: { content: string }) {
   );
 }
 
-function PdfPreview({ node, onReveal }: { node: WorkspaceNode; onReveal: (node: WorkspaceNode) => void }) {
+function PdfPreview({
+  node,
+  fileAccess,
+  onReveal,
+}: {
+  node: WorkspaceNode;
+  fileAccess: PreviewFileAccess;
+  onReveal?: (node: WorkspaceNode) => void;
+}) {
   const { t } = useTranslation('workspace');
   const previewAreaRef = useRef<HTMLDivElement>(null);
   const pageCanvasRefs = useRef(new Map<number, HTMLCanvasElement>());
@@ -317,7 +357,7 @@ function PdfPreview({ node, onReveal }: { node: WorkspaceNode; onReveal: (node: 
   const [loading, setLoading] = useState(true);
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const previewUrl = workspaceAPI.previewUrl(node.path);
+  const previewUrl = fileAccess.previewUrl(node.path);
 
   useEffect(() => {
     let cancelled = false;
@@ -507,21 +547,23 @@ function PdfPreview({ node, onReveal }: { node: WorkspaceNode; onReveal: (node: 
             </div>
             <div className="flex flex-wrap gap-2">
               <a
-                href={workspaceAPI.downloadUrl(node.path)}
+                href={fileAccess.downloadUrl(node.path)}
                 download={node.name}
                 className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-800"
               >
                 <Download className="h-4 w-4" />
                 {t('files.downloadFile')}
               </a>
-              <button
-                type="button"
-                onClick={() => onReveal(node)}
-                className="flex items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-sm text-amber-800 hover:bg-amber-100"
-              >
-                <FolderOpen className="h-4 w-4" />
-                {t('files.reveal')}
-              </button>
+              {onReveal && (
+                <button
+                  type="button"
+                  onClick={() => onReveal(node)}
+                  className="flex items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-sm text-amber-800 hover:bg-amber-100"
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  {t('files.reveal')}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -608,13 +650,13 @@ function PdfPreview({ node, onReveal }: { node: WorkspaceNode; onReveal: (node: 
   );
 }
 
-function ImagePreview({ node }: { node: WorkspaceNode }) {
+function ImagePreview({ node, fileAccess }: { node: WorkspaceNode; fileAccess: PreviewFileAccess }) {
   const { t } = useTranslation('workspace');
   const previewAreaRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [previewAreaWidth, setPreviewAreaWidth] = useState(0);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
-  const previewUrl = workspaceAPI.previewUrl(node.path);
+  const previewUrl = fileAccess.previewUrl(node.path);
 
   useEffect(() => {
     setScale(1);
@@ -692,26 +734,27 @@ function RenderedPreview({
   node,
   content,
   kind,
+  fileAccess,
   onReveal,
 }: {
   node: WorkspaceNode;
   content: string | null;
   kind: PreviewKind;
-  onReveal: (node: WorkspaceNode) => void;
+  fileAccess: PreviewFileAccess;
+  onReveal?: (node: WorkspaceNode) => void;
 }) {
   const { t } = useTranslation('workspace');
-  const previewUrl = workspaceAPI.previewUrl(node.path);
 
   if (kind === 'image') {
-    return <ImagePreview node={node} />;
+    return <ImagePreview node={node} fileAccess={fileAccess} />;
   }
 
   if (kind === 'pdf') {
-    return <PdfPreview node={node} onReveal={onReveal} />;
+    return <PdfPreview node={node} fileAccess={fileAccess} onReveal={onReveal} />;
   }
 
   if (kind === 'unsupported') {
-    return <UnsupportedPreview node={node} onReveal={onReveal} />;
+    return <UnsupportedPreview node={node} fileAccess={fileAccess} onReveal={onReveal} />;
   }
 
   if (content === null) {
@@ -778,10 +821,18 @@ function RenderedPreview({
     return <SourcePreview content={content} />;
   }
 
-  return <UnsupportedPreview node={node} onReveal={onReveal} />;
+  return <UnsupportedPreview node={node} fileAccess={fileAccess} onReveal={onReveal} />;
 }
 
-function UnsupportedPreview({ node, onReveal }: { node: WorkspaceNode; onReveal: (node: WorkspaceNode) => void }) {
+function UnsupportedPreview({
+  node,
+  fileAccess,
+  onReveal,
+}: {
+  node: WorkspaceNode;
+  fileAccess: PreviewFileAccess;
+  onReveal?: (node: WorkspaceNode) => void;
+}) {
   const { t } = useTranslation('workspace');
   return (
     <div className="h-full overflow-auto bg-white p-5">
@@ -794,21 +845,23 @@ function UnsupportedPreview({ node, onReveal }: { node: WorkspaceNode; onReveal:
           </div>
           <div className="flex flex-wrap gap-2">
             <a
-              href={workspaceAPI.downloadUrl(node.path)}
+              href={fileAccess.downloadUrl(node.path)}
               download={node.name}
               className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-800"
             >
               <Download className="h-4 w-4" />
               {t('files.downloadFile')}
             </a>
-            <button
-              type="button"
-              onClick={() => onReveal(node)}
-              className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800"
-            >
-              <FolderOpen className="h-4 w-4" />
-              {t('files.reveal')}
-            </button>
+            {onReveal && (
+              <button
+                type="button"
+                onClick={() => onReveal(node)}
+                className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800"
+              >
+                <FolderOpen className="h-4 w-4" />
+                {t('files.reveal')}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -853,6 +906,7 @@ function FilePreviewRenderer({
   editContent,
   truncated,
   previewLimitBytes,
+  fileAccess,
   onEditChange,
   onReveal,
 }: {
@@ -862,8 +916,9 @@ function FilePreviewRenderer({
   editContent: string | null;
   truncated: boolean;
   previewLimitBytes: number | null;
+  fileAccess: PreviewFileAccess;
   onEditChange: (text: string) => void;
-  onReveal: (node: WorkspaceNode) => void;
+  onReveal?: (node: WorkspaceNode) => void;
 }) {
   const { t } = useTranslation('workspace');
   const [mode, setMode] = useState<PreviewMode>('preview');
@@ -903,7 +958,7 @@ function FilePreviewRenderer({
         {showSource ? (
           <SourcePreview content={content} />
         ) : (
-          <RenderedPreview node={node} content={content} kind={kind} onReveal={onReveal} />
+          <RenderedPreview node={node} content={content} kind={kind} fileAccess={fileAccess} onReveal={onReveal} />
         )}
       </div>
     </div>
@@ -915,6 +970,7 @@ function PreviewModal({
   content,
   truncated,
   previewLimitBytes,
+  fileAccess,
   onClose,
   onReveal,
 }: {
@@ -922,8 +978,9 @@ function PreviewModal({
   content: string | null;
   truncated: boolean;
   previewLimitBytes: number | null;
+  fileAccess: PreviewFileAccess;
   onClose: () => void;
-  onReveal: (node: WorkspaceNode) => void;
+  onReveal?: (node: WorkspaceNode) => void;
 }) {
   const { t } = useTranslation('workspace');
   return (
@@ -934,12 +991,14 @@ function PreviewModal({
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-gray-900">{node.name}</span>
           <span className="text-xs text-gray-400">{formatBytes(node.size ?? 0)}</span>
           <span className="text-xs text-gray-400">{formatDate(node.modified_at)}</span>
-          <a href={workspaceAPI.downloadUrl(node.path)} download={node.name} title={t('files.download')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+          <a href={fileAccess.downloadUrl(node.path)} download={node.name} title={t('files.download')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
             <Download className="h-4 w-4" />
           </a>
-          <button onClick={() => onReveal(node)} title={t('files.reveal')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
-            <FolderOpen className="h-4 w-4" />
-          </button>
+          {onReveal && (
+            <button onClick={() => onReveal(node)} title={t('files.reveal')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+              <FolderOpen className="h-4 w-4" />
+            </button>
+          )}
           <button onClick={onClose} title={t('files.close')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
             <X className="h-4 w-4" />
           </button>
@@ -952,6 +1011,7 @@ function PreviewModal({
             editContent={null}
             truncated={truncated}
             previewLimitBytes={previewLimitBytes}
+            fileAccess={fileAccess}
             onEditChange={() => undefined}
             onReveal={onReveal}
           />
@@ -982,13 +1042,15 @@ function FilesTab() {
   const [newDir, setNewDir] = useState<{ show: boolean; name: string }>({ show: false, name: '' });
   const [dragOver, setDragOver] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
-  const [previewPanelWidth, setPreviewPanelWidth] = useState(PREVIEW_PANEL_DEFAULT_WIDTH);
+  const [previewPanelWidth, setPreviewPanelWidth] = useState(() => getDefaultPreviewPanelWidth());
   const [fileListWidth, setFileListWidth] = useState(900);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const workspaceSplitRef = useRef<HTMLDivElement>(null);
   const fileListRef = useRef<HTMLDivElement>(null);
   const latestDirRequestIdRef = useRef(0);
   const didInitRef = useRef(false);
+  const userResizedPreviewRef = useRef(false);
 
   const loadFileContent = useCallback(async (path: string) => {
     const res = await workspaceAPI.readFile(path);
@@ -1047,6 +1109,31 @@ function FilesTab() {
       if (entry.contentRect.width > 0) {
         setFileListWidth(entry.contentRect.width);
       }
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const node = workspaceSplitRef.current;
+    if (!node) return;
+
+    const syncPreviewWidth = (containerWidth: number) => {
+      if (containerWidth <= 0) return;
+      const maxWidth = getPreviewPanelMaxWidth(containerWidth);
+      setPreviewPanelWidth((current) => {
+        if (userResizedPreviewRef.current) {
+          return Math.min(maxWidth, Math.max(PREVIEW_PANEL_MIN_WIDTH, current));
+        }
+        return getDefaultPreviewPanelWidth(containerWidth);
+      });
+    };
+
+    syncPreviewWidth(node.clientWidth);
+    if (typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      syncPreviewWidth(entry.contentRect.width);
     });
     observer.observe(node);
     return () => observer.disconnect();
@@ -1164,13 +1251,12 @@ function FilesTab() {
 
   const handlePreviewResizeStart = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
+    userResizedPreviewRef.current = true;
     const pointerId = event.pointerId;
     const startX = event.clientX;
     const startWidth = previewPanelWidth;
-    const maxWidth = Math.min(
-      PREVIEW_PANEL_MAX_WIDTH,
-      Math.max(PREVIEW_PANEL_MIN_WIDTH, window.innerWidth - PREVIEW_PANEL_MIN_LIST_WIDTH),
-    );
+    const containerWidth = workspaceSplitRef.current?.clientWidth ?? getViewportWidth();
+    const maxWidth = getPreviewPanelMaxWidth(containerWidth);
 
     event.currentTarget.setPointerCapture(pointerId);
 
@@ -1212,7 +1298,7 @@ function FilesTab() {
   const showModifiedColumn = fileListWidth >= 760;
 
   return (
-    <div className="flex h-full min-h-0 gap-4">
+    <div ref={workspaceSplitRef} className="flex h-full min-h-0 gap-4">
       {/* File list */}
       <div ref={fileListRef} className="flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
         {/* Toolbar */}
@@ -1442,6 +1528,7 @@ function FilesTab() {
               editContent={panel.editContent}
               truncated={panel.truncated}
               previewLimitBytes={panel.previewLimitBytes}
+              fileAccess={WORKSPACE_PREVIEW_FILE_ACCESS}
               onEditChange={(text) => dispatchPanel({ type: 'edit_change', text })}
               onReveal={handleReveal}
             />
@@ -1454,6 +1541,7 @@ function FilesTab() {
           content={panel.content}
           truncated={panel.truncated}
           previewLimitBytes={panel.previewLimitBytes}
+          fileAccess={WORKSPACE_PREVIEW_FILE_ACCESS}
           onClose={() => setPreviewModalOpen(false)}
           onReveal={handleReveal}
         />
@@ -1477,8 +1565,12 @@ function MemoryTab() {
   // the '加载中...' placeholder getting stuck on error.
   const [contentState, setContentState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [content, setContent] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [previewLimitBytes, setPreviewLimitBytes] = useState<number | null>(null);
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
 
   const [search, setSearch] = useState('');
+  const latestMemoryRequestIdRef = useRef(0);
 
   const load = useCallback(async () => {
     setLoadState('loading');
@@ -1495,20 +1587,39 @@ function MemoryTab() {
   useEffect(() => { load(); }, [load]);
 
   const handleSelect = async (node: WorkspaceNode) => {
+    const requestId = latestMemoryRequestIdRef.current + 1;
+    latestMemoryRequestIdRef.current = requestId;
     setSelected(node);
+    setPreviewModalOpen(false);
     setContent(null);
+    setTruncated(false);
+    setPreviewLimitBytes(null);
+
+    if (!node.is_text_file) {
+      setContentState('ready');
+      return;
+    }
+
     setContentState('loading');
     try {
       const res = await workspaceAPI.readMemoryFile(node.path);
+      if (requestId !== latestMemoryRequestIdRef.current) {
+        return;
+      }
       setContent(res.data.content);
+      setTruncated(res.data.truncated ?? false);
+      setPreviewLimitBytes(res.data.preview_limit_bytes ?? null);
       setContentState('ready');
     } catch (e: any) {
+      if (requestId !== latestMemoryRequestIdRef.current) {
+        return;
+      }
       setContentState('error');
       toastError(t('memory.readFileFailed'), e?.response?.data?.detail ?? e.message);
     }
   };
 
-  const filtered = files.filter((f) => f.name.toLowerCase().includes(search.toLowerCase()));
+  const filtered = files.filter((f) => f.path.toLowerCase().includes(search.toLowerCase()));
 
   return (
     <div className="flex h-full gap-4">
@@ -1557,7 +1668,7 @@ function MemoryTab() {
                   selected?.path === f.path ? 'bg-purple-50 text-purple-700' : 'hover:bg-gray-50 text-gray-700'
                 }`}
               >
-                <FileText className={`w-4 h-4 flex-shrink-0 ${selected?.path === f.path ? 'text-purple-500' : 'text-gray-400'}`} />
+                <span className="text-sm flex-shrink-0">{fileIcon(f)}</span>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-medium truncate">{f.name}</div>
                   <div className="text-xs text-gray-400">{formatDate(f.modified_at)} · {formatBytes(f.size ?? 0)}</div>
@@ -1576,12 +1687,18 @@ function MemoryTab() {
         {selected ? (
           <>
             <div className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
-              <Brain className="w-4 h-4 text-purple-500 flex-shrink-0" />
+              <span className="text-sm flex-shrink-0">{fileIcon(selected)}</span>
               <span className="flex-1 text-sm font-medium text-gray-800 truncate">{selected.name}</span>
               <span className="text-xs text-gray-400">{formatBytes(selected.size ?? 0)}</span>
               <span className="text-xs text-gray-400">{formatDate(selected.modified_at)}</span>
+              <a href={workspaceAPI.memoryDownloadUrl(selected.path)} download={selected.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                <Download className="w-4 h-4" />
+              </a>
+              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                <Maximize2 className="w-4 h-4" />
+              </button>
             </div>
-            <div className="flex-1 overflow-auto">
+            <div className="flex-1 min-h-0 overflow-hidden">
               {contentState === 'loading' && (
                 <div className="flex items-center justify-center h-24"><LoadingSpinner /></div>
               )}
@@ -1593,11 +1710,28 @@ function MemoryTab() {
                 </div>
               )}
               {contentState === 'ready' && (
-                <pre className="p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words">
-                  {content}
-                </pre>
+                <FilePreviewRenderer
+                  node={selected}
+                  content={content}
+                  editing={false}
+                  editContent={null}
+                  truncated={truncated}
+                  previewLimitBytes={previewLimitBytes}
+                  fileAccess={MEMORY_PREVIEW_FILE_ACCESS}
+                  onEditChange={() => undefined}
+                />
               )}
             </div>
+            {previewModalOpen && (
+              <PreviewModal
+                node={selected}
+                content={content}
+                truncated={truncated}
+                previewLimitBytes={previewLimitBytes}
+                fileAccess={MEMORY_PREVIEW_FILE_ACCESS}
+                onClose={() => setPreviewModalOpen(false)}
+              />
+            )}
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-400">
