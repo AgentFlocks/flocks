@@ -517,8 +517,10 @@ class TestConfigRoutes:
     ):
         """UI display-name endpoints expose only the visible product name."""
         from flocks.config.config import Config
+        from flocks.server.routes import config as config_routes
 
         monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: False)
         Config._global_config = None
         Config._cached_config = None
 
@@ -560,6 +562,40 @@ class TestConfigRoutes:
         resp = await client.delete("/api/config/ui/favicon")
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["faviconUrl"] is None
+
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_to_flockspro_when_pro_is_enabled(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Empty display-name config falls back to the active product edition."""
+        from flocks.config.config import Config
+        from flocks.server.routes import config as config_routes
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: True)
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Flocks Pro",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme Pro  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme Pro"
+        assert resp.json()["configuredDisplayName"] == "Acme Pro"
+
+        resp = await client.patch("/api/config/ui", json={"displayName": ""})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Flocks Pro"
+        assert resp.json()["configuredDisplayName"] is None
 
     @pytest.mark.parametrize(
         "svg",

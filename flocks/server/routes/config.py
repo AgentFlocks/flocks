@@ -142,6 +142,7 @@ class UIConfigUpdateRequest(BaseModel):
 
 
 DEFAULT_UI_DISPLAY_NAME = "Flocks"
+DEFAULT_UI_PRO_DISPLAY_NAME = "Flocks Pro"
 FAVICON_MAX_BYTES = 512 * 1024
 FAVICON_RELATIVE_DIR = "assets"
 FAVICON_BASENAME = "favicon"
@@ -252,9 +253,23 @@ SVG_UNSAFE_VALUE_PATTERN = re.compile(
 SVG_URL_PATTERN = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
 
 
+def _is_flockspro_enabled() -> bool:
+    try:
+        from flocks.server.routes.console_upgrade import _get_pro_capability_status
+
+        status_data = _get_pro_capability_status()
+    except Exception:
+        return False
+    return any(status_data.get(key) is True for key in ("pro_enabled", "active", "activated"))
+
+
+def _default_display_name() -> str:
+    return DEFAULT_UI_PRO_DISPLAY_NAME if _is_flockspro_enabled() else DEFAULT_UI_DISPLAY_NAME
+
+
 def _effective_display_name(config: ConfigInfoModel) -> tuple[str, Optional[str]]:
     configured = config.ui.display_name if config.ui else None
-    return configured or DEFAULT_UI_DISPLAY_NAME, configured
+    return configured or _default_display_name(), configured
 
 
 def _ui_assets_dir() -> Path:
