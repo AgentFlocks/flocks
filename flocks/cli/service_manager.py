@@ -860,15 +860,23 @@ def _trusted_flocks_port_owner(pid: int, *, service: str, root: Path) -> bool:
     root_text = str(root).lower()
     webui_text = str(root / "webui").lower()
     if service == "backend":
+        looks_like_uvicorn_backend = "uvicorn" in command_line and "flocks.server.app:app" in command_line
         return (
-            ("flocks.cli.main" in command_line and "serve" in command_line)
+            looks_like_uvicorn_backend
+            or ("flocks.cli.main" in command_line and "serve" in command_line)
             or ("flocks" in command_line and "serve" in command_line and root_text in command_line)
         )
     if service == "webui":
-        looks_like_preview = ("vite" in command_line and "preview" in command_line) or (
-            "npm" in command_line and "preview" in command_line
+        looks_like_vite = "vite" in command_line and (
+            "preview" in command_line or "--host" in command_line or "--port" in command_line
         )
-        return looks_like_preview and (webui_text in command_line or root_text in command_line)
+        looks_like_flocks_webui = (
+            webui_text in command_line
+            or root_text in command_line
+            or "/flocks/webui/" in command_line
+            or "\\flocks\\webui\\" in command_line
+        )
+        return looks_like_vite and looks_like_flocks_webui
     return False
 
 
@@ -879,13 +887,23 @@ def _terminate_orphan_pid(pid: int, label: str, console, *, timeout: float = 5.0
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
         return
 
+    pgid: int | None = None
+    try:
+        candidate_pgid = os.getpgid(pid)
+        if candidate_pgid != os.getpgrp():
+            pgid = candidate_pgid
+    except OSError:
+        pgid = None
+
     targets = collect_process_tree_pids(pid)
+    signal_process_group(signal.SIGTERM, pgid)
     signal_pid_list(signal.SIGTERM, targets)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not any(pid_is_running(target) for target in targets):
+        if not any(pid_is_running(target) for target in targets) and not process_group_is_running(pgid):
             return
         time.sleep(0.25)
+    signal_process_group(signal.SIGKILL, pgid)
     signal_pid_list(signal.SIGKILL, targets)
 
 

@@ -1617,6 +1617,34 @@ def test_start_backend_cleans_trusted_orphan_port_owner(monkeypatch, tmp_path: P
     assert cleaned == [9999]
 
 
+def test_backend_cleanup_trusts_cross_worktree_flocks_uvicorn_owner(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+    owners = iter([[18787], []])
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: (
+            "/Users/zgy/.codex/worktrees/6be0/flocks/.venv/bin/python "
+            "/Users/zgy/.codex/worktrees/6be0/flocks/.venv/bin/uvicorn "
+            "flocks.server.app:app --host 127.0.0.1 --port 8000 --reload --reload-dir flocks"
+        ),
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_port_owners(
+        8000,
+        service="backend",
+        label="后端",
+        console=DummyConsole(),
+        root=tmp_path,
+    )
+
+    assert result == [18787]
+    assert cleaned == [18787]
+
+
 def test_start_backend_raises_when_port_in_use_without_pid_lookup(monkeypatch, tmp_path: Path) -> None:
     paths = service_manager.RuntimePaths(
         root=tmp_path,
@@ -1672,6 +1700,32 @@ def test_start_webui_cleans_trusted_orphan_port_owner(monkeypatch, tmp_path: Pat
 
     assert process.pid == 5678
     assert cleaned == [52372]
+
+
+def test_webui_cleanup_trusts_cross_worktree_flocks_vite_owner(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+    owners = iter([[18962], []])
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: (
+            "node /Users/zgy/.codex/worktrees/6be0/flocks/webui/node_modules/.bin/vite --host 127.0.0.1 --port 5173"
+        ),
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_port_owners(
+        5173,
+        service="webui",
+        label="WebUI",
+        console=DummyConsole(),
+        root=tmp_path,
+    )
+
+    assert result == [18962]
+    assert cleaned == [18962]
 
 
 def test_cleanup_trusted_daemon_processes_cleans_current_install_only(monkeypatch, tmp_path: Path) -> None:
@@ -1774,6 +1828,34 @@ def test_terminate_process_stops_cached_process_group_after_root_exits(monkeypat
     service_manager._terminate_process(process, "WebUI", DummyConsole(), timeout=0.1)
 
     assert signals == [("SIGTERM", 4321)]
+
+
+def test_terminate_orphan_pid_stops_process_group(monkeypatch) -> None:
+    signals: list[tuple[str, int | tuple[int, ...] | None]] = []
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: 18745 if pid == 18787 else pid)
+    monkeypatch.setattr(service_manager.os, "getpgrp", lambda: 99999)
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [18787, 18873])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: False)
+    monkeypatch.setattr(
+        service_manager,
+        "signal_process_group",
+        lambda sig, pgid: signals.append((sig.name, pgid)),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "signal_pid_list",
+        lambda sig, pids: signals.append((sig.name, tuple(pids))),
+    )
+
+    service_manager._terminate_orphan_pid(18787, "后端", DummyConsole(), timeout=0.1)
+
+    assert signals == [
+        ("SIGTERM", 18745),
+        ("SIGTERM", (18787, 18873)),
+    ]
 
 
 def test_spawn_process_appends_without_rotated_suffix(monkeypatch, tmp_path: Path) -> None:
