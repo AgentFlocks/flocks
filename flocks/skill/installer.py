@@ -25,6 +25,7 @@ import platform
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -181,13 +182,37 @@ class SkillInstaller:
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
         }
-        if os.name != "nt":
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
             kwargs["start_new_session"] = True
         return kwargs
 
     @staticmethod
-    def _signal_process_tree(proc, sig: signal.Signals) -> None:
+    def _signal_process_tree(proc, sig: signal.Signals, *, force: bool = False) -> None:
         pid = getattr(proc, "pid", None)
+        if os.name == "nt":
+            if force and isinstance(pid, int) and pid > 0:
+                try:
+                    completed = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                    if completed.returncode == 0:
+                        return
+                except Exception:
+                    pass
+            try:
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except ProcessLookupError:
+                pass
+            return
+
         if os.name != "nt" and isinstance(pid, int) and pid > 0:
             try:
                 os.killpg(pid, sig)
@@ -197,7 +222,7 @@ class SkillInstaller:
             except Exception:
                 pass
         try:
-            if sig == signal.SIGKILL:
+            if force:
                 proc.kill()
             else:
                 proc.terminate()
@@ -241,7 +266,11 @@ class SkillInstaller:
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=5)
             except Exception:
-                SkillInstaller._signal_process_tree(proc, signal.SIGKILL)
+                SkillInstaller._signal_process_tree(
+                    proc,
+                    getattr(signal, "SIGKILL", signal.SIGTERM),
+                    force=True,
+                )
                 try:
                     await asyncio.wait_for(proc.communicate(), timeout=5)
                 except Exception:
@@ -1273,7 +1302,11 @@ class SkillInstaller:
                 try:
                     await asyncio.wait_for(proc.communicate(), timeout=5)
                 except Exception:
-                    cls._signal_process_tree(proc, signal.SIGKILL)
+                    cls._signal_process_tree(
+                        proc,
+                        getattr(signal, "SIGKILL", signal.SIGTERM),
+                        force=True,
+                    )
                     try:
                         await asyncio.wait_for(proc.communicate(), timeout=5)
                     except Exception:

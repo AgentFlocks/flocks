@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 import signal
+import subprocess
 import tempfile
 import io
 import zipfile
@@ -313,6 +314,20 @@ class TestInstallFromSource:
         if os.name != "nt":
             assert kwargs["start_new_session"] is True
 
+    def test_subprocess_stdio_kwargs_uses_windows_process_group(self):
+        with (
+            patch("flocks.skill.installer.os.name", "nt"),
+            patch(
+                "flocks.skill.installer.subprocess.CREATE_NEW_PROCESS_GROUP",
+                512,
+                create=True,
+            ),
+        ):
+            kwargs = SkillInstaller._subprocess_stdio_kwargs()
+
+        assert kwargs["creationflags"] == 512
+        assert "start_new_session" not in kwargs
+
     @pytest.mark.asyncio
     async def test_run_subprocess_timeout_terminates_process_group(self):
         proc = MagicMock()
@@ -341,6 +356,26 @@ class TestInstallFromSource:
                 await SkillInstaller._run_subprocess(["demo"], timeout_sec=1)
 
         mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_signal_process_tree_force_uses_windows_taskkill(self):
+        proc = MagicMock()
+        proc.pid = 12345
+
+        with (
+            patch("flocks.skill.installer.os.name", "nt"),
+            patch("flocks.skill.installer.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            SkillInstaller._signal_process_tree(proc, signal.SIGTERM, force=True)
+
+        mock_run.assert_called_once_with(
+            ["taskkill", "/PID", "12345", "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        proc.kill.assert_not_called()
+        proc.terminate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_skills_sh_cli_staging_imports_agent_skill(self, tmp_skills_dir):
