@@ -1609,11 +1609,8 @@ def _status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
     backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
     webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
     lines = [
-        "[flocks] Flocks daemon",
-        f"[flocks]   PID: {daemon.get('pid')}",
-        f"[flocks]   状态: {daemon.get('state')}",
-        "",
         "[flocks] 服务",
+        _daemon_status_line(daemon),
         _service_status_line("后端", backend),
         _service_status_line("WebUI", webui),
         "",

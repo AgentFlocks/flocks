@@ -775,14 +775,13 @@ def test_build_status_lines_reports_supervisor_control_status(monkeypatch, tmp_p
 
     lines = service_manager.build_status_lines(paths)
 
-    assert lines[0] == "[flocks] Flocks daemon"
-    assert lines[1] == "[flocks]   PID: 100"
-    assert lines[2] == "[flocks]   状态: running"
-    assert "http://127.0.0.1:9000" in lines[5]
-    assert "http://127.0.0.1:5174" in lines[6]
-    assert lines[9] == "[flocks]   daemon: /tmp/logs/daemon.log"
-    assert lines[10] == "[flocks]   后端: /tmp/logs/backend.log"
-    assert lines[11] == "[flocks]   WebUI: /tmp/logs/webui.log"
+    assert lines[0] == "[flocks] 服务"
+    assert lines[1] == "[flocks]   daemon: state=running PID=100"
+    assert "http://127.0.0.1:9000" in lines[2]
+    assert "http://127.0.0.1:5174" in lines[3]
+    assert lines[6] == "[flocks]   daemon: /tmp/logs/daemon.log"
+    assert lines[7] == "[flocks]   后端: /tmp/logs/backend.log"
+    assert lines[8] == "[flocks]   WebUI: /tmp/logs/webui.log"
 
 
 def test_startup_status_lines_use_progress_summary() -> None:
