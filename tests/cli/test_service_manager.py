@@ -2011,8 +2011,10 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
             self.messages.append(message)
 
     states = iter([True, False])
+    payload = _supervisor_status_payload()
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(states))
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
     monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop") or {"status": "stopping"})
     monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda _paths, _console: calls.append("legacy"))
     monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console, **_kwargs: calls.append("cleanup"))
@@ -2022,7 +2024,11 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     service_manager.stop_all(console=console)
 
     assert calls == ["/stop", "legacy", "cleanup", "browser"]
-    assert console.messages == ["[flocks] Flocks daemon 已停止。"]
+    assert console.messages == [
+        "[flocks] server 已停止（PID=111）。",
+        "[flocks] webui 已停止（PID=222）。",
+        "[flocks] daemon 已停止。",
+    ]
 
 
 def test_stop_all_reports_when_supervisor_is_down(monkeypatch, tmp_path: Path) -> None:

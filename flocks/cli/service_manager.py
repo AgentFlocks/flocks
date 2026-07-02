@@ -1472,6 +1472,7 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
     """Stop managed services; caller must hold the lifecycle lock."""
     cleanup_config = ServiceConfig()
     legacy_config = _legacy_runtime_config(paths, cleanup_config)
+    stop_status = None
     if not supervisor_is_running(paths):
         console.print("[flocks] Flocks daemon 未运行。")
         cleanup_legacy_runtime_processes(paths, console)
@@ -1479,7 +1480,8 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
         stop_all_browser_daemons()
         return
     try:
-        cleanup_config = read_supervisor_status(paths=paths, timeout=1.0).config
+        stop_status = read_supervisor_status(paths=paths, timeout=1.0)
+        cleanup_config = stop_status.config
         legacy_config = _legacy_runtime_config(paths, cleanup_config)
     except Exception:
         pass
@@ -1494,7 +1496,7 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
             cleanup_legacy_runtime_processes(paths, console)
             cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
             stop_all_browser_daemons()
-            console.print("[flocks] Flocks daemon 已停止。")
+            _print_stop_summary(console, stop_status)
             return
         time.sleep(0.5)
     raise ServiceError("Flocks daemon 未在预期时间内退出。")
@@ -1556,6 +1558,16 @@ def restart_all(config: ServiceConfig, console) -> None:
     with service_lock(paths):
         _stop_all_unlocked(console, paths=paths)
         _start_all_unlocked(config, console, paths=paths)
+
+
+def _print_stop_summary(console, status) -> None:
+    """Print stopped services from the last available supervisor status."""
+    if status is not None:
+        if status.backend.pid is not None:
+            console.print(f"[flocks] server 已停止（PID={status.backend.pid}）。")
+        if status.webui.pid is not None:
+            console.print(f"[flocks] webui 已停止（PID={status.webui.pid}）。")
+    console.print("[flocks] daemon 已停止。")
 
 
 def cleanup_orphan_service_ports(config: ServiceConfig, console, *, extra_configs: Sequence[ServiceConfig] = ()) -> None:
