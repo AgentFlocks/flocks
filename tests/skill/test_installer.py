@@ -5,6 +5,7 @@ Tests for flocks.skill.installer and eligibility checking.
 import asyncio
 import os
 import shutil
+import signal
 import tempfile
 import io
 import zipfile
@@ -75,6 +76,12 @@ class TestResolveSource:
         r = _resolve_source("safeskill:ioc-lookup")
         assert r["kind"] == "safeskill"
         assert r["value"] == "ioc-lookup"
+
+    def test_safeskill_uri_scheme(self):
+        source = "safeskill://tbx/6ef3925b1f6245bcbd7da39f23c28652/onesig-use@1.0.0"
+        r = _resolve_source(source)
+        assert r["kind"] == "safeskill"
+        assert r["value"] == source
 
     def test_clawhub_scheme(self):
         r = _resolve_source("clawhub:github")
@@ -282,6 +289,60 @@ class TestSaveSkillContent:
 
 class TestInstallFromSource:
     @pytest.mark.asyncio
+    async def test_run_subprocess_isolates_stdio_and_process_group(self):
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        proc.returncode = 0
+
+        with patch(
+            "flocks.skill.installer.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ) as mock_exec:
+            returncode, stdout, stderr = await SkillInstaller._run_subprocess(
+                ["demo"],
+                timeout_sec=1,
+            )
+
+        assert returncode == 0
+        assert stdout == "ok"
+        assert stderr == ""
+        kwargs = mock_exec.call_args.kwargs
+        assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        if os.name != "nt":
+            assert kwargs["start_new_session"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_subprocess_timeout_terminates_process_group(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = None
+        wait_calls = 0
+
+        async def fake_wait_for(awaitable, timeout):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 1:
+                awaitable.close()
+                raise asyncio.TimeoutError()
+            return await awaitable
+
+        with (
+            patch(
+                "flocks.skill.installer.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=proc),
+            ),
+            patch("flocks.skill.installer.asyncio.wait_for", fake_wait_for),
+            patch("flocks.skill.installer.os.killpg") as mock_killpg,
+        ):
+            with pytest.raises(TimeoutError):
+                await SkillInstaller._run_subprocess(["demo"], timeout_sec=1)
+
+        mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+
+    @pytest.mark.asyncio
     async def test_skills_sh_cli_staging_imports_agent_skill(self, tmp_skills_dir):
         class Proc:
             returncode = 0
@@ -351,6 +412,48 @@ class TestInstallFromSource:
             result = await SkillInstaller.install_from_source("safeskill:test")
         assert result.success is False
         assert "npx is required" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_safeskill_cli_uses_cn_region_and_flocks_agent(self, tmp_skills_dir):
+        source = "safeskill://tbx/6ef3925b1f6245bcbd7da39f23c28652/onesig-use@1.0.0"
+        captured = {}
+
+        async def fake_run_subprocess(cmd, *, timeout_sec, cwd=None, env=None):
+            captured["cmd"] = cmd
+            captured["timeout_sec"] = timeout_sec
+            captured["cwd"] = cwd
+            captured["env"] = env
+            staged_skill = Path(env["HOME"]) / ".flocks" / "plugins" / "skills" / "onesig-use"
+            staged_skill.mkdir(parents=True)
+            (staged_skill / "SKILL.md").write_text(
+                "---\nname: onesig-use\ndescription: OneSig\n---\n",
+                encoding="utf-8",
+            )
+            return 0, "✓ onesig-use (copied)", ""
+
+        with (
+            patch("flocks.skill.installer.shutil.which", return_value="/usr/bin/npx"),
+            patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch.object(SkillInstaller, "_run_subprocess", fake_run_subprocess),
+        ):
+            result = await SkillInstaller.install_from_source(source)
+
+        assert result.success is True
+        assert result.skill_name == "onesig-use"
+        assert (tmp_skills_dir / "onesig-use" / "SKILL.md").exists()
+        assert captured["cmd"] == [
+            "/usr/bin/npx",
+            "-y",
+            "@safeskill/cli",
+            "--region",
+            "cn",
+            "add",
+            source,
+            "--agent",
+            "flocks",
+            "--yes",
+        ]
+        assert captured["env"]["HOME"] == captured["cwd"]
 
     @pytest.mark.asyncio
     async def test_local_file(self, tmp_path: Path, tmp_skills_dir: Path):
