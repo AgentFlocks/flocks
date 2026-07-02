@@ -1893,11 +1893,8 @@ def _current_service_config():
 
     try:
         status = read_supervisor_status(paths=service_manager.runtime_paths(), timeout=1.0)
-    except Exception:
-        return service_manager.ServiceConfig(
-            no_browser=True,
-            skip_frontend_build=True,
-        )
+    except Exception as exc:
+        raise RuntimeError("Supervisor control API is unavailable; cannot perform managed upgrade restart.") from exc
     return service_config_from_status_payload(
         status.raw,
         no_browser=True,
@@ -2073,7 +2070,7 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
 
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     from flocks.cli import service_manager
-    from flocks.cli.service_control import request_stop_webui
+    from flocks.cli.service_control import request_prepare_upgrade
 
     config = _current_service_config()
     payload: dict[str, Any] = {
@@ -2089,7 +2086,7 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
 
     console = _NullConsole()
     paths = service_manager.runtime_paths()
-    request_stop_webui(paths=paths, timeout=30.0)
+    request_prepare_upgrade(paths=paths, timeout=30.0)
 
     try:
         payload.update(_start_upgrade_page_server(config, version))
@@ -2110,6 +2107,22 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     return payload
 
 
+def _spawn_restart_handoff(command: list[str], *, cwd: Path) -> subprocess.Popen:
+    creationflags = 0
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            kwargs["startupinfo"] = startupinfo
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, cwd=cwd, close_fds=True, creationflags=creationflags, **kwargs)
+
+
 def _service_config_from_payload(
     payload: dict[str, Any],
     *,
@@ -2125,6 +2138,13 @@ def _service_config_from_payload(
         no_browser=True,
         skip_frontend_build=resolved_skip_frontend_build,
     )
+
+
+def _handoff_service_config():
+    payload = _read_upgrade_state()
+    if payload is not None:
+        return _service_config_from_payload(payload, skip_frontend_build=True)
+    return _current_service_config()
 
 
 def _read_upgrade_server_pid() -> tuple[int | None, bool]:
@@ -3309,11 +3329,7 @@ async def perform_update(
                 "restart_argv": restart_argv,
             },
         )
-        subprocess.Popen(
-            handoff_argv,
-            cwd=install_root,
-            close_fds=True,
-        )
+        _spawn_restart_handoff(handoff_argv, cwd=install_root)
         os._exit(0)
     except Exception as exc:
         log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
@@ -3449,7 +3465,23 @@ def _build_restart_handoff_argv(
     if not restart_argv:
         raise ValueError("restart command is empty")
 
-    config = _current_service_config()
+    config = _handoff_service_config()
+    managed_restart_argv = [
+        restart_argv[0],
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--server-host",
+        str(config.backend_host),
+        "--server-port",
+        str(config.backend_port),
+        "--webui-host",
+        str(config.frontend_host),
+        "--webui-port",
+        str(config.frontend_port),
+    ]
     argv = [
         restart_argv[0],
         "-m",
@@ -3489,7 +3521,7 @@ def _build_restart_handoff_argv(
         argv.extend(["--bundle-sha256", bundle_sha256])
     if cleanup_dir is not None:
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
-    argv.extend(["--", *restart_argv])
+    argv.extend(["--", *managed_restart_argv])
     return argv
 
 

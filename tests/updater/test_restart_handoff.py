@@ -1,7 +1,13 @@
+import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from flocks.cli import service_manager
 from flocks.updater import restart_handoff
+from tests.helpers.service_supervisor import make_short_runtime_root, start_supervisor, stop_supervisor, wait_for_supervisor
 
 
 def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
@@ -56,6 +62,11 @@ def test_run_waits_for_parent_and_backend_port_before_spawning(
         or SimpleNamespace(pid=4321),
     )
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda: events.append("stop-supervisor") or True,
+    )
 
     code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
 
@@ -64,6 +75,7 @@ def test_run_waits_for_parent_and_backend_port_before_spawning(
         "wait-parent:1234",
         "free-port:8000",
         "tasks",
+        "stop-supervisor",
         f"spawn:{restart_argv}:{tmp_path}:True",
         "log:restart_spawned pid=4321",
     ]
@@ -139,6 +151,50 @@ def test_run_rolls_back_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_
     assert "rollback:upgrade tasks crashed: boom" in events
     assert not cleanup_dir.exists()
     assert "spawn" not in events
+
+
+def test_run_does_not_spawn_when_supervisor_stop_fails(monkeypatch, tmp_path: Path) -> None:
+    events: list[str] = []
+    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: None)
+    monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda: False)
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: events.append("spawn"),
+    )
+
+    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
+
+    assert code == 1
+    assert "log:supervisor_stop_timeout" in events
+    assert "spawn" not in events
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_stop_supervisor_before_restart_waits_until_real_control_api_stops(monkeypatch) -> None:
+    short_root = make_short_runtime_root("flocks-handoff-")
+    monkeypatch.setenv("FLOCKS_ROOT", str(short_root))
+    paths = service_manager.runtime_paths()
+    daemon, thread = start_supervisor(
+        service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
+    )
+
+    try:
+        wait_for_supervisor(paths, running=True)
+
+        assert restart_handoff._stop_supervisor_before_restart(timeout_seconds=5.0, poll_interval_seconds=0.05) is True
+
+        wait_for_supervisor(paths, running=False)
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    finally:
+        stop_supervisor(daemon, thread)
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_ensure_backend_port_free_waits_again_after_timeout(monkeypatch) -> None:

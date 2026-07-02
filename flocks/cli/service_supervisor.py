@@ -114,6 +114,7 @@ class SupervisorDaemon:
         self._shutdown_requested = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
+        self._backend_paused = False
         self._webui_paused = False
         self.backend = ManagedService(
             name="backend",
@@ -265,6 +266,10 @@ class SupervisorDaemon:
                         daemon.stop_webui(reason="control stop")
                         self._send_json(daemon.status_payload())
                         return
+                    if parsed.path == "/upgrade/prepare":
+                        daemon.prepare_upgrade(reason="control upgrade prepare")
+                        self._send_json(daemon.status_payload())
+                        return
                     self._send_json({"error": "not found"}, status=404)
                 except Exception as exc:  # pragma: no cover - defensive control path
                     self._send_json({"error": str(exc)}, status=500)
@@ -296,7 +301,7 @@ class SupervisorDaemon:
                     "state": "stopping" if self._shutdown_requested.is_set() else "running",
                     "log_path": str(supervisor_log_path(self.paths)),
                 },
-                "backend": _service_payload(self.backend),
+                "backend": _service_payload(self.backend, paused=self._backend_paused),
                 "webui": _service_payload(self.webui, paused=self._webui_paused),
                 "config": service_config_payload(self.config),
             }
@@ -388,6 +393,7 @@ class SupervisorDaemon:
 
     def restart_all(self, *, reason: str) -> None:
         with self._lock:
+            self._backend_paused = False
             self._webui_paused = False
             self._restart_service(self.webui, reason=reason, immediate=True)
             self._restart_service(self.backend, reason=reason, immediate=True)
@@ -396,6 +402,7 @@ class SupervisorDaemon:
 
     def restart_backend(self, *, reason: str) -> None:
         with self._lock:
+            self._backend_paused = False
             self._restart_service(self.backend, reason=reason, immediate=True)
             self._start_backend_locked(immediate=True)
 
@@ -414,6 +421,16 @@ class SupervisorDaemon:
             self._stop_service(self.webui)
             self.webui.last_error = reason
 
+    def prepare_upgrade(self, *, reason: str) -> None:
+        with self._lock:
+            self._backend_paused = True
+            self._webui_paused = True
+            _daemon_log("service_pause", {"service": "backend", "reason": reason})
+            _daemon_log("service_pause", {"service": "webui", "reason": reason})
+            self.backend.last_error = reason
+            self.webui.last_error = reason
+            self._stop_service(self.webui)
+
     def shutdown_children(self) -> None:
         with self._lock:
             self._stop_service(self.webui)
@@ -421,10 +438,12 @@ class SupervisorDaemon:
 
     def tick(self) -> None:
         with self._lock:
-            self._probe_backend_locked()
+            if not self._backend_paused:
+                self._probe_backend_locked()
             if not self._webui_paused:
                 self._probe_webui_locked()
-            self._start_backend_locked(immediate=False)
+            if not self._backend_paused:
+                self._start_backend_locked(immediate=False)
             if not self._webui_paused:
                 self._start_webui_locked(immediate=False)
 

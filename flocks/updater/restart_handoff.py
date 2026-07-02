@@ -23,6 +23,7 @@ from flocks.utils.log import append_upgrade_text_log
 DEFAULT_PARENT_TIMEOUT_SECONDS = 20.0
 DEFAULT_PORT_TIMEOUT_SECONDS = 10.0
 POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
+SUPERVISOR_STOP_TIMEOUT_SECONDS = 20.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 
 
@@ -69,6 +70,31 @@ def _ensure_backend_port_free(backend_port: int) -> bool:
 
     _record_handoff_log(f"backend_port_still_in_use port={backend_port}")
     return _wait_for_backend_port_free(backend_port, timeout_seconds=POST_STOP_PORT_TIMEOUT_SECONDS)
+
+
+def _stop_supervisor_before_restart(
+    *,
+    timeout_seconds: float = SUPERVISOR_STOP_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    from flocks.cli import service_control
+
+    paths = service_manager.runtime_paths()
+    if not service_control.supervisor_is_running(paths):
+        return True
+
+    try:
+        service_control.request_stop(paths=paths, timeout=timeout_seconds)
+    except Exception as exc:
+        _record_handoff_log(f"supervisor_stop_request_failed error={exc}")
+        return False
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not service_control.supervisor_is_running(paths):
+            return True
+        time.sleep(poll_interval_seconds)
+    return not service_control.supervisor_is_running(paths)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -167,6 +193,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         task_error = f"upgrade tasks crashed: {exc}"
     if task_error is not None:
         _rollback_failed_upgrade(args, task_error)
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    if not _stop_supervisor_before_restart():
+        _record_handoff_log("supervisor_stop_timeout")
         _cleanup_dir(args.cleanup_dir)
         return 1
 

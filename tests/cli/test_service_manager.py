@@ -1,4 +1,5 @@
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,11 @@ from flocks.cli import service_manager
 from flocks.cli import service_supervisor
 from flocks.cli import service_control
 from flocks.cli import service_process
+from tests.helpers.service_supervisor import (
+    SleeperProcessAdapter,
+    make_short_runtime_root,
+    wait_for_process_exit,
+)
 
 
 class DummyConsole:
@@ -1297,6 +1303,52 @@ def test_supervisor_recovers_webui_when_port_disappears(monkeypatch, tmp_path: P
 
     assert calls == ["stop:WebUI", "start:webui"]
     assert daemon.webui.pid == 444
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_supervisor_upgrade_prepare_control_api_pauses_real_child_restart(monkeypatch, tmp_path: Path) -> None:
+    del tmp_path
+    short_root = make_short_runtime_root("flocks-supervisor-")
+    paths = _make_runtime_paths(short_root)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    backend_adapter = SleeperProcessAdapter()
+    webui_adapter = SleeperProcessAdapter()
+    daemon = service_supervisor.SupervisorDaemon(
+        service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
+        backend_adapter=backend_adapter,
+        webui_adapter=webui_adapter,
+    )
+    daemon._start_control_server()
+
+    try:
+        daemon.restart_all(reason="test startup")
+        backend_process = daemon.backend.process
+        webui_process = daemon.webui.process
+        assert backend_process is not None
+        assert webui_process is not None
+
+        status = service_control.request_prepare_upgrade(paths=paths)
+
+        wait_for_process_exit(webui_process)
+        assert status.backend.paused is True
+        assert status.webui.paused is True
+        assert daemon.backend.process is backend_process
+        assert backend_process.poll() is None
+        assert webui_process.pid in webui_adapter.stopped
+
+        backend_process.terminate()
+        backend_process.wait(timeout=5)
+        daemon.tick()
+
+        assert len(backend_adapter.started) == 1
+        assert daemon.backend.process is backend_process
+        assert daemon.status_payload()["backend"]["paused"] is True
+    finally:
+        daemon.shutdown_children()
+        daemon._stop_control_server()
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_start_frontend_tolerates_windows_node_assertion_after_build(monkeypatch, tmp_path: Path) -> None:
