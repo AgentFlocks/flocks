@@ -205,6 +205,21 @@ class SkillInstaller:
             pass
 
     @staticmethod
+    def _safeskill_staging_env(staging: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        appdata = staging / "AppData"
+        env.update({
+            "HOME": str(staging),
+            "USERPROFILE": str(staging),
+            "APPDATA": str(appdata / "Roaming"),
+            "LOCALAPPDATA": str(appdata / "Local"),
+            "XDG_CONFIG_HOME": str(staging / ".config"),
+            "XDG_CACHE_HOME": str(staging / ".cache"),
+            "NPM_CONFIG_CACHE": str(staging / ".npm"),
+        })
+        return env
+
+    @staticmethod
     async def _run_subprocess(
         cmd: list[str],
         *,
@@ -414,9 +429,7 @@ class SkillInstaller:
 
         with tempfile.TemporaryDirectory(prefix="flocks-safeskill-") as tmp:
             staging = Path(tmp)
-            env = os.environ.copy()
-            env["HOME"] = str(staging)
-            env["XDG_CONFIG_HOME"] = str(staging / ".config")
+            env = cls._safeskill_staging_env(staging)
             cmd = [
                 npx,
                 "-y",

@@ -454,6 +454,13 @@ class TestInstallFromSource:
             "--yes",
         ]
         assert captured["env"]["HOME"] == captured["cwd"]
+        assert captured["env"]["USERPROFILE"] == captured["cwd"]
+        staging = Path(captured["cwd"])
+        assert captured["env"]["APPDATA"] == str(staging / "AppData" / "Roaming")
+        assert captured["env"]["LOCALAPPDATA"] == str(staging / "AppData" / "Local")
+        assert captured["env"]["XDG_CONFIG_HOME"] == str(staging / ".config")
+        assert captured["env"]["XDG_CACHE_HOME"] == str(staging / ".cache")
+        assert captured["env"]["NPM_CONFIG_CACHE"] == str(staging / ".npm")
 
     @pytest.mark.asyncio
     async def test_local_file(self, tmp_path: Path, tmp_skills_dir: Path):
