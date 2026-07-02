@@ -189,6 +189,17 @@ def request_prepare_upgrade(*, paths=None, timeout: float | None = 30.0) -> Supe
     return parse_supervisor_status(payload)
 
 
+def request_resume_upgrade(
+    config: ServiceConfig,
+    *,
+    paths=None,
+    timeout: float | None = 180.0,
+) -> SupervisorStatus:
+    """Ask the supervisor daemon to resume managed services after upgrade handoff."""
+    payload = _post_control_json("/upgrade/resume", payload=service_config_payload(config), paths=paths, timeout=timeout)
+    return parse_supervisor_status(payload)
+
+
 def read_logs(
     *,
     service: str,

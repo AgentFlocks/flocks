@@ -270,6 +270,11 @@ class SupervisorDaemon:
                         daemon.prepare_upgrade(reason="control upgrade prepare")
                         self._send_json(daemon.status_payload())
                         return
+                    if parsed.path == "/upgrade/resume":
+                        daemon.update_config(payload)
+                        daemon.resume_upgrade(reason="control upgrade resume")
+                        self._send_json(daemon.status_payload())
+                        return
                     self._send_json({"error": "not found"}, status=404)
                 except Exception as exc:  # pragma: no cover - defensive control path
                     self._send_json({"error": str(exc)}, status=500)
@@ -430,6 +435,17 @@ class SupervisorDaemon:
             self.backend.last_error = reason
             self.webui.last_error = reason
             self._stop_service(self.webui)
+
+    def resume_upgrade(self, *, reason: str) -> None:
+        with self._lock:
+            self._backend_paused = False
+            self._webui_paused = False
+            _daemon_log("service_resume", {"service": "backend", "reason": reason})
+            _daemon_log("service_resume", {"service": "webui", "reason": reason})
+            self._probe_backend_locked()
+            self._probe_webui_locked()
+            self._start_backend_locked(immediate=True)
+            self._start_webui_locked(immediate=True)
 
     def shutdown_children(self) -> None:
         with self._lock:

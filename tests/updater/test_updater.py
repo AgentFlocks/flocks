@@ -1129,7 +1129,57 @@ def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails_with
 
         status = service_control.read_supervisor_status(paths)
         assert calls == ["stop_page"]
+        assert status.backend.paused is False
+        assert status.backend.pid is not None
         assert status.webui.paused is False
+        assert status.webui.pid is not None
+        assert updater._read_upgrade_state() is None
+    finally:
+        stop_supervisor(daemon, thread)
+        shutil.rmtree(short_root, ignore_errors=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_rollback_failed_update_resumes_backend_when_handoff_tasks_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    short_root = make_short_runtime_root("flocks-updater-")
+    monkeypatch.setenv("FLOCKS_ROOT", str(short_root))
+    paths = service_manager.runtime_paths()
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9995,
+        frontend_host="127.0.0.1",
+        frontend_port=9996,
+    )
+    daemon, thread = start_supervisor(config)
+    wait_for_supervisor(paths, running=True)
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **_kw: None)
+
+    try:
+        updater._write_upgrade_state(
+            {
+                "version": "2026.4.1",
+                "backend_host": "127.0.0.1",
+                "backend_port": 9995,
+                "frontend_host": "127.0.0.1",
+                "frontend_port": 9996,
+                "skip_frontend_build": True,
+            }
+        )
+        service_control.request_prepare_upgrade(paths=paths)
+        old_backend = daemon.backend.process
+        assert old_backend is not None
+        old_backend.terminate()
+        old_backend.wait(timeout=5)
+
+        updater._rollback_failed_update(None, short_root / "install", "2026.3.31")
+
+        status = service_control.read_supervisor_status(paths)
+        assert status.backend.paused is False
+        assert status.webui.paused is False
+        assert status.backend.pid is not None
+        assert status.backend.pid != old_backend.pid
         assert status.webui.pid is not None
         assert updater._read_upgrade_state() is None
     finally:
@@ -1148,7 +1198,7 @@ def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: stopped.append("stop"))
     monkeypatch.setattr(
         service_control,
-        "request_restart_webui",
+        "request_resume_upgrade",
         lambda config, **_kwargs: started.append((config.frontend_port, config.skip_frontend_build))
         or _webui_control_status(),
     )
@@ -1175,7 +1225,7 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    starts: list[tuple[bool | None, bool | None]] = []
+    starts: list[tuple[str, bool | None, bool | None]] = []
 
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: None)
 
@@ -1184,10 +1234,15 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
         _webui_control_payload(),
     ])
 
-    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
-        starts.append((config.skip_frontend_build, force_frontend_build or None))
+    def fake_resume_upgrade(config, **_kwargs):
+        starts.append(("resume", config.skip_frontend_build, None))
         return service_control.parse_supervisor_status(next(results))
 
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
+        starts.append(("restart_webui", config.skip_frontend_build, force_frontend_build or None))
+        return service_control.parse_supervisor_status(next(results))
+
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
     monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
@@ -1202,7 +1257,7 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
 
     updater.recover_upgrade_state()
 
-    assert starts == [(True, None), (False, True)]
+    assert starts == [("resume", True, None), ("restart_webui", False, True)]
     assert updater._read_upgrade_state() is None
 
 
@@ -1211,14 +1266,19 @@ def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_p
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    starts: list[tuple[bool | None, bool | None]] = []
+    starts: list[tuple[str, bool | None, bool | None]] = []
 
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: None)
 
-    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
-        starts.append((config.skip_frontend_build, force_frontend_build or None))
+    def fake_resume_upgrade(config, **_kwargs):
+        starts.append(("resume", config.skip_frontend_build, None))
         return _webui_control_status("degraded", "still broken")
 
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
+        starts.append(("restart_webui", config.skip_frontend_build, force_frontend_build or None))
+        return _webui_control_status("degraded", "still broken")
+
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
     monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
@@ -1234,7 +1294,7 @@ def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_p
     with pytest.raises(RuntimeError, match="still broken"):
         updater.recover_upgrade_state()
 
-    assert starts == [(True, None), (False, True)]
+    assert starts == [("resume", True, None), ("restart_webui", False, True)]
     assert updater._read_upgrade_state() is None
 
 
@@ -1355,10 +1415,15 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
         _webui_control_payload(),
     ])
 
+    def fake_resume_upgrade(config, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"resume:{config.skip_frontend_build}")
+        return service_control.parse_supervisor_status(next(results))
+
     def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs) -> service_control.SupervisorStatus:
         events.append(f"restart_webui:{config.skip_frontend_build}:{force_frontend_build or None}")
         return service_control.parse_supervisor_status(next(results))
 
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
     monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
@@ -1379,7 +1444,7 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
         "restore:backup.tar.gz:install",
         "marker:2026.3.31",
         "stop_page",
-        "restart_webui:True:None",
+        "resume:True",
         "restart_webui:False:True",
         "rmtree:upgrade-page",
     ]
@@ -1402,10 +1467,15 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: events.append("stop_page"))
     monkeypatch.setattr(updater.shutil, "rmtree", lambda path, ignore_errors=True: events.append(f"rmtree:{Path(path).name}"))
 
+    def fake_resume_upgrade(config, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"resume:{config.skip_frontend_build}")
+        return _webui_control_status("degraded", "frontend still broken")
+
     def fake_restart_webui(config, **_kwargs) -> service_control.SupervisorStatus:
         events.append(f"restart_webui:{config.skip_frontend_build}")
         return _webui_control_status("degraded", "frontend still broken")
 
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
     monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
@@ -1425,7 +1495,7 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
 
     assert events == [
         "stop_page",
-        "restart_webui:True",
+        "resume:True",
         "rmtree:upgrade-page",
     ]
     assert updater._read_upgrade_state() is None

@@ -2204,10 +2204,10 @@ def read_upgrade_runtime_state(frontend_port: int | None = None) -> dict[str, An
 
 def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool) -> None:
     from flocks.cli.service_config import with_frontend_build
-    from flocks.cli.service_control import request_restart_webui
+    from flocks.cli.service_control import request_restart_webui, request_resume_upgrade
 
     try:
-        status = request_restart_webui(
+        status = request_resume_upgrade(
             config,
             paths=None,
             timeout=180.0,
