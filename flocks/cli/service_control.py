@@ -13,7 +13,7 @@ import httpx
 from flocks.cli.service_config import ServiceConfig, service_config_from_status_payload, service_config_payload
 
 SUPERVISOR_CONTROL_PORT = 48765
-SUPERVISOR_LOG_FILENAME = "supervisor.log"
+SUPERVISOR_LOG_FILENAME = "daemon.log"
 SUPERVISOR_SOCKET_FILENAME = "service-daemon.sock"
 
 

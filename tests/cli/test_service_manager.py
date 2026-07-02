@@ -712,7 +712,7 @@ def _supervisor_status_payload() -> dict[str, object]:
         "daemon": {
             "pid": 100,
             "state": "running",
-            "log_path": "/tmp/logs/supervisor.log",
+            "log_path": "/tmp/logs/daemon.log",
         },
         "backend": {
             "pid": 111,
@@ -748,7 +748,7 @@ def test_build_status_lines_reports_supervisor_control_status(monkeypatch, tmp_p
     assert lines[2] == "[flocks]   状态: running"
     assert "http://127.0.0.1:9000" in lines[5]
     assert "http://127.0.0.1:5174" in lines[6]
-    assert lines[9] == "[flocks]   daemon: /tmp/logs/supervisor.log"
+    assert lines[9] == "[flocks]   daemon: /tmp/logs/daemon.log"
     assert lines[10] == "[flocks]   后端: /tmp/logs/backend.log"
     assert lines[11] == "[flocks]   WebUI: /tmp/logs/webui.log"
 
@@ -800,22 +800,15 @@ def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
     assert "[flocks] Flocks daemon 已在运行。" in console.messages
 
 
-def test_restart_all_uses_supervisor_control_api(monkeypatch) -> None:
+def test_restart_all_stops_then_starts_daemon(monkeypatch) -> None:
     call_order: list[str] = []
-    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
 
-    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
-    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
-    monkeypatch.setattr(
-        service_manager,
-        "request_restart",
-        lambda _config, **_kwargs: call_order.append("/restart") or _supervisor_status(),
-    )
-    monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console: call_order.append("print_status"))
+    monkeypatch.setattr(service_manager, "stop_all", lambda _console: call_order.append("stop"))
+    monkeypatch.setattr(service_manager, "start_all", lambda _config, _console: call_order.append("start"))
 
     service_manager.restart_all(service_manager.ServiceConfig(), console=None)
 
-    assert call_order == ["ensure_runtime_dirs", "/restart", "print_status"]
+    assert call_order == ["stop", "start"]
 
 
 def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: Path) -> None:
@@ -1510,6 +1503,31 @@ def test_start_backend_raises_when_port_has_listener(monkeypatch, tmp_path: Path
         service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole())
 
 
+def test_start_backend_cleans_trusted_orphan_port_owner(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    owners = iter([[9999], [9999], [], []])
+    cleaned: list[int] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(service_manager, "_process_command_line", lambda _pid: f"{tmp_path}/.venv/bin/python -m flocks.cli.main serve")
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service_manager, "resolve_flocks_cli_command", lambda _root: ["/env/bin/python", "-m", "flocks.cli.main"])
+    monkeypatch.setattr(service_manager, "_spawn_process", lambda command, **_kwargs: SimpleNamespace(pid=1234, args=command))
+    monkeypatch.setattr(service_manager, "process_runtime_record", lambda *_args, **_kwargs: service_manager.RuntimeRecord(pid=1234))
+    monkeypatch.setattr(service_manager, "_log_startup_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+
+    process = service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole(), paths=paths)
+
+    assert process.pid == 1234
+    assert cleaned == [9999]
+
+
 def test_start_backend_raises_when_port_in_use_without_pid_lookup(monkeypatch, tmp_path: Path) -> None:
     paths = service_manager.RuntimePaths(
         root=tmp_path,
@@ -1531,6 +1549,40 @@ def test_start_backend_raises_when_port_in_use_without_pid_lookup(monkeypatch, t
 
     with pytest.raises(service_manager.ServiceError, match="无法识别占用 PID"):
         service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole())
+
+
+def test_start_webui_cleans_trusted_orphan_port_owner(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir()
+    owners = iter([[52372], [52372], [], []])
+    cleaned: list[int] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(service_manager, "_read_upgrade_runtime_info", lambda _port: service_manager.UpgradeRuntimeInfo())
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: f"node {webui_dir}/node_modules/vite/bin/vite.js preview --host 127.0.0.1 --port 5173",
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: "/usr/bin/npm")
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(service_manager.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(service_manager, "_spawn_process", lambda command, **_kwargs: SimpleNamespace(pid=5678, args=command))
+    monkeypatch.setattr(service_manager, "process_runtime_record", lambda *_args, **_kwargs: service_manager.RuntimeRecord(pid=5678))
+    monkeypatch.setattr(service_manager, "_log_startup_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+
+    process = service_manager._start_frontend_process(service_manager.ServiceConfig(), DummyConsole(), paths=paths)
+
+    assert process.pid == 5678
+    assert cleaned == [52372]
 
 
 def test_spawn_process_uses_hidden_window_flags_on_windows(monkeypatch, tmp_path: Path) -> None:
@@ -1677,11 +1729,12 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(states))
     monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop") or {"status": "stopping"})
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console: calls.append("cleanup"))
 
     console = FakeConsole()
     service_manager.stop_all(console=console)
 
-    assert calls == ["/stop"]
+    assert calls == ["/stop", "cleanup"]
     assert console.messages == ["[flocks] Flocks daemon 已停止。"]
 
 
@@ -1691,10 +1744,11 @@ def test_stop_all_reports_when_supervisor_is_down(monkeypatch, tmp_path: Path) -
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console: console.messages.append("cleanup"))
 
     service_manager.stop_all(console)
 
-    assert console.messages == ["[flocks] Flocks daemon 未运行。"]
+    assert console.messages == ["[flocks] Flocks daemon 未运行。", "cleanup"]
 
 
 def test_status_lines_include_control_api_errors(monkeypatch, tmp_path: Path) -> None:

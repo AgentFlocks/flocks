@@ -29,7 +29,6 @@ from flocks.cli.service_config import ServiceConfig, loopback_host
 from flocks.cli.service_control import (
     read_logs,
     read_supervisor_status,
-    request_restart,
     request_stop,
     stream_logs,
     supervisor_is_running,
@@ -818,6 +817,76 @@ def port_is_in_use(port: int, listeners: Sequence[int] | None = None) -> bool:
     return not _bind_port_available(port)
 
 
+def _process_command_line(pid: int) -> str:
+    """Return a process command line for best-effort orphan detection."""
+    if pid <= 0:
+        return ""
+    if sys.platform == "win32":
+        snapshot = _windows_process_snapshot(pid)
+        return str(snapshot.get("command_line") or "") if snapshot else ""
+    completed = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _trusted_flocks_port_owner(pid: int, *, service: str, root: Path) -> bool:
+    """Return True only for port owners that look like Flocks leftovers."""
+    command_line = _process_command_line(pid).lower()
+    if not command_line:
+        return False
+    root_text = str(root).lower()
+    webui_text = str(root / "webui").lower()
+    if service == "backend":
+        return (
+            ("flocks.cli.main" in command_line and "serve" in command_line)
+            or ("flocks" in command_line and "serve" in command_line and root_text in command_line)
+        )
+    if service == "webui":
+        looks_like_preview = ("vite" in command_line and "preview" in command_line) or (
+            "npm" in command_line and "preview" in command_line
+        )
+        return looks_like_preview and (webui_text in command_line or root_text in command_line)
+    return False
+
+
+def _terminate_orphan_pid(pid: int, label: str, console, *, timeout: float = 5.0) -> None:
+    """Terminate a trusted orphan process tree by pid."""
+    console.print(f"[flocks] 清理残留 {label} 进程（PID={pid}）...")
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+        return
+
+    targets = collect_process_tree_pids(pid)
+    signal_pid_list(signal.SIGTERM, targets)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(pid_is_running(target) for target in targets):
+            return
+        time.sleep(0.25)
+    signal_pid_list(signal.SIGKILL, targets)
+
+
+def cleanup_trusted_port_owners(port: int, *, service: str, label: str, console, root: Path | None = None) -> list[int]:
+    """Clean Flocks-owned orphan processes that are still occupying a service port."""
+    current_root = root or ensure_install_layout()
+    listeners = port_owner_pids(port)
+    trusted = [pid for pid in listeners if _trusted_flocks_port_owner(pid, service=service, root=current_root)]
+    for pid in trusted:
+        _terminate_orphan_pid(pid, label, console)
+    if trusted:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            current = port_owner_pids(port)
+            if not any(pid in trusted for pid in current):
+                break
+            time.sleep(0.25)
+    return trusted
+
+
 def _is_reachable_response(response: httpx.Response) -> bool:
     """Return True when an HTTP endpoint is reachable enough for startup checks."""
     return response.status_code < 500
@@ -949,10 +1018,19 @@ def _start_backend_process(
 
     listeners = port_owner_pids(config.backend_port)
     if listeners:
-        raise ServiceError(
-            f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-            "请先执行 `flocks stop` 或手动清理残留进程。"
+        cleanup_trusted_port_owners(
+            config.backend_port,
+            service="backend",
+            label="后端",
+            console=console,
+            root=root,
         )
+        listeners = port_owner_pids(config.backend_port)
+        if listeners:
+            raise ServiceError(
+                f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
+                "请先执行 `flocks stop` 或手动清理残留进程。"
+            )
     if port_is_in_use(config.backend_port, listeners):
         raise ServiceError(
             f"后端端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
@@ -1011,11 +1089,20 @@ def _start_frontend_process(
                 )
 
         else:
-            raise ServiceError(
-                f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-                "请先执行 `flocks stop` 或手动清理残留进程。"
+            cleanup_trusted_port_owners(
+                config.frontend_port,
+                service="webui",
+                label="WebUI",
+                console=console,
+                root=root,
             )
-    elif port_is_in_use(config.frontend_port, listeners):
+            listeners = port_owner_pids(config.frontend_port)
+            if listeners:
+                raise ServiceError(
+                    f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
+                    "请先执行 `flocks stop` 或手动清理残留进程。"
+                )
+    if port_is_in_use(config.frontend_port, listeners):
         raise ServiceError(
             f"WebUI 端口 {config.frontend_port} 已被占用，但当前环境无法识别占用 PID；"
             "请先安装 lsof 或手动清理残留进程。"
@@ -1191,9 +1278,15 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
 def stop_all(console) -> None:
     """Stop managed services through the supervisor control API."""
     paths = ensure_runtime_dirs()
+    cleanup_config = ServiceConfig()
     if not supervisor_is_running(paths):
         console.print("[flocks] Flocks daemon 未运行。")
+        cleanup_orphan_service_ports(cleanup_config, console)
         return
+    try:
+        cleanup_config = read_supervisor_status(paths=paths, timeout=1.0).config
+    except Exception:
+        pass
     try:
         request_stop(paths=paths, timeout=2.0)
     except Exception as exc:
@@ -1202,6 +1295,7 @@ def stop_all(console) -> None:
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if not supervisor_is_running(paths):
+            cleanup_orphan_service_ports(cleanup_config, console)
             console.print("[flocks] Flocks daemon 已停止。")
             return
         time.sleep(0.5)
@@ -1236,16 +1330,28 @@ def start_all(config: ServiceConfig, console) -> None:
 
 
 def restart_all(config: ServiceConfig, console) -> None:
-    """Restart backend and frontend through the supervisor control API."""
-    paths = ensure_runtime_dirs()
-    if not supervisor_is_running(paths):
-        start_all(config, console)
-        return
-    try:
-        status = request_restart(config, paths=paths, timeout=180.0)
-    except Exception as exc:
-        raise ServiceError(f"无法请求 Flocks daemon 重启: {exc}") from exc
-    _print_status_payload(status.raw, console)
+    """Restart by stopping the daemon first, then starting a fresh daemon."""
+    stop_all(console)
+    start_all(config, console)
+
+
+def cleanup_orphan_service_ports(config: ServiceConfig, console) -> None:
+    """Clean trusted Flocks leftovers on configured backend/WebUI ports."""
+    root = ensure_install_layout()
+    cleanup_trusted_port_owners(
+        config.backend_port,
+        service="backend",
+        label="后端",
+        console=console,
+        root=root,
+    )
+    cleanup_trusted_port_owners(
+        config.frontend_port,
+        service="webui",
+        label="WebUI",
+        console=console,
+        root=root,
+    )
 
 
 def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
