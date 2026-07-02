@@ -1511,8 +1511,9 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     """Start the supervisor daemon, then print access summary."""
     paths = ensure_runtime_dirs()
     process = _start_supervisor_process(config, paths, console)
+    console.print("[flocks] [x] 启动 Flocks daemon...")
     payload = _wait_for_supervisor_ready(paths, process=process)
-    _print_status_payload(payload, console)
+    _print_status_payload(payload, console, include_daemon_step=False)
     if not config.no_browser:
         open_default_browser(config.frontend_url, console)
 
@@ -1648,12 +1649,14 @@ def _startup_step_marker(state: object, *, ready_states: set[str]) -> str:
     return "[x]" if str(state or "").lower() in ready_states else "[!]"
 
 
-def _startup_status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
+def _startup_status_lines_from_payload(payload: dict[str, Any], *, include_daemon_step: bool = True) -> list[str]:
     daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
     backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
     webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
-    lines = [
-        f"[flocks] {_startup_step_marker(daemon.get('state'), ready_states={'running'})} 启动 Flocks daemon...",
+    lines = []
+    if include_daemon_step:
+        lines.append(f"[flocks] {_startup_step_marker(daemon.get('state'), ready_states={'running'})} 启动 Flocks daemon...")
+    lines.extend([
         f"[flocks] {_startup_step_marker(backend.get('state'), ready_states={'healthy'})} 启动 Flocks server...",
         f"[flocks] {_startup_step_marker(webui.get('state'), ready_states={'healthy'})} 启动 Flocks webui...",
         "",
@@ -1664,7 +1667,7 @@ def _startup_status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
         "",
         "[flocks] 日志",
         f"[flocks]   daemon: {daemon.get('log_path')}",
-    ]
+    ])
     for label, service in (("server", backend), ("webui", webui)):
         log_path = service.get("log_path")
         if log_path:
@@ -1678,8 +1681,8 @@ def _frontend_url_from_status(status, fallback: str) -> str:
     return fallback
 
 
-def _print_status_payload(payload: dict[str, Any], console) -> None:
-    for line in _startup_status_lines_from_payload(payload):
+def _print_status_payload(payload: dict[str, Any], console, *, include_daemon_step: bool = True) -> None:
+    for line in _startup_status_lines_from_payload(payload, include_daemon_step=include_daemon_step):
         console.print(line)
 
 

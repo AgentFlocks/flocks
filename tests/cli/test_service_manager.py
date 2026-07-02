@@ -812,6 +812,18 @@ def test_startup_status_lines_mark_unhealthy_steps() -> None:
     assert lines[6] == "[flocks]   server: state=degraded PID=111 URL=http://127.0.0.1:9000 last_error=port occupied"
 
 
+def test_startup_status_lines_can_skip_daemon_step() -> None:
+    lines = service_manager._startup_status_lines_from_payload(
+        _supervisor_status_payload(),
+        include_daemon_step=False,
+    )
+
+    assert lines[:2] == [
+        "[flocks] [x] 启动 Flocks server...",
+        "[flocks] [x] 启动 Flocks webui...",
+    ]
+
+
 def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
@@ -930,20 +942,22 @@ def test_restart_all_stops_then_starts_daemon(monkeypatch) -> None:
 def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
+    console = DummyConsole()
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "_start_supervisor_process", lambda _config, _paths, _console: calls.append("daemon") or SimpleNamespace(poll=lambda: None))
     monkeypatch.setattr(service_manager, "_wait_for_supervisor_ready", lambda _paths, **_kwargs: calls.append("ready") or _supervisor_status_payload())
-    monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console: calls.append("status"))
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console, **_kwargs: calls.append("status"))
     monkeypatch.setattr(
         service_manager,
         "open_default_browser",
         lambda _url, _console: calls.append("browser"),
     )
 
-    service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), DummyConsole())
+    service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), console)
 
     assert calls == ["daemon", "ready", "status"]
+    assert console.messages == ["[flocks] [x] 启动 Flocks daemon..."]
 
 
 def test_start_all_propagates_supervisor_start_failure(monkeypatch) -> None:
