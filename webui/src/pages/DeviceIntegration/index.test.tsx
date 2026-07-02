@@ -388,7 +388,7 @@ describe('DeviceIntegrationPage', () => {
     mocks.getSessionMessagesPage.mockResolvedValue({ items: [] });
   });
 
-  it('refreshes devices and templates without syncing when the window regains focus', async () => {
+  it('refreshes templates and syncs devices when the window regains focus', async () => {
     render(<DeviceIntegrationPage />);
 
     await screen.findByText('设备接入');
@@ -403,10 +403,10 @@ describe('DeviceIntegrationPage', () => {
 
     await waitFor(() => {
       expect(mocks.listDevices).toHaveBeenCalledWith();
-      expect(mocks.listTemplates).toHaveBeenCalledWith();
+      expect(mocks.listTemplates).toHaveBeenCalledWith({ refresh: true });
       expect(mocks.listGroups).toHaveBeenCalled();
     });
-    expect(mocks.syncDevices).not.toHaveBeenCalled();
+    expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
   });
 
   it('shows custom guidance and example entries on the add-device workbench', async () => {
