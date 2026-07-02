@@ -785,6 +785,33 @@ def test_build_status_lines_reports_supervisor_control_status(monkeypatch, tmp_p
     assert lines[11] == "[flocks]   WebUI: /tmp/logs/webui.log"
 
 
+def test_startup_status_lines_use_progress_summary() -> None:
+    lines = service_manager._startup_status_lines_from_payload(_supervisor_status_payload())
+
+    assert lines[:3] == [
+        "[flocks] [x] 启动 Flocks daemon...",
+        "[flocks] [x] 启动 Flocks server...",
+        "[flocks] [x] 启动 Flocks webui...",
+    ]
+    assert lines[5] == "[flocks]   daemon: state=running PID=100"
+    assert lines[6] == "[flocks]   server: state=healthy PID=111 URL=http://127.0.0.1:9000"
+    assert lines[7] == "[flocks]   webui: state=healthy PID=222 URL=http://127.0.0.1:5174"
+    assert lines[10] == "[flocks]   daemon: /tmp/logs/daemon.log"
+    assert lines[11] == "[flocks]   server: /tmp/logs/backend.log"
+    assert lines[12] == "[flocks]   webui: /tmp/logs/webui.log"
+
+
+def test_startup_status_lines_mark_unhealthy_steps() -> None:
+    payload = _supervisor_status_payload()
+    payload["backend"]["state"] = "degraded"
+    payload["backend"]["last_error"] = "port occupied"
+
+    lines = service_manager._startup_status_lines_from_payload(payload)
+
+    assert lines[1] == "[flocks] [!] 启动 Flocks server..."
+    assert lines[6] == "[flocks]   server: state=degraded PID=111 URL=http://127.0.0.1:9000 last_error=port occupied"
+
+
 def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []

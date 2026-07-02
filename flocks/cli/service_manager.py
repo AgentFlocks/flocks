@@ -1420,7 +1420,6 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
         command.append("--skip-webui-build")
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    console.print("[flocks] 启动 Flocks daemon...")
     return _spawn_process(command, cwd=root, log_path=log_path, env=env)
 
 
@@ -1637,6 +1636,42 @@ def _service_status_line(label: str, payload: dict[str, Any]) -> str:
     return f"[flocks]   {label}: state={state} PID={pid} URL=http://{host}:{port}{suffix}"
 
 
+def _daemon_status_line(payload: dict[str, Any]) -> str:
+    pid = payload.get("pid")
+    state = payload.get("state") or "unknown"
+    error = payload.get("last_error")
+    suffix = f" last_error={error}" if error else ""
+    return f"[flocks]   daemon: state={state} PID={pid}{suffix}"
+
+
+def _startup_step_marker(state: object, *, ready_states: set[str]) -> str:
+    return "[x]" if str(state or "").lower() in ready_states else "[!]"
+
+
+def _startup_status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
+    daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
+    backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
+    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
+    lines = [
+        f"[flocks] {_startup_step_marker(daemon.get('state'), ready_states={'running'})} 启动 Flocks daemon...",
+        f"[flocks] {_startup_step_marker(backend.get('state'), ready_states={'healthy'})} 启动 Flocks server...",
+        f"[flocks] {_startup_step_marker(webui.get('state'), ready_states={'healthy'})} 启动 Flocks webui...",
+        "",
+        "[flocks] 服务",
+        _daemon_status_line(daemon),
+        _service_status_line("server", backend),
+        _service_status_line("webui", webui),
+        "",
+        "[flocks] 日志",
+        f"[flocks]   daemon: {daemon.get('log_path')}",
+    ]
+    for label, service in (("server", backend), ("webui", webui)):
+        log_path = service.get("log_path")
+        if log_path:
+            lines.append(f"[flocks]   {label}: {log_path}")
+    return lines
+
+
 def _frontend_url_from_status(status, fallback: str) -> str:
     if status.webui.port is not None:
         return f"http://{_format_host_for_url(_loopback_host(status.webui.host))}:{status.webui.port}"
@@ -1644,7 +1679,7 @@ def _frontend_url_from_status(status, fallback: str) -> str:
 
 
 def _print_status_payload(payload: dict[str, Any], console) -> None:
-    for line in _status_lines_from_payload(payload):
+    for line in _startup_status_lines_from_payload(payload):
         console.print(line)
 
 
