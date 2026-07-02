@@ -1145,7 +1145,7 @@ def _wait_for_supervisor_ready(
     last_payload: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
-            raise ServiceError(f"Supervisor 启动失败，退出码: {process.returncode}")
+            raise ServiceError(f"Flocks daemon 启动失败，退出码: {process.returncode}")
         try:
             status = read_supervisor_status(paths=paths, timeout=1.0)
             last_payload = status.raw
@@ -1160,7 +1160,7 @@ def _wait_for_supervisor_ready(
         time.sleep(0.5)
     if last_payload is not None:
         return last_payload
-    raise ServiceError("Supervisor 启动超时，请检查日志。")
+    raise ServiceError("Flocks daemon 启动超时，请检查日志。")
 
 
 def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, console) -> subprocess.Popen:
@@ -1184,7 +1184,7 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
         command.append("--skip-webui-build")
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    console.print("[flocks] 启动 Supervisor daemon...")
+    console.print("[flocks] 启动 Flocks daemon...")
     return _spawn_process(command, cwd=root, log_path=log_path, env=env)
 
 
@@ -1192,20 +1192,20 @@ def stop_all(console) -> None:
     """Stop managed services through the supervisor control API."""
     paths = ensure_runtime_dirs()
     if not supervisor_is_running(paths):
-        console.print("[flocks] Supervisor 未运行。")
+        console.print("[flocks] Flocks daemon 未运行。")
         return
     try:
         request_stop(paths=paths, timeout=2.0)
     except Exception as exc:
-        raise ServiceError(f"无法请求 Supervisor 停止: {exc}") from exc
+        raise ServiceError(f"无法请求 Flocks daemon 停止: {exc}") from exc
 
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if not supervisor_is_running(paths):
-            console.print("[flocks] Supervisor 已停止。")
+            console.print("[flocks] Flocks daemon 已停止。")
             return
         time.sleep(0.5)
-    raise ServiceError("Supervisor 未在预期时间内退出。")
+    raise ServiceError("Flocks daemon 未在预期时间内退出。")
 
 
 def _start_all_without_stop(config: ServiceConfig, console) -> None:
@@ -1213,7 +1213,6 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     paths = ensure_runtime_dirs()
     process = _start_supervisor_process(config, paths, console)
     payload = _wait_for_supervisor_ready(paths, process=process)
-    show_start_summary(config, console)
     _print_status_payload(payload, console)
     if not config.no_browser:
         open_default_browser(config.frontend_url, console)
@@ -1223,7 +1222,7 @@ def start_all(config: ServiceConfig, console) -> None:
     """Ensure the supervisor daemon is running."""
     paths = ensure_runtime_dirs()
     if supervisor_is_running(paths):
-        console.print("[flocks] Supervisor 已在运行。")
+        console.print("[flocks] Flocks daemon 已在运行。")
         show_status(console)
         if not config.no_browser:
             try:
@@ -1245,7 +1244,7 @@ def restart_all(config: ServiceConfig, console) -> None:
     try:
         status = request_restart(config, paths=paths, timeout=180.0)
     except Exception as exc:
-        raise ServiceError(f"无法请求 Supervisor 重启: {exc}") from exc
+        raise ServiceError(f"无法请求 Flocks daemon 重启: {exc}") from exc
     _print_status_payload(status.raw, console)
 
 
@@ -1256,8 +1255,8 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
         status = read_supervisor_status(paths=current)
     except Exception:
         return [
-            "[flocks] Supervisor 未运行",
-            f"[flocks] Supervisor 日志: {supervisor_log_path(current)}",
+            "[flocks] Flocks daemon 未运行",
+            f"[flocks] 日志: {supervisor_log_path(current)}",
         ]
     return _status_lines_from_payload(status.raw)
 
@@ -1267,15 +1266,21 @@ def _status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
     backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
     webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
     lines = [
-        f"[flocks] Supervisor 运行中: PID={daemon.get('pid')} state={daemon.get('state')}",
+        "[flocks] Flocks daemon",
+        f"[flocks]   PID: {daemon.get('pid')}",
+        f"[flocks]   状态: {daemon.get('state')}",
+        "",
+        "[flocks] 服务",
         _service_status_line("后端", backend),
         _service_status_line("WebUI", webui),
-        f"[flocks] Supervisor 日志: {daemon.get('log_path')}",
+        "",
+        "[flocks] 日志",
+        f"[flocks]   daemon: {daemon.get('log_path')}",
     ]
-    for service in (backend, webui):
+    for label, service in (("后端", backend), ("WebUI", webui)):
         log_path = service.get("log_path")
         if log_path:
-            lines.append(f"[flocks] {service.get('state')} 日志: {log_path}")
+            lines.append(f"[flocks]   {label}: {log_path}")
     return lines
 
 
@@ -1286,7 +1291,7 @@ def _service_status_line(label: str, payload: dict[str, Any]) -> str:
     state = payload.get("state") or "unknown"
     error = payload.get("last_error")
     suffix = f" last_error={error}" if error else ""
-    return f"[flocks] {label}: state={state} PID={pid} URL=http://{host}:{port}{suffix}"
+    return f"[flocks]   {label}: state={state} PID={pid} URL=http://{host}:{port}{suffix}"
 
 
 def _frontend_url_from_status(status, fallback: str) -> str:
@@ -1304,21 +1309,6 @@ def show_status(console) -> None:
     """Print service status."""
     for line in build_status_lines():
         console.print(line)
-
-
-def show_start_summary(config: ServiceConfig, console) -> None:
-    """Print URLs and log locations after startup."""
-    paths = ensure_runtime_dirs()
-    console.print()
-    console.print("[flocks] 日志:")
-    console.print(f"[flocks]   后端: {paths.backend_log}")
-    console.print(f"[flocks]   WebUI: {paths.frontend_log}")
-    console.print()
-    console.print("[flocks] 后端接口:")
-    console.print(f"[flocks]   http://{_loopback_host(config.backend_host)}:{config.backend_port}")
-    console.print()
-    console.print("[flocks] 打开浏览器访问:")
-    console.print(f"[flocks]   {config.frontend_url}")
 
 
 def show_logs(
@@ -1340,7 +1330,7 @@ def show_logs(
         try:
             payload = read_logs(service=service, lines=lines, paths=paths, timeout=5.0)
         except Exception as exc:
-            raise ServiceError(f"无法通过 Supervisor 读取日志: {exc}") from exc
+            raise ServiceError(f"无法通过 Flocks daemon 读取日志: {exc}") from exc
         logs = payload.get("logs") if isinstance(payload.get("logs"), dict) else {}
         for prefix, entry in logs.items():
             if not isinstance(entry, dict):
@@ -1357,7 +1347,7 @@ def show_logs(
     except KeyboardInterrupt:
         return
     except Exception as exc:
-        raise ServiceError(f"无法通过 Supervisor 跟随日志: {exc}") from exc
+        raise ServiceError(f"无法通过 Flocks daemon 跟随日志: {exc}") from exc
 
 
 def selected_log_paths(
@@ -1466,7 +1456,7 @@ def open_default_browser(url: str, console) -> None:
     """Best-effort browser open."""
     try:
         if webbrowser.open(url):
-            console.print(f"[flocks] 已使用默认浏览器打开: {url}")
+            console.print(f"[flocks] 浏览器已打开: {url}")
             return
     except Exception:
         pass

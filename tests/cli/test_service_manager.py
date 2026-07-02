@@ -743,9 +743,14 @@ def test_build_status_lines_reports_supervisor_control_status(monkeypatch, tmp_p
 
     lines = service_manager.build_status_lines(paths)
 
-    assert "Supervisor 运行中" in lines[0]
-    assert "http://127.0.0.1:9000" in lines[1]
-    assert "http://127.0.0.1:5174" in lines[2]
+    assert lines[0] == "[flocks] Flocks daemon"
+    assert lines[1] == "[flocks]   PID: 100"
+    assert lines[2] == "[flocks]   状态: running"
+    assert "http://127.0.0.1:9000" in lines[5]
+    assert "http://127.0.0.1:5174" in lines[6]
+    assert lines[9] == "[flocks]   daemon: /tmp/logs/supervisor.log"
+    assert lines[10] == "[flocks]   后端: /tmp/logs/backend.log"
+    assert lines[11] == "[flocks]   WebUI: /tmp/logs/webui.log"
 
 
 def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
@@ -762,7 +767,7 @@ def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, 
 
     lines = service_manager.build_status_lines(paths)
 
-    assert lines[0] == "[flocks] Supervisor 未运行"
+    assert lines[0] == "[flocks] Flocks daemon 未运行"
     assert calls == []
 
 
@@ -792,7 +797,7 @@ def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
     service_manager.start_all(service_manager.ServiceConfig(no_browser=True), console=console)
 
     assert calls == ["status"]
-    assert "[flocks] Supervisor 已在运行。" in console.messages
+    assert "[flocks] Flocks daemon 已在运行。" in console.messages
 
 
 def test_restart_all_uses_supervisor_control_api(monkeypatch) -> None:
@@ -820,7 +825,6 @@ def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "_start_supervisor_process", lambda _config, _paths, _console: calls.append("daemon") or SimpleNamespace(poll=lambda: None))
     monkeypatch.setattr(service_manager, "_wait_for_supervisor_ready", lambda _paths, **_kwargs: calls.append("ready") or _supervisor_status_payload())
-    monkeypatch.setattr(service_manager, "show_start_summary", lambda _config, _console: calls.append("summary"))
     monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console: calls.append("status"))
     monkeypatch.setattr(
         service_manager,
@@ -830,7 +834,7 @@ def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: 
 
     service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), DummyConsole())
 
-    assert calls == ["daemon", "ready", "summary", "status"]
+    assert calls == ["daemon", "ready", "status"]
 
 
 def test_start_all_propagates_supervisor_start_failure(monkeypatch) -> None:
@@ -1678,7 +1682,7 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     service_manager.stop_all(console=console)
 
     assert calls == ["/stop"]
-    assert console.messages == ["[flocks] Supervisor 已停止。"]
+    assert console.messages == ["[flocks] Flocks daemon 已停止。"]
 
 
 def test_stop_all_reports_when_supervisor_is_down(monkeypatch, tmp_path: Path) -> None:
@@ -1690,7 +1694,7 @@ def test_stop_all_reports_when_supervisor_is_down(monkeypatch, tmp_path: Path) -
 
     service_manager.stop_all(console)
 
-    assert console.messages == ["[flocks] Supervisor 未运行。"]
+    assert console.messages == ["[flocks] Flocks daemon 未运行。"]
 
 
 def test_status_lines_include_control_api_errors(monkeypatch, tmp_path: Path) -> None:
@@ -1702,8 +1706,9 @@ def test_status_lines_include_control_api_errors(monkeypatch, tmp_path: Path) ->
 
     lines = service_manager.build_status_lines(paths)
 
-    assert "state=degraded" in lines[1]
-    assert "last_error=health failed" in lines[1]
+    backend_line = next(line for line in lines if "后端:" in line)
+    assert "state=degraded" in backend_line
+    assert "last_error=health failed" in backend_line
 
 
 
