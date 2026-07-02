@@ -2024,7 +2024,7 @@ export default function DeviceIntegrationPage() {
     const now = Date.now();
     if (now - lastRefreshRef.current < 1000) return;
     lastRefreshRef.current = now;
-    void fetchData(true);
+    void fetchData(true, true, true);
   }, [fetchData]);
 
   useEffect(() => {
