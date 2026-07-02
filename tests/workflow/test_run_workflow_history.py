@@ -65,14 +65,14 @@ async def test_workflow_history_in_output():
     assert result.success is True
     assert result.output is not None
     
-    # Final tool metadata should not retain full per-step history in memory.
-    assert "history" in result.metadata
-    history = result.metadata["history"]
-    assert history == []
+    # Final tool metadata should not retain full per-step history or outputs in memory.
+    assert "history" not in result.metadata
+    assert "outputs" not in result.metadata
     
-    # Verify final outputs in metadata
-    assert "outputs" in result.metadata
-    assert result.metadata["outputs"]["final"] == 35
+    # Verify final outputs remain available in the agent-facing output text.
+    assert result.metadata["has_output"] is True
+    assert result.metadata["output_keys"] == ["final"]
+    assert '"final": 35' in result.output
     
     # Verify output text no longer expands the full execution history
     assert "Status: SUCCEEDED" in result.output
@@ -123,9 +123,8 @@ async def test_workflow_history_with_error():
     
     # Per-step details are written through execution step rows, not retained
     # in the final ToolResult metadata.
-    assert "history" in result.metadata
-    history = result.metadata["history"]
-    assert history == []
+    assert "history" not in result.metadata
+    assert "outputs" not in result.metadata
     
     # Output should contain only the top-level failure summary
     assert "Error:" in result.output
@@ -163,8 +162,8 @@ async def test_workflow_history_with_stdout():
     
     assert result.success is True
     
-    history = result.metadata["history"]
-    assert history == []
+    assert "history" not in result.metadata
+    assert "outputs" not in result.metadata
     
     # Output should stay concise and omit per-step stdout details
     assert "Stdout:" not in result.output

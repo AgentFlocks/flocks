@@ -14,10 +14,10 @@ async def test_sync_legacy_configs_disables_explicit_empty_trigger_list(
 ) -> None:
     writes: list[tuple[str, dict]] = []
 
-    async def _fake_write(key: str, value: dict) -> None:
-        writes.append((key, value))
+    async def _fake_put_config(workflow_id: str, config: dict, *, kind: str) -> None:
+        writes.append((f"{kind}/{workflow_id}", config))
 
-    monkeypatch.setattr(runtime_module.Storage, "write", _fake_write)
+    monkeypatch.setattr(runtime_module.WorkflowStore, "put_config", _fake_put_config)
 
     runtime = runtime_module.TriggerRuntime()
     triggers = await runtime._sync_legacy_configs_from_workflow(  # noqa: SLF001
@@ -26,9 +26,7 @@ async def test_sync_legacy_configs_disables_explicit_empty_trigger_list(
     )
 
     assert triggers == []
-    assert {
-        key for key, _value in writes
-    } == {
+    assert {key for key, _value in writes} == {
         "workflow_poller_config/wf-empty",
         "workflow_syslog_config/wf-empty",
         "workflow_kafka_config/wf-empty",
@@ -62,9 +60,7 @@ async def test_custom_adapter_restarts_when_definition_changes(
     monkeypatch.setattr(
         runtime_module,
         "load_trigger_plugin_module",
-        lambda _plugin_spec: SimpleNamespace(
-            create_trigger_adapter=lambda definition: _FakeAdapter(definition)
-        ),
+        lambda _plugin_spec: SimpleNamespace(create_trigger_adapter=lambda definition: _FakeAdapter(definition)),
     )
 
     runtime = runtime_module.TriggerRuntime()

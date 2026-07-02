@@ -187,6 +187,33 @@ async def test_nonzero_exit_returns_failure():
 
 
 @pytest.mark.asyncio
+async def test_install_forwards_raw_safeskill_uri_args():
+    from flocks.tool.skill.flocks_skills import flocks_skills
+    from flocks.skill.installer import SkillInstallResult
+
+    source = "safeskill://tbx/6ef3925b1f6245bcbd7da39f23c28652/onesig-use@1.0.0"
+    ctx = make_ctx()
+    installer = AsyncMock(
+        return_value=SkillInstallResult(
+            success=True,
+            skill_name="onesig-use",
+            location="/tmp/onesig-use/SKILL.md",
+            message="installed",
+        )
+    )
+
+    with patch("flocks.skill.installer.SkillInstaller.install_from_source", installer):
+        result = await flocks_skills(ctx, subcommand="install", args=source)
+
+    assert result.success is True
+    installer.assert_awaited_once_with(source, scope="global", yes=True)
+    ctx.ask.assert_called_once()
+    assert ctx.ask.call_args.kwargs["patterns"] == [
+        f"flocks skills install {source} --scope global --yes"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_install_timeout_returns_failure():
     from flocks.tool.skill.flocks_skills import flocks_skills
     from flocks.skill.installer import SkillInstallResult

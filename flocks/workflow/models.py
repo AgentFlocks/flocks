@@ -10,6 +10,8 @@ from .triggers.models import TriggerDefinition, normalize_trigger_definitions
 
 
 class Node(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(min_length=1)
     type: Literal[
         "python", "logic", "branch", "loop",
@@ -22,6 +24,8 @@ class Node(BaseModel):
     join_mode: Literal["flat", "namespace"] = "flat"
     join_conflict: Literal["overwrite", "error"] = "overwrite"
     join_namespace_key: str = "__by_source__"
+    input_schema: Optional[Dict[str, Any]] = Field(None, alias="inputSchema")
+    output_schema: Optional[Dict[str, Any]] = Field(None, alias="outputSchema")
 
     # tool 节点
     tool_name: Optional[str] = None

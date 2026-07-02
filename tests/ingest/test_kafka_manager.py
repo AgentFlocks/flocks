@@ -167,10 +167,12 @@ async def test_restart_disabled_config_reports_stopped(monkeypatch: pytest.Monke
 
     manager = kafka_manager.KafkaManager()
 
-    async def _fake_read(key):  # noqa: ANN001
+    async def _fake_get_config(workflow_id: str, *, kind: str) -> dict:
+        assert workflow_id == "wf-disabled"
+        assert kind == "workflow_kafka_config"
         return {"enabled": False}
 
-    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
 
     status = await manager.restart_workflow("wf-disabled")
     assert status == {"state": "stopped", "error": None}
@@ -182,10 +184,12 @@ async def test_restart_missing_broker_reports_failed(monkeypatch: pytest.MonkeyP
 
     manager = kafka_manager.KafkaManager()
 
-    async def _fake_read(key):  # noqa: ANN001
+    async def _fake_get_config(workflow_id: str, *, kind: str) -> dict:
+        assert workflow_id == "wf-no-broker"
+        assert kind == "workflow_kafka_config"
         return {"enabled": True, "inputBroker": "", "inputTopic": ""}
 
-    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
 
     status = await manager.restart_workflow("wf-no-broker")
     assert status["state"] == "failed"
@@ -201,7 +205,9 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
     manager = kafka_manager.KafkaManager()
     workflow_id = "wf-connect-failed"
 
-    async def _fake_read(key):  # noqa: ANN001
+    async def _fake_get_config(workflow_id_value: str, *, kind: str) -> dict:
+        assert workflow_id_value == workflow_id
+        assert kind == "workflow_kafka_config"
         return {
             "enabled": True,
             "inputBroker": "localhost:9092",
@@ -220,11 +226,17 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
         async def stop(self) -> None:
             self.stopped = True
 
-    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
     monkeypatch.setattr(
         kafka_manager,
         "read_workflow_from_fs",
-        lambda _workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}},
+        lambda _workflow_id: {
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
+                "edges": [],
+            }
+        },
     )
     monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
 
@@ -318,7 +330,8 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
 
     assert captured_input_params["kafka_message"]["alarmData"]["_type"] == "string"
     assert captured_input_params["kafka_message"]["alarmData"]["chars"] == 50_000
-    assert captured_run_kwargs["history_mode"] == "summary"
+    assert captured_run_kwargs["run_id"] == "exec-compact"
+    assert captured_run_kwargs["execution_profile"] == "high_frequency"
     assert callable(captured_run_kwargs["on_step_complete"])
     assert captured_exec_data["outputResults"] == {
         "_enriched_alerts_count": 1,
