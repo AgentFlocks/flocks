@@ -441,6 +441,33 @@ class SessionBindingService:
         rows = await cursor.fetchall()
         return [self._row_to_binding(r) for r in rows]
 
+    async def latest_active_user_binding(
+        self,
+        *,
+        channel_id: str,
+        account_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ) -> Optional[SessionBinding]:
+        """Return the binding only when a channel target resolves uniquely."""
+        from flocks.session.session import Session
+
+        candidates = await self.list_bindings(channel_id=channel_id)
+        if account_id:
+            candidates = [b for b in candidates if b.account_id == account_id]
+        if chat_id:
+            candidates = [b for b in candidates if b.chat_id == chat_id]
+
+        active_candidates: list[SessionBinding] = []
+        for binding in candidates:
+            session = await Session.get_by_id(binding.session_id)
+            if (
+                session
+                and session.status == "active"
+                and session.category == "user"
+            ):
+                active_candidates.append(binding)
+        return active_candidates[0] if len(active_candidates) == 1 else None
+
     # --- internal helpers ---
 
     async def _find_binding(
