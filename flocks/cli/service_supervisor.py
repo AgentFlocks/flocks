@@ -208,11 +208,14 @@ class SupervisorDaemon:
 
             def _send_json(self, payload: dict[str, object], status: int = 200) -> None:
                 body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
             def _read_json(self) -> dict[str, Any]:
                 length = int(self.headers.get("Content-Length") or "0")
@@ -234,6 +237,8 @@ class SupervisorDaemon:
                         daemon.handle_logs_request(self, parse_qs(parsed.query))
                         return
                     self._send_json({"error": "not found"}, status=404)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 except Exception as exc:  # pragma: no cover - defensive control path
                     self._send_json({"error": str(exc)}, status=500)
 
@@ -276,6 +281,8 @@ class SupervisorDaemon:
                         self._send_json(daemon.status_payload())
                         return
                     self._send_json({"error": "not found"}, status=404)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 except Exception as exc:  # pragma: no cover - defensive control path
                     self._send_json({"error": str(exc)}, status=500)
 

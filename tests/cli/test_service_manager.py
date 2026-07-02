@@ -411,6 +411,37 @@ def test_daemon_log_service_name_uses_daemon_only(tmp_path: Path) -> None:
     assert daemon._log_paths_for_service("supervisor") == []
 
 
+def test_supervisor_control_send_json_ignores_disconnected_client() -> None:
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    handler_class = daemon._handler_class()
+    handler = handler_class.__new__(handler_class)
+    calls: list[tuple[str, object]] = []
+
+    handler.send_response = lambda status: calls.append(("status", status))
+    handler.send_header = lambda name, value: calls.append((name, value))
+    handler.end_headers = lambda: calls.append(("end_headers", None))
+    handler.wfile = SimpleNamespace(write=lambda _body: (_ for _ in ()).throw(BrokenPipeError()))
+
+    handler._send_json({"ok": True})
+
+    assert calls[0] == ("status", 200)
+
+
+def test_supervisor_control_get_ignores_logs_client_disconnect() -> None:
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    handler_class = daemon._handler_class()
+    handler = handler_class.__new__(handler_class)
+    sent: list[dict[str, object]] = []
+
+    daemon.handle_logs_request = lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokenPipeError())
+    handler.path = "/logs?service=daemon"
+    handler._send_json = lambda payload, **_kwargs: sent.append(payload)
+
+    handler.do_GET()
+
+    assert sent == []
+
+
 def test_tail_lines_returns_recent_content(tmp_path: Path) -> None:
     log_file = tmp_path / "backend.log"
     log_file.write_text("a\nb\nc\n", encoding="utf-8")
