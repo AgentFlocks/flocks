@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
 import { ThemeContext, type Theme } from '@/contexts/ThemeContext';
+import { ToastProvider } from '@/components/common/Toast';
 
 const { changeLanguage, flocksproUsersApi, setTheme, useAuth } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
@@ -63,25 +64,27 @@ function LocationProbe() {
 
 function renderSettings(path: string, theme: Theme = 'light', state?: Record<string, unknown>) {
   return render(
-    <ThemeContext.Provider
-      value={{
-        theme,
-        effectiveTheme: theme,
-        toggleTheme: vi.fn(),
-        setTheme,
-        setTemporaryThemeOverride: vi.fn(),
-      }}
-    >
-      <MemoryRouter initialEntries={[state ? { pathname: path, state } : path]}>
-        <Routes>
-          <Route path="/settings/:sectionId?" element={<SettingsPage />} />
-          <Route path="/models" element={<div>models page</div>} />
-          <Route path="/channels" element={<div>channels page</div>} />
-          <Route path="/contracts/webui/workspaces/:workspaceId" element={<LocationProbe />} />
-          <Route path="/" element={<LocationProbe />} />
-        </Routes>
-      </MemoryRouter>
-    </ThemeContext.Provider>,
+    <ToastProvider>
+      <ThemeContext.Provider
+        value={{
+          theme,
+          effectiveTheme: theme,
+          toggleTheme: vi.fn(),
+          setTheme,
+          setTemporaryThemeOverride: vi.fn(),
+        }}
+      >
+        <MemoryRouter initialEntries={[state ? { pathname: path, state } : path]}>
+          <Routes>
+            <Route path="/settings/:sectionId?" element={<SettingsPage />} />
+            <Route path="/models" element={<div>models page</div>} />
+            <Route path="/channels" element={<div>channels page</div>} />
+            <Route path="/contracts/webui/workspaces/:workspaceId" element={<LocationProbe />} />
+            <Route path="/" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </ThemeContext.Provider>
+    </ToastProvider>,
   );
 }
 
@@ -193,7 +196,7 @@ describe('SettingsPage', () => {
     renderSettings('/settings/flockspro');
 
     expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'flocksproUpgrade' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
   });
 });

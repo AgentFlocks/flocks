@@ -111,6 +111,33 @@ def test_legacy_todo_tool_flags_migrate_to_todo_permission():
     assert worker.permission["bash"] == PermissionAction.ALLOW
 
 
+def test_ui_config_normalizes_and_dumps_aliases():
+    config = ConfigInfo.model_validate({
+        "ui": {
+            "displayName": "  Acme SOC  ",
+            "faviconPath": "assets/favicon.png",
+        }
+    })
+
+    assert config.ui is not None
+    assert config.ui.display_name == "Acme SOC"
+    assert config.ui.favicon_path == "assets/favicon.png"
+    assert config.model_dump(by_alias=True, exclude_none=True)["ui"] == {
+        "displayName": "Acme SOC",
+        "faviconPath": "assets/favicon.png",
+    }
+
+
+def test_ui_display_name_rejects_control_characters():
+    with pytest.raises(ValueError):
+        ConfigInfo.model_validate({"ui": {"displayName": "Acme\nSOC"}})
+
+
+def test_ui_favicon_path_rejects_unsafe_paths():
+    with pytest.raises(ValueError):
+        ConfigInfo.model_validate({"ui": {"faviconPath": "../favicon.svg"}})
+
+
 @pytest.mark.asyncio
 async def test_config_file_loading(tmp_path):
     """Test loading configuration from file"""
