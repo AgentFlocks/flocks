@@ -379,6 +379,38 @@ def test_selected_log_paths_support_specific_targets(tmp_path: Path) -> None:
     assert service_manager.selected_log_paths(paths) == [paths.backend_log, paths.frontend_log]
 
 
+def test_show_logs_falls_back_to_local_files_when_daemon_unavailable(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.log_dir.mkdir(parents=True)
+    paths.backend_log.write_text("backend-one\nbackend-two\n", encoding="utf-8")
+    paths.frontend_log.write_text("webui-one\n", encoding="utf-8")
+    (paths.log_dir / "daemon.log").write_text("daemon-one\n", encoding="utf-8")
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(
+        service_manager,
+        "read_logs",
+        lambda **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("down")),
+    )
+
+    service_manager.show_logs(console, follow=False, lines=1)
+
+    assert any("改为读取本地日志文件" in message for message in console.messages)
+    assert "[backend] backend-two" in console.messages
+    assert "[webui] webui-one" in console.messages
+    assert "[daemon] daemon-one" in console.messages
+
+
+def test_daemon_log_service_name_has_supervisor_alias(tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    daemon.paths = paths
+
+    assert daemon._log_paths_for_service("daemon") == [("daemon", paths.log_dir / "daemon.log")]
+    assert daemon._log_paths_for_service("supervisor") == [("daemon", paths.log_dir / "daemon.log")]
+
+
 def test_tail_lines_returns_recent_content(tmp_path: Path) -> None:
     log_file = tmp_path / "backend.log"
     log_file.write_text("a\nb\nc\n", encoding="utf-8")
@@ -764,11 +796,33 @@ def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, 
     )
     monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: calls.append("port_owner") or [])
     monkeypatch.setattr(service_manager, "port_is_in_use", lambda *_args, **_kwargs: calls.append("port_in_use") or False)
+    monkeypatch.setattr(service_manager, "trusted_daemon_process_pids", lambda **_kwargs: [])
 
     lines = service_manager.build_status_lines(paths)
 
     assert lines[0] == "[flocks] Flocks daemon 未运行"
     assert calls == []
+
+
+def test_build_status_lines_reports_residual_daemon_when_control_api_is_down(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+
+    monkeypatch.setattr(
+        service_manager,
+        "read_supervisor_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("down")),
+    )
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "trusted_daemon_process_pids", lambda **_kwargs: [52058])
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert lines == [
+        "[flocks] Flocks daemon control API 未运行",
+        "[flocks] 检测到残留 daemon 进程: PID=52058",
+        f"[flocks] 日志: {paths.log_dir / 'daemon.log'}",
+        "[flocks] 可执行 `flocks stop` 清理残留进程。",
+    ]
 
 
 def test_start_all_starts_supervisor_when_control_api_is_down(monkeypatch) -> None:
@@ -800,11 +854,46 @@ def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
     assert "[flocks] Flocks daemon 已在运行。" in console.messages
 
 
+def test_start_all_restarts_running_daemon_when_config_changes(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+    payload = _supervisor_status_payload()
+    payload["config"] = {
+        "backend_host": "127.0.0.1",
+        "backend_port": 8000,
+        "frontend_host": "127.0.0.1",
+        "frontend_port": 5173,
+    }
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
+    monkeypatch.setattr(service_manager, "_stop_all_unlocked", lambda _console, **_kwargs: calls.append("stop"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: calls.append("start"))
+
+    service_manager.start_all(
+        service_manager.ServiceConfig(
+            backend_host="0.0.0.0",
+            backend_port=9000,
+            frontend_host="0.0.0.0",
+            frontend_port=5273,
+            no_browser=True,
+        ),
+        console,
+    )
+
+    assert calls == ["stop", "start"]
+    assert "[flocks] Flocks daemon 已在运行，但配置已变化，正在按新配置重启..." in console.messages
+
+
 def test_restart_all_stops_then_starts_daemon(monkeypatch) -> None:
     call_order: list[str] = []
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
 
-    monkeypatch.setattr(service_manager, "stop_all", lambda _console: call_order.append("stop"))
-    monkeypatch.setattr(service_manager, "start_all", lambda _config, _console: call_order.append("start"))
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "_stop_all_unlocked", lambda _console, **_kwargs: call_order.append("stop"))
+    monkeypatch.setattr(service_manager, "_start_all_unlocked", lambda _config, _console, **_kwargs: call_order.append("start"))
 
     service_manager.restart_all(service_manager.ServiceConfig(), console=None)
 
@@ -1585,6 +1674,27 @@ def test_start_webui_cleans_trusted_orphan_port_owner(monkeypatch, tmp_path: Pat
     assert cleaned == [52372]
 
 
+def test_cleanup_trusted_daemon_processes_cleans_current_install_only(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+
+    monkeypatch.setattr(service_manager, "_process_list_pids", lambda: [111, 222, 333])
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda pid: {
+            111: f"{tmp_path}/.venv/bin/python -m flocks.cli.main service-daemon --server-port 8000",
+            222: "/other/flocks/.venv/bin/python -m flocks.cli.main service-daemon --server-port 8000",
+            333: f"{tmp_path}/.venv/bin/python -m flocks.cli.main serve --port 8000",
+        }[pid],
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_daemon_processes(console=DummyConsole(), root=tmp_path)
+
+    assert result == [111]
+    assert cleaned == [111]
+
+
 def test_spawn_process_uses_hidden_window_flags_on_windows(monkeypatch, tmp_path: Path) -> None:
     captured = {}
     log_path = tmp_path / "logs" / "backend.log"
@@ -1633,15 +1743,37 @@ def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(service_manager.sys, "platform", "darwin")
     monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: 4321 if pid == 9876 else pid)
 
     process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
 
     assert process.pid == 9876
+    assert process._flocks_pgid == 4321
     assert captured["args"] == (["python", "-m", "uvicorn"],)
     assert captured["kwargs"]["cwd"] == tmp_path
     assert captured["kwargs"]["creationflags"] == 0
     assert captured["kwargs"]["start_new_session"] is True
     assert "startupinfo" not in captured["kwargs"]
+
+
+def test_terminate_process_stops_cached_process_group_after_root_exits(monkeypatch) -> None:
+    signals: list[tuple[str, int]] = []
+    group_running = iter([True, False])
+    process = SimpleNamespace(pid=9876, returncode=0, poll=lambda: 0, _flocks_pgid=4321)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: next(group_running))
+    monkeypatch.setattr(
+        service_manager,
+        "signal_process_group",
+        lambda sig, pgid: signals.append((sig.name, pgid)),
+    )
+    monkeypatch.setattr(service_manager, "signal_pid_list", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [])
+
+    service_manager._terminate_process(process, "WebUI", DummyConsole(), timeout=0.1)
+
+    assert signals == [("SIGTERM", 4321)]
 
 
 def test_spawn_process_appends_without_rotated_suffix(monkeypatch, tmp_path: Path) -> None:
@@ -1729,12 +1861,14 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(states))
     monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop") or {"status": "stopping"})
-    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console: calls.append("cleanup"))
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda _paths, _console: calls.append("legacy"))
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console, **_kwargs: calls.append("cleanup"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: calls.append("browser"))
 
     console = FakeConsole()
     service_manager.stop_all(console=console)
 
-    assert calls == ["/stop", "cleanup"]
+    assert calls == ["/stop", "legacy", "cleanup", "browser"]
     assert console.messages == ["[flocks] Flocks daemon 已停止。"]
 
 
@@ -1744,11 +1878,46 @@ def test_stop_all_reports_when_supervisor_is_down(monkeypatch, tmp_path: Path) -
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
-    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console: console.messages.append("cleanup"))
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda _paths, _console: console.messages.append("legacy"))
+    monkeypatch.setattr(
+        service_manager,
+        "cleanup_orphan_service_ports",
+        lambda _config, _console, **_kwargs: console.messages.append("cleanup"),
+    )
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: console.messages.append("browser"))
 
     service_manager.stop_all(console)
 
-    assert console.messages == ["[flocks] Flocks daemon 未运行。", "cleanup"]
+    assert console.messages == ["[flocks] Flocks daemon 未运行。", "legacy", "cleanup", "browser"]
+
+
+def test_stop_all_uses_legacy_runtime_ports_for_orphan_cleanup(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    console = DummyConsole()
+    captured: list[service_manager.ServiceConfig] = []
+    paths.run_dir.mkdir(parents=True)
+    _write_legacy_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, host="0.0.0.0", port=9000),
+    )
+    _write_legacy_runtime_record(
+        paths.frontend_pid,
+        service_manager.RuntimeRecord(pid=222, host="0.0.0.0", port=5273),
+    )
+
+    def fake_cleanup(config, _console, *, extra_configs=()):
+        captured.append(config)
+        captured.extend(extra_configs)
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", fake_cleanup)
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: None)
+
+    service_manager.stop_all(console)
+
+    assert [(config.backend_port, config.frontend_port) for config in captured] == [(8000, 5173), (9000, 5273)]
 
 
 def test_status_lines_include_control_api_errors(monkeypatch, tmp_path: Path) -> None:

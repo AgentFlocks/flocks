@@ -25,6 +25,7 @@ from typing import Any, Iterable, Sequence
 
 import httpx
 
+from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
 from flocks.cli.service_config import ServiceConfig, loopback_host
 from flocks.cli.service_control import (
     read_logs,
@@ -35,6 +36,11 @@ from flocks.cli.service_control import (
     supervisor_log_path,
     supervisor_socket_path,
 )
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - unavailable on Windows
+    fcntl = None
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
@@ -398,12 +404,7 @@ def process_runtime_record(
     command: Sequence[str],
 ) -> RuntimeRecord:
     """Build runtime metadata for a freshly started service process."""
-    pgid = None
-    if sys.platform != "win32":
-        try:
-            pgid = os.getpgid(process.pid)
-        except OSError:
-            pgid = None
+    pgid = _process_group_id(process)
     return RuntimeRecord(
         pid=process.pid,
         pgid=pgid,
@@ -412,6 +413,24 @@ def process_runtime_record(
         command=tuple(command),
         started_at=time.time(),
     )
+
+
+def _process_group_id(process: subprocess.Popen) -> int | None:
+    """Return a cached or live Unix process group id for a managed process."""
+    if sys.platform == "win32":
+        return None
+    cached = getattr(process, "_flocks_pgid", None)
+    if isinstance(cached, int) and cached > 0:
+        return cached
+    try:
+        pgid = os.getpgid(process.pid)
+    except OSError:
+        return None
+    try:
+        setattr(process, "_flocks_pgid", pgid)
+    except Exception:
+        pass
+    return pgid
 
 
 def read_pid(pid_file: Path) -> int | None:
@@ -887,6 +906,62 @@ def cleanup_trusted_port_owners(port: int, *, service: str, label: str, console,
     return trusted
 
 
+def _process_list_pids() -> list[int]:
+    """Return process ids for best-effort trusted orphan cleanup."""
+    if sys.platform == "win32":
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object { $_.ProcessId }",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        completed = subprocess.run(
+            ["ps", "-eo", "pid="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    if completed.returncode != 0:
+        return []
+    pids = []
+    for line in completed.stdout.splitlines():
+        value = line.strip()
+        if value.isdigit():
+            pids.append(int(value))
+    return sorted(dict.fromkeys(pids))
+
+
+def _trusted_flocks_daemon_owner(pid: int, *, root: Path) -> bool:
+    """Return True only for daemon processes that belong to this Flocks install."""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    command_line = _process_command_line(pid).lower()
+    if not command_line:
+        return False
+    root_text = str(root).lower()
+    return "service-daemon" in command_line and "flocks" in command_line and root_text in command_line
+
+
+def trusted_daemon_process_pids(*, root: Path | None = None) -> list[int]:
+    """Return trusted daemon pids for the current Flocks install."""
+    current_root = root or ensure_install_layout()
+    return [pid for pid in _process_list_pids() if _trusted_flocks_daemon_owner(pid, root=current_root)]
+
+
+def cleanup_trusted_daemon_processes(*, console, root: Path | None = None) -> list[int]:
+    """Clean trusted Flocks daemon processes whose control API is unavailable."""
+    trusted = trusted_daemon_process_pids(root=root)
+    for pid in trusted:
+        _terminate_orphan_pid(pid, "daemon", console)
+    return trusted
+
+
 def _is_reachable_response(response: httpx.Response) -> bool:
     """Return True when an HTTP endpoint is reachable enough for startup checks."""
     return response.status_code < 500
@@ -961,13 +1036,15 @@ def _terminate_process(
     """Terminate a process and its process group without scanning service ports."""
     if process is None:
         return
-    if process.poll() is not None:
-        return
 
     record = process_runtime_record(process, host=None, port=None, command=())
+    if process.poll() is not None and not process_group_is_running(record.pgid):
+        return
+
     console.print(f"[flocks] 停止 {name}（PID={process.pid}）...")
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)
+        if process.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)
     else:
         if record.pgid is not None:
             signal_process_group(signal.SIGTERM, record.pgid)
@@ -982,7 +1059,8 @@ def _terminate_process(
 
     console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)
+        if process.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)
     else:
         if record.pgid is not None:
             signal_process_group(signal.SIGKILL, record.pgid)
@@ -1204,6 +1282,59 @@ def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
         pass
 
 
+def _recorded_port(pid_file: Path, default: int) -> int:
+    """Return the port from a legacy runtime record, falling back to *default*."""
+    record = read_runtime_record(pid_file)
+    if record is not None and record.port is not None:
+        return record.port
+    return default
+
+
+def _recorded_host(pid_file: Path, default: str) -> str:
+    """Return the host from a legacy runtime record, falling back to *default*."""
+    record = read_runtime_record(pid_file)
+    if record is not None and record.host:
+        return record.host
+    return default
+
+
+@contextlib.contextmanager
+def service_lock(paths: RuntimePaths):
+    """Serialize CLI lifecycle commands while starting/stopping the daemon."""
+    lock_path = paths.run_dir / "service.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    unlock_windows = None
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                handle.write("0")
+                handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                unlock_windows = msvcrt
+            else:
+                if fcntl is None:  # pragma: no cover - defensive
+                    raise OSError("fcntl unavailable")
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise ServiceError("另一个 flocks 命令正在执行，请稍后重试。") from error
+        yield
+    finally:
+        try:
+            if unlock_windows is not None:
+                handle.seek(0)
+                unlock_windows.locking(handle.fileno(), unlock_windows.LK_UNLCK, 1)
+            elif fcntl is not None and sys.platform != "win32":
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
 def _log_startup_config(
     log_path: Path,
     name: str,
@@ -1275,16 +1406,64 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
     return _spawn_process(command, cwd=root, log_path=log_path, env=env)
 
 
-def stop_all(console) -> None:
-    """Stop managed services through the supervisor control API."""
-    paths = ensure_runtime_dirs()
+def _service_config_matches(left: ServiceConfig, right: ServiceConfig) -> bool:
+    """Return True when two configs manage the same service endpoints."""
+    return (
+        left.backend_host == right.backend_host
+        and left.backend_port == right.backend_port
+        and left.frontend_host == right.frontend_host
+        and left.frontend_port == right.frontend_port
+    )
+
+
+def _legacy_runtime_config(paths: RuntimePaths, fallback: ServiceConfig) -> ServiceConfig:
+    """Build cleanup config from legacy runtime records when present."""
+    return ServiceConfig(
+        backend_host=_recorded_host(paths.backend_pid, fallback.backend_host),
+        backend_port=_recorded_port(paths.backend_pid, fallback.backend_port),
+        frontend_host=_recorded_host(paths.frontend_pid, fallback.frontend_host),
+        frontend_port=_recorded_port(paths.frontend_pid, fallback.frontend_port),
+        no_browser=fallback.no_browser,
+        skip_frontend_build=fallback.skip_frontend_build,
+    )
+
+
+def _unique_cleanup_configs(*configs: ServiceConfig) -> list[ServiceConfig]:
+    """Deduplicate cleanup configs by backend/WebUI ports."""
+    result: list[ServiceConfig] = []
+    seen: set[tuple[int, int]] = set()
+    for config in configs:
+        key = (config.backend_port, config.frontend_port)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(config)
+    return result
+
+
+def cleanup_legacy_runtime_processes(paths: RuntimePaths, console) -> None:
+    """Clean legacy pid/runtime records left by pre-daemon service starts."""
+    for pid_file, name in (
+        (watchdog_pid_path(paths), "watchdog"),
+        (paths.frontend_pid, "WebUI"),
+        (paths.backend_pid, "后端"),
+    ):
+        stop_runtime_record_process(pid_file, name, console)
+
+
+def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
+    """Stop managed services; caller must hold the lifecycle lock."""
     cleanup_config = ServiceConfig()
+    legacy_config = _legacy_runtime_config(paths, cleanup_config)
     if not supervisor_is_running(paths):
         console.print("[flocks] Flocks daemon 未运行。")
-        cleanup_orphan_service_ports(cleanup_config, console)
+        cleanup_legacy_runtime_processes(paths, console)
+        cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
+        stop_all_browser_daemons()
         return
     try:
         cleanup_config = read_supervisor_status(paths=paths, timeout=1.0).config
+        legacy_config = _legacy_runtime_config(paths, cleanup_config)
     except Exception:
         pass
     try:
@@ -1295,11 +1474,20 @@ def stop_all(console) -> None:
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if not supervisor_is_running(paths):
-            cleanup_orphan_service_ports(cleanup_config, console)
+            cleanup_legacy_runtime_processes(paths, console)
+            cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
+            stop_all_browser_daemons()
             console.print("[flocks] Flocks daemon 已停止。")
             return
         time.sleep(0.5)
     raise ServiceError("Flocks daemon 未在预期时间内退出。")
+
+
+def stop_all(console) -> None:
+    """Stop managed services through the supervisor control API."""
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        _stop_all_unlocked(console, paths=paths)
 
 
 def _start_all_without_stop(config: ServiceConfig, console) -> None:
@@ -1312,15 +1500,23 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
         open_default_browser(config.frontend_url, console)
 
 
-def start_all(config: ServiceConfig, console) -> None:
-    """Ensure the supervisor daemon is running."""
-    paths = ensure_runtime_dirs()
+def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) -> None:
+    """Ensure the supervisor daemon is running; caller must hold lifecycle lock."""
     if supervisor_is_running(paths):
+        status = None
+        try:
+            status = read_supervisor_status(paths=paths, timeout=1.0)
+        except Exception:
+            status = None
+        if status is not None and not _service_config_matches(config, status.config):
+            console.print("[flocks] Flocks daemon 已在运行，但配置已变化，正在按新配置重启...")
+            _stop_all_unlocked(console, paths=paths)
+            _start_all_without_stop(config, console)
+            return
         console.print("[flocks] Flocks daemon 已在运行。")
         show_status(console)
         if not config.no_browser:
             try:
-                status = read_supervisor_status(paths=paths, timeout=1.0)
                 url = _frontend_url_from_status(status, config.frontend_url)
             except Exception:
                 url = config.frontend_url
@@ -1329,29 +1525,40 @@ def start_all(config: ServiceConfig, console) -> None:
     _start_all_without_stop(config, console)
 
 
+def start_all(config: ServiceConfig, console) -> None:
+    """Ensure the supervisor daemon is running."""
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        _start_all_unlocked(config, console, paths=paths)
+
+
 def restart_all(config: ServiceConfig, console) -> None:
     """Restart by stopping the daemon first, then starting a fresh daemon."""
-    stop_all(console)
-    start_all(config, console)
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        _stop_all_unlocked(console, paths=paths)
+        _start_all_unlocked(config, console, paths=paths)
 
 
-def cleanup_orphan_service_ports(config: ServiceConfig, console) -> None:
+def cleanup_orphan_service_ports(config: ServiceConfig, console, *, extra_configs: Sequence[ServiceConfig] = ()) -> None:
     """Clean trusted Flocks leftovers on configured backend/WebUI ports."""
     root = ensure_install_layout()
-    cleanup_trusted_port_owners(
-        config.backend_port,
-        service="backend",
-        label="后端",
-        console=console,
-        root=root,
-    )
-    cleanup_trusted_port_owners(
-        config.frontend_port,
-        service="webui",
-        label="WebUI",
-        console=console,
-        root=root,
-    )
+    cleanup_trusted_daemon_processes(console=console, root=root)
+    for cleanup_config in _unique_cleanup_configs(config, *extra_configs):
+        cleanup_trusted_port_owners(
+            cleanup_config.backend_port,
+            service="backend",
+            label="后端",
+            console=console,
+            root=root,
+        )
+        cleanup_trusted_port_owners(
+            cleanup_config.frontend_port,
+            service="webui",
+            label="WebUI",
+            console=console,
+            root=root,
+        )
 
 
 def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
@@ -1360,6 +1567,18 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     try:
         status = read_supervisor_status(paths=current)
     except Exception:
+        residual_daemons = []
+        try:
+            residual_daemons = trusted_daemon_process_pids(root=ensure_install_layout())
+        except Exception:
+            residual_daemons = []
+        if residual_daemons:
+            return [
+                "[flocks] Flocks daemon control API 未运行",
+                f"[flocks] 检测到残留 daemon 进程: PID={_join_pids(residual_daemons)}",
+                f"[flocks] 日志: {supervisor_log_path(current)}",
+                "[flocks] 可执行 `flocks stop` 清理残留进程。",
+            ]
         return [
             "[flocks] Flocks daemon 未运行",
             f"[flocks] 日志: {supervisor_log_path(current)}",
@@ -1436,7 +1655,9 @@ def show_logs(
         try:
             payload = read_logs(service=service, lines=lines, paths=paths, timeout=5.0)
         except Exception as exc:
-            raise ServiceError(f"无法通过 Flocks daemon 读取日志: {exc}") from exc
+            console.print(f"[flocks] Flocks daemon 日志接口不可用，改为读取本地日志文件: {exc}")
+            _show_local_logs(console, paths, backend=backend, webui=webui, follow=False, lines=lines)
+            return
         logs = payload.get("logs") if isinstance(payload.get("logs"), dict) else {}
         for prefix, entry in logs.items():
             if not isinstance(entry, dict):
@@ -1453,7 +1674,8 @@ def show_logs(
     except KeyboardInterrupt:
         return
     except Exception as exc:
-        raise ServiceError(f"无法通过 Flocks daemon 跟随日志: {exc}") from exc
+        console.print(f"[flocks] Flocks daemon 日志接口不可用，改为跟随本地日志文件: {exc}")
+        _show_local_logs(console, paths, backend=backend, webui=webui, follow=True, lines=lines)
 
 
 def selected_log_paths(
@@ -1468,6 +1690,64 @@ def selected_log_paths(
     if webui and not backend:
         return [paths.frontend_log]
     return [paths.backend_log, paths.frontend_log]
+
+
+def _selected_log_entries(paths: RuntimePaths, *, backend: bool = False, webui: bool = False) -> list[tuple[str, Path]]:
+    """Return local log files selected by CLI flags."""
+    if backend and not webui:
+        return [("backend", paths.backend_log)]
+    if webui and not backend:
+        return [("webui", paths.frontend_log)]
+    return [
+        ("backend", paths.backend_log),
+        ("webui", paths.frontend_log),
+        ("daemon", supervisor_log_path(paths)),
+    ]
+
+
+def _show_local_logs(
+    console,
+    paths: RuntimePaths,
+    *,
+    backend: bool = False,
+    webui: bool = False,
+    follow: bool = True,
+    lines: int = 50,
+) -> None:
+    """Print local log files when the daemon control API is unavailable."""
+    selections = _selected_log_entries(paths, backend=backend, webui=webui)
+    for prefix, path in selections:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        console.print(f"[{prefix}] --- {path} ---")
+        for line in tail_lines(path, lines):
+            console.print(f"[{prefix}] {line}")
+
+    if not follow:
+        return
+
+    handles = {}
+    try:
+        for prefix, path in selections:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+            handle.seek(0, os.SEEK_END)
+            handles[prefix] = handle
+        while True:
+            emitted = False
+            for prefix, handle in handles.items():
+                while True:
+                    line = handle.readline()
+                    if not line:
+                        break
+                    emitted = True
+                    console.print(f"[{prefix}] {line.rstrip()}")
+            if not emitted:
+                time.sleep(FOLLOW_POLL_INTERVAL)
+    except KeyboardInterrupt:
+        return
+    finally:
+        for handle in handles.values():
+            handle.close()
 
 
 def tail_lines(path: Path, lines: int) -> list[str]:
@@ -1671,7 +1951,7 @@ def _spawn_process(
     _cap_service_log_file(log_path, MAX_SERVICE_LOG_BYTES)
     handle = log_path.open("a", encoding="utf-8")
     try:
-        return subprocess.Popen(
+        process = subprocess.Popen(
             list(command),
             cwd=cwd,
             env=env,
@@ -1681,6 +1961,8 @@ def _spawn_process(
             creationflags=creationflags,
             **kwargs,
         )
+        _process_group_id(process)
+        return process
     finally:
         handle.close()
 

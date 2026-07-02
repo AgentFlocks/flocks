@@ -386,13 +386,13 @@ class SupervisorDaemon:
             return [("backend", self.paths.backend_log)]
         if service_name == "webui":
             return [("webui", self.paths.frontend_log)]
-        if service_name == "supervisor":
-            return [("supervisor", supervisor_log_path(self.paths))]
+        if service_name in {"daemon", "supervisor"}:
+            return [("daemon", supervisor_log_path(self.paths))]
         if service_name == "all":
             return [
                 ("backend", self.paths.backend_log),
                 ("webui", self.paths.frontend_log),
-                ("supervisor", supervisor_log_path(self.paths)),
+                ("daemon", supervisor_log_path(self.paths)),
             ]
         return []
 
