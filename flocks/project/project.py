@@ -46,6 +46,39 @@ class Project:
     """Project management namespace"""
     
     _current: Optional[ProjectInfo] = None
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        name: str,
+        worktree: str,
+        icon: Optional[ProjectIcon] = None,
+    ) -> ProjectInfo:
+        """
+        Create a user-managed project grouping.
+
+        User-managed projects share the provided worktree but get their own
+        project ID so sessions can be organized independently from the default
+        auto-discovered project.
+        """
+        now = int(datetime.now().timestamp() * 1000)
+        project_id = Identifier.ascending("slug").replace("slg_", "prj_", 1)
+        project = ProjectInfo(
+            id=project_id,
+            worktree=worktree,
+            vcs=None,
+            name=name,
+            icon=icon,
+            sandboxes=[],
+            time=ProjectTime(
+                created=now,
+                updated=now,
+            ),
+        )
+        await Storage.write(["project", project_id], project)
+        log.info("project.created", {"id": project_id})
+        return project
     
     @classmethod
     async def from_directory(cls, directory: str) -> Dict[str, Any]:

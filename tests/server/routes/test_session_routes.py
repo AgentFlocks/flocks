@@ -161,6 +161,8 @@ class TestSessionCRUD:
         row = next(item for item in data if item["id"] == user_id)
         assert set(row) == {
             "id",
+            "projectID",
+            "directory",
             "title",
             "time",
             "category",
@@ -172,8 +174,32 @@ class TestSessionCRUD:
             "canDelete",
             "isShared",
         }
+        assert row["projectID"]
+        assert row["directory"]
         assert "goal" not in row
         assert "summary" not in row
+
+    @pytest.mark.asyncio
+    async def test_create_session_in_user_managed_project(self, client: AsyncClient):
+        """Session creation can target a user-managed project."""
+        project_resp = await client.post("/api/project", json={"name": "Labs"})
+        assert project_resp.status_code == status.HTTP_200_OK
+        project = project_resp.json()
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "Project Session", "projectID": project["id"]},
+        )
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json()["projectID"] == project["id"]
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+        row = next(item for item in list_resp.json() if item["id"] == session_resp.json()["id"])
+        assert row["projectID"] == project["id"]
+        assert row["directory"] == project["worktree"]
 
     @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):

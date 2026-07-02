@@ -72,6 +72,7 @@ class SessionCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     
     parentID: Optional[str] = Field(None, alias="parent_id", description="Parent session ID")
+    projectID: Optional[str] = Field(None, alias="project_id", description="Project ID")
     title: Optional[str] = Field(None, description="Session title")
     permission: Optional[List[PermissionRule]] = Field(None, description="Permission rules")
     category: Optional[str] = Field(None, description="Session category (e.g. 'user', 'workflow')")
@@ -143,6 +144,8 @@ class SessionListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
 
     id: str
+    projectID: str
+    directory: str
     title: str
     time: SessionTime
     category: str = "user"
@@ -198,6 +201,8 @@ def _session_to_list_item(session: SessionModel) -> SessionListItem:
     current_user = get_current_auth_user()
     return SessionListItem(
         id=session.id,
+        projectID=session.project_id,
+        directory=session.directory,
         title=session.title,
         time=SessionTime(
             created=session.time.created,
@@ -485,6 +490,18 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     except Exception:
         directory = os.getcwd()
         project_id = "default"
+
+    if request.projectID:
+        from flocks.project.project import Project
+
+        project = await Project.get(request.projectID)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project {request.projectID} not found",
+            )
+        project_id = project.id
+        directory = project.worktree
     
     # Trigger command:new hook if creating from parent (like /new command)
     if request.parentID:

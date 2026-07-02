@@ -21,6 +21,8 @@ const {
   toast,
 } = vi.hoisted(() => ({
   client: {
+    get: vi.fn(),
+    patch: vi.fn(),
     post: vi.fn(),
   },
   sessionApi: {
@@ -248,8 +250,19 @@ describe('SessionPage session actions menu', () => {
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: { id: 'project-1', worktree: '/tmp/project', name: 'Security Project' } });
+      }
+      return Promise.resolve({
+        data: [
+          { id: 'project-1', worktree: '/tmp/project', name: 'Security Project' },
+        ],
+      });
+    });
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
+    client.patch.mockResolvedValue({ data: { id: 'project-1', worktree: '/tmp/project', name: 'Renamed Project' } });
     client.post.mockResolvedValue({ data: secondSession });
     sessionApi.get.mockResolvedValue(session);
     sessionApi.getMessages.mockResolvedValue([
@@ -266,6 +279,113 @@ describe('SessionPage session actions menu', () => {
     sessionApi.delete.mockResolvedValue(true);
 
     vi.stubGlobal('confirm', vi.fn(() => true));
+  });
+
+  it('groups sidebar sessions under their project', async () => {
+    const user = userEvent.setup();
+
+    renderSessionPage();
+
+    const projectLabel = await screen.findByText('Security Project');
+    expect(screen.getByText('Original Session')).toBeInTheDocument();
+    expect(screen.getByText('1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'toggleProject' }));
+
+    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+  });
+
+  it('merges legacy default sessions into the current project group', async () => {
+    useSessions.mockReturnValue({
+      sessions: [
+        session,
+        {
+          ...secondSession,
+          projectID: 'default',
+          directory: '/tmp/project',
+          title: 'Legacy Default Session',
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Security Project');
+    expect(screen.getByText('Original Session')).toBeInTheDocument();
+    expect(screen.getByText('Legacy Default Session')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    expect(screen.queryByText('project')).not.toBeInTheDocument();
+  });
+
+  it('labels the unnamed current project as default', async () => {
+    client.get.mockImplementation((url: string) => {
+      const currentProject = { id: 'project-1', worktree: '/tmp/project', name: null };
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: currentProject });
+      }
+      return Promise.resolve({ data: [currentProject] });
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('defaultProjectName')).toBeInTheDocument();
+    expect(screen.queryByText('project')).not.toBeInTheDocument();
+  });
+
+  it('creates a user-managed project from the sidebar', async () => {
+    const user = userEvent.setup();
+    let projectRows = [
+      { id: 'project-1', worktree: '/tmp/project', name: 'Security Project' },
+    ];
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: projectRows[0] });
+      }
+      return Promise.resolve({ data: projectRows });
+    });
+    client.post.mockImplementation((url: string, payload: Record<string, unknown>) => {
+      if (url === '/api/project') {
+        const created = { id: 'project-2', worktree: '/tmp/project', name: payload.name as string };
+        projectRows = [projectRows[0], created];
+        return Promise.resolve({ data: created });
+      }
+      return Promise.resolve({ data: secondSession });
+    });
+
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
+    await user.type(screen.getByLabelText('projectDialog.nameLabel'), 'Labs');
+    await user.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/project', { name: 'Labs' });
+      expect(screen.getByText('Labs')).toBeInTheDocument();
+    });
+  });
+
+  it('renames a project from the sidebar', async () => {
+    const user = userEvent.setup();
+
+    renderSessionPage();
+
+    await screen.findByText('Security Project');
+    await user.click(screen.getByRole('button', { name: 'projectDialog.renameTitle' }));
+    const input = screen.getByLabelText('projectDialog.nameLabel');
+    await user.clear(input);
+    await user.type(input, 'Renamed Project');
+    await user.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenCalledWith('/api/project/project-1', { name: 'Renamed Project' });
+    });
   });
 
   it('opens the actions menu for a session item', async () => {

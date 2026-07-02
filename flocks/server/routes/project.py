@@ -21,6 +21,14 @@ class ProjectUpdateRequest(BaseModel):
     icon: Optional[ProjectIcon] = None
 
 
+class ProjectCreateRequest(BaseModel):
+    """Project create request"""
+    name: str
+    worktree: Optional[str] = None
+    icon: Optional[ProjectIcon] = None
+
+
+@router.get("", response_model=List[ProjectInfo], include_in_schema=False)
 @router.get("/", response_model=List[ProjectInfo], summary="List all projects")
 async def list_projects():
     """
@@ -34,6 +42,43 @@ async def list_projects():
     except Exception as e:
         log.error("project.list.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("", response_model=ProjectInfo, include_in_schema=False)
+@router.post("/", response_model=ProjectInfo, summary="Create project")
+async def create_project(request: ProjectCreateRequest):
+    """
+    Create a user-managed project.
+
+    User-managed projects organize sessions without changing the current
+    workspace execution directory.
+    """
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name cannot be empty")
+
+    try:
+        import os
+        from flocks.project.instance import Instance
+
+        worktree = request.worktree
+        if not worktree:
+            try:
+                worktree = Instance.directory
+            except Exception:
+                worktree = os.getcwd()
+
+        project = await Project.create(
+            name=name,
+            worktree=str(worktree),
+            icon=request.icon,
+        )
+        return project
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("project.create.error", {"error": str(e)})
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/current", response_model=ProjectInfo, summary="Get current project")

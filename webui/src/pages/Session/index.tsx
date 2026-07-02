@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   MessageSquare, Plus, Trash2,
-  ChevronDown, Sparkles, Shield, Search, AlertTriangle,
+  ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
+  FolderGit2, FolderPlus,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -37,6 +38,18 @@ function sanitizeSessionExportName(value: string) {
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+type ProjectSummary = {
+  id: string;
+  worktree: string;
+  name?: string | null;
+};
+type ProjectDialogMode = 'create' | 'rename';
+type ProjectSessionGroup = {
+  id: string;
+  label: string;
+  worktree: string;
+  sessions: Session[];
+};
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -113,6 +126,27 @@ function makeModelKey(providerID: string, modelID: string): string {
   return `${providerID}::${modelID}`;
 }
 
+function getPathBasename(path: string): string {
+  const normalized = path.replace(/[\\/]+$/g, '');
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path || 'Project';
+}
+
+function getProjectLabel(project?: ProjectSummary, fallbackDirectory?: string): string {
+  const explicitName = project?.name?.trim();
+  if (explicitName) return explicitName;
+  const directory = project?.worktree || fallbackDirectory || '';
+  return getPathBasename(directory);
+}
+
+function normalizeProjectPath(path?: string): string {
+  return (path || '').replace(/[\\/]+$/g, '');
+}
+
+function isLegacyDefaultProjectId(projectId?: string): boolean {
+  return !projectId || projectId === 'default' || projectId === 'global';
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const location = useLocation();
@@ -131,6 +165,14 @@ export default function SessionPage() {
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(new Set());
+  const [projectDialogMode, setProjectDialogMode] = useState<ProjectDialogMode | null>(null);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [projectNameValue, setProjectNameValue] = useState('');
+  const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
@@ -259,55 +301,78 @@ export default function SessionPage() {
   const selectedSession = listedSelectedSession
     ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
 
-  // 今天/昨天不限制；本周/上周/更早默认只显示 5 条
-  const GROUP_DEFAULT_LIMIT: Record<string, number> = {
-    today: Infinity,
-    yesterday: Infinity,
-    thisWeek: 5,
-    lastWeek: 5,
-    earlier: 5,
-  };
-
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const toggleGroupExpand = useCallback((key: string) => {
-    setExpandedGroups(prev => {
+  const toggleProjectCollapsed = useCallback((projectId: string) => {
+    setCollapsedProjectIds(prev => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      next.has(projectId) ? next.delete(projectId) : next.add(projectId);
       return next;
     });
   }, []);
 
-  const groupedSessions = useMemo(() => {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const yesterdayStart = todayStart - 86400000;
-    // Week starts on Monday
-    const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
-    const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
-    const lastWeekStart = thisWeekStart - 7 * 86400000;
+  const projectSessionGroups = useMemo<ProjectSessionGroup[]>(() => {
+    const projectMap = new Map<string, ProjectSessionGroup>();
+    const currentProject = currentProjectId
+      ? projects.find((project) => project.id === currentProjectId)
+      : undefined;
+    const currentProjectWorktree = normalizeProjectPath(currentProject?.worktree);
 
-    const q = searchQuery.toLowerCase().trim();
-    const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
+    projects.forEach((project) => {
+      const isCurrentProject = currentProjectId === project.id;
+      const hasExplicitName = Boolean(project.name?.trim());
+      projectMap.set(project.id, {
+        id: project.id,
+        label: isCurrentProject && !hasExplicitName ? t('defaultProjectName') : getProjectLabel(project),
+        worktree: project.worktree,
+        sessions: [],
+      });
+    });
 
-    const buckets: { key: string; labelKey: string; items: typeof sessions }[] = [
-      { key: 'today', labelKey: 'groupToday', items: [] },
-      { key: 'yesterday', labelKey: 'groupYesterday', items: [] },
-      { key: 'thisWeek', labelKey: 'groupThisWeek', items: [] },
-      { key: 'lastWeek', labelKey: 'groupLastWeek', items: [] },
-      { key: 'earlier', labelKey: 'groupEarlier', items: [] },
-    ];
+    sessions.forEach((session) => {
+      const sessionDirectory = normalizeProjectPath(session.directory);
+      const projectId = isLegacyDefaultProjectId(session.projectID) && currentProjectId && sessionDirectory === currentProjectWorktree
+        ? currentProjectId
+        : session.projectID || session.directory || 'global';
+      const existing = projectMap.get(projectId);
+      if (existing) {
+        existing.sessions.push(session);
+        return;
+      }
 
-    for (const s of filtered) {
-      const ts = s.time?.updated ?? 0;
-      if (ts >= todayStart) buckets[0].items.push(s);
-      else if (ts >= yesterdayStart) buckets[1].items.push(s);
-      else if (ts >= thisWeekStart) buckets[2].items.push(s);
-      else if (ts >= lastWeekStart) buckets[3].items.push(s);
-      else buckets[4].items.push(s);
+      projectMap.set(projectId, {
+        id: projectId,
+        label: getProjectLabel(undefined, session.directory),
+        worktree: session.directory,
+        sessions: [session],
+      });
+    });
+
+    return Array.from(projectMap.values())
+      .filter((group) => group.sessions.length > 0 || !searchQuery.trim())
+      .sort((a, b) => {
+        const aLatest = a.sessions[0]?.time?.updated ?? 0;
+        const bLatest = b.sessions[0]?.time?.updated ?? 0;
+        if (aLatest !== bLatest) return bLatest - aLatest;
+        return a.label.localeCompare(b.label);
+      });
+  }, [currentProjectId, projects, searchQuery, sessions, t]);
+
+  const selectedProjectIDForCreate = selectedProjectId ?? currentProjectId ?? projectSessionGroups[0]?.id ?? null;
+
+  useEffect(() => {
+    if (projectSessionGroups.length === 0) {
+      setSelectedProjectId(null);
+      return;
     }
 
-    return buckets.filter(b => b.items.length > 0);
-  }, [sessions, searchQuery]);
+    if (selectedProjectId && projectSessionGroups.some((group) => group.id === selectedProjectId)) {
+      return;
+    }
+
+    const fallbackProjectId = currentProjectId && projectSessionGroups.some((group) => group.id === currentProjectId)
+      ? currentProjectId
+      : projectSessionGroups[0].id;
+    setSelectedProjectId(fallbackProjectId);
+  }, [currentProjectId, projectSessionGroups, selectedProjectId]);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
@@ -327,6 +392,28 @@ export default function SessionPage() {
       refetchSessions();
     }
   }, [updateSessionTitle, refetchSessions]);
+
+  const fetchProjects = useCallback(async () => {
+    const [listResult, currentResult] = await Promise.allSettled([
+      client.get('/api/project'),
+      client.get('/api/project/current'),
+    ]);
+
+    const nextProjects = listResult.status === 'fulfilled' && Array.isArray(listResult.value.data)
+      ? listResult.value.data
+      : [];
+    const nextCurrentProjectId = currentResult.status === 'fulfilled'
+      ? currentResult.value.data?.id ?? null
+      : null;
+
+    setProjects(nextProjects);
+    setCurrentProjectId(nextCurrentProjectId);
+    setSelectedProjectId((current) => current ?? nextCurrentProjectId ?? nextProjects[0]?.id ?? null);
+  }, []);
+
+  useEffect(() => {
+    void fetchProjects();
+  }, [fetchProjects]);
 
   // Keep the selected session in sync with URL query params (e.g. onboarding
   // or other in-app navigation to `/sessions?session=...`). Clear the params
@@ -518,7 +605,10 @@ export default function SessionPage() {
     if (creating) return;
     setCreating(true);
     try {
-      const response = await client.post('/api/session', { title: 'New Session' });
+      const response = await client.post('/api/session', {
+        title: 'New Session',
+        ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
+      });
       addSession(response.data);
       setSelectedAgent('rex');
       setSelectedModelKey(null);
@@ -528,7 +618,7 @@ export default function SessionPage() {
     } finally {
       setCreating(false);
     }
-  }, [creating, addSession, toast, t]);
+  }, [creating, selectedProjectIDForCreate, addSession, toast, t]);
 
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     setSelectedModelKey(option.key);
@@ -554,7 +644,10 @@ export default function SessionPage() {
     modelOverride?: { providerID: string; modelID: string } | null,
   ) => {
     try {
-      const response = await client.post('/api/session', { title: 'New Session' });
+      const response = await client.post('/api/session', {
+        title: 'New Session',
+        ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
+      });
       const newSessionId = response.data.id;
 
       addSession(response.data);
@@ -573,7 +666,7 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, selectedAgent, toast, t]);
+  }, [addSession, selectedAgent, selectedProjectIDForCreate, toast, t]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();
@@ -644,6 +737,57 @@ export default function SessionPage() {
       setRenameSubmitting(false);
     }
   }, [renameValue, sessions, t, toast, updateSessionTitle]);
+
+  const handleOpenCreateProject = useCallback(() => {
+    setProjectDialogMode('create');
+    setEditingProjectId(null);
+    setProjectNameValue('');
+  }, []);
+
+  const handleOpenRenameProject = useCallback((project: ProjectSessionGroup) => {
+    setProjectDialogMode('rename');
+    setEditingProjectId(project.id);
+    setProjectNameValue(project.label);
+  }, []);
+
+  const handleCloseProjectDialog = useCallback(() => {
+    if (projectSubmitting) return;
+    setProjectDialogMode(null);
+    setEditingProjectId(null);
+    setProjectNameValue('');
+  }, [projectSubmitting]);
+
+  const handleSubmitProject = useCallback(async () => {
+    if (!projectDialogMode || projectSubmitting) return;
+    const nextName = projectNameValue.trim();
+    if (!nextName) {
+      toast.error(t('projectDialog.saveFailed'), t('projectDialog.nameEmpty'));
+      return;
+    }
+
+    setProjectSubmitting(true);
+    try {
+      if (projectDialogMode === 'create') {
+        const response = await client.post('/api/project', { name: nextName });
+        setSelectedProjectId(response.data.id);
+        setCollapsedProjectIds(prev => {
+          const next = new Set(prev);
+          next.delete(response.data.id);
+          return next;
+        });
+      } else if (editingProjectId) {
+        await client.patch(`/api/project/${editingProjectId}`, { name: nextName });
+      }
+      await fetchProjects();
+      setProjectDialogMode(null);
+      setEditingProjectId(null);
+      setProjectNameValue('');
+    } catch (err: any) {
+      toast.error(t('projectDialog.saveFailed'), err.message);
+    } finally {
+      setProjectSubmitting(false);
+    }
+  }, [editingProjectId, fetchProjects, projectDialogMode, projectNameValue, projectSubmitting, t, toast]);
 
   const handleDownloadSession = useCallback(async (sessionId: string, title: string) => {
     setOpenMenuSessionId(null);
@@ -744,6 +888,100 @@ export default function SessionPage() {
     setBatchDeleting(false);
   }, [checkedIds, batchDeleting, removeSessions, selectedSessionId, toast, t]);
 
+  const renderSessionListItem = (session: Session) => (
+    <div
+      key={session.id}
+      onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
+      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+        !selectMode && selectedSessionId === session.id
+          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          : selectMode && checkedIds.has(session.id)
+          ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
+          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+      }`}
+    >
+      <div className="flex items-center gap-1.5 min-w-0 pr-7">
+        {selectMode && (
+          <input
+            type="checkbox"
+            checked={checkedIds.has(session.id)}
+            onChange={() => handleToggleCheck(session.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+          />
+        )}
+        {session.category === 'workflow' && (
+          <span title={t('workflowSession')} className="flex-shrink-0">
+            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+          </span>
+        )}
+        {session.category === 'entity-config' && (
+          <span title={t('configSession')} className="flex-shrink-0">
+            <Settings2 className="w-3 h-3 text-purple-400" />
+          </span>
+        )}
+        {renamingSessionId === session.id ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => void handleSubmitRename(session.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void handleSubmitRename(session.id); }
+              if (e.key === 'Escape') { e.preventDefault(); handleCancelRename(); }
+            }}
+            placeholder={t('renamePlaceholder')}
+            disabled={renameSubmitting}
+            className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+            aria-label={t('rename')}
+            data-session-rename-input
+          />
+        ) : (
+          <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+            <span className="truncate">{session.title}</span>
+            {session.isShared && (
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                {t('sharedTag')}
+              </span>
+            )}
+          </h3>
+        )}
+      </div>
+      {session.time?.updated && renamingSessionId !== session.id && (
+        <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
+          {formatSessionDate(session.time.updated)}
+        </p>
+      )}
+
+      {!selectMode && (
+        <div className="absolute right-1.5 top-2" data-session-actions>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (openMenuSessionId === session.id) {
+                setOpenMenuSessionId(null);
+                setMenuAnchor(null);
+              } else {
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                setOpenMenuSessionId(session.id);
+              }
+            }}
+            title={t('moreActions')}
+            aria-label={t('moreActions')}
+            aria-expanded={openMenuSessionId === session.id}
+            className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
+              openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <MoreHorizontal className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
   if (loadingSessions) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -787,148 +1025,106 @@ export default function SessionPage() {
 
         {/* Session list */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide pb-2">
-          {sessions.length === 0 ? (
+          {sessions.length === 0 && projectSessionGroups.length === 0 ? (
             <div className="text-center py-10 px-4 text-gray-400">
               <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-40" />
               <p className="text-sm">{t('noSessions')}</p>
             </div>
-          ) : groupedSessions.length === 0 ? (
+          ) : projectSessionGroups.length === 0 ? (
             <div className="text-center py-8 px-4 text-gray-400">
               <p className="text-sm">{t('noResults', 'No conversations found')}</p>
             </div>
           ) : (
-            groupedSessions.map(({ key, labelKey, items }) => {
-              const isSearching = searchQuery.trim().length > 0;
-              const limit = isSearching ? Infinity : (GROUP_DEFAULT_LIMIT[key] ?? 5);
-              const isExpanded = expandedGroups.has(key);
-              const visibleItems = (isSearching || isExpanded || items.length <= limit)
-                ? items
-                : items.slice(0, limit);
-              const hiddenCount = items.length - visibleItems.length;
-
-              return (
-              <div key={key}>
-                <div className="px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
-                  {t(labelKey, labelKey)}
-                </div>
-                {visibleItems.map((session) => (
-                  <div
-                    key={session.id}
-                    onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
-                    className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
-                      !selectMode && selectedSessionId === session.id
-                        ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
-                        : selectMode && checkedIds.has(session.id)
-                        ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-                        : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
-                    }`}
-                  >
-                    {/* Title row */}
-                    <div className="flex items-center gap-1.5 min-w-0 pr-7">
-                      {selectMode && (
-                        <input
-                          type="checkbox"
-                          checked={checkedIds.has(session.id)}
-                          onChange={() => handleToggleCheck(session.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
-                        />
-                      )}
-                      {session.category === 'workflow' && (
-                        <span title={t('workflowSession')} className="flex-shrink-0">
-                          <WorkflowIcon className="w-3 h-3 text-orange-400" />
-                        </span>
-                      )}
-                      {session.category === 'entity-config' && (
-                        <span title={t('configSession')} className="flex-shrink-0">
-                          <Settings2 className="w-3 h-3 text-purple-400" />
-                        </span>
-                      )}
-                      {renamingSessionId === session.id ? (
-                        <input
-                          ref={renameInputRef}
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          onClick={(e) => e.stopPropagation()}
-                          onBlur={() => void handleSubmitRename(session.id)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') { e.preventDefault(); void handleSubmitRename(session.id); }
-                            if (e.key === 'Escape') { e.preventDefault(); handleCancelRename(); }
+            <div>
+              <div className="flex items-center justify-between px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
+                <span>{t('projectsSection')}</span>
+                <button
+                  type="button"
+                  onClick={handleOpenCreateProject}
+                  className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                  title={t('projectDialog.createTitle')}
+                  aria-label={t('projectDialog.createTitle')}
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="space-y-1">
+                {projectSessionGroups.map((group) => {
+                  const collapsed = collapsedProjectIds.has(group.id);
+                  const isCurrentProject = currentProjectId === group.id;
+                  const isSelectedProject = selectedProjectId === group.id;
+                  return (
+                    <div key={group.id} className="group/project">
+                      <div
+                        className={`mx-2 flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm transition-colors ${
+                          isSelectedProject
+                            ? 'bg-gray-100 text-gray-900 dark:bg-zinc-900 dark:text-zinc-100'
+                            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
+                        }`}
+                        title={group.worktree}
+                      >
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleProjectCollapsed(group.id);
                           }}
-                          placeholder={t('renamePlaceholder')}
-                          disabled={renameSubmitting}
-                          className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
-                          aria-label={t('rename')}
-                          data-session-rename-input
-                        />
-                      ) : (
-                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
-                          <span className="truncate">{session.title}</span>
-                          {session.isShared && (
-                            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
-                              {t('sharedTag')}
-                            </span>
+                          className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                          aria-label={t('toggleProject', { project: group.label })}
+                        >
+                          {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedProjectId(group.id);
+                            setCollapsedProjectIds(prev => {
+                              const next = new Set(prev);
+                              next.delete(group.id);
+                              return next;
+                            });
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
+                          aria-label={t('selectProject', { project: group.label })}
+                        >
+                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
+                          <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                          {isCurrentProject && (
+                            <span
+                              className="h-2 w-2 shrink-0 rounded-full bg-blue-400 shadow-[0_0_0_2px_rgba(96,165,250,0.18)]"
+                              title={t('defaultProject')}
+                            />
                           )}
-                        </h3>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenRenameProject(group)}
+                          className="rounded p-1 text-gray-400 opacity-0 transition-all hover:bg-gray-200 hover:text-gray-700 group-hover/project:opacity-100 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                          title={t('projectDialog.renameTitle')}
+                          aria-label={t('projectDialog.renameTitle')}
+                        >
+                          <PencilLine className="h-3 w-3" />
+                        </button>
+                        <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
+                          {group.sessions.length}
+                        </span>
+                      </div>
+                      {!collapsed && (
+                        <div className="mt-1">
+                          {group.sessions.length > 0 ? (
+                            group.sessions.map(renderSessionListItem)
+                          ) : (
+                            <div className="mx-4 py-1 text-xs text-gray-400 dark:text-zinc-600">
+                              {t('noProjectSessions')}
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
-                    {/* Timestamp row */}
-                    {session.time?.updated && renamingSessionId !== session.id && (
-                      <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
-                        {formatSessionDate(session.time.updated)}
-                      </p>
-                    )}
-
-                    {/* Three-dot menu trigger */}
-                    {!selectMode && (
-                      <div className="absolute right-1.5 top-2" data-session-actions>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (openMenuSessionId === session.id) {
-                              setOpenMenuSessionId(null);
-                              setMenuAnchor(null);
-                            } else {
-                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                              setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-                              setOpenMenuSessionId(session.id);
-                            }
-                          }}
-                          title={t('moreActions')}
-                          aria-label={t('moreActions')}
-                          aria-expanded={openMenuSessionId === session.id}
-                          className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
-                            openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
-                          }`}
-                        >
-                          <MoreHorizontal className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {/* 展开/收起按钮 */}
-                {!isSearching && hiddenCount > 0 && (
-                  <button
-                    onClick={() => toggleGroupExpand(key)}
-                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
-                  >
-                    <ChevronDown className="w-3 h-3" />
-                    <span>{t('showMore', { count: hiddenCount })}</span>
-                  </button>
-                )}
-                {!isSearching && isExpanded && items.length > (GROUP_DEFAULT_LIMIT[key] ?? 5) && (
-                  <button
-                    onClick={() => toggleGroupExpand(key)}
-                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
-                  >
-                    <ChevronDown className="w-3 h-3 rotate-180" />
-                    <span>{t('showLess', 'Show less')}</span>
-                  </button>
-                )}
+                  );
+                })}
               </div>
-              );
-            })
+            </div>
           )}
           {hasMoreSessions && (
             <div className="px-4 py-3">
@@ -1243,6 +1439,60 @@ export default function SessionPage() {
           }
         />
       </div>
+
+      {projectDialogMode && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                {projectDialogMode === 'create' ? t('projectDialog.createTitle') : t('projectDialog.renameTitle')}
+              </h3>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-name">
+                {t('projectDialog.nameLabel')}
+              </label>
+              <input
+                id="session-project-name"
+                value={projectNameValue}
+                onChange={(event) => setProjectNameValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleSubmitProject();
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    handleCloseProjectDialog();
+                  }
+                }}
+                disabled={projectSubmitting}
+                placeholder={t('projectDialog.namePlaceholder')}
+                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                autoFocus
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={handleCloseProjectDialog}
+                disabled={projectSubmitting}
+                className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitProject()}
+                disabled={projectSubmitting}
+                className="inline-flex min-w-16 items-center justify-center rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+              >
+                {projectSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : t('save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {selectorTooltip && (
         <div
