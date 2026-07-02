@@ -17,15 +17,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import httpx
-
 from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
+from flocks.cli.service_config import service_config_from_payload, service_config_payload
 from flocks.cli.service_control import (
-    service_config_payload,
     supervisor_control_port,
     supervisor_log_path,
     supervisor_socket_path,
 )
+from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter, WebUIProcessAdapter
 
 SUPERVISOR_CHECK_INTERVAL_SECONDS = 5.0
 SUPERVISOR_HEALTH_FAILURE_THRESHOLD = 2
@@ -64,38 +63,6 @@ def _daemon_log(event: str, details: dict[str, object] | None = None) -> None:
     sys.stdout.flush()
 
 
-def _config_from_payload(payload: dict[str, Any], default):
-    from flocks.cli.service_manager import ServiceConfig
-
-    def _string(name: str, fallback: str) -> str:
-        value = payload.get(name)
-        return value if isinstance(value, str) and value else fallback
-
-    def _int(name: str, fallback: int) -> int:
-        value = payload.get(name)
-        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else fallback
-
-    return ServiceConfig(
-        backend_host=_string("backend_host", default.backend_host),
-        backend_port=_int("backend_port", default.backend_port),
-        frontend_host=_string("frontend_host", default.frontend_host),
-        frontend_port=_int("frontend_port", default.frontend_port),
-        no_browser=bool(payload.get("no_browser", default.no_browser)),
-        skip_frontend_build=bool(payload.get("skip_frontend_build", default.skip_frontend_build)),
-    )
-
-
-def _tcp_port_accepts_connections(host: str, port: int) -> bool:
-    """Return True when a local service accepts TCP connections."""
-    from flocks.cli.service_manager import access_host
-
-    try:
-        with socket.create_connection((access_host(host), port), timeout=1.0):
-            return True
-    except OSError:
-        return False
-
-
 def _health_status_from_service_state(state: str) -> str:
     if state in {"healthy", "starting", "restarting", "stopped", "paused"}:
         return state
@@ -131,6 +98,8 @@ class SupervisorDaemon:
         *,
         interval: float = SUPERVISOR_CHECK_INTERVAL_SECONDS,
         failure_threshold: int = SUPERVISOR_HEALTH_FAILURE_THRESHOLD,
+        backend_adapter: ProcessAdapter | None = None,
+        webui_adapter: ProcessAdapter | None = None,
     ) -> None:
         from flocks.cli.service_manager import ensure_runtime_dirs
 
@@ -138,6 +107,8 @@ class SupervisorDaemon:
         self.paths = ensure_runtime_dirs()
         self.interval = interval
         self.failure_threshold = failure_threshold
+        self.backend_adapter = backend_adapter or BackendProcessAdapter()
+        self.webui_adapter = webui_adapter or WebUIProcessAdapter()
         self.started_at = time.time()
         self._lock = threading.RLock()
         self._shutdown_requested = threading.Event()
@@ -302,7 +273,7 @@ class SupervisorDaemon:
 
     def update_config(self, payload: dict[str, Any]) -> None:
         with self._lock:
-            self.config = _config_from_payload(payload, self.config)
+            self.config = service_config_from_payload(payload, self.config)
             self.backend.host = self.config.backend_host
             self.backend.port = self.config.backend_port
             self.webui.host = self.config.frontend_host
@@ -468,23 +439,20 @@ class SupervisorDaemon:
         service.next_restart_at = time.monotonic() if immediate else self._next_restart_time(service.restart_count)
 
     def _stop_service(self, service: ManagedService) -> None:
-        from flocks.cli.service_manager import _StdoutConsole, _terminate_process
-
-        _terminate_process(service.process, service.label, _StdoutConsole())
+        adapter = self._adapter_for(service)
+        adapter.stop(service.process)
         service.process = None
         service.command = ()
         service.state = "stopped"
 
     def _start_backend_locked(self, *, immediate: bool) -> None:
-        from flocks.cli.service_manager import _StdoutConsole, _start_backend_process
-
         if self.backend.process is not None and self.backend.process.poll() is None:
             return
         if not immediate and time.monotonic() < self.backend.next_restart_at:
             return
         self.backend.state = "starting"
         try:
-            process = _start_backend_process(self.config, _StdoutConsole(), paths=self.paths)
+            process = self.backend_adapter.start(self.config, self.paths)
         except Exception as exc:
             self._mark_start_failed(self.backend, exc)
             return
@@ -495,25 +463,13 @@ class SupervisorDaemon:
         self.backend.health_failure_count = 0
 
     def _start_webui_locked(self, *, immediate: bool) -> None:
-        from flocks.cli.service_manager import ServiceConfig, _StdoutConsole, _start_frontend_process
-
         if self.webui.process is not None and self.webui.process.poll() is None:
             return
         if not immediate and time.monotonic() < self.webui.next_restart_at:
             return
         self.webui.state = "starting"
-        config = self.config
-        if self.webui.built_once:
-            config = ServiceConfig(
-                backend_host=config.backend_host,
-                backend_port=config.backend_port,
-                frontend_host=config.frontend_host,
-                frontend_port=config.frontend_port,
-                no_browser=config.no_browser,
-                skip_frontend_build=True,
-            )
         try:
-            process = _start_frontend_process(config, _StdoutConsole(), paths=self.paths)
+            process = self.webui_adapter.start(self.config, self.paths, built_once=self.webui.built_once)
         except Exception as exc:
             self._mark_start_failed(self.webui, exc)
             return
@@ -539,29 +495,14 @@ class SupervisorDaemon:
         return time.monotonic() + SUPERVISOR_BACKOFF_SECONDS[index]
 
     def _probe_backend_locked(self) -> None:
-        from flocks.cli.service_manager import _backend_health_url, _is_healthy_status_response
-
-        process = self.backend.process
-        if process is None:
+        result = self.backend_adapter.probe(self.backend.process, self.backend.host, self.backend.port)
+        if self.backend.process is None:
             self.backend.state = "stopped"
             return
-        if process.poll() is not None:
-            self._restart_service(self.backend, reason=f"process exited with code {process.returncode}", immediate=True)
+        if result.restart:
+            self._restart_service(self.backend, reason=result.reason or "backend probe failed", immediate=True)
             return
-        if not _tcp_port_accepts_connections(self.backend.host, self.backend.port):
-            self._restart_service(self.backend, reason=f"port {self.backend.port} is not listening", immediate=True)
-            return
-
-        url = _backend_health_url(self.backend.host, self.backend.port)
-        try:
-            with httpx.Client(timeout=2.0, trust_env=False) as client:
-                response = client.get(url)
-            healthy = _is_healthy_status_response(response)
-            reason = f"health status={response.status_code}"
-        except Exception as exc:
-            healthy = False
-            reason = f"health failed: {exc}"
-        if healthy:
+        if result.healthy:
             self.backend.state = "healthy"
             self.backend.health_failure_count = 0
             self.backend.last_error = None
@@ -569,24 +510,24 @@ class SupervisorDaemon:
 
         self.backend.health_failure_count += 1
         self.backend.state = "degraded"
-        self.backend.last_error = reason
+        self.backend.last_error = result.reason
         if self.backend.health_failure_count >= self.failure_threshold:
-            self._restart_service(self.backend, reason=reason, immediate=True)
+            self._restart_service(self.backend, reason=result.reason or "backend health failed", immediate=True)
 
     def _probe_webui_locked(self) -> None:
-        process = self.webui.process
-        if process is None:
+        result = self.webui_adapter.probe(self.webui.process, self.webui.host, self.webui.port)
+        if self.webui.process is None:
             self.webui.state = "stopped"
             return
-        if process.poll() is not None:
-            self._restart_service(self.webui, reason=f"process exited with code {process.returncode}", immediate=True)
-            return
-        if not _tcp_port_accepts_connections(self.webui.host, self.webui.port):
-            self._restart_service(self.webui, reason=f"port {self.webui.port} is not listening", immediate=True)
+        if result.restart:
+            self._restart_service(self.webui, reason=result.reason or "webui probe failed", immediate=True)
             return
         self.webui.state = "healthy"
         self.webui.health_failure_count = 0
         self.webui.last_error = None
+
+    def _adapter_for(self, service: ManagedService) -> ProcessAdapter:
+        return self.backend_adapter if service.name == "backend" else self.webui_adapter
 
 
 def run_service_daemon(

@@ -8,6 +8,8 @@ import pytest
 
 from flocks.cli import service_manager
 from flocks.cli import service_supervisor
+from flocks.cli import service_control
+from flocks.cli import service_process
 
 
 class DummyConsole:
@@ -602,7 +604,7 @@ def test_wait_for_http_ignores_proxy_environment(monkeypatch) -> None:
         captured["trust_env"] = trust_env
         return _FakeClient()
 
-    monkeypatch.setattr(service_supervisor.httpx, "Client", _client_factory)
+    monkeypatch.setattr(service_manager.httpx, "Client", _client_factory)
 
     service_manager.wait_for_http(
         ["http://127.0.0.1:8000/api/health"],
@@ -725,9 +727,13 @@ def _supervisor_status_payload() -> dict[str, object]:
     }
 
 
+def _supervisor_status(payload: dict[str, object] | None = None) -> service_control.SupervisorStatus:
+    return service_control.parse_supervisor_status(payload or _supervisor_status_payload())
+
+
 def test_build_status_lines_reports_supervisor_control_status(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
-    monkeypatch.setattr(service_manager, "read_control_json", lambda *_args, **_kwargs: _supervisor_status_payload())
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status())
 
     lines = service_manager.build_status_lines(paths)
 
@@ -742,7 +748,7 @@ def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, 
 
     monkeypatch.setattr(
         service_manager,
-        "read_control_json",
+        "read_supervisor_status",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("down")),
     )
     monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: calls.append("port_owner") or [])
@@ -791,8 +797,8 @@ def test_restart_all_uses_supervisor_control_api(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
     monkeypatch.setattr(
         service_manager,
-        "post_control_json",
-        lambda path, **_kwargs: call_order.append(path) or _supervisor_status_payload(),
+        "request_restart",
+        lambda _config, **_kwargs: call_order.append("/restart") or _supervisor_status(),
     )
     monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console: call_order.append("print_status"))
 
@@ -1214,7 +1220,7 @@ def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path:
     daemon.backend.process = _fake_process(111, ["backend"])
     daemon.webui.process = _fake_process(222, ["webui"])
 
-    monkeypatch.setattr(service_supervisor, "_tcp_port_accepts_connections", lambda _host, port: port != 9995)
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda _host, port: port != 9995)
     monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
     monkeypatch.setattr(
         service_manager,
@@ -1253,8 +1259,8 @@ def test_supervisor_waits_for_second_backend_health_failure(monkeypatch, tmp_pat
         def get(self, _url):
             return httpx.Response(503, json={"status": "unhealthy"})
 
-    monkeypatch.setattr(service_supervisor.httpx, "Client", FakeClient)
-    monkeypatch.setattr(service_supervisor, "_tcp_port_accepts_connections", lambda *_args: True)
+    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
     monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
     monkeypatch.setattr(
         service_manager,
@@ -1279,7 +1285,7 @@ def test_supervisor_recovers_webui_when_port_disappears(monkeypatch, tmp_path: P
     daemon.backend.process = _fake_process(111, ["backend"])
     daemon.webui.process = _fake_process(222, ["webui"])
 
-    monkeypatch.setattr(service_supervisor, "_tcp_port_accepts_connections", lambda _host, port: port != 9996)
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda _host, port: port != 9996)
     monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
     monkeypatch.setattr(
         service_manager,
@@ -1614,7 +1620,7 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     states = iter([True, False])
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(states))
-    monkeypatch.setattr(service_manager, "post_control_json", lambda path, **_kwargs: calls.append(path) or {"status": "stopping"})
+    monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop") or {"status": "stopping"})
 
     console = FakeConsole()
     service_manager.stop_all(console=console)
@@ -1640,7 +1646,7 @@ def test_status_lines_include_control_api_errors(monkeypatch, tmp_path: Path) ->
     payload = _supervisor_status_payload()
     payload["backend"]["state"] = "degraded"
     payload["backend"]["last_error"] = "health failed"
-    monkeypatch.setattr(service_manager, "read_control_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
 
     lines = service_manager.build_status_lines(paths)
 

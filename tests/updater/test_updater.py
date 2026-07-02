@@ -49,6 +49,13 @@ def _webui_control_payload(state: str = "healthy", last_error: str | None = None
     }
 
 
+def _webui_control_status(
+    state: str = "healthy",
+    last_error: str | None = None,
+) -> service_control.SupervisorStatus:
+    return service_control.parse_supervisor_status(_webui_control_payload(state, last_error))
+
+
 def test_run_handles_none_process_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=None, stderr=None)
@@ -1015,8 +1022,8 @@ def test_prepare_upgrade_handover_writes_state_and_stops_frontend(
     )
     monkeypatch.setattr(
         service_control,
-        "post_control_json",
-        lambda path, **_kwargs: calls.append(path) or _webui_control_payload(),
+        "request_stop_webui",
+        lambda **_kwargs: calls.append("/stop/webui") or _webui_control_status(),
     )
 
     payload = updater._prepare_upgrade_handover("2026.3.31.1")
@@ -1042,8 +1049,14 @@ def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails(
     )
     monkeypatch.setattr(
         service_control,
-        "post_control_json",
-        lambda path, payload=None, **_kwargs: calls.append((path, None if payload is None else payload.get("skip_frontend_build"))) or _webui_control_payload(),
+        "request_stop_webui",
+        lambda **_kwargs: calls.append(("/stop/webui", None)) or _webui_control_status(),
+    )
+    monkeypatch.setattr(
+        service_control,
+        "request_restart_webui",
+        lambda config, **_kwargs: calls.append(("/restart/webui", config.skip_frontend_build))
+        or _webui_control_status(),
     )
 
     with pytest.raises(RuntimeError, match="page failed"):
@@ -1068,8 +1081,9 @@ def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: stopped.append("stop"))
     monkeypatch.setattr(
         service_control,
-        "post_control_json",
-        lambda _path, payload=None, **_kwargs: started.append((payload["frontend_port"], payload.get("skip_frontend_build"))) or _webui_control_payload(),
+        "request_restart_webui",
+        lambda config, **_kwargs: started.append((config.frontend_port, config.skip_frontend_build))
+        or _webui_control_status(),
     )
     updater._write_upgrade_state(
         {
@@ -1103,11 +1117,11 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
         _webui_control_payload(),
     ])
 
-    def fake_restart_webui(_path, payload=None, **_kwargs):
-        starts.append((payload.get("skip_frontend_build"), payload.get("force_frontend_build")))
-        return next(results)
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
+        starts.append((config.skip_frontend_build, force_frontend_build or None))
+        return service_control.parse_supervisor_status(next(results))
 
-    monkeypatch.setattr(service_control, "post_control_json", fake_restart_webui)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.3.31.1",
@@ -1134,11 +1148,11 @@ def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_p
 
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: None)
 
-    def fake_restart_webui(_path, payload=None, **_kwargs):
-        starts.append((payload.get("skip_frontend_build"), payload.get("force_frontend_build")))
-        return _webui_control_payload("degraded", "still broken")
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
+        starts.append((config.skip_frontend_build, force_frontend_build or None))
+        return _webui_control_status("degraded", "still broken")
 
-    monkeypatch.setattr(service_control, "post_control_json", fake_restart_webui)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.3.31.1",
@@ -1274,11 +1288,11 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
         _webui_control_payload(),
     ])
 
-    def fake_restart_webui(_path, payload=None, **_kwargs) -> dict[str, object]:
-        events.append(f"restart_webui:{payload.get('skip_frontend_build')}:{payload.get('force_frontend_build')}")
-        return next(results)
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"restart_webui:{config.skip_frontend_build}:{force_frontend_build or None}")
+        return service_control.parse_supervisor_status(next(results))
 
-    monkeypatch.setattr(service_control, "post_control_json", fake_restart_webui)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.4.1",
@@ -1321,11 +1335,11 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: events.append("stop_page"))
     monkeypatch.setattr(updater.shutil, "rmtree", lambda path, ignore_errors=True: events.append(f"rmtree:{Path(path).name}"))
 
-    def fake_restart_webui(_path, payload=None, **_kwargs) -> dict[str, object]:
-        events.append(f"restart_webui:{payload.get('skip_frontend_build')}")
-        return _webui_control_payload("degraded", "frontend still broken")
+    def fake_restart_webui(config, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"restart_webui:{config.skip_frontend_build}")
+        return _webui_control_status("degraded", "frontend still broken")
 
-    monkeypatch.setattr(service_control, "post_control_json", fake_restart_webui)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.4.1",

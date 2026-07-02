@@ -5,7 +5,6 @@ Provides command-line interface for Flocks
 """
 
 import asyncio
-import os
 import secrets as secrets_lib
 import sys
 from pathlib import Path
@@ -30,8 +29,14 @@ from flocks.cli.commands import (
     task_app,
 )
 from flocks.cli.commands.update import update_command
-from flocks.cli.service_manager import (
+from flocks.cli.service_config import (
     ServiceConfig,
+    ServiceConfigError,
+    build_service_config,
+    restart_defaults_from_status_payload,
+)
+from flocks.cli.service_control import read_supervisor_status
+from flocks.cli.service_manager import (
     ServiceError,
     resolve_flocks_cli_command,
     restart_all,
@@ -41,7 +46,6 @@ from flocks.cli.service_manager import (
     start_all,
     stop_all,
 )
-from flocks.cli.service_control import read_supervisor_status
 from flocks.cli.service_supervisor import run_service_daemon
 from flocks.config.config import Config
 from flocks.utils.log import Log, LogLevel
@@ -152,82 +156,27 @@ def _service_config(
 ) -> ServiceConfig:
     """Build service config from environment and CLI toggles."""
     global_config = Config.get_global()
-    return ServiceConfig(
-        backend_host=_resolve_host(
-            cli_value=server_host,
-            env_names=("FLOCKS_SERVER_HOST", "FLOCKS_BACKEND_HOST"),
-            default=default_server_host or global_config.server_host,
-        ),
-        backend_port=_resolve_port(
-            cli_value=server_port,
-            env_names=("FLOCKS_SERVER_PORT", "FLOCKS_BACKEND_PORT"),
-            default=default_server_port or global_config.server_port,
-            label="server",
-        ),
-        frontend_host=_resolve_host(
-            cli_value=webui_host,
-            env_names=("FLOCKS_WEBUI_HOST", "FLOCKS_FRONTEND_HOST"),
-            default=default_webui_host or "127.0.0.1",
-        ),
-        frontend_port=_resolve_port(
-            cli_value=webui_port,
-            env_names=("FLOCKS_WEBUI_PORT", "FLOCKS_FRONTEND_PORT"),
-            default=default_webui_port or 5173,
-            label="webui",
-        ),
+    return build_service_config(
         no_browser=no_browser,
-        skip_frontend_build=skip_webui_build,
+        skip_webui_build=skip_webui_build,
+        server_host=server_host,
+        server_port=server_port,
+        webui_host=webui_host,
+        webui_port=webui_port,
+        default_server_host=default_server_host or global_config.server_host,
+        default_server_port=default_server_port or global_config.server_port,
+        default_webui_host=default_webui_host or "127.0.0.1",
+        default_webui_port=default_webui_port or 5173,
     )
-
-
-def _resolve_host(cli_value: Optional[str], env_names: tuple[str, ...], default: str) -> str:
-    """Resolve a host value from CLI, environment, and default values."""
-    if cli_value is not None:
-        return cli_value
-    for env_name in env_names:
-        env_value = os.getenv(env_name)
-        if env_value:
-            return env_value
-    return default
-
-
-def _resolve_port(
-    cli_value: Optional[int],
-    env_names: tuple[str, ...],
-    default: int,
-    label: str,
-) -> int:
-    """Resolve a port value from CLI, environment, and default values."""
-    if cli_value is not None:
-        return cli_value
-    for env_name in env_names:
-        env_value = os.getenv(env_name)
-        if not env_value:
-            continue
-        try:
-            return int(env_value)
-        except ValueError as error:
-            raise ServiceError(f"{label} port from {env_name} must be an integer.") from error
-    return default
 
 
 def _restart_runtime_defaults() -> dict[str, Any]:
     """Load host/port defaults from the running supervisor when available."""
-    defaults: dict[str, Any] = {}
     try:
-        payload = read_supervisor_status(paths=runtime_paths(), timeout=1.0)
+        status = read_supervisor_status(paths=runtime_paths(), timeout=1.0)
     except Exception:
-        return defaults
-    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
-    if isinstance(config.get("backend_host"), str):
-        defaults["default_server_host"] = config["backend_host"]
-    if isinstance(config.get("backend_port"), int):
-        defaults["default_server_port"] = config["backend_port"]
-    if isinstance(config.get("frontend_host"), str):
-        defaults["default_webui_host"] = config["frontend_host"]
-    if isinstance(config.get("frontend_port"), int):
-        defaults["default_webui_port"] = config["frontend_port"]
-    return defaults
+        return {}
+    return restart_defaults_from_status_payload(status.raw)
 
 
 def _restart_service_config(
@@ -327,7 +276,7 @@ def restart(
             ),
             console,
         )
-    except ServiceError as error:
+    except (ServiceConfigError, ServiceError) as error:
         _handle_service_error(error)
 
 

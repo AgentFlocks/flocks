@@ -25,11 +25,13 @@ from typing import Any, Iterable, Sequence
 
 import httpx
 
+from flocks.cli.service_config import ServiceConfig, loopback_host
 from flocks.cli.service_control import (
-    post_control_json,
-    read_control_json,
-    service_config_payload,
-    supervisor_control_client,
+    read_logs,
+    read_supervisor_status,
+    request_restart,
+    request_stop,
+    stream_logs,
     supervisor_is_running,
     supervisor_log_path,
     supervisor_socket_path,
@@ -57,20 +59,6 @@ SUPERVISOR_START_TIMEOUT_SECONDS = 180.0
 
 class ServiceError(RuntimeError):
     """Raised when a service lifecycle action fails."""
-
-
-@dataclass(frozen=True)
-class ServiceConfig:
-    backend_host: str = "127.0.0.1"
-    backend_port: int = 8000
-    frontend_host: str = "127.0.0.1"
-    frontend_port: int = 5173
-    no_browser: bool = False
-    skip_frontend_build: bool = False
-
-    @property
-    def frontend_url(self) -> str:
-        return f"http://{_loopback_host(self.frontend_host)}:{self.frontend_port}"
 
 
 @dataclass(frozen=True)
@@ -1159,14 +1147,14 @@ def _wait_for_supervisor_ready(
         if process is not None and process.poll() is not None:
             raise ServiceError(f"Supervisor 启动失败，退出码: {process.returncode}")
         try:
-            payload = read_control_json("/status", paths=paths, timeout=1.0)
-            last_payload = payload
-            backend_state = ((payload.get("backend") or {}).get("state") if isinstance(payload.get("backend"), dict) else None)
-            webui_state = ((payload.get("webui") or {}).get("state") if isinstance(payload.get("webui"), dict) else None)
+            status = read_supervisor_status(paths=paths, timeout=1.0)
+            last_payload = status.raw
+            backend_state = status.backend.state
+            webui_state = status.webui.state
             if backend_state == "healthy" and webui_state == "healthy":
-                return payload
+                return status.raw
             if backend_state == "degraded" or webui_state == "degraded":
-                return payload
+                return status.raw
         except Exception:
             pass
         time.sleep(0.5)
@@ -1207,7 +1195,7 @@ def stop_all(console) -> None:
         console.print("[flocks] Supervisor 未运行。")
         return
     try:
-        post_control_json("/stop", paths=paths, timeout=2.0)
+        request_stop(paths=paths, timeout=2.0)
     except Exception as exc:
         raise ServiceError(f"无法请求 Supervisor 停止: {exc}") from exc
 
@@ -1239,8 +1227,8 @@ def start_all(config: ServiceConfig, console) -> None:
         show_status(console)
         if not config.no_browser:
             try:
-                payload = read_control_json("/status", paths=paths, timeout=1.0)
-                url = _frontend_url_from_status_payload(payload, config.frontend_url)
+                status = read_supervisor_status(paths=paths, timeout=1.0)
+                url = _frontend_url_from_status(status, config.frontend_url)
             except Exception:
                 url = config.frontend_url
             open_default_browser(url, console)
@@ -1255,23 +1243,23 @@ def restart_all(config: ServiceConfig, console) -> None:
         start_all(config, console)
         return
     try:
-        payload = post_control_json("/restart", payload=service_config_payload(config), paths=paths, timeout=180.0)
+        status = request_restart(config, paths=paths, timeout=180.0)
     except Exception as exc:
         raise ServiceError(f"无法请求 Supervisor 重启: {exc}") from exc
-    _print_status_payload(payload, console)
+    _print_status_payload(status.raw, console)
 
 
 def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     """Return a human-readable status summary from the supervisor control API."""
     current = paths or runtime_paths()
     try:
-        payload = read_control_json("/status", paths=current)
+        status = read_supervisor_status(paths=current)
     except Exception:
         return [
             "[flocks] Supervisor 未运行",
             f"[flocks] Supervisor 日志: {supervisor_log_path(current)}",
         ]
-    return _status_lines_from_payload(payload)
+    return _status_lines_from_payload(status.raw)
 
 
 def _status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
@@ -1301,12 +1289,9 @@ def _service_status_line(label: str, payload: dict[str, Any]) -> str:
     return f"[flocks] {label}: state={state} PID={pid} URL=http://{host}:{port}{suffix}"
 
 
-def _frontend_url_from_status_payload(payload: dict[str, Any], fallback: str) -> str:
-    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
-    host = webui.get("host")
-    port = webui.get("port")
-    if isinstance(host, str) and isinstance(port, int):
-        return f"http://{_format_host_for_url(_loopback_host(host))}:{port}"
+def _frontend_url_from_status(status, fallback: str) -> str:
+    if status.webui.port is not None:
+        return f"http://{_format_host_for_url(_loopback_host(status.webui.host))}:{status.webui.port}"
     return fallback
 
 
@@ -1351,10 +1336,9 @@ def show_logs(
         service = "backend"
     elif webui and not backend:
         service = "webui"
-    params = {"service": service, "lines": str(lines), "follow": "true" if follow else "false"}
     if not follow:
         try:
-            payload = read_control_json(f"/logs?service={service}&lines={lines}&follow=false", paths=paths, timeout=5.0)
+            payload = read_logs(service=service, lines=lines, paths=paths, timeout=5.0)
         except Exception as exc:
             raise ServiceError(f"无法通过 Supervisor 读取日志: {exc}") from exc
         logs = payload.get("logs") if isinstance(payload.get("logs"), dict) else {}
@@ -1368,11 +1352,8 @@ def show_logs(
 
     console.print("[flocks] 按 Ctrl+C 退出日志跟随。")
     try:
-        with supervisor_control_client(paths, timeout=None) as client:
-            with client.stream("GET", "/logs", params=params) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    console.print(line)
+        for line in stream_logs(service=service, lines=lines, paths=paths, timeout=None):
+            console.print(line)
     except KeyboardInterrupt:
         return
     except Exception as exc:
@@ -1494,7 +1475,7 @@ def open_default_browser(url: str, console) -> None:
 
 def access_host(host: str) -> str:
     """Return the host that local health checks and browser requests should use."""
-    return _loopback_host(host)
+    return loopback_host(host)
 
 
 def _format_host_for_url(host: str) -> str:
@@ -1679,7 +1660,7 @@ def _join_pids(pids: Iterable[int]) -> str:
 
 
 def _loopback_host(host: str) -> str:
-    return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    return loopback_host(host)
 
 
 def _http_to_ws_url(url: str) -> str:
