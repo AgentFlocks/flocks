@@ -402,13 +402,13 @@ def test_show_logs_falls_back_to_local_files_when_daemon_unavailable(monkeypatch
     assert "[daemon] daemon-one" in console.messages
 
 
-def test_daemon_log_service_name_has_supervisor_alias(tmp_path: Path) -> None:
+def test_daemon_log_service_name_uses_daemon_only(tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
     daemon.paths = paths
 
     assert daemon._log_paths_for_service("daemon") == [("daemon", paths.log_dir / "daemon.log")]
-    assert daemon._log_paths_for_service("supervisor") == [("daemon", paths.log_dir / "daemon.log")]
+    assert daemon._log_paths_for_service("supervisor") == []
 
 
 def test_tail_lines_returns_recent_content(tmp_path: Path) -> None:
