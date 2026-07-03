@@ -26,11 +26,11 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
 
         def json(self) -> dict:
             return {
-                "display_version": "v2026.5.10",
+                "bundle_version": "v2026.5.10",
                 "compare_version": "2026.5.10",
                 "bundle_url": "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
                 "bundle_sha256": "abc123",
-                "oss_version": "v2026.5.10",
+                "core_version": "v2026.5.10",
                 "flockspro_component_version": "pro-v2026-5-10",
                 "release_notes": "bundle release",
             }
@@ -75,7 +75,8 @@ async def test_check_update_uses_pro_marker_bundle_version_and_component_metadat
     marker.parent.mkdir(parents=True)
     marker.write_text(
         """{
-  "installed_version": "v2026.5.23",
+  "bundle_version": "v2026.5.23",
+  "core_version": "v2026.5.23",
   "flockspro_component_version": "pro-v2026-05-23"
 }""",
         encoding="utf-8",
@@ -93,7 +94,8 @@ async def test_check_update_uses_pro_marker_bundle_version_and_component_metadat
             bundle_sha256=None,
             bundle_format="zip",
             manifest={
-                "display_version": "v2026.5.23",
+                "bundle_version": "v2026.5.23",
+                "core_version": "v2026.5.23",
                 "flockspro_component_version": "pro-v2026-05-23",
             },
         )
@@ -126,7 +128,8 @@ async def test_check_update_force_console_manifest_uses_bundle_versions(monkeypa
     marker.parent.mkdir(parents=True)
     marker.write_text(
         """{
-  "installed_version": "v2026.5.23",
+  "bundle_version": "v2026.5.23",
+  "core_version": "v2026.5.23",
   "flockspro_component_version": "pro-v2026-05-23"
 }""",
         encoding="utf-8",
@@ -144,7 +147,7 @@ async def test_check_update_force_console_manifest_uses_bundle_versions(monkeypa
             bundle_sha256="abc123",
             bundle_format="zip",
             manifest={
-                "display_version": "v2026.5.24",
+                "bundle_version": "v2026.5.24",
                 "core_version": "v2026.5.23",
                 "flockspro_component_version": "pro-v2026-05-24",
             },
@@ -180,7 +183,8 @@ async def test_check_update_force_console_manifest_detects_component_only_update
     marker.parent.mkdir(parents=True)
     marker.write_text(
         """{
-  "installed_version": "v2026.6.18",
+  "bundle_version": "v2026.6.18",
+  "core_version": "v2026.6.18",
   "flockspro_component_version": "v2026.6.1"
 }""",
         encoding="utf-8",
@@ -198,8 +202,8 @@ async def test_check_update_force_console_manifest_detects_component_only_update
             bundle_sha256="def456",
             bundle_format="zip",
             manifest={
-                "display_version": "v2026.6.18",
-                "oss_version": "v2026.6.18",
+                "bundle_version": "v2026.6.18",
+                "core_version": "v2026.6.18",
                 "flockspro_component_version": "v2026.6.2",
             },
         )
@@ -227,7 +231,7 @@ async def test_check_update_force_console_manifest_reports_stale_product_marker_
     marker.parent.mkdir(parents=True)
     marker.write_text(
         """{
-  "installed_version": "v2026.6.22",
+  "bundle_version": "v2026.6.22",
   "core_version": "v2026.6.21",
   "flockspro_component_version": "v2026.6.23"
 }""",
@@ -246,7 +250,7 @@ async def test_check_update_force_console_manifest_reports_stale_product_marker_
             bundle_sha256="ghi789",
             bundle_format="zip",
             manifest={
-                "display_version": "v2026.6.23",
+                "bundle_version": "v2026.6.23",
                 "core_version": "v2026.6.21",
                 "flockspro_component_version": "v2026.6.23",
             },
@@ -278,33 +282,34 @@ def test_console_manifest_release_identity_writes_product_and_core_versions(
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     merged = updater._merge_console_manifest_release_identity(
         {
-            "display_version": "v2026.6.21",
+            "bundle_version": "v2026.6.21",
             "core_version": "v2026.6.21",
             "flockspro_component_version": "v2026.6.23",
         },
         {
             "release_id": "rel_623",
-            "display_version": "v2026.6.23",
+            "bundle_version": "v2026.6.23",
             "core_version": "v2026.6.21",
             "flockspro_component_version": "v2026.6.23",
             "build_id": "job_623",
         },
     )
 
-    assert merged["display_version"] == "v2026.6.23"
+    assert merged["bundle_version"] == "v2026.6.23"
     assert merged["core_version"] == "v2026.6.21"
     updater._write_pro_bundle_install_marker(merged, bundle_sha256="sha623")
 
     marker = json.loads((tmp_path / "run" / "pro-bundle-installed.json").read_text(encoding="utf-8"))
-    assert marker["installed_version"] == "v2026.6.23"
+    assert marker["bundle_version"] == "v2026.6.23"
     assert marker["core_version"] == "v2026.6.21"
-    assert marker["oss_version"] == "v2026.6.21"
     assert marker["flockspro_component_version"] == "v2026.6.23"
     assert marker["build_id"] == "job_623"
     pending = json.loads((tmp_path / "run" / "pro-bundle-install-receipt-pending.json").read_text(encoding="utf-8"))
     assert pending["install_result"] == "success"
     assert pending["bundle_version"] == "v2026.6.23"
-    assert pending["version_info"]["core_version"] == "v2026.6.21"
+    assert pending["core_version"] == "v2026.6.21"
+    assert pending["flockspro_component_version"] == "v2026.6.23"
+    assert "version_info" not in pending
 
 
 @pytest.mark.asyncio
@@ -369,7 +374,7 @@ async def test_fetch_console_manifest_release_blocks_frozen_channel(monkeypatch:
 
         def json(self) -> dict:
             return {
-                "display_version": "v2026.5.10",
+                "bundle_version": "v2026.5.10",
                 "bundle_url": "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
                 "frozen": True,
             }
@@ -588,8 +593,8 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     wheel.write_bytes(b"fake-wheel")
     (bundle_root / "manifest.json").write_text(
         """{
-  "display_version": "v2026.5.10",
-  "oss_version": "v2026.5.10",
+  "bundle_version": "v2026.5.10",
+  "core_version": "v2026.5.10",
   "flockspro_component_version": "pro-v2026-5-10",
   "flockspro_wheel": "wheels/flockspro-0.1.0-py3-none-any.whl",
   "build_id": "job_test"
@@ -639,12 +644,12 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
     assert marker.is_file()
     marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
-    assert marker_payload["display_version"] == "v2026.5.10"
-    assert marker_payload["oss_version"] == "v2026.5.10"
+    assert marker_payload["bundle_version"] == "v2026.5.10"
+    assert marker_payload["core_version"] == "v2026.5.10"
 
 
 @pytest.mark.asyncio
-async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_oss_is_older(
+async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_core_is_older(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -659,8 +664,8 @@ async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_oss
     wheel.write_bytes(b"fake-wheel")
     (bundle_root / "manifest.json").write_text(
         """{
-  "display_version": "v2026.6.13",
-  "oss_version": "v2026.6.13",
+  "bundle_version": "v2026.6.13",
+  "core_version": "v2026.6.13",
   "flockspro_component_version": "v2026.6.2",
   "flockspro_wheel": "wheels/flockspro-0.2.0-py3-none-any.whl",
   "build_id": "job_new_pro_old_core"
@@ -694,8 +699,8 @@ async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_oss
             bundle_format="zip",
             manifest={
                 "release_id": "rel_new_pro_old_core",
-                "display_version": "v2026.6.13",
-                "oss_version": "v2026.6.13",
+                "bundle_version": "v2026.6.13",
+                "core_version": "v2026.6.13",
                 "flockspro_component_version": "v2026.6.2",
                 "build_id": "job_new_pro_old_core",
             },
@@ -729,10 +734,8 @@ async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_oss
     marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
     marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
     assert marker_payload["release_id"] == "rel_new_pro_old_core"
-    assert marker_payload["display_version"] == "v2026.6.13"
-    assert marker_payload["installed_version"] == "v2026.6.13"
+    assert marker_payload["bundle_version"] == "v2026.6.13"
     assert marker_payload["core_version"] == "v2026.6.18"
-    assert marker_payload["oss_version"] == "v2026.6.18"
     assert marker_payload["flockspro_component_version"] == "v2026.6.2"
 
 
@@ -751,8 +754,8 @@ async def test_perform_pro_bundle_install_schedules_restart_before_stream_can_cl
     wheel.write_bytes(b"fake-wheel")
     (bundle_root / "manifest.json").write_text(
         """{
-  "display_version": "v2026.5.10",
-  "oss_version": "v2026.5.10",
+  "bundle_version": "v2026.5.10",
+  "core_version": "v2026.5.10",
   "flockspro_component_version": "pro-v2026-5-10",
   "flockspro_wheel": "wheels/flockspro-0.1.0-py3-none-any.whl",
   "build_id": "job_test"
@@ -803,8 +806,8 @@ async def _async_manifest_info(bundle):
         bundle_sha256=None,
         bundle_format="zip",
         manifest={
-            "display_version": "v2026.5.10",
-            "oss_version": "v2026.5.10",
+            "bundle_version": "v2026.5.10",
+            "core_version": "v2026.5.10",
             "flockspro_component_version": "pro-v2026-5-10",
             "build_id": "job_test",
         },

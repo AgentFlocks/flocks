@@ -5,7 +5,28 @@ from flocks.console import login as login_mod
 from flocks.console.login import ConsoleLoginService
 
 
-def test_heartbeat_payload_includes_runtime_version_info(tmp_path, monkeypatch):
+def test_heartbeat_payload_reports_oss_for_core_only_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_EDITION", "flockspro")
+    monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.3.3"))
+
+    payload = ConsoleLoginService.heartbeat_payload(
+        {
+            "console_session_token": "cs_heartbeat",
+            "fingerprint": "fp_heartbeat",
+            "install_id": "inst_heartbeat",
+        },
+    )
+
+    assert payload["edition"] == "oss"
+    assert payload["core_version"] == "2026.7.3.3"
+    assert "version" not in payload
+    assert "bundle_version" not in payload
+    assert "flockspro_component_version" not in payload
+    assert "version_info" not in payload
+
+
+def test_heartbeat_payload_includes_pro_runtime_versions(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.3"))
 
@@ -37,17 +58,11 @@ def test_heartbeat_payload_includes_runtime_version_info(tmp_path, monkeypatch):
     assert payload["status"] == "poc"
     assert payload["license_id"] == "lic_heartbeat"
     assert payload["edition"] == "flockspro"
-    assert payload["version"] == "v2026.7.3"
     assert payload["bundle_version"] == "v2026.7.3"
     assert payload["core_version"] == "v2026.7.3"
     assert payload["flockspro_component_version"] == "2026.7.3.1"
-    assert payload["version_info"] == {
-        "edition": "flockspro",
-        "version": "v2026.7.3",
-        "bundle_version": "v2026.7.3",
-        "core_version": "v2026.7.3",
-        "flockspro_component_version": "2026.7.3.1",
-    }
+    assert "version" not in payload
+    assert "version_info" not in payload
 
 
 def test_send_heartbeat_uses_local_pro_license_and_applies_response(tmp_path, monkeypatch):
@@ -127,7 +142,11 @@ def test_send_heartbeat_uses_local_pro_license_and_applies_response(tmp_path, mo
     payload = captured["json"]
     assert payload["status"] == "poc"
     assert payload["license_id"] == "lic_core"
-    assert payload["version_info"]["bundle_version"] == "v2026.7.3"
+    assert payload["bundle_version"] == "v2026.7.3"
+    assert payload["core_version"] == "v2026.7.3"
+    assert payload["flockspro_component_version"] == "2026.7.3.1"
+    assert "version" not in payload
+    assert "version_info" not in payload
 
     updated = json.loads(license_path.read_text(encoding="utf-8"))
     assert updated["patches"] == ["patch_token_1"]

@@ -381,32 +381,27 @@ class ConsoleLoginService:
         return str(__version__).lstrip("v")
 
     @classmethod
-    def runtime_version_info(cls, *, pro_component_version: str | None = None) -> dict[str, str]:
+    def runtime_version_payload(cls, *, pro_component_version: str | None = None) -> dict[str, str]:
         marker = _read_pro_bundle_marker()
         core_version = str(
             marker.get("core_version")
-            or marker.get("oss_version")
             or cls._runtime_version()
         ).strip()
         bundle_version = str(
             marker.get("bundle_version")
-            or marker.get("installed_version")
-            or marker.get("display_version")
             or ""
         ).strip()
         pro_component_version = str(marker.get("flockspro_component_version") or pro_component_version or "").strip()
-        edition = cls._edition()
-        if edition != "flockspro" and (bundle_version or pro_component_version):
-            edition = "flockspro"
-        display_version = bundle_version if edition == "flockspro" and bundle_version else core_version
+        has_pro_bundle = bool(bundle_version or pro_component_version)
+        edition = "flockspro" if has_pro_bundle else "oss"
         payload = {
             "edition": edition,
-            "version": display_version,
-            "core_version": core_version,
         }
-        if bundle_version:
+        if core_version:
+            payload["core_version"] = core_version
+        if edition == "flockspro" and bundle_version:
             payload["bundle_version"] = bundle_version
-        if pro_component_version:
+        if edition == "flockspro" and pro_component_version:
             payload["flockspro_component_version"] = pro_component_version
         return {key: value for key, value in payload.items() if value}
 
@@ -419,7 +414,7 @@ class ConsoleLoginService:
         license_id: str | None = None,
         pro_component_version: str | None = None,
     ) -> dict[str, Any]:
-        version_info = cls.runtime_version_info(pro_component_version=pro_component_version)
+        version_payload = cls.runtime_version_payload(pro_component_version=pro_component_version)
         return {
             "fingerprint": session.get("fingerprint"),
             "install_id": session.get("install_id"),
@@ -427,12 +422,7 @@ class ConsoleLoginService:
             "sent_at": _now_iso(),
             "status": status,
             "license_id": license_id or None,
-            "edition": version_info.get("edition"),
-            "version": version_info.get("version"),
-            "bundle_version": version_info.get("bundle_version"),
-            "core_version": version_info.get("core_version"),
-            "flockspro_component_version": version_info.get("flockspro_component_version"),
-            "version_info": version_info,
+            **version_payload,
         }
 
     @classmethod
@@ -521,16 +511,11 @@ class ConsoleLoginService:
         _ = force
         session = await cls._require_session()
         console_base = cls.console_base_url()
-        version_info = cls.runtime_version_info()
+        version_payload = cls.runtime_version_payload()
         payload = {
             "fingerprint": session["fingerprint"],
             "install_id": session["install_id"],
-            "edition": version_info.get("edition") or cls._edition(),
-            "version": version_info.get("version") or cls._runtime_version(),
-            "bundle_version": version_info.get("bundle_version"),
-            "core_version": version_info.get("core_version"),
-            "flockspro_component_version": version_info.get("flockspro_component_version"),
-            "version_info": version_info,
+            **version_payload,
             "source": source,
             "sent_at": _now_iso(),
         }

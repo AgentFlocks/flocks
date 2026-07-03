@@ -317,8 +317,8 @@ def _enrich_record_from_install_marker(record: dict[str, Any]) -> dict[str, Any]
     marker = _read_pro_bundle_install_marker()
     if marker:
         details.setdefault("auto_install_release_id", marker.get("release_id") or marker.get("bundle_release_id"))
-        details.setdefault("auto_install_version", marker.get("installed_version"))
-        details.setdefault("auto_install_pro_version", marker.get("flockspro_component_version"))
+        details.setdefault("auto_install_bundle_version", marker.get("bundle_version"))
+        details.setdefault("auto_install_pro_component_version", marker.get("flockspro_component_version"))
         details.setdefault("flockspro_component_version", marker.get("flockspro_component_version"))
         details.setdefault("auto_install_build_id", marker.get("build_id"))
 
@@ -442,19 +442,16 @@ def _record_target_bundle(record: dict[str, Any]) -> dict[str, str]:
         "release_id": release_id,
         "bundle_release_id": _clean_bundle_value(details.get("bundle_release_id") or release_id),
         "build_id": _clean_bundle_value(details.get("target_build_id") or latest_bundle.get("build_id")),
-        "display_version": _clean_bundle_value(
-            details.get("target_display_version")
-            or details.get("auto_install_target")
-            or latest_bundle.get("display_version")
+        "bundle_version_update_to": _clean_bundle_value(
+            details.get("bundle_version_update_to")
+            or latest_bundle.get("bundle_version")
         ),
-        "core_version": _clean_bundle_value(
-            details.get("target_core_version")
-            or details.get("target_oss_version")
+        "core_version_update_to": _clean_bundle_value(
+            details.get("core_version_update_to")
             or latest_bundle.get("core_version")
-            or latest_bundle.get("oss_version")
         ),
-        "flockspro_component_version": _clean_bundle_value(
-            details.get("target_flockspro_component_version")
+        "flockspro_component_version_update_to": _clean_bundle_value(
+            details.get("flockspro_component_version_update_to")
             or latest_bundle.get("flockspro_component_version")
         ),
     }
@@ -467,18 +464,18 @@ def _target_bundle_fingerprint_matches(target: dict[str, str], marker: dict[str,
     if build_id and marker_build_id:
         return marker_build_id == build_id
 
-    pro_version = target.get("flockspro_component_version")
+    pro_version = target.get("flockspro_component_version_update_to")
     marker_pro_version = _clean_bundle_value(marker.get("flockspro_component_version"))
     if pro_version and marker_pro_version:
         return marker_pro_version == pro_version
 
-    display_version = target.get("display_version")
-    marker_display_version = _clean_bundle_value(marker.get("installed_version") or marker.get("display_version"))
-    if display_version and marker_display_version:
-        return _clean_version_value(marker_display_version) == _clean_version_value(display_version)
+    bundle_version = target.get("bundle_version_update_to")
+    marker_bundle_version = _clean_bundle_value(marker.get("bundle_version"))
+    if bundle_version and marker_bundle_version:
+        return _clean_version_value(marker_bundle_version) == _clean_version_value(bundle_version)
 
-    core_version = target.get("core_version") or target.get("oss_version")
-    marker_core_version = _clean_bundle_value(marker.get("core_version") or marker.get("oss_version"))
+    core_version = target.get("core_version_update_to")
+    marker_core_version = _clean_bundle_value(marker.get("core_version"))
     if core_version and marker_core_version:
         return _clean_version_value(marker_core_version) == _clean_version_value(core_version)
 
@@ -510,7 +507,7 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
     marker = _read_pro_bundle_install_marker()
     if _is_pro_component_installed() and _marker_matches_target_bundle(marker, record):
         details["auto_install_release_id"] = marker.get("release_id") or marker.get("bundle_release_id")
-        details["auto_install_version"] = marker.get("installed_version")
+        details["auto_install_bundle_version"] = marker.get("bundle_version")
         await _maybe_activate_pro_license(record, allow_fallback=False)
         await _maybe_refresh_pro_license(record)
         capability = _record_pro_capability(details)
@@ -538,8 +535,8 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
         "done" if final_stage == "done" and capability.get("pro_enabled") else "license_inactive"
     )
     details["auto_install_release_id"] = marker.get("release_id") or marker.get("bundle_release_id")
-    details["auto_install_version"] = marker.get("installed_version")
-    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+    details["auto_install_bundle_version"] = marker.get("bundle_version")
+    details["auto_install_pro_component_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = final_message
     _enrich_record_from_install_marker(record)
@@ -565,7 +562,7 @@ def _marker_indicates_pro_bundle_installed(marker: dict[str, Any]) -> bool:
         return False
     return any(
         str(marker.get(key) or "").strip()
-        for key in ("installed_at", "installed_version", "bundle_version", "flockspro_component_version", "build_id")
+        for key in ("installed_at", "bundle_version", "flockspro_component_version", "build_id")
     )
 
 
@@ -600,15 +597,12 @@ async def _report_pro_bundle_installation(
         "license_id": _record_license_id(record),
         "fingerprint": console_session.get("fingerprint"),
         "install_id": console_session.get("install_id"),
-        "installed_version": source.get("installed_version")
-        or source.get("display_version")
-        or target.get("display_version")
-        or details.get("auto_install_target")
-        or details.get("auto_install_version")
-        or "",
-        "core_version": source.get("core_version") or source.get("oss_version") or target.get("core_version"),
-        "oss_version": source.get("core_version") or source.get("oss_version") or target.get("core_version"),
-        "flockspro_component_version": source.get("flockspro_component_version") or target.get("flockspro_component_version"),
+        "bundle_version": source.get("bundle_version") or target.get("bundle_version_update_to") or "",
+        "core_version": source.get("core_version") or target.get("core_version_update_to"),
+        "flockspro_component_version": (
+            source.get("flockspro_component_version")
+            or target.get("flockspro_component_version_update_to")
+        ),
         "build_id": source.get("build_id") or target.get("build_id"),
         "install_result": install_result,
         "error_message": error_message,
@@ -688,8 +682,8 @@ async def _finalize_restarting_upgrade_if_installed(record: dict[str, Any]) -> d
     await _maybe_refresh_pro_license(record)
     capability = _record_pro_capability(details)
     details["auto_install_result"] = "done" if capability.get("pro_enabled") else "license_inactive"
-    details["auto_install_version"] = marker.get("installed_version") or marker.get("display_version")
-    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+    details["auto_install_bundle_version"] = marker.get("bundle_version")
+    details["auto_install_pro_component_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = "Upgrade completed after service restart"
     _enrich_record_from_install_marker(record)
@@ -877,7 +871,8 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
         "installed": installed,
         "runtime_importable": runtime_importable,
         "install_marker_present": install_marker_present,
-        "installed_version": marker.get("installed_version"),
+        "bundle_version": marker.get("bundle_version"),
+        "core_version": marker.get("core_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),
         "installed_at": marker.get("installed_at"),
@@ -996,8 +991,8 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
                         details["auto_install_result"] = "done"
                     else:
                         details["auto_install_result"] = "license_inactive"
-                    details["auto_install_version"] = marker.get("installed_version")
-                    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+                    details["auto_install_bundle_version"] = marker.get("bundle_version")
+                    details["auto_install_pro_component_version"] = marker.get("flockspro_component_version")
                     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
                     details["auto_install_message"] = progress.message
                     _enrich_record_from_install_marker(raw)
