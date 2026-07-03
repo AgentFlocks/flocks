@@ -38,7 +38,15 @@ vi.mock('@/api/consoleUpgrade', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: Record<string, string>) => options?.defaultValue || key,
+    t: (key: string, options?: Record<string, string>) => {
+      if (options?.defaultValue) {
+        return options.defaultValue;
+      }
+      if (key === 'upgrade.installedTitle') {
+        return `Flocks Pro ${options?.version || ''}`;
+      }
+      return key;
+    },
     i18n: { language: 'zh-CN' },
   }),
 }));
@@ -99,5 +107,43 @@ describe('FlocksproUpgradePage', () => {
 
     await waitFor(() => expect(consoleUpgradeApi.getProPackageStatus).toHaveBeenCalled());
     expect(await screen.findByRole('button', { name: 'upgrade.startUpgrade' })).toBeInTheDocument();
+  });
+
+  it('shows the installed bundle version instead of the Pro component version', async () => {
+    consoleUpgradeApi.listRequests.mockResolvedValue([
+      {
+        request_id: 'req-1',
+        status: 'activated',
+        license_id: 'lic-1',
+        license_status: 'active',
+        details: {
+          license_id: 'lic-1',
+          license_status: 'active',
+          auto_install_bundle_version: 'v2026.7.3.3',
+          flockspro_component_version: 'pro-v2026.7.3.3',
+        },
+        created_at: '2026-07-03T00:00:00Z',
+        updated_at: '2026-07-03T00:00:00Z',
+      },
+    ]);
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      runtime_importable: true,
+      install_marker_present: true,
+      bundle_version: 'v2026.7.3.3',
+      flockspro_component_version: 'pro-v2026.7.3.3',
+      pro_enabled: true,
+      license_status: 'active',
+    });
+
+    render(
+      <MemoryRouter>
+        <FlocksproUpgradePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Flocks Pro v2026.7.3.3')).toBeInTheDocument();
+    expect(await screen.findByText('v2026.7.3.3')).toBeInTheDocument();
+    expect(screen.queryByText('pro-v2026.7.3.3')).not.toBeInTheDocument();
   });
 });
