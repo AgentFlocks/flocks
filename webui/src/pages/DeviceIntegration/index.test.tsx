@@ -851,6 +851,13 @@ describe('DeviceIntegrationPage', () => {
           name: '360 WAF',
           vendor: '360',
         }),
+        buildTemplate({
+          plugin_id: 'chaitin_safeline_waf_v1_0_0',
+          storage_key: 'chaitin_safeline_waf',
+          service_id: 'chaitin_safeline_waf',
+          name: '长亭雷池 WAF',
+          vendor: 'chaitin',
+        }),
       ],
     });
     const { container } = render(<DeviceIntegrationPage />);
@@ -859,14 +866,17 @@ describe('DeviceIntegrationPage', () => {
 
     expect(screen.getByText('火绒')).toBeInTheDocument();
     expect(screen.getByText('华为云')).toBeInTheDocument();
+    expect(screen.getByText('长亭')).toBeInTheDocument();
     expect(screen.getAllByText('360').length).toBeGreaterThan(0);
     expect(screen.queryByText('huorong')).toBeNull();
     expect(screen.queryByText('huaweicloud')).toBeNull();
+    expect(screen.queryByText('chaitin')).toBeNull();
 
     const huorongLogo = container.querySelector('img[src="/vendor-logos/huorong.png"]');
     expect(huorongLogo).not.toBeNull();
     expect(container.querySelector('img[src="/vendor-logos/huaweicloud.png"]')).not.toBeNull();
     expect(container.querySelector('img[src="/vendor-logos/360.png"]')).not.toBeNull();
+    expect(container.querySelector('img[src="/vendor-logos/chaitin.png"]')).not.toBeNull();
 
     fireEvent.error(huorongLogo as Element);
     await waitFor(() => expect(screen.getByText('火')).toBeInTheDocument());

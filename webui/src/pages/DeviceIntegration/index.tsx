@@ -67,6 +67,7 @@ const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
   threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微', logoSrc: '/vendor-logos/threatbook.png' },
   qingteng:    { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800', mark: '青', logoSrc: '/vendor-logos/qingteng.png' },
   nsfocus:     { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800', mark: '绿', logoSrc: '/vendor-logos/nsfocus.png' },
+  chaitin:     { nameCn: '长亭',   nameEn: 'Chaitin',    color: 'bg-lime-100 text-lime-800', mark: '长', logoSrc: '/vendor-logos/chaitin.png' },
 };
 
 function vendorPresentation(vendorKey: string): DeviceVendor {
