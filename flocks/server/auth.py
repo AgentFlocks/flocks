@@ -28,6 +28,8 @@ PUBLIC_PATHS = frozenset({
     "/openapi.json",
     "/favicon.ico",
     "/api/health",
+    "/api/config/ui-display",
+    "/api/config/ui-favicon",
     "/api/auth/login",
     "/api/auth/bootstrap-status",
     "/api/auth/bootstrap-admin",

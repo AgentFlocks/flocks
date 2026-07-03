@@ -24,6 +24,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProductName } from '@/contexts/ProductNameContext';
 
 const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
 const GITEE_URL = 'https://gitee.com/flocks/flocks';
@@ -35,6 +36,7 @@ export default function Home() {
   const navigate = useNavigate();
   const toast = useToast();
   const { user } = useAuth();
+  const { productName } = useProductName();
   const canCreateWebUIContractPage = user?.role === 'admin';
   const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
   const [creatingWebUIContractPageSession, setCreatingWebUIContractPageSession] = useState(false);
@@ -70,7 +72,7 @@ export default function Home() {
             </div>
 
             <h1 className="text-2xl font-extrabold mb-3 tracking-tight">
-              <span className="text-red-500">Flocks</span>
+              <span className="text-red-500">{productName}</span>
             </h1>
 
             <p className="text-sm text-white font-semibold mb-2">
@@ -203,7 +205,7 @@ export default function Home() {
               <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <div>
                 <span className="text-sm font-medium text-red-900">{t('stats.abnormal')}</span>
-                <span className="text-sm text-red-600 ml-2">Please ensure the Flocks backend is running</span>
+                <span className="text-sm text-red-600 ml-2">Please ensure the {productName} backend is running</span>
               </div>
             </div>
           )}
