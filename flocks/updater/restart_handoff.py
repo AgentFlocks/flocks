@@ -161,6 +161,22 @@ def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
     )
 
 
+def _report_pending_pro_bundle_install_receipt(args: argparse.Namespace) -> None:
+    if not args.pro_bundle_manifest_path:
+        return
+    try:
+        from flocks.console.login import ConsoleLoginService
+
+        reported = asyncio.run(ConsoleLoginService.report_pending_pro_bundle_install_receipt())
+    except Exception as exc:
+        _record_handoff_log(f"install_receipt_report_failed error={exc}")
+        return
+    if reported:
+        _record_handoff_log("install_receipt_reported")
+    else:
+        _record_handoff_log("install_receipt_report_skipped")
+
+
 def _rollback_failed_upgrade(args: argparse.Namespace, error: str) -> None:
     from flocks.updater import updater
 
@@ -214,6 +230,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         _rollback_failed_upgrade(args, task_error)
         _cleanup_dir(args.cleanup_dir)
         return 1
+    _report_pending_pro_bundle_install_receipt(args)
 
     try:
         process = subprocess.Popen(

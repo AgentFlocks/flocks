@@ -153,3 +153,72 @@ def test_send_heartbeat_uses_local_pro_license_and_applies_response(tmp_path, mo
     assert updated["last_sync_at"]
     revocation = json.loads((tmp_path / "flockspro" / "revocation.json").read_text(encoding="utf-8"))
     assert revocation == {"revoked_license_ids": ["lic_revoked"]}
+
+
+def test_report_pending_pro_bundle_install_receipt_posts_and_deletes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL", raising=False)
+
+    license_path = tmp_path / "flockspro" / "license.json"
+    license_path.parent.mkdir(parents=True)
+    license_path.write_text(json.dumps({"license_id": "lic_pending"}), encoding="utf-8")
+    pending_path = tmp_path / "run" / "pro-bundle-install-receipt-pending.json"
+    pending_path.parent.mkdir(parents=True)
+    pending_path.write_text(
+        json.dumps(
+            {
+                "release_id": "rel_pending",
+                "bundle_release_id": "rel_pending",
+                "bundle_version": "2026.7.3.5",
+                "core_version": "2026.7.3.5",
+                "flockspro_component_version": "2026.7.3.3",
+                "build_id": "job_pending",
+                "install_result": "success",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _require_session(cls):
+        return {
+            "console_session_token": "cs_pending",
+            "fingerprint": "fp_pending",
+            "install_id": "inst_pending",
+            "console_base_url": "http://127.0.0.1:18001",
+        }
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _Response()
+
+    monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(_require_session))
+    monkeypatch.setattr(login_mod.httpx, "AsyncClient", _Client)
+
+    reported = asyncio.run(ConsoleLoginService.report_pending_pro_bundle_install_receipt())
+
+    assert reported is True
+    assert not pending_path.exists()
+    assert captured["url"] == "http://127.0.0.1:18001/v1/pro-bundles/installations"
+    assert captured["headers"] == {"Authorization": "Bearer cs_pending"}
+    payload = captured["json"]
+    assert payload["fingerprint"] == "fp_pending"
+    assert payload["install_id"] == "inst_pending"
+    assert payload["license_id"] == "lic_pending"
+    assert payload["bundle_version"] == "2026.7.3.5"

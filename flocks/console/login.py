@@ -475,20 +475,39 @@ class ConsoleLoginService:
         )
 
     @classmethod
+    async def report_pending_pro_bundle_install_receipt(cls) -> bool:
+        try:
+            session = await cls._require_session()
+        except Exception:
+            session = read_shared_console_session()
+        if not session:
+            return False
+        async with httpx.AsyncClient(timeout=10) as client:
+            return await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
+
+    @classmethod
+    def _console_base_url_for_session(cls, session: dict[str, Any]) -> str:
+        console_base = cls.console_base_url() or str(session.get("console_base_url") or "").strip().rstrip("/")
+        if console_base:
+            return console_base
+        shared_session = read_shared_console_session()
+        return str((shared_session or {}).get("console_base_url") or "").strip().rstrip("/")
+
+    @classmethod
     async def _report_pending_pro_bundle_install_receipt(
         cls,
         *,
         client: httpx.AsyncClient,
         session: dict[str, Any],
-    ) -> None:
-        console_base = cls.console_base_url()
+    ) -> bool:
+        console_base = cls._console_base_url_for_session(session)
         token = str(session.get("console_session_token") or "").strip()
         if not console_base or not token:
-            return
+            return False
         path = _pending_pro_bundle_install_receipt_path()
         payload = _read_json_file(path)
         if not payload:
-            return
+            return False
         payload = {
             **payload,
             "fingerprint": session.get("fingerprint"),
@@ -503,8 +522,10 @@ class ConsoleLoginService:
             )
             if resp.status_code in {200, 201, 202}:
                 path.unlink(missing_ok=True)
+                return True
         except Exception:
-            return
+            return False
+        return False
 
     @classmethod
     async def sync_node_profile(cls, *, force: bool = False, source: str = "scheduled") -> dict[str, Any]:
