@@ -217,6 +217,10 @@ start_backend() {
 }
 
 start_frontend() {
+    echo -e "${GREEN}🏗️  构建前端...${NC}"
+    cd "${PROJECT_ROOT}/webui"
+    npm run build
+
     echo -e "${GREEN}🎨 启动前端服务: http://${FRONTEND_HOST}:${FRONTEND_PORT}${NC}"
     cd "${PROJECT_ROOT}/webui"
     VITE_API_BASE_URL="${BACKEND_BASE_URL}" \
