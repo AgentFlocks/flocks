@@ -23,6 +23,31 @@ def _shared_console_session_path() -> Path:
     return Path(raw).expanduser() / "run" / "console-session.json"
 
 
+def _flocks_root() -> Path:
+    return Path(os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))).expanduser()
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_pro_bundle_marker() -> dict[str, Any]:
+    return _read_json_file(_flocks_root() / "run" / "pro-bundle-installed.json")
+
+
+def _read_local_pro_license_id() -> str:
+    payload = _read_json_file(_flocks_root() / "flockspro" / "license.json")
+    return str(payload.get("license_id") or "").strip()
+
+
+def _pending_pro_bundle_install_receipt_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
 def _write_shared_console_session(session: dict[str, Any]) -> None:
     path = _shared_console_session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,15 +309,53 @@ class ConsoleLoginService:
         return str(__version__).lstrip("v")
 
     @classmethod
+    def _runtime_version_info(cls) -> dict[str, str]:
+        marker = _read_pro_bundle_marker()
+        core_version = str(
+            marker.get("core_version")
+            or marker.get("oss_version")
+            or cls._runtime_version()
+        ).strip()
+        bundle_version = str(
+            marker.get("bundle_version")
+            or marker.get("installed_version")
+            or marker.get("display_version")
+            or ""
+        ).strip()
+        pro_component_version = str(marker.get("flockspro_component_version") or "").strip()
+        edition = cls._edition()
+        if edition != "flockspro" and (bundle_version or pro_component_version):
+            edition = "flockspro"
+        display_version = bundle_version if edition == "flockspro" and bundle_version else core_version
+        payload = {
+            "edition": edition,
+            "version": display_version,
+            "core_version": core_version,
+        }
+        if bundle_version:
+            payload["bundle_version"] = bundle_version
+        if pro_component_version:
+            payload["flockspro_component_version"] = pro_component_version
+        return {key: value for key, value in payload.items() if value}
+
+    @classmethod
     async def send_heartbeat(cls) -> dict[str, Any]:
         session = await cls._require_session()
         console_base = cls.console_base_url()
+        version_info = cls._runtime_version_info()
         payload = {
             "fingerprint": session["fingerprint"],
             "install_id": session["install_id"],
             "console_login_id": session.get("console_login_id"),
             "sent_at": _now_iso(),
             "status": "ok",
+            "license_id": _read_local_pro_license_id() or None,
+            "edition": version_info.get("edition"),
+            "version": version_info.get("version"),
+            "bundle_version": version_info.get("bundle_version"),
+            "core_version": version_info.get("core_version"),
+            "flockspro_component_version": version_info.get("flockspro_component_version"),
+            "version_info": version_info,
         }
         if not console_base:
             return {"ok": True, "mode": "mock", "node": payload}
@@ -305,18 +368,57 @@ class ConsoleLoginService:
             if resp.status_code in {401, 403}:
                 raise ValueError("console 会话已失效，请重新登录")
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
+            return data
+
+    @classmethod
+    async def _report_pending_pro_bundle_install_receipt(
+        cls,
+        *,
+        client: httpx.AsyncClient,
+        session: dict[str, Any],
+    ) -> None:
+        console_base = cls.console_base_url()
+        token = str(session.get("console_session_token") or "").strip()
+        if not console_base or not token:
+            return
+        path = _pending_pro_bundle_install_receipt_path()
+        payload = _read_json_file(path)
+        if not payload:
+            return
+        payload = {
+            **payload,
+            "fingerprint": session.get("fingerprint"),
+            "install_id": session.get("install_id"),
+            "license_id": payload.get("license_id") or _read_local_pro_license_id() or None,
+        }
+        try:
+            resp = await client.post(
+                f"{console_base}/v1/pro-bundles/installations",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code in {200, 201, 202}:
+                path.unlink(missing_ok=True)
+        except Exception:
+            return
 
     @classmethod
     async def sync_node_profile(cls, *, force: bool = False, source: str = "scheduled") -> dict[str, Any]:
         _ = force
         session = await cls._require_session()
         console_base = cls.console_base_url()
+        version_info = cls._runtime_version_info()
         payload = {
             "fingerprint": session["fingerprint"],
             "install_id": session["install_id"],
-            "edition": cls._edition(),
-            "version": cls._runtime_version(),
+            "edition": version_info.get("edition") or cls._edition(),
+            "version": version_info.get("version") or cls._runtime_version(),
+            "bundle_version": version_info.get("bundle_version"),
+            "core_version": version_info.get("core_version"),
+            "flockspro_component_version": version_info.get("flockspro_component_version"),
+            "version_info": version_info,
             "source": source,
             "sent_at": _now_iso(),
         }

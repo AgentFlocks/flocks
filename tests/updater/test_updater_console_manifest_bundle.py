@@ -15,6 +15,9 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
     from flocks.storage.storage import Storage
 
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    license_path = tmp_path / "flockspro" / "license.json"
+    license_path.parent.mkdir(parents=True)
+    license_path.write_text('{"license_id": "lic_manifest"}', encoding="utf-8")
     await Storage.set("console:session", {"console_session_token": "cs_manifest"}, "json")
 
     class _Resp:
@@ -41,7 +44,11 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
 
         async def get(self, url, headers=None, follow_redirects=True):
             assert "channel=flockspro" in url
-            assert headers == {"Authorization": "Bearer cs_manifest"}
+            assert "license_id=lic_manifest" in url
+            assert headers == {
+                "x-license-id": "lic_manifest",
+                "Authorization": "Bearer cs_manifest",
+            }
             return _Resp()
 
     monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
@@ -294,6 +301,10 @@ def test_console_manifest_release_identity_writes_product_and_core_versions(
     assert marker["oss_version"] == "v2026.6.21"
     assert marker["flockspro_component_version"] == "v2026.6.23"
     assert marker["build_id"] == "job_623"
+    pending = json.loads((tmp_path / "run" / "pro-bundle-install-receipt-pending.json").read_text(encoding="utf-8"))
+    assert pending["install_result"] == "success"
+    assert pending["bundle_version"] == "v2026.6.23"
+    assert pending["version_info"]["core_version"] == "v2026.6.21"
 
 
 @pytest.mark.asyncio

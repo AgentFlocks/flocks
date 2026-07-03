@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, AsyncGenerator, Awaitable, Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
@@ -1222,6 +1222,17 @@ async def _fetch_gitlab_release(
     )
 
 
+def _read_local_pro_license_id() -> str:
+    license_path = _flocks_root() / "flockspro" / "license.json"
+    try:
+        payload = json.loads(license_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("license_id") or "").strip()
+
+
 async def _load_console_session_token() -> str | None:
     def _token_from_payload(payload: Any) -> str | None:
         if not isinstance(payload, dict):
@@ -1273,8 +1284,14 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
         raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置，无法使用 console-manifest 源")
 
     channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
-    url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
+    license_id = (os.getenv("FLOCKSPRO_LICENSE_ID") or _read_local_pro_license_id()).strip()
+    query = {"channel": channel}
+    if license_id:
+        query["license_id"] = license_id
+    url = f"{manifest_base}/v1/manifest/latest?{urlencode(query)}"
     headers: dict[str, str] = {}
+    if license_id:
+        headers["x-license-id"] = license_id
     token = str(console_session_token or "").strip() or await _load_console_session_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -1879,6 +1896,47 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    _write_pending_pro_bundle_install_receipt(payload)
+
+
+def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) -> None:
+    receipt_path = _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_version = str(
+        marker_payload.get("bundle_version")
+        or marker_payload.get("installed_version")
+        or marker_payload.get("display_version")
+        or ""
+    ).strip()
+    core_version = str(marker_payload.get("core_version") or marker_payload.get("oss_version") or "").strip()
+    pro_component_version = str(marker_payload.get("flockspro_component_version") or "").strip()
+    version_info = {
+        "edition": "flockspro",
+        "version": bundle_version,
+        "bundle_version": bundle_version,
+        "core_version": core_version,
+        "flockspro_component_version": pro_component_version,
+    }
+    receipt = {
+        "release_id": marker_payload.get("release_id") or marker_payload.get("bundle_release_id"),
+        "bundle_release_id": marker_payload.get("bundle_release_id") or marker_payload.get("release_id"),
+        "license_id": _read_local_pro_license_id() or None,
+        "installed_version": bundle_version,
+        "bundle_version": bundle_version,
+        "target_version": bundle_version,
+        "core_version": core_version,
+        "oss_version": core_version,
+        "flockspro_component_version": pro_component_version,
+        "build_id": marker_payload.get("build_id"),
+        "install_result": "success",
+        "reported_at": datetime.now(timezone.utc).isoformat(),
+        "version_info": {key: value for key, value in version_info.items() if value},
+    }
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(receipt_path, 0o600)
+    except OSError:
+        pass
 
 
 class _NullConsole:
