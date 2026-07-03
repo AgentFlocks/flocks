@@ -1,0 +1,38 @@
+name: chaitin_safeline_waf
+vendor: chaitin
+service_id: chaitin_safeline_waf
+version: "OpenAPI"
+integration_type: device
+description: >
+  Chaitin SafeLine WAF OpenAPI integration. Configure the management URL and
+  API Token. Read-only calls and mutation calls are separated at tool level.
+description_cn: >
+  长亭雷池 WAF OpenAPI 接入。配置管理端地址和 API Token；只读查询与变更调用在工具层隔离。
+auth:
+  type: custom
+  secret: chaitin_safeline_waf_api_token
+credential_fields:
+  - key: base_url
+    label: 管理端地址
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://safeline.example.com"
+  - key: api_token
+    label: API Token
+    storage: secret
+    config_key: api_token
+    secret_id: chaitin_safeline_waf_api_token
+    input_type: password
+    required: true
+defaults:
+  timeout: 30
+  category: custom
+  product_version: "OpenAPI"
+  verify_ssl: false
+notes: |
+  认证规则来自《长亭雷池WAF》OpenAPI 文档：
+    - Token 在管理界面个人中心的 Open API 页面创建。
+    - 所有 API 请求在 Header 中携带 API-TOKEN。
+    - GET 使用 query string；POST/PUT/DELETE 使用 JSON body。

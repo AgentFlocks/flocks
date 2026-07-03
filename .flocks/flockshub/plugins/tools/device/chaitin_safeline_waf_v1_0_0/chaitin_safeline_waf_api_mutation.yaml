@@ -1,0 +1,33 @@
+name: chaitin_safeline_waf_api_mutation
+description: Chaitin SafeLine WAF documented mutation REST caller with confirmation.
+description_cn: 长亭雷池 WAF 文档内变更类 REST 调用工具。所有调用都需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: chaitin_safeline_waf
+version: "OpenAPI"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_mutation
+    method:
+      type: string
+      description: HTTP 方法，必须和 catalog 中 kind=mutation 的 method/path 匹配。
+    path:
+      type: string
+      description: REST 路径，例如 /api/ACLRuleAPI。
+    query:
+      type: object
+      description: Query string 参数。
+    body:
+      description: JSON body，按雷池 WAF 文档对应接口填写。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_safeline_waf.handler.py
+  function: api_mutation

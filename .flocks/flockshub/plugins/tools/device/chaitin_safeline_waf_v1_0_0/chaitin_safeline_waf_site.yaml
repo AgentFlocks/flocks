@@ -1,0 +1,35 @@
+name: chaitin_safeline_waf_site
+description: Chaitin SafeLine WAF protected site and certificate read-only queries.
+description_cn: 长亭雷池 WAF 防护站点与证书只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_safeline_waf
+version: "OpenAPI"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - reverse_proxy_sites
+        - traffic_detection_sites
+        - certificates
+        - test
+      description: |
+        - reverse_proxy_sites: GET /api/HardwareReverseProxyWebsiteAPI，查询反向代理站点。
+        - traffic_detection_sites: GET /api/HardwareTrafficDetectionWebsiteAPI，查询流量检测站点。
+        - certificates: GET /api/CertAPI，查询证书列表。
+    query:
+      type: object
+      description: GET query 参数。
+    count:
+      type: integer
+    offset:
+      type: integer
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_safeline_waf.handler.py
+  function: site

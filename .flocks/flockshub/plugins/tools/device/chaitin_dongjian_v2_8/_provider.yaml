@@ -1,0 +1,40 @@
+name: chaitin_dongjian
+vendor: chaitin
+service_id: chaitin_dongjian_api
+version: "2.8"
+integration_type: device
+description: >
+  Chaitin Dongjian (X-Ray) security assessment system OpenAPI V2.8
+  integration. Configure the management URL and token. The handler normalizes
+  the base URL to /api/v2.
+description_cn: >
+  长亭洞鉴（X-Ray）安全评估系统 OpenAPI V2.8 接入。配置管理端地址和 token；
+  handler 会将地址归一化到 /api/v2。
+auth:
+  type: custom
+  secret: chaitin_dongjian_token
+credential_fields:
+  - key: base_url
+    label: 管理端地址
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://dongjian.example.com"
+  - key: token
+    label: OpenAPI Token
+    storage: secret
+    config_key: token
+    secret_id: chaitin_dongjian_token
+    input_type: password
+    required: true
+defaults:
+  timeout: 30
+  category: custom
+  product_version: "OpenAPI V2.8"
+  verify_ssl: false
+notes: |
+  认证规则来自《洞鉴（X-Ray）安全评估系统OpenAPI接口文档（标准版）V2.8》：
+    - 所有 API 请求需要在请求头 token 中携带认证信息。
+    - 接口路径基于 /api/v2，例如 GET /api/v2/project/?limit=1&offset=0。
+    - GET 用于获取指定数据；POST /filter/ 用于批量筛选查询。
