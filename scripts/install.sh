@@ -948,6 +948,25 @@ ensure_env_var_persisted() {
   fi
 }
 
+write_install_profile() {
+  local config_dir language
+  if [[ -n "${FLOCKS_CONFIG_DIR:-}" ]]; then
+    config_dir="$FLOCKS_CONFIG_DIR"
+  else
+    config_dir="${FLOCKS_ROOT:-$HOME/.flocks}/config"
+  fi
+
+  if is_zh_install; then
+    language="zh-CN"
+  else
+    language="en"
+  fi
+
+  if ! { mkdir -p "$config_dir" && printf '{\n  "Language": "%s"\n}\n' "$language" > "$config_dir/install_profile.json"; }; then
+    warn "Failed to write install profile. Continuing with the default installer behavior."
+  fi
+}
+
 detect_system_browser_path() {
   case "$(uname -s)" in
     Darwin)
@@ -1105,6 +1124,7 @@ main() {
   else
     info "Project directory: $ROOT_DIR"
   fi
+  write_install_profile
   install_uv
   ensure_npm_installed
   select_install_sources
