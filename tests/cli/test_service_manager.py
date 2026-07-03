@@ -869,8 +869,8 @@ def test_startup_status_lines_use_progress_summary() -> None:
     lines = service_manager._startup_status_lines_from_payload(_supervisor_status_payload())
 
     assert lines[:2] == [
-        "[flocks] [x] 启动 Flocks daemon...",
-        "[flocks] [x] 启动 Flocks service...",
+        "[flocks] Flocks daemon 已启动。",
+        "[flocks] Flocks service 已启动。",
     ]
     assert lines[4] == "[flocks]   daemon: state=running PID=100"
     assert lines[5] == "[flocks]   flocks: state=healthy PID=111 URL=http://127.0.0.1:9000"
@@ -885,7 +885,7 @@ def test_startup_status_lines_mark_unhealthy_steps() -> None:
 
     lines = service_manager._startup_status_lines_from_payload(payload)
 
-    assert lines[1] == "[flocks] [!] 启动 Flocks service..."
+    assert lines[1] == "[flocks] Flocks service 启动异常。"
     assert lines[5] == "[flocks]   flocks: state=degraded PID=111 URL=http://127.0.0.1:9000 last_error=port occupied"
 
 
@@ -895,7 +895,7 @@ def test_startup_status_lines_can_skip_daemon_step() -> None:
         include_daemon_step=False,
     )
 
-    assert lines[:1] == ["[flocks] [x] 启动 Flocks service..."]
+    assert lines[:1] == ["[flocks] Flocks service 已启动。"]
 
 
 def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
@@ -971,7 +971,7 @@ def test_start_all_resolves_upgrade_runtime_before_supervisor_status(monkeypatch
 
     service_manager.start_all(service_manager.ServiceConfig(frontend_port=5173), console)
 
-    assert events == ["upgrade:5173:True", "supervisor", "start"]
+    assert events == ["upgrade:5173:False", "supervisor", "start"]
 
 
 def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
@@ -990,7 +990,7 @@ def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
     assert "[flocks] Flocks daemon 已在运行。" in console.messages
 
 
-def test_start_all_resumes_paused_supervisor_before_opening_browser(monkeypatch) -> None:
+def test_start_all_restarts_paused_supervisor(monkeypatch) -> None:
     calls: list[str] = []
     console = DummyConsole()
     paths = _make_runtime_paths(Path("/tmp/flocks-test"))
@@ -1008,23 +1008,17 @@ def test_start_all_resumes_paused_supervisor_before_opening_browser(monkeypatch)
         "paused": True,
         "last_error": "control upgrade prepare",
     })
-    resumed_status = _supervisor_status()
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
     monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(paused_payload))
-    monkeypatch.setattr(
-        service_manager,
-        "request_resume_upgrade",
-        lambda _config, **_kwargs: calls.append("resume") or resumed_status,
-    )
-    monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: calls.append("status"))
-    monkeypatch.setattr(service_manager, "open_default_browser", lambda url, _console: calls.append(f"browser:{url}"))
+    monkeypatch.setattr(service_manager, "_stop_all_unlocked", lambda _console, **_kwargs: calls.append("stop"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: calls.append("start"))
 
     service_manager.start_all(service_manager.ServiceConfig(), console)
 
-    assert calls == ["resume", "status", "browser:http://127.0.0.1:9000"]
-    assert "[flocks] Flocks daemon 已在运行，但 Flocks service 处于暂停状态，正在恢复..." in console.messages
+    assert calls == ["stop", "start"]
+    assert "[flocks] Flocks daemon 已在运行，但 Flocks service 处于暂停状态，正在重新启动..." in console.messages
 
 
 def test_start_all_does_not_open_browser_when_restarted_service_remains_unhealthy(monkeypatch) -> None:
@@ -1123,8 +1117,8 @@ def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: 
 
     assert calls == ["daemon", "ready", "status"]
     assert console.messages == [
-        "[flocks] [ ] 启动 Flocks daemon...",
-        "[flocks] [x] 启动 Flocks daemon...",
+        "[flocks] Flocks daemon 启动中...",
+        "[flocks] Flocks daemon 已启动。",
     ]
 
 
@@ -1152,7 +1146,7 @@ def test_start_all_without_stop_prints_before_cleanup(monkeypatch, tmp_path: Pat
 
     service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), console)
 
-    assert events[:5] == ["print:[flocks] [ ] 启动 Flocks daemon...", "legacy", "orphan", "dist", "daemon"]
+    assert events[:5] == ["print:[flocks] Flocks daemon 启动中...", "legacy", "orphan", "dist", "daemon"]
 
 
 def test_start_all_propagates_supervisor_start_failure(monkeypatch) -> None:
