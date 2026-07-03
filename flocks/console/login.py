@@ -39,13 +39,62 @@ def _read_pro_bundle_marker() -> dict[str, Any]:
     return _read_json_file(_flocks_root() / "run" / "pro-bundle-installed.json")
 
 
+def _local_pro_license_path() -> Path:
+    return _flocks_root() / "flockspro" / "license.json"
+
+
+def _read_local_pro_license_state() -> dict[str, Any]:
+    return _read_json_file(_local_pro_license_path())
+
+
 def _read_local_pro_license_id() -> str:
-    payload = _read_json_file(_flocks_root() / "flockspro" / "license.json")
-    return str(payload.get("license_id") or "").strip()
+    state = _read_local_pro_license_state()
+    payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
+    return str(state.get("license_id") or payload.get("license_id") or "").strip()
+
+
+def _read_local_pro_license_status() -> str:
+    state = _read_local_pro_license_state()
+    payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
+    return str(
+        state.get("license_status")
+        or state.get("status")
+        or payload.get("license_status")
+        or payload.get("status")
+        or ""
+    ).strip()
 
 
 def _pending_pro_bundle_install_receipt_path() -> Path:
     return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+def _sync_local_pro_license_from_heartbeat_response(data: dict[str, Any]) -> None:
+    license_path = _local_pro_license_path()
+    state = _read_json_file(license_path)
+    now_ts = int(datetime.now(UTC).timestamp())
+    if state:
+        changed = False
+        patch_token = data.get("license_patch") or data.get("latest_patch")
+        if isinstance(patch_token, str) and patch_token:
+            patches = state.get("patches") if isinstance(state.get("patches"), list) else []
+            if patch_token not in patches:
+                state["patches"] = [*patches, patch_token]
+                changed = True
+        if state.get("last_sync_at") != now_ts:
+            state["last_sync_at"] = now_ts
+            state["last_heartbeat_ok_at"] = now_ts
+            changed = True
+        if changed:
+            license_path.parent.mkdir(parents=True, exist_ok=True)
+            license_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    revoked_license_ids = data.get("revoked_license_ids")
+    if isinstance(revoked_license_ids, list):
+        revocation_path = _flocks_root() / "flockspro" / "revocation.json"
+        revocation_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"revoked_license_ids": sorted({str(item) for item in revoked_license_ids})}
+        revocation_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _write_shared_console_session(session: dict[str, Any]) -> None:
@@ -65,6 +114,29 @@ def _write_shared_console_session(session: dict[str, Any]) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+def read_shared_console_session() -> dict[str, Any] | None:
+    path = _shared_console_session_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    token = str(payload.get("console_session_token") or "").strip()
+    fingerprint = str(payload.get("fingerprint") or "").strip()
+    install_id = str(payload.get("install_id") or "").strip()
+    if not token or not fingerprint or not install_id:
+        return None
+    expires_at = str(payload.get("expires_at") or "").strip()
+    if expires_at:
+        try:
+            if _parse_iso(expires_at) <= datetime.now(UTC):
+                return None
+        except ValueError:
+            return None
+    return payload
 
 
 def _delete_shared_console_session() -> None:
@@ -309,7 +381,7 @@ class ConsoleLoginService:
         return str(__version__).lstrip("v")
 
     @classmethod
-    def _runtime_version_info(cls) -> dict[str, str]:
+    def runtime_version_info(cls, *, pro_component_version: str | None = None) -> dict[str, str]:
         marker = _read_pro_bundle_marker()
         core_version = str(
             marker.get("core_version")
@@ -322,7 +394,7 @@ class ConsoleLoginService:
             or marker.get("display_version")
             or ""
         ).strip()
-        pro_component_version = str(marker.get("flockspro_component_version") or "").strip()
+        pro_component_version = str(marker.get("flockspro_component_version") or pro_component_version or "").strip()
         edition = cls._edition()
         if edition != "flockspro" and (bundle_version or pro_component_version):
             edition = "flockspro"
@@ -339,17 +411,22 @@ class ConsoleLoginService:
         return {key: value for key, value in payload.items() if value}
 
     @classmethod
-    async def send_heartbeat(cls) -> dict[str, Any]:
-        session = await cls._require_session()
-        console_base = cls.console_base_url()
-        version_info = cls._runtime_version_info()
-        payload = {
-            "fingerprint": session["fingerprint"],
-            "install_id": session["install_id"],
+    def heartbeat_payload(
+        cls,
+        session: dict[str, Any],
+        *,
+        status: str = "ok",
+        license_id: str | None = None,
+        pro_component_version: str | None = None,
+    ) -> dict[str, Any]:
+        version_info = cls.runtime_version_info(pro_component_version=pro_component_version)
+        return {
+            "fingerprint": session.get("fingerprint"),
+            "install_id": session.get("install_id"),
             "console_login_id": session.get("console_login_id"),
             "sent_at": _now_iso(),
-            "status": "ok",
-            "license_id": _read_local_pro_license_id() or None,
+            "status": status,
+            "license_id": license_id or None,
             "edition": version_info.get("edition"),
             "version": version_info.get("version"),
             "bundle_version": version_info.get("bundle_version"),
@@ -357,20 +434,55 @@ class ConsoleLoginService:
             "flockspro_component_version": version_info.get("flockspro_component_version"),
             "version_info": version_info,
         }
-        if not console_base:
+
+    @classmethod
+    async def send_heartbeat_for_session(
+        cls,
+        *,
+        session: dict[str, Any],
+        status: str = "ok",
+        license_id: str | None = None,
+        heartbeat_url: str | None = None,
+        report_install_receipt: bool = False,
+        pro_component_version: str | None = None,
+    ) -> dict[str, Any]:
+        console_base = cls.console_base_url()
+        payload = cls.heartbeat_payload(
+            session,
+            status=status,
+            license_id=license_id,
+            pro_component_version=pro_component_version,
+        )
+        target_url = heartbeat_url or (f"{console_base}/v1/heartbeats" if console_base else "")
+        if not target_url:
             return {"ok": True, "mode": "mock", "node": payload}
+        token = str(session.get("console_session_token") or "").strip()
+        if not token:
+            raise ValueError("console_session_token 缺失，无法发送心跳")
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                f"{console_base}/v1/heartbeats",
+                target_url,
                 json=payload,
-                headers={"Authorization": f"Bearer {session['console_session_token']}"},
+                headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code in {401, 403}:
                 raise ValueError("console 会话已失效，请重新登录")
             resp.raise_for_status()
             data = resp.json()
-            await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
+            _sync_local_pro_license_from_heartbeat_response(data)
+            if report_install_receipt:
+                await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
             return data
+
+    @classmethod
+    async def send_heartbeat(cls) -> dict[str, Any]:
+        session = await cls._require_session()
+        return await cls.send_heartbeat_for_session(
+            session=session,
+            status=_read_local_pro_license_status() or "ok",
+            license_id=_read_local_pro_license_id() or None,
+            report_install_receipt=True,
+        )
 
     @classmethod
     async def _report_pending_pro_bundle_install_receipt(
@@ -409,7 +521,7 @@ class ConsoleLoginService:
         _ = force
         session = await cls._require_session()
         console_base = cls.console_base_url()
-        version_info = cls._runtime_version_info()
+        version_info = cls.runtime_version_info()
         payload = {
             "fingerprint": session["fingerprint"],
             "install_id": session["install_id"],

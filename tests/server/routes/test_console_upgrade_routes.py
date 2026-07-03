@@ -337,6 +337,50 @@ async def test_flockspro_license_status_delegates_to_pro_runtime(monkeypatch: py
     assert payload["license_id"] == "lic_1"
 
 
+async def test_flockspro_license_refresh_sends_heartbeat_from_core(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import flockspro_license as license_routes
+
+    app = FastAPI()
+    app.include_router(license_routes.router, prefix="/api/flockspro/license")
+    monkeypatch.setattr(license_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(
+        license_routes,
+        "_get_pro_capability_status",
+        lambda: {"active": True, "pro_enabled": True, "license_status": "poc", "license_id": "lic_1"},
+    )
+    monkeypatch.setattr(license_routes, "require_user", lambda _req: _mock_admin())
+
+    heartbeat_calls: list[str] = []
+    refresh_calls: list[str] = []
+
+    async def _send_heartbeat():
+        heartbeat_calls.append("sent")
+        return {"ok": True}
+
+    class _Checker:
+        async def refresh(self):
+            refresh_calls.append("refreshed")
+            return {"active": True}
+
+    runtime_module = ModuleType("flockspro.license.runtime")
+    runtime_module.get_license_checker = lambda: _Checker()
+    license_module = ModuleType("flockspro.license")
+    flockspro_module = ModuleType("flockspro")
+    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
+    monkeypatch.setattr(license_routes.ConsoleLoginService, "send_heartbeat", _send_heartbeat)
+
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
+        resp = await local_client.post("/api/flockspro/license/refresh")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert heartbeat_calls == ["sent"]
+    assert refresh_calls == ["refreshed"]
+    assert resp.json()["license_id"] == "lic_1"
+
+
 async def test_create_upgrade_request_does_not_link_previous_request_when_omitted(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
