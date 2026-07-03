@@ -23,6 +23,7 @@ from flocks.cli.service_control import (
     supervisor_control_port,
     supervisor_log_path,
     supervisor_socket_path,
+    supervisor_uses_tcp_control,
 )
 from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter
 
@@ -85,8 +86,13 @@ def _service_payload(service: ManagedService, *, paused: bool = False) -> dict[s
     }
 
 
-class _UnixControlServer(ThreadingHTTPServer):
-    address_family = socket.AF_UNIX
+if hasattr(socket, "AF_UNIX"):
+
+    class _UnixControlServer(ThreadingHTTPServer):
+        address_family = socket.AF_UNIX
+
+else:  # pragma: no cover - exercised by importing on Windows
+    _UnixControlServer = None
 
 
 class SupervisorDaemon:
@@ -175,12 +181,13 @@ class SupervisorDaemon:
 
     def _start_control_server(self) -> None:
         handler = self._handler_class()
-        if sys.platform == "win32":
+        if supervisor_uses_tcp_control():
             server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", supervisor_control_port()), handler)
         else:
             socket_path = supervisor_socket_path(self.paths)
             socket_path.parent.mkdir(parents=True, exist_ok=True)
             socket_path.unlink(missing_ok=True)
+            assert _UnixControlServer is not None
             server = _UnixControlServer(str(socket_path), handler)
         self._server = server
         self._server_thread = threading.Thread(target=server.serve_forever, name="flocks-supervisor-control", daemon=True)
@@ -193,7 +200,7 @@ class SupervisorDaemon:
             self._server.server_close()
         if self._server_thread is not None:
             self._server_thread.join(timeout=5.0)
-        if sys.platform != "win32":
+        if not supervisor_uses_tcp_control():
             supervisor_socket_path(self.paths).unlink(missing_ok=True)
 
     def _handler_class(self):

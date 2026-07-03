@@ -35,6 +35,7 @@ from flocks.cli.service_control import (
     supervisor_is_running,
     supervisor_log_path,
     supervisor_socket_path,
+    supervisor_uses_tcp_control,
 )
 
 try:
@@ -1370,7 +1371,7 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
     """Spawn the detached service supervisor daemon."""
     root = ensure_install_layout()
     log_path = supervisor_log_path(paths)
-    if sys.platform != "win32":
+    if not supervisor_uses_tcp_control():
         supervisor_socket_path(paths).unlink(missing_ok=True)
     command = resolve_flocks_cli_command(root) + [
         "service-daemon",

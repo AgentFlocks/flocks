@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +57,28 @@ def _write_legacy_runtime_record(pid_file: Path, record: service_manager.Runtime
     if record.started_at is not None:
         payload["started_at"] = record.started_at
     pid_file.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+
+
+def test_supervisor_uses_tcp_control_when_af_unix_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(service_control.sys, "platform", "linux")
+    monkeypatch.delattr(service_control.socket, "AF_UNIX", raising=False)
+
+    assert service_control.supervisor_uses_tcp_control() is True
+
+
+def test_service_supervisor_imports_when_af_unix_is_unavailable() -> None:
+    code = "\n".join(
+        [
+            "import socket",
+            "if hasattr(socket, 'AF_UNIX'):",
+            "    delattr(socket, 'AF_UNIX')",
+            "import flocks.cli.service_supervisor",
+        ]
+    )
+
+    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_runtime_paths_follow_flocks_root_env(monkeypatch, tmp_path: Path) -> None:

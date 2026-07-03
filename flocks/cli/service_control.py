@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,9 +77,14 @@ def supervisor_control_port() -> int:
     return SUPERVISOR_CONTROL_PORT
 
 
+def supervisor_uses_tcp_control() -> bool:
+    """Return True when the daemon control API should use localhost TCP."""
+    return sys.platform == "win32" or not hasattr(socket, "AF_UNIX")
+
+
 def supervisor_control_client(paths=None, timeout: float | None = 2.0) -> httpx.Client:
     """Create a client for the local daemon control API."""
-    if sys.platform == "win32":
+    if supervisor_uses_tcp_control():
         return httpx.Client(
             base_url=f"http://127.0.0.1:{supervisor_control_port()}",
             timeout=timeout,
