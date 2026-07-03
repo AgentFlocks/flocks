@@ -1044,7 +1044,8 @@ def test_start_all_does_not_open_browser_when_restarted_service_remains_unhealth
     monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: calls.append("status"))
     monkeypatch.setattr(service_manager, "open_default_browser", lambda *_args, **_kwargs: calls.append("browser"))
 
-    service_manager.start_all(service_manager.ServiceConfig(), console)
+    with pytest.raises(service_manager.ServiceError, match="Flocks service 启动失败"):
+        service_manager.start_all(service_manager.ServiceConfig(), console)
 
     assert calls == ["restart", "status"]
     assert "[flocks] Flocks daemon 已在运行，但 Flocks service 不可用，正在重启..." in console.messages
@@ -1120,6 +1121,39 @@ def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: 
         "[flocks] Flocks daemon 启动中...",
         "[flocks] Flocks daemon 已启动。",
     ]
+
+
+def test_start_all_without_stop_raises_when_service_starts_degraded(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    console = DummyConsole()
+    degraded_payload = _supervisor_status_payload()
+    degraded_payload["backend"].update({
+        "state": "degraded",
+        "health": "degraded",
+        "last_error": "port unavailable",
+    })
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service_manager,
+        "_start_supervisor_process",
+        lambda _config, _paths, _console: calls.append("daemon") or SimpleNamespace(poll=lambda: None),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_wait_for_supervisor_ready",
+        lambda _paths, **_kwargs: calls.append("ready") or degraded_payload,
+    )
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console, **_kwargs: calls.append("status"))
+    monkeypatch.setattr(service_manager, "open_default_browser", lambda *_args, **_kwargs: calls.append("browser"))
+
+    with pytest.raises(service_manager.ServiceError, match="Flocks service 启动失败"):
+        service_manager._start_all_without_stop(service_manager.ServiceConfig(), console)
+
+    assert calls == ["daemon", "ready", "status"]
 
 
 def test_start_all_without_stop_prints_before_cleanup(monkeypatch, tmp_path: Path) -> None:

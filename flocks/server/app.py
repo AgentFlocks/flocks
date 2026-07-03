@@ -660,6 +660,13 @@ _REQUEST_LOG_SKIP_EXACT = frozenset({
     "/api/session/status",
 })
 
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "frame-ancestors 'self'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
 
 def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
@@ -779,6 +786,15 @@ class _DeferredCORSMiddleware:
                 allow_headers=["*"],
             )
         await self._inner(scope, receive, send)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Attach baseline browser security headers to every HTTP response."""
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
 
 
 @app.middleware("http")

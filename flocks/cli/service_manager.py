@@ -1406,6 +1406,35 @@ def _wait_for_supervisor_ready(
     raise ServiceError("Flocks daemon 启动超时，请检查日志。")
 
 
+def _startup_payload_is_ready(payload: dict[str, Any]) -> bool:
+    """Return whether startup status represents a usable Flocks service."""
+    backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
+    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
+    backend_state = str(backend.get("state") or "").lower()
+    webui_state = str(webui.get("state") or "").lower()
+    return backend_state == "healthy" and webui_state in {"healthy", "static"}
+
+
+def _startup_failure_message(payload: dict[str, Any]) -> str:
+    """Build a concise error for failed startup status payloads."""
+    daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
+    backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
+    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
+    details = []
+    backend_error = backend.get("last_error")
+    webui_error = webui.get("last_error")
+    details.append(f"flocks state={backend.get('state') or 'unknown'}")
+    if backend_error:
+        details.append(f"last_error={backend_error}")
+    if webui.get("state") not in {"healthy", "static"}:
+        details.append(f"webui state={webui.get('state') or 'unknown'}")
+    if webui_error and webui_error != backend_error:
+        details.append(f"webui_error={webui_error}")
+    log_path = backend.get("log_path") or daemon.get("log_path")
+    suffix = f"；日志: {log_path}" if log_path else ""
+    return f"Flocks service 启动失败（{', '.join(details)}）{suffix}"
+
+
 def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, console) -> subprocess.Popen:
     """Spawn the detached service supervisor daemon."""
     root = ensure_install_layout()
@@ -1545,6 +1574,8 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     console.print("[flocks] Flocks daemon 已启动。")
     payload = _wait_for_supervisor_ready(paths, process=process)
     _print_status_payload(payload, console, include_daemon_step=False)
+    if not _startup_payload_is_ready(payload):
+        raise ServiceError(_startup_failure_message(payload))
     if not config.no_browser:
         open_default_browser(config.frontend_url, console)
 
@@ -1572,6 +1603,8 @@ def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) 
             console.print("[flocks] Flocks daemon 已在运行，但 Flocks service 不可用，正在重启...")
             status = request_restart(config, paths=paths)
             _print_status_payload(status.raw, console, include_daemon_step=False)
+            if not _startup_payload_is_ready(status.raw):
+                raise ServiceError(_startup_failure_message(status.raw))
             if not config.no_browser and _supervisor_backend_is_healthy(status):
                 open_default_browser(_frontend_url_from_status(status, config.frontend_url), console)
             return

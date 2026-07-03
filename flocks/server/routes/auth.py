@@ -4,6 +4,8 @@ Local account authentication routes.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -20,6 +22,106 @@ from flocks.server.auth import (
 )
 
 router = APIRouter()
+
+_LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
+_LOGIN_LOCKOUT_SECONDS = 15 * 60
+_LOGIN_MAX_FAILURES_PER_USER_AND_IP = 5
+_LOGIN_MAX_FAILURES_PER_IP = 20
+
+
+class _LoginRateLimiter:
+    """In-process failed-login limiter for local account authentication."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failures: dict[tuple[str, str], list[float]] = {}
+        self._locked_until: dict[tuple[str, str], float] = {}
+
+    def check(self, *, username: str, ip: str | None) -> int | None:
+        """Return retry-after seconds when the login attempt is currently blocked."""
+        now = time.monotonic()
+        with self._lock:
+            retry_after = self._retry_after(("user_ip", self._user_ip_key(username, ip)), now)
+            if retry_after is not None:
+                return retry_after
+            return self._retry_after(("ip", self._ip_key(ip)), now)
+
+    def record_failure(self, *, username: str, ip: str | None) -> int | None:
+        """Record a failed login attempt and return retry-after when it locks out."""
+        now = time.monotonic()
+        with self._lock:
+            user_retry = self._record_failure(
+                ("user_ip", self._user_ip_key(username, ip)),
+                limit=_LOGIN_MAX_FAILURES_PER_USER_AND_IP,
+                now=now,
+            )
+            ip_retry = self._record_failure(
+                ("ip", self._ip_key(ip)),
+                limit=_LOGIN_MAX_FAILURES_PER_IP,
+                now=now,
+            )
+            if user_retry is not None and ip_retry is not None:
+                return max(user_retry, ip_retry)
+            return user_retry if user_retry is not None else ip_retry
+
+    def record_success(self, *, username: str, ip: str | None) -> None:
+        """Clear the exact user/IP failure bucket after a successful login."""
+        with self._lock:
+            key = ("user_ip", self._user_ip_key(username, ip))
+            self._failures.pop(key, None)
+            self._locked_until.pop(key, None)
+
+    def reset(self) -> None:
+        """Clear limiter state for tests and process lifecycle resets."""
+        with self._lock:
+            self._failures.clear()
+            self._locked_until.clear()
+
+    def _retry_after(self, key: tuple[str, str], now: float) -> int | None:
+        locked_until = self._locked_until.get(key)
+        if locked_until is None:
+            return None
+        if locked_until <= now:
+            self._locked_until.pop(key, None)
+            self._failures.pop(key, None)
+            return None
+        return max(1, int(locked_until - now))
+
+    def _record_failure(self, key: tuple[str, str], *, limit: int, now: float) -> int | None:
+        if retry_after := self._retry_after(key, now):
+            return retry_after
+        cutoff = now - _LOGIN_FAILURE_WINDOW_SECONDS
+        failures = [timestamp for timestamp in self._failures.get(key, []) if timestamp >= cutoff]
+        failures.append(now)
+        self._failures[key] = failures
+        if len(failures) <= limit:
+            return None
+        locked_until = now + _LOGIN_LOCKOUT_SECONDS
+        self._locked_until[key] = locked_until
+        return _LOGIN_LOCKOUT_SECONDS
+
+    @staticmethod
+    def _user_ip_key(username: str, ip: str | None) -> str:
+        return f"{(username or '').strip().casefold()}@{ip or 'unknown'}"
+
+    @staticmethod
+    def _ip_key(ip: str | None) -> str:
+        return ip or "unknown"
+
+
+_login_rate_limiter = _LoginRateLimiter()
+
+
+def _request_ip(request: Request) -> str | None:
+    return getattr(getattr(request, "client", None), "host", None)
+
+
+def _raise_login_rate_limited(retry_after: int) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="登录失败次数过多，请稍后再试",
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 def _parse_event_type(event_type: str) -> tuple[str, str]:
@@ -181,22 +283,39 @@ async def bootstrap_admin(payload: BootstrapAdminRequest, response: Response, re
 
 @router.post("/login", response_model=MeResponse, summary="登录本地账号")
 async def login(payload: LoginRequest, response: Response, request: Request) -> MeResponse:
+    ip = _request_ip(request)
+    retry_after = _login_rate_limiter.check(username=payload.username, ip=ip)
+    if retry_after is not None:
+        await _emit_auth_audit(
+            "account.login_rate_limited",
+            {
+                "username": payload.username,
+                "ip": ip,
+                "retry_after": retry_after,
+            },
+        )
+        _raise_login_rate_limited(retry_after)
+
     try:
         user, session_id = await AuthService.login(
             payload.username,
             payload.password,
         )
     except ValueError as exc:
+        retry_after = _login_rate_limiter.record_failure(username=payload.username, ip=ip)
         await _emit_auth_audit(
             "account.login_failed",
             {
                 "username": payload.username,
                 "reason": str(exc),
-                "ip": getattr(getattr(request, "client", None), "host", None),
+                "ip": ip,
             },
         )
+        if retry_after is not None:
+            _raise_login_rate_limited(retry_after)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    _login_rate_limiter.record_success(username=payload.username, ip=ip)
     set_session_cookie(response, session_id, secure=should_use_secure_cookie(request))
     await _emit_auth_audit(
         "account.login",
@@ -208,7 +327,7 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
             "username": user.username,
             "role": user.role,
             "session_id": session_id,
-            "ip": getattr(getattr(request, "client", None), "host", None),
+            "ip": ip,
         },
     )
     return _to_me_response(user)

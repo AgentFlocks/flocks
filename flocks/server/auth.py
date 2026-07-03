@@ -23,9 +23,6 @@ API_TOKEN_SECRET_ID = "server_api_token"
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     "/favicon.ico",
     "/api/health",
     "/api/config/ui-display",
