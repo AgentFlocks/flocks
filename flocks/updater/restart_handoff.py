@@ -104,6 +104,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend-port", type=int, required=True)
     parser.add_argument("--frontend-host", required=True)
     parser.add_argument("--frontend-port", type=int, required=True)
+    parser.add_argument("--backend-pid-file")
     parser.add_argument("--install-root", required=True)
     parser.add_argument("--uv-path", required=True)
     parser.add_argument("--sync-timeout", type=int, required=True)
@@ -116,6 +117,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pro-bundle-manifest-path")
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
+    parser.add_argument("--prepare-handover", action="store_true")
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.restart_argv and args.restart_argv[0] == "--":
@@ -158,15 +160,67 @@ def _rollback_failed_upgrade(args: argparse.Namespace, error: str) -> None:
         _record_handoff_log(f"rollback_failed error={exc}")
 
 
+def _prepare_upgrade_handover(args: argparse.Namespace) -> bool:
+    from flocks.updater import updater
+
+    try:
+        updater._prepare_upgrade_handover(args.version)
+    except Exception as exc:
+        _record_handoff_log(f"prepare_handover_failed error={exc}")
+        return False
+    return True
+
+
+def _rollback_upgrade_handover() -> None:
+    from flocks.updater import updater
+
+    try:
+        updater.rollback_upgrade_handover()
+    except Exception as exc:
+        _record_handoff_log(f"handover_rollback_failed error={exc}")
+
+
 def _cleanup_dir(path_value: str | None) -> None:
     if not path_value:
         return
     shutil.rmtree(Path(path_value), ignore_errors=True)
 
 
+def _cli_subcommand(argv: Sequence[str]) -> str | None:
+    """Return the flocks.cli.main subcommand embedded in a Python argv."""
+    for index, value in enumerate(argv[:-2]):
+        if value == "-m" and argv[index + 1] == "flocks.cli.main":
+            return argv[index + 2]
+    return None
+
+
+def _restart_argv_for_current_runtime(args: argparse.Namespace, restart_argv: Sequence[str]) -> list[str]:
+    if _cli_subcommand(restart_argv) != "serve":
+        return list(restart_argv)
+
+    argv = [
+        restart_argv[0],
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        str(args.frontend_host),
+        "--port",
+        str(args.frontend_port),
+        "--server-host",
+        str(args.backend_host),
+        "--server-port",
+        str(args.backend_port),
+    ]
+    _record_handoff_log(f"legacy_serve_restart_migrated argv={argv}")
+    return argv
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    restart_argv = list(args.restart_argv)
+    restart_argv = _restart_argv_for_current_runtime(args, args.restart_argv)
     if not restart_argv:
         _record_handoff_log("missing_restart_argv")
         return 2
@@ -182,7 +236,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    if not _ensure_backend_port_free(args.backend_port):
+    if args.prepare_handover:
+        if not _prepare_upgrade_handover(args):
+            _cleanup_dir(args.cleanup_dir)
+            return 1
+    elif not _ensure_backend_port_free(args.backend_port):
         _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
         _cleanup_dir(args.cleanup_dir)
         return 1
@@ -198,6 +256,8 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if not _stop_supervisor_before_restart():
         _record_handoff_log("supervisor_stop_timeout")
+        if args.prepare_handover:
+            _rollback_upgrade_handover()
         _cleanup_dir(args.cleanup_dir)
         return 1
 
@@ -209,6 +269,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
     except OSError as exc:
         _record_handoff_log(f"restart_spawn_failed error={exc}")
+        if args.prepare_handover:
+            _rollback_upgrade_handover()
         _cleanup_dir(args.cleanup_dir)
         return 1
 

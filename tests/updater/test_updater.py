@@ -259,13 +259,6 @@ def test_find_executable_checks_windows_cmd_suffixes(
     assert updater._find_executable("npm") == str(npm_cmd)
 
 
-def test_is_windows_file_in_use_error_detects_winerror32(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-
-    assert updater._is_windows_file_in_use_error(PermissionError("[WinError 32] file in use")) is True
-    assert updater._is_windows_file_in_use_error(PermissionError("[WinError 5] access denied")) is False
-
-
 def test_is_uv_managed_python_runtime_error_detects_virtualenv_creation_failure() -> None:
     text = (
         "Failed to create temporary virtualenv\n"
@@ -830,8 +823,10 @@ def test_build_restart_handoff_argv_rewrites_serve_to_managed_start(
         sync_timeout=300,
         version="2026.4.1",
         current_version="2026.3.31",
+        prepare_handover=True,
     )
 
+    assert "--prepare-handover" in argv[: argv.index("--")]
     assert argv[argv.index("--") + 1 :] == [
         "python",
         "-m",
@@ -1707,7 +1702,7 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
 
 
 @pytest.mark.asyncio
-async def test_perform_update_schedules_handoff_after_handover(
+async def test_perform_update_schedules_handoff_with_deferred_handover(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1783,12 +1778,13 @@ async def test_perform_update_schedules_handoff_after_handover(
             pass
 
     assert events[:2] == ["replace", "sleep"]
-    assert "handover" in events
+    assert "handover" not in events
     assert len(popen_calls) == 1
     handoff_argv = popen_calls[0]
     assert handoff_argv[:3] == ["/usr/bin/python3", "-m", "flocks.updater.restart_handoff"]
     assert "--uv-path" in handoff_argv
     assert "--version" in handoff_argv
+    assert "--prepare-handover" in handoff_argv[: handoff_argv.index("--")]
     assert handoff_argv[handoff_argv.index("--") + 1 :] == [
         "/usr/bin/python3",
         "-m",
@@ -1808,7 +1804,7 @@ async def test_perform_update_schedules_handoff_after_handover(
 
 
 @pytest.mark.asyncio
-async def test_perform_update_errors_when_handover_fails_before_frontend_build(
+async def test_perform_update_does_not_prepare_handover_before_spawning_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1824,6 +1820,7 @@ async def test_perform_update_errors_when_handover_fails_before_frontend_build(
     install_root.mkdir()
 
     events: list[str] = []
+    popen_calls: list[list[str]] = []
 
     async def fake_get_updater_config():
         return SimpleNamespace(
@@ -1880,12 +1877,20 @@ async def test_perform_update_errors_when_handover_fails_before_frontend_build(
         lambda _version: (_ for _ in ()).throw(RuntimeError("handover boom")),
     )
     monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, **_kwargs: popen_calls.append(list(argv)) or SimpleNamespace(pid=4321),
+    )
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    progresses = [step async for step in updater.perform_update("2026.4.1")]
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1"):
+            pass
 
-    assert progresses[-1].stage == "error"
-    assert progresses[-1].message == "Failed to prepare WebUI handover: handover boom"
-    assert events == ["replace", "restore"]
+    assert events == ["replace"]
+    assert len(popen_calls) == 1
+    assert "--prepare-handover" in popen_calls[0][: popen_calls[0].index("--")]
 
 
 @pytest.mark.asyncio
@@ -2919,7 +2924,7 @@ async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_fi
 
 
 @pytest.mark.asyncio
-async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_handover_failures(
+async def test_perform_update_reports_windows_file_lock_without_stopping_current_backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2991,17 +2996,13 @@ async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_han
     )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1"):
-            pass
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
 
-    assert events == [
-        "replace-1",
-        "handover",
-        "replace-2",
-        "popen",
-    ]
-    assert "restore" not in events
+    assert progresses[-1].stage == "error"
+    assert "WinError 32" in progresses[-1].message
+    assert events == ["replace-1", "restore"]
+    assert "handover" not in events
+    assert "popen" not in events
 
 
 @pytest.mark.asyncio
@@ -3290,6 +3291,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     assert handoff_argv[:3] == [r"C:\tool\python.exe", "-m", "flocks.updater.restart_handoff"]
     assert "--parent-pid" in handoff_argv
     assert "--backend-port" in handoff_argv
+    assert "--prepare-handover" in handoff_argv[: handoff_argv.index("--")]
     assert handoff_argv[handoff_argv.index("--") + 1 :] == [
         r"C:\tool\python.exe",
         "-m",
@@ -3306,7 +3308,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
         "--server-port",
         "8000",
     ]
-    assert events == ["handover"]
+    assert events == []
     assert "execv" not in events
 
 
@@ -3499,4 +3501,5 @@ async def test_perform_update_yields_error_when_windows_spawn_fails(
 
     assert progresses[-1].stage == "error"
     assert "Failed to restart service" in progresses[-1].message
-    assert "rollback_handover" in events
+    assert "handover" not in events
+    assert "rollback_handover" not in events

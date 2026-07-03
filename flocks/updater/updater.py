@@ -199,17 +199,6 @@ def _looks_like_windows_python_launcher(entry: str) -> bool:
     return _windows_path_stem(entry) in {"python", "pythonw", "py"}
 
 
-def _is_windows_file_in_use_error(exc: BaseException) -> bool:
-    """Return True when *exc* looks like a Windows file-lock failure."""
-    if sys.platform != "win32":
-        return False
-    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 32:
-        return True
-
-    text = str(exc).lower()
-    return "winerror 32" in text or "used by another process" in text
-
-
 def _is_uv_managed_python_runtime_error(text: str) -> bool:
     """Return True when uv reports a broken managed Python runtime cache."""
     if not text:
@@ -2970,7 +2959,6 @@ async def perform_update(
     current_version = get_current_version()
     effective_update_version = current_version
     skip_core_replace = False
-    handover_active = False
     console_manifest_info: ConsoleManifestRelease | None = None
     console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
     fmt = _choose_archive_format(ucfg.archive_format)
@@ -3162,20 +3150,7 @@ async def perform_update(
     )
 
     async def _restore_after_apply_failure() -> None:
-        nonlocal handover_active
         if backup_path is None:
-            if handover_active:
-                await asyncio.to_thread(rollback_upgrade_handover)
-                handover_active = False
-            return
-        if handover_active:
-            await asyncio.to_thread(
-                _rollback_failed_update,
-                backup_path,
-                install_root,
-                current_version,
-            )
-            handover_active = False
             return
         await asyncio.to_thread(
             _restore_backup_if_possible,
@@ -3193,28 +3168,6 @@ async def perform_update(
             )
     except Exception as exc:
         final_replace_error: Exception | None = exc
-        if (
-            sys.platform == "win32"
-            and restart
-            and needs_handover
-            and not handover_active
-            and _is_windows_file_in_use_error(exc)
-        ):
-            log.warning("updater.replace.locked_retry_with_handover", {"error": str(exc)})
-            try:
-                _prepare_upgrade_handover(latest_tag)
-                handover_active = True
-                if not skip_core_replace:
-                    await asyncio.to_thread(
-                        _replace_install_dir,
-                        content_root,
-                        install_root,
-                    )
-            except Exception as retry_exc:
-                final_replace_error = retry_exc
-            else:
-                final_replace_error = None
-
         if final_replace_error is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             await _restore_after_apply_failure()
@@ -3311,32 +3264,12 @@ async def perform_update(
         restart_argv = _build_restart_argv(install_root)
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
-        if handover_active:
-            try:
-                rollback_upgrade_handover()
-            except Exception:
-                pass
-            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to build restart command: {exc}",
             success=False,
         )
         return
-
-    if needs_handover and not handover_active:
-        try:
-            _prepare_upgrade_handover(latest_tag)
-            handover_active = True
-        except Exception as exc:
-            log.error("updater.handover.failed", {"error": str(exc)})
-            await _restore_after_apply_failure()
-            yield UpdateProgress(
-                stage="error",
-                message=f"Failed to prepare WebUI handover: {exc}",
-                success=False,
-            )
-            return
 
     try:
         handoff_argv = _build_restart_handoff_argv(
@@ -3353,6 +3286,7 @@ async def perform_update(
             pro_bundle_manifest_path=pro_bundle_manifest_path,
             bundle_sha256=bundle_sha256,
             cleanup_dir=tmp_dir,
+            prepare_handover=needs_handover,
         )
         log.info(
             "updater.restart.handoff_spawn",
@@ -3366,12 +3300,6 @@ async def perform_update(
     except Exception as exc:
         log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if handover_active:
-            try:
-                rollback_upgrade_handover()
-            except Exception:
-                pass
-            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to restart service: {exc}",
@@ -3492,6 +3420,7 @@ def _build_restart_handoff_argv(
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
     cleanup_dir: Path | None = None,
+    prepare_handover: bool = False,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
     if not restart_argv:
@@ -3553,6 +3482,8 @@ def _build_restart_handoff_argv(
         argv.extend(["--bundle-sha256", bundle_sha256])
     if cleanup_dir is not None:
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
+    if prepare_handover:
+        argv.append("--prepare-handover")
     argv.extend(["--", *managed_restart_argv])
     return argv
 
