@@ -14544,6 +14544,73 @@
       "trust": "community",
       "riskLevel": "medium",
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/validating-backup-integrity-for-recovery/manifest.json"
+    },
+    {
+      "id": "chaitin_muyun_api_v3",
+      "type": "device",
+      "name": "Chaitin Muyun",
+      "description": "Chaitin Muyun host security platform JSON-RPC API 3.0 integration.",
+      "version": "3.0",
+      "category": "integration",
+      "tags": [
+        "edr",
+        "hids",
+        "vulnerability",
+        "integration"
+      ],
+      "useCases": [
+        "integration",
+        "incident-response",
+        "vulnerability-management"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/tools/device/chaitin_muyun_api_v3/manifest.json",
+      "descriptionCn": "长亭牧云主机安全平台 API 3.0 接入。"
+    },
+    {
+      "id": "chaitin_safeline_waf_v1_0_0",
+      "type": "device",
+      "name": "Chaitin SafeLine WAF",
+      "description": "Chaitin SafeLine WAF OpenAPI integration.",
+      "version": "1.0.0",
+      "category": "integration",
+      "tags": [
+        "waf",
+        "web-security",
+        "integration"
+      ],
+      "useCases": [
+        "integration",
+        "threat-detection",
+        "log-analysis"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/tools/device/chaitin_safeline_waf_v1_0_0/manifest.json",
+      "descriptionCn": "长亭雷池 WAF OpenAPI 接入。"
+    },
+    {
+      "id": "chaitin_dongjian_v2_8",
+      "type": "device",
+      "name": "Chaitin Dongjian",
+      "description": "Chaitin Dongjian (X-Ray) security assessment system OpenAPI V2.8 integration.",
+      "version": "2.8",
+      "category": "integration",
+      "tags": [
+        "vulnerability",
+        "web-security",
+        "integration"
+      ],
+      "useCases": [
+        "integration",
+        "vulnerability-management",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/tools/device/chaitin_dongjian_v2_8/manifest.json",
+      "descriptionCn": "长亭洞鉴（X-Ray）安全评估系统 OpenAPI V2.8 接入。"
     }
   ]
 }

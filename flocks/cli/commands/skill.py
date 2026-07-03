@@ -366,11 +366,12 @@ async def _search_safeskill(query: str) -> list:
             name = item.get("name") or item.get("slug") or source
             if not source or not name:
                 continue
+            install_hint = source if str(source).startswith("safeskill://") else f"safeskill:{source}"
             results.append({
                 "name": str(name),
                 "description": str(item.get("description") or ""),
                 "source": "safeskill.cn",
-                "install_hint": f"safeskill:{source}",
+                "install_hint": install_hint,
             })
         return results
     except Exception:
@@ -389,11 +390,12 @@ def _parse_safeskill_text_results(text: str) -> list:
             continue
         source = match.group(1).rstrip(",.;")
         name = source.rstrip("/").split("/")[-1]
+        install_hint = source if source.startswith("safeskill://") else f"safeskill:{source}"
         results.append({
             "name": name,
             "description": clean,
             "source": "safeskill.cn",
-            "install_hint": f"safeskill:{source}",
+            "install_hint": install_hint,
         })
     return results
 
@@ -472,7 +474,8 @@ def install_skill(
             "Install source:\n"
             "  clawhub:<name>        – clawhub.com registry\n"
             "  skills-sh:<id>        – skills.sh identifier (owner/repo/skill)\n"
-            "  safeskill:<source>    – SafeSkill Hub/GitHub/local source via SafeSkill CLI\n"
+            "  safeskill://...       – SafeSkill package URI\n"
+            "  safeskill:<source>    – SafeSkill source alias via SafeSkill CLI\n"
             "  github:<owner>/<repo> – GitHub repository\n"
             "  <owner>/<repo>        – GitHub shorthand\n"
             "  https://...           – direct SKILL.md URL\n"

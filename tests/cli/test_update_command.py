@@ -44,8 +44,45 @@ def test_update_cli_accepts_force_option(monkeypatch, tmp_path) -> None:
     assert captured == {"check": False, "yes": True, "force": True, "region": "cn"}
 
 
-def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch) -> None:
+def test_update_uses_install_profile_language_as_default_region(monkeypatch, tmp_path) -> None:
     output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "install_profile.json").write_text('{"Language": "zh-CN"}', encoding="utf-8")
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    check_regions: list[str | None] = []
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        check_regions.append(region)
+        return VersionInfo(
+            current_version="2026.4.1",
+            latest_version="2026.4.2",
+            has_update=True,
+            zipball_url="https://gitee.example.com/flocks.zip",
+            tarball_url="https://gitee.example.com/flocks.tar.gz",
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+
+    import asyncio
+
+    asyncio.run(update_cmd._update(check=True, yes=False, force=False, region=None))
+
+    assert check_regions == ["cn"]
+    assert "flocks update" in output.getvalue()
+
+
+def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch, tmp_path) -> None:
+    output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_INSTALL_LANGUAGE", raising=False)
     monkeypatch.setattr(
         update_cmd,
         "console",
@@ -90,6 +127,8 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch) -
         captured["latest_tag"] = latest_tag
         captured["zipball_url"] = zipball_url
         captured["tarball_url"] = tarball_url
+        captured["bundle_sha256"] = bundle_sha256
+        captured["bundle_format"] = bundle_format
         captured["perform_region"] = region
         captured["restart"] = restart
         async for step in _fake_progress():
@@ -124,6 +163,8 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch) -
         "latest_tag": "2026.4.2",
         "zipball_url": "https://gitee.example.com/flocks.zip",
         "tarball_url": "https://gitee.example.com/flocks.tar.gz",
+        "bundle_sha256": None,
+        "bundle_format": None,
         "perform_region": "cn",
         "restart": False,
     }
@@ -212,8 +253,10 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
     assert "升级完成" in output.getvalue()
 
 
-def test_update_executes_flocks_stop_before_upgrade(monkeypatch) -> None:
+def test_update_executes_flocks_stop_before_upgrade(monkeypatch, tmp_path) -> None:
     output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_INSTALL_LANGUAGE", raising=False)
     monkeypatch.setattr(
         update_cmd,
         "console",
@@ -276,8 +319,10 @@ def test_update_executes_flocks_stop_before_upgrade(monkeypatch) -> None:
     assert "已执行 flocks stop" in output.getvalue()
 
 
-def test_update_reports_frontend_build_failure_after_common_upgrade(monkeypatch) -> None:
+def test_update_reports_frontend_build_failure_after_common_upgrade(monkeypatch, tmp_path) -> None:
     output = StringIO()
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_INSTALL_LANGUAGE", raising=False)
     monkeypatch.setattr(
         update_cmd,
         "console",

@@ -2,8 +2,10 @@
 Tests for storage module
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 import os
+import shutil
 import sqlite3
 import pytest
 from pathlib import Path
@@ -12,7 +14,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from pydantic import BaseModel
 
+from flocks.project.instance import Instance
 from flocks.storage.storage import Storage
+from flocks.task.store import TaskStore
+from flocks.workflow.store import WorkflowStore
 
 
 class StorageTestModel(BaseModel):
@@ -274,9 +279,8 @@ async def test_storage_init_recovers_when_pragma_reports_corruption(tmp_path):
     with patch.object(Storage, "_initialized", False), \
          patch.object(Storage, "_db_path", None):
         await Storage.init(db_path)
-
-    await Storage.set("hello", {"value": 2})
-    assert await Storage.get("hello") == {"value": 2}
+        await Storage.set("hello", {"value": 2})
+        assert await Storage.get("hello") == {"value": 2}
 
     assert db_path.exists()
     quarantined = [
@@ -284,6 +288,270 @@ async def test_storage_init_recovers_when_pragma_reports_corruption(tmp_path):
         if p.name.startswith("flocks.db.corrupt.")
     ]
     assert quarantined, list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_storage_get_recovers_corrupt_db_after_init(tmp_path):
+    """A request-time storage read should quarantine corruption and retry once."""
+    db_path = tmp_path / "flocks.db"
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None):
+        await Storage.init(db_path)
+        await Storage.set("hello", {"value": "before"})
+
+        db_path.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
+        db_path.with_name("flocks.db-wal").write_bytes(b"fake wal payload")
+        db_path.with_name("flocks.db-shm").write_bytes(b"fake shm payload")
+
+        assert await Storage.get("hello") is None
+        await Storage.set("hello", {"value": "after"})
+        assert await Storage.get("hello") == {"value": "after"}
+
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert "flocks.db" in siblings
+    assert any(name.startswith("flocks.db.corrupt.") for name in siblings), siblings
+
+
+def test_try_sqlite_recover_installs_recovered_db(tmp_path):
+    """The lightweight `.recover` path should install a readable recovered DB."""
+    if shutil.which("sqlite3") is None:
+        pytest.skip("sqlite3 CLI is not available")
+
+    quarantined = tmp_path / "flocks.db.corrupt.test"
+    target = tmp_path / "flocks.db"
+    conn = sqlite3.connect(quarantined)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE storage (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("hello", '{"value": "recovered"}', "json", "old", "old"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert Storage._try_sqlite_recover_sync(quarantined, target) == target
+    recovered = sqlite3.connect(target)
+    try:
+        assert recovered.execute(
+            "SELECT value FROM storage WHERE key = ?",
+            ("hello",),
+        ).fetchone()[0] == '{"value": "recovered"}'
+        assert recovered.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        recovered.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_init_recovers_real_malformed_sqlite_file(tmp_path):
+    """Startup should recover a real DB that fails SQLite integrity checks."""
+    if shutil.which("sqlite3") is None:
+        pytest.skip("sqlite3 CLI is not available")
+
+    db_path = tmp_path / "flocks.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("PRAGMA page_size=4096")
+        conn.execute("VACUUM")
+        conn.execute(
+            """
+            CREATE TABLE storage (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE TABLE junk (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
+        conn.execute(
+            "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("hello", '{"value": "survived"}', "json", "old", "old"),
+        )
+        blob = os.urandom(3500)
+        for _ in range(350):
+            conn.execute("INSERT INTO junk (payload) VALUES (?)", (blob,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    page_size = 4096
+    page_count = db_path.stat().st_size // page_size
+    with db_path.open("r+b") as fh:
+        fh.seek((page_count - 3) * page_size)
+        fh.write(b"BROKEN_PAGE_FOR_RECOVERY_TEST" + b"\xff" * 256)
+
+    ok, detail = Storage._integrity_check_sync(db_path)
+    assert ok is False
+    assert "malformed" in detail.lower()
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None):
+        await Storage.init(db_path)
+        assert await Storage.get("hello") == {"value": "survived"}
+        await Storage.shutdown()
+
+    assert Storage._integrity_check_sync(db_path) == (True, "ok")
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert any(name.startswith("flocks.db.corrupt.") for name in siblings), siblings
+    assert "flocks.db.recover.sql" in siblings
+
+
+@pytest.mark.asyncio
+async def test_storage_get_uses_recovered_db_before_empty_rebuild(tmp_path, monkeypatch):
+    """A recovered DB should be installed before retrying the failed read."""
+    db_path = tmp_path / "flocks.db"
+
+    def fake_recover(quarantined_path: Path, target_path: Path):
+        assert quarantined_path.name.startswith("flocks.db.corrupt.")
+        conn = sqlite3.connect(target_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE storage (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("hello", '{"value": "recovered"}', "json", "old", "old"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return target_path
+
+    monkeypatch.setattr(Storage, "_try_sqlite_recover_sync", staticmethod(fake_recover))
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None):
+        await Storage.init(db_path)
+        db_path.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
+
+        assert await Storage.get("hello") == {"value": "recovered"}
+
+
+@pytest.mark.asyncio
+async def test_task_store_init_recovers_corrupt_tasks_db(tmp_path):
+    """TaskStore should quarantine tasks.db corruption and keep task center bootable."""
+    db_path = tmp_path / "flocks.db"
+    tasks_db = tmp_path / "tasks.db"
+    tasks_db.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(TaskStore, "_initialized", False), \
+         patch.object(TaskStore, "_conn", None), \
+         patch.object(TaskStore, "_init_pid", None):
+        await Storage.init(db_path)
+        await TaskStore.init()
+        await TaskStore.close()
+
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert "tasks.db" in siblings
+    assert any(name.startswith("tasks.db.corrupt.") for name in siblings), siblings
+
+
+@pytest.mark.asyncio
+async def test_task_store_init_recovers_corrupt_tasks_db_after_completed_migration(tmp_path, monkeypatch):
+    """A corrupt existing tasks.db should not be treated like a missing migrated DB."""
+    db_path = tmp_path / "flocks.db"
+    tasks_db = tmp_path / "tasks.db"
+    tasks_db.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
+
+    monkeypatch.setattr(Storage, "_try_sqlite_recover_sync", staticmethod(lambda *_args: None))
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(TaskStore, "_initialized", False), \
+         patch.object(TaskStore, "_conn", None), \
+         patch.object(TaskStore, "_init_pid", None):
+        await Storage.init(db_path)
+        await asyncio.to_thread(
+            Storage._write_multi_db_migration_marker_sync,
+            {
+                "version": 1,
+                "tasks_migrated": True,
+                "task_rows": 1,
+            },
+        )
+        await TaskStore.init()
+        await TaskStore.close()
+
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert "tasks.db" in siblings
+    assert any(name.startswith("tasks.db.corrupt.") for name in siblings), siblings
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_init_recovers_corrupt_workflow_db(tmp_path):
+    """WorkflowStore should quarantine workflow.db corruption and rebuild tables."""
+    db_path = tmp_path / "flocks.db"
+    workflow_db = tmp_path / "workflow.db"
+    workflow_db.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(WorkflowStore, "_initialized", False), \
+         patch.object(WorkflowStore, "_conn", None), \
+         patch.object(WorkflowStore, "_init_pid", None), \
+         patch.object(WorkflowStore, "_db_path", None):
+        await Storage.init(db_path)
+        await WorkflowStore.init()
+        await WorkflowStore.close()
+
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert "workflow.db" in siblings
+    assert any(name.startswith("workflow.db.corrupt.") for name in siblings), siblings
+
+
+@pytest.mark.asyncio
+async def test_instance_provide_drops_failed_context_task(monkeypatch):
+    """A failed project-context initialization must not poison later requests."""
+    directory = "/tmp/flocks-instance-retry"
+    Instance._cache.pop(directory, None)
+    calls = {"count": 0}
+
+    async def fake_from_directory(cls, requested_directory):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        return {
+            "project": SimpleNamespace(id="project"),
+            "sandbox": requested_directory,
+        }
+
+    monkeypatch.setattr(
+        "flocks.project.instance.Project.from_directory",
+        classmethod(fake_from_directory),
+    )
+
+    with pytest.raises(sqlite3.DatabaseError):
+        await Instance.provide(directory=directory, fn=lambda: "unreachable")
+
+    assert directory not in Instance._cache
+    assert await Instance.provide(directory=directory, fn=lambda: "ok") == "ok"
+    assert calls["count"] == 2
+    Instance._cache.pop(directory, None)
 
 
 def test_is_db_corruption_error_recognizes_known_messages():

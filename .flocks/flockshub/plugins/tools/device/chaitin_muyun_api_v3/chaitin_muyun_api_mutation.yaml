@@ -1,0 +1,28 @@
+name: chaitin_muyun_api_mutation
+description: Chaitin Muyun documented mutation JSON-RPC caller with confirmation.
+description_cn: 长亭牧云文档内变更类 JSON-RPC 调用工具。所有调用都需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: chaitin_muyun_api
+version: "API 3.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rpc_call_mutation
+    method:
+      type: string
+      description: rpc_call_mutation 使用的 JSON-RPC 方法名，必须属于 catalog 中 kind=mutation 的条目。
+    params:
+      type: object
+      description: JSON-RPC params 对象。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_muyun.handler.py
+  function: api_mutation

@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "chaitin_dongjian_v2_8",
+  "type": "device",
+  "name": "Chaitin Dongjian",
+  "description": "Chaitin Dongjian (X-Ray) security assessment system OpenAPI V2.8 integration.",
+  "descriptionCn": "长亭洞鉴（X-Ray）安全评估系统 OpenAPI V2.8 接入。",
+  "version": "2.8",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "category": "integration",
+  "tags": [
+    "vulnerability",
+    "web-security",
+    "integration"
+  ],
+  "useCases": [
+    "integration",
+    "vulnerability-management",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "device-integration",
+    "rest-api"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/tools/device/chaitin_dongjian_v2_8"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": true,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "_provider.yaml",
+    "_test.yaml",
+    "chaitin_dongjian.handler.py",
+    "chaitin_dongjian_api_catalog.json",
+    "chaitin_dongjian_projects.yaml",
+    "chaitin_dongjian_tasks.yaml",
+    "chaitin_dongjian_assets.yaml",
+    "chaitin_dongjian_results.yaml",
+    "chaitin_dongjian_system.yaml",
+    "chaitin_dongjian_api_readonly.yaml",
+    "chaitin_dongjian_api_mutation.yaml"
+  ],
+  "checksums": {}
+}
