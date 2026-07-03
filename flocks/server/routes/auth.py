@@ -27,6 +27,8 @@ _LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 _LOGIN_LOCKOUT_SECONDS = 15 * 60
 _LOGIN_MAX_FAILURES_PER_USER_AND_IP = 5
 _LOGIN_MAX_FAILURES_PER_IP = 20
+_LOGIN_PRUNE_INTERVAL_SECONDS = 60
+_LOGIN_MAX_TRACKED_BUCKETS = 2048
 
 
 class _LoginRateLimiter:
@@ -36,6 +38,7 @@ class _LoginRateLimiter:
         self._lock = threading.Lock()
         self._failures: dict[tuple[str, str], list[float]] = {}
         self._locked_until: dict[tuple[str, str], float] = {}
+        self._last_pruned_at = 0.0
 
     def check(self, *, username: str, ip: str | None) -> int | None:
         """Return retry-after seconds when the login attempt is currently blocked."""
@@ -50,16 +53,20 @@ class _LoginRateLimiter:
         """Record a failed login attempt and return retry-after when it locks out."""
         now = time.monotonic()
         with self._lock:
+            self._prune(now)
+            user_key = ("user_ip", self._user_ip_key(username, ip))
+            ip_key = ("ip", self._ip_key(ip))
             user_retry = self._record_failure(
-                ("user_ip", self._user_ip_key(username, ip)),
+                user_key,
                 limit=_LOGIN_MAX_FAILURES_PER_USER_AND_IP,
                 now=now,
             )
             ip_retry = self._record_failure(
-                ("ip", self._ip_key(ip)),
+                ip_key,
                 limit=_LOGIN_MAX_FAILURES_PER_IP,
                 now=now,
             )
+            self._enforce_capacity(now, preserve={user_key, ip_key})
             if user_retry is not None and ip_retry is not None:
                 return max(user_retry, ip_retry)
             return user_retry if user_retry is not None else ip_retry
@@ -76,6 +83,7 @@ class _LoginRateLimiter:
         with self._lock:
             self._failures.clear()
             self._locked_until.clear()
+            self._last_pruned_at = 0.0
 
     def _retry_after(self, key: tuple[str, str], now: float) -> int | None:
         locked_until = self._locked_until.get(key)
@@ -99,6 +107,58 @@ class _LoginRateLimiter:
         locked_until = now + _LOGIN_LOCKOUT_SECONDS
         self._locked_until[key] = locked_until
         return _LOGIN_LOCKOUT_SECONDS
+
+    def _prune(self, now: float, *, force: bool = False) -> None:
+        if not force and (
+            now - self._last_pruned_at < _LOGIN_PRUNE_INTERVAL_SECONDS
+            and self._tracked_bucket_count() <= _LOGIN_MAX_TRACKED_BUCKETS
+        ):
+            return
+        cutoff = now - _LOGIN_FAILURE_WINDOW_SECONDS
+        for key, locked_until in list(self._locked_until.items()):
+            if locked_until <= now:
+                self._locked_until.pop(key, None)
+        for key, failures in list(self._failures.items()):
+            if self._locked_until.get(key, 0) > now:
+                continue
+            active_failures = [timestamp for timestamp in failures if timestamp >= cutoff]
+            if active_failures:
+                self._failures[key] = active_failures
+            else:
+                self._failures.pop(key, None)
+        self._last_pruned_at = now
+
+    def _enforce_capacity(self, now: float, *, preserve: set[tuple[str, str]]) -> None:
+        if self._tracked_bucket_count() <= _LOGIN_MAX_TRACKED_BUCKETS:
+            return
+        self._prune(now, force=True)
+        overflow = self._tracked_bucket_count() - _LOGIN_MAX_TRACKED_BUCKETS
+        if overflow <= 0:
+            return
+        candidates = [
+            (max(failures, default=0.0), key)
+            for key, failures in self._failures.items()
+            if key not in preserve and self._locked_until.get(key, 0) <= now
+        ]
+        candidates.sort()
+        for _latest_failure, key in candidates[:overflow]:
+            self._failures.pop(key, None)
+            self._locked_until.pop(key, None)
+        overflow = self._tracked_bucket_count() - _LOGIN_MAX_TRACKED_BUCKETS
+        if overflow <= 0:
+            return
+        locked_candidates = [
+            (locked_until, key)
+            for key, locked_until in self._locked_until.items()
+            if key not in preserve
+        ]
+        locked_candidates.sort()
+        for _locked_until, key in locked_candidates[:overflow]:
+            self._locked_until.pop(key, None)
+            self._failures.pop(key, None)
+
+    def _tracked_bucket_count(self) -> int:
+        return len(set(self._failures) | set(self._locked_until))
 
     @staticmethod
     def _user_ip_key(username: str, ip: str | None) -> str:

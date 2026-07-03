@@ -112,6 +112,37 @@ async def test_login_rate_limits_repeated_failures(monkeypatch: pytest.MonkeyPat
         auth_routes._login_rate_limiter.reset()
 
 
+async def test_login_rate_limiter_prunes_expired_buckets():
+    from flocks.server.routes import auth as auth_routes
+
+    limiter = auth_routes._LoginRateLimiter()
+    now = auth_routes.time.monotonic()
+    stale_key = ("user_ip", "stale@127.0.0.1")
+    limiter._failures[stale_key] = [now - auth_routes._LOGIN_FAILURE_WINDOW_SECONDS - 1]
+    limiter._locked_until[stale_key] = now - 1
+    limiter._last_pruned_at = now - auth_routes._LOGIN_PRUNE_INTERVAL_SECONDS - 1
+
+    limiter.record_failure(username="chenjie", ip="127.0.0.1")
+
+    assert stale_key not in limiter._failures
+    assert stale_key not in limiter._locked_until
+
+
+async def test_login_rate_limiter_caps_tracked_buckets(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import auth as auth_routes
+
+    monkeypatch.setattr(auth_routes, "_LOGIN_MAX_TRACKED_BUCKETS", 4)
+    monkeypatch.setattr(auth_routes, "_LOGIN_PRUNE_INTERVAL_SECONDS", 0)
+    limiter = auth_routes._LoginRateLimiter()
+
+    for index in range(10):
+        limiter.record_failure(username=f"user{index}", ip="127.0.0.1")
+
+    assert limiter._tracked_bucket_count() <= auth_routes._LOGIN_MAX_TRACKED_BUCKETS
+    assert ("user_ip", "user9@127.0.0.1") in limiter._failures
+    assert ("ip", "127.0.0.1") in limiter._failures
+
+
 async def test_logout_emits_audit_event(monkeypatch: pytest.MonkeyPatch):
     from flocks.server.routes import auth as auth_routes
 
