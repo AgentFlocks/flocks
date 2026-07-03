@@ -438,7 +438,8 @@ def test_daemon_log_service_name_uses_daemon_only(tmp_path: Path) -> None:
     assert daemon._log_paths_for_service("supervisor") == []
 
 
-def test_supervisor_control_send_json_ignores_disconnected_client() -> None:
+@pytest.mark.parametrize("disconnect_error", [BrokenPipeError, ConnectionResetError, ConnectionAbortedError])
+def test_supervisor_control_send_json_ignores_disconnected_client(disconnect_error: type[Exception]) -> None:
     daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
     handler_class = daemon._handler_class()
     handler = handler_class.__new__(handler_class)
@@ -447,7 +448,7 @@ def test_supervisor_control_send_json_ignores_disconnected_client() -> None:
     handler.send_response = lambda status: calls.append(("status", status))
     handler.send_header = lambda name, value: calls.append((name, value))
     handler.end_headers = lambda: calls.append(("end_headers", None))
-    handler.wfile = SimpleNamespace(write=lambda _body: (_ for _ in ()).throw(BrokenPipeError()))
+    handler.wfile = SimpleNamespace(write=lambda _body: (_ for _ in ()).throw(disconnect_error()))
 
     handler._send_json({"ok": True})
 
@@ -467,6 +468,24 @@ def test_supervisor_control_get_ignores_logs_client_disconnect() -> None:
     handler.do_GET()
 
     assert sent == []
+
+
+def test_open_default_browser_uses_windows_startfile(monkeypatch) -> None:
+    opened: list[str] = []
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager.os, "startfile", lambda url: opened.append(url), raising=False)
+    monkeypatch.setattr(
+        service_manager.webbrowser,
+        "open",
+        lambda _url: (_ for _ in ()).throw(AssertionError("webbrowser should not be used on Windows when startfile exists")),
+    )
+
+    service_manager.open_default_browser("http://127.0.0.1:5173", console)
+
+    assert opened == ["http://127.0.0.1:5173"]
+    assert console.messages == ["[flocks] 浏览器已打开: http://127.0.0.1:5173"]
 
 
 def test_tail_lines_returns_recent_content(tmp_path: Path) -> None:
@@ -1007,7 +1026,37 @@ def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: 
     service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), console)
 
     assert calls == ["daemon", "ready", "status"]
-    assert console.messages == ["[flocks] [x] 启动 Flocks daemon..."]
+    assert console.messages == [
+        "[flocks] [ ] 启动 Flocks daemon...",
+        "[flocks] [x] 启动 Flocks daemon...",
+    ]
+
+
+def test_start_all_without_stop_prints_before_cleanup(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    events: list[str] = []
+    console = DummyConsole()
+
+    def record_print(message: str) -> None:
+        events.append(f"print:{message}")
+        console.messages.append(message)
+
+    console.print = record_print
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: events.append("legacy"))
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: events.append("orphan"))
+    monkeypatch.setattr(service_manager, "_ensure_webui_dist", lambda *_args, **_kwargs: events.append("dist"))
+    monkeypatch.setattr(
+        service_manager,
+        "_start_supervisor_process",
+        lambda _config, _paths, _console: events.append("daemon") or SimpleNamespace(poll=lambda: None),
+    )
+    monkeypatch.setattr(service_manager, "_wait_for_supervisor_ready", lambda _paths, **_kwargs: _supervisor_status_payload())
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: None)
+
+    service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), console)
+
+    assert events[:5] == ["print:[flocks] [ ] 启动 Flocks daemon...", "legacy", "orphan", "dist", "daemon"]
 
 
 def test_start_all_propagates_supervisor_start_failure(monkeypatch) -> None:
@@ -1680,6 +1729,33 @@ def test_cleanup_trusted_daemon_processes_cleans_current_install_only(monkeypatc
 
     assert result == [111]
     assert cleaned == [111]
+
+
+def test_windows_cleanup_trusted_daemon_processes_uses_single_query(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+    commands: list[list[str]] = []
+
+    def fail_per_pid_lookup(_pid: int) -> str:
+        raise AssertionError("Windows daemon cleanup should not query each pid separately")
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        assert command[:2] == ["powershell.exe", "-NoProfile"]
+        assert kwargs["env"]["FLOCKS_DAEMON_ROOT_MATCH"] == str(tmp_path).lower()
+        return SimpleNamespace(returncode=0, stdout="111\n222\n111\n")
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+    monkeypatch.setattr(service_manager, "_process_list_pids", lambda: [111, 222, 333])
+    monkeypatch.setattr(service_manager, "_process_command_line", fail_per_pid_lookup)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_daemon_processes(console=DummyConsole(), root=tmp_path)
+
+    assert result == [111, 222]
+    assert cleaned == [111, 222]
+    assert len(commands) == 1
 
 
 def test_spawn_process_uses_hidden_window_flags_on_windows(monkeypatch, tmp_path: Path) -> None:

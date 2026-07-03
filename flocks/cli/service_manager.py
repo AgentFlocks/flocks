@@ -961,6 +961,43 @@ def _process_list_pids() -> list[int]:
     return sorted(dict.fromkeys(pids))
 
 
+def _windows_trusted_daemon_process_pids(*, root: Path) -> list[int]:
+    """Return trusted Windows daemon pids with a single process query."""
+    if sys.platform != "win32":
+        return []
+    root_text = str(root).lower()
+    env = os.environ.copy()
+    env["FLOCKS_DAEMON_ROOT_MATCH"] = root_text
+    env["FLOCKS_DAEMON_CURRENT_PID"] = str(os.getpid())
+    powershell = which("powershell") or which("powershell.exe")
+    if not powershell:
+        return []
+    script = (
+        "$root = [Environment]::GetEnvironmentVariable('FLOCKS_DAEMON_ROOT_MATCH'); "
+        "$currentPid = [int][Environment]::GetEnvironmentVariable('FLOCKS_DAEMON_CURRENT_PID'); "
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "$_.ProcessId -ne $currentPid -and $_.CommandLine -and "
+        "$_.CommandLine.ToLowerInvariant().Contains('service-daemon') -and "
+        "$_.CommandLine.ToLowerInvariant().Contains('flocks') -and "
+        "$_.CommandLine.ToLowerInvariant().Contains($root) "
+        "} | ForEach-Object { $_.ProcessId }"
+    )
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-Command", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    if completed.returncode != 0:
+        return []
+    return sorted(
+        dict.fromkeys(int(line.strip()) for line in completed.stdout.splitlines() if line.strip().isdigit())
+    )
+
+
 def _trusted_flocks_daemon_owner(pid: int, *, root: Path) -> bool:
     """Return True only for daemon processes that belong to this Flocks install."""
     if pid <= 0 or pid == os.getpid():
@@ -975,6 +1012,8 @@ def _trusted_flocks_daemon_owner(pid: int, *, root: Path) -> bool:
 def trusted_daemon_process_pids(*, root: Path | None = None) -> list[int]:
     """Return trusted daemon pids for the current Flocks install."""
     current_root = root or ensure_install_layout()
+    if sys.platform == "win32":
+        return _windows_trusted_daemon_process_pids(root=current_root)
     return [pid for pid in _process_list_pids() if _trusted_flocks_daemon_owner(pid, root=current_root)]
 
 
@@ -1489,8 +1528,10 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     """Start the supervisor daemon, then print access summary."""
     paths = ensure_runtime_dirs()
     _print_static_port_migration_hint(config, console)
+    console.print("[flocks] [ ] 启动 Flocks daemon...")
     cleanup_legacy_runtime_processes(paths, console)
     cleanup_orphan_service_ports(config, console)
+    _ensure_webui_dist(ensure_install_layout(), config, console)
     process = _start_supervisor_process(config, paths, console)
     console.print("[flocks] [x] 启动 Flocks daemon...")
     payload = _wait_for_supervisor_ready(paths, process=process)
@@ -1907,6 +1948,15 @@ def signal_pid_list(sig: signal.Signals, pids: Iterable[int]) -> None:
 
 def open_default_browser(url: str, console) -> None:
     """Best-effort browser open."""
+    if sys.platform == "win32":
+        startfile = getattr(os, "startfile", None)
+        if startfile is not None:
+            try:
+                startfile(url)
+                console.print(f"[flocks] 浏览器已打开: {url}")
+                return
+            except Exception:
+                pass
     try:
         if webbrowser.open(url):
             console.print(f"[flocks] 浏览器已打开: {url}")

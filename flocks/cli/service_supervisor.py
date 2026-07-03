@@ -30,6 +30,7 @@ from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter
 SUPERVISOR_CHECK_INTERVAL_SECONDS = 5.0
 SUPERVISOR_HEALTH_FAILURE_THRESHOLD = 2
 SUPERVISOR_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0)
+_CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
 @dataclass
@@ -220,7 +221,7 @@ class SupervisorDaemon:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError):
+                except _CLIENT_DISCONNECT_ERRORS:
                     return
 
             def _read_json(self) -> dict[str, Any]:
@@ -243,7 +244,7 @@ class SupervisorDaemon:
                         daemon.handle_logs_request(self, parse_qs(parsed.query))
                         return
                     self._send_json({"error": "not found"}, status=404)
-                except (BrokenPipeError, ConnectionResetError):
+                except _CLIENT_DISCONNECT_ERRORS:
                     return
                 except Exception as exc:  # pragma: no cover - defensive control path
                     self._send_json({"error": str(exc)}, status=500)
@@ -286,7 +287,7 @@ class SupervisorDaemon:
                         self._send_json(daemon.status_payload())
                         return
                     self._send_json({"error": "not found"}, status=404)
-                except (BrokenPipeError, ConnectionResetError):
+                except _CLIENT_DISCONNECT_ERRORS:
                     return
                 except Exception as exc:  # pragma: no cover - defensive control path
                     self._send_json({"error": str(exc)}, status=500)
