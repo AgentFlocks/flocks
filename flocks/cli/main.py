@@ -21,6 +21,7 @@ from flocks.cli.commands import (
     admin_app,
     BROWSER_CONTEXT_SETTINGS,
     browser_command,
+    doctor_command,
     export_app,
     import_app,
     mcp_app,
@@ -66,6 +67,7 @@ app.add_typer(skill_app, name="skills")
 app.add_typer(admin_app, name="admin")
 
 app.command(name="update")(update_command)
+app.command(name="doctor")(doctor_command)
 app.command(
     name="browser",
     context_settings=BROWSER_CONTEXT_SETTINGS,

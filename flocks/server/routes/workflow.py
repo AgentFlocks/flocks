@@ -99,6 +99,8 @@ log = Log.create(service="workflow-routes")
 _PROGRESS_FLUSH_EVERY_STEPS = 5
 
 _LEGACY_SINGLETON_TRIGGER_TYPES = frozenset({"schedule", "kafka", "syslog"})
+_WEBHOOK_TRIGGER_TYPES = frozenset({"webhook", "custom_webhook"})
+_WEBHOOK_AUTH_TYPES = frozenset({"api_key", "hmac"})
 _WORKFLOW_INTEGRATION_CONFIG_VERSION = 1
 _WORKFLOW_INTEGRATION_CONFIG_KIND = "workflow.integration-config"
 _WORKFLOW_INTEGRATION_CONFIG_PREFIX = "workflow_integration_config/"
@@ -2733,6 +2735,39 @@ def _validate_trigger_type_constraints(triggers: List[TriggerDefinition]) -> Non
     raise HTTPException(status_code=409, detail=detail)
 
 
+def _webhook_auth_type(trigger: TriggerDefinition) -> str:
+    auth = trigger.auth
+    return str(getattr(auth, "type", "") or "").strip().lower()
+
+
+def _validate_webhook_trigger_auth(trigger: TriggerDefinition) -> None:
+    if trigger.type not in _WEBHOOK_TRIGGER_TYPES:
+        return
+
+    auth = trigger.auth
+    auth_type = _webhook_auth_type(trigger)
+    if auth is None or auth_type in {"", "none"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook triggers must configure authentication with auth.type 'api_key' or 'hmac'.",
+        )
+    if auth_type not in _WEBHOOK_AUTH_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
+    if auth_type == "api_key" and not (auth.apiKey or auth.secretRef):
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook api_key auth requires either apiKey or secretRef.",
+        )
+    if auth_type == "hmac" and not auth.secretRef:
+        raise HTTPException(status_code=400, detail="Webhook hmac auth requires secretRef.")
+
+
+def _validate_trigger_definitions(triggers: List[TriggerDefinition]) -> None:
+    _validate_trigger_type_constraints(triggers)
+    for trigger in triggers:
+        _validate_webhook_trigger_auth(trigger)
+
+
 @router.get("/workflow/{workflow_id}/triggers")
 async def list_workflow_triggers(workflow_id: str):
     """List unified triggers for a workflow with runtime status."""
@@ -2764,7 +2799,7 @@ async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
     existing = await _get_workflow_trigger_defs(workflow_id, data)
     updated = _replace_or_append_trigger(existing, trigger)
-    _validate_trigger_type_constraints(updated)
+    _validate_trigger_definitions(updated)
     persisted = await _persist_workflow_triggers(workflow_id, data, updated)
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
     status = await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
@@ -2781,7 +2816,7 @@ async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: Tr
     _find_trigger_or_404(existing, trigger_id)
     updated_trigger = trigger.model_copy(update={"id": trigger_id})
     updated = _replace_or_append_trigger(existing, updated_trigger)
-    _validate_trigger_type_constraints(updated)
+    _validate_trigger_definitions(updated)
     persisted = await _persist_workflow_triggers(workflow_id, data, updated)
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
     status = await default_trigger_runtime.get_trigger_status(workflow_id, updated_trigger)
@@ -2908,9 +2943,13 @@ def _authorize_webhook_trigger(
     raw_body: bytes,
 ) -> None:
     auth = trigger.auth
-    if auth is None or auth.type in {"none", ""}:
-        return
-    if auth.type == "api_key":
+    auth_type = _webhook_auth_type(trigger)
+    if auth is None or auth_type in {"none", ""}:
+        raise HTTPException(
+            status_code=401,
+            detail="Webhook trigger must configure authentication with auth.type 'api_key' or 'hmac'.",
+        )
+    if auth_type == "api_key":
         expected = auth.apiKey or _resolve_trigger_secret(auth.secretRef)
         if not expected:
             raise HTTPException(status_code=401, detail="Webhook trigger API key is not configured")
@@ -2919,7 +2958,7 @@ def _authorize_webhook_trigger(
         if actual != expected:
             raise HTTPException(status_code=401, detail="Invalid webhook API key")
         return
-    if auth.type == "hmac":
+    if auth_type == "hmac":
         expected = _resolve_trigger_secret(auth.secretRef)
         if not expected:
             raise HTTPException(status_code=401, detail="Webhook trigger secret is not configured")

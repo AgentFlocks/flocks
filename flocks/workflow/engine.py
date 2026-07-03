@@ -841,9 +841,9 @@ class WorkflowEngine:
         """Execute an LLM node: render Jinja2 prompt template, call LLM."""
         assert node.prompt, "llm node requires prompt"
         try:
-            from jinja2 import Template, TemplateError
+            from jinja2.sandbox import SandboxedEnvironment
 
-            rendered = Template(node.prompt).render(**inputs)
+            rendered = SandboxedEnvironment().from_string(node.prompt).render(**inputs)
         except Exception as e:
             raise NodeExecutionError(
                 node_id=node.id,
@@ -871,14 +871,15 @@ class WorkflowEngine:
         assert node.url, "http_request node requires url"
         assert node.method, "http_request node requires method"
         try:
-            from jinja2 import Template
+            from jinja2.sandbox import SandboxedEnvironment
 
-            url = Template(node.url).render(**inputs)
+            _sandbox = SandboxedEnvironment()
+            url = _sandbox.from_string(node.url).render(**inputs)
             method = node.method.upper()
             headers = node.headers or {}
             body = node.body
             if isinstance(body, str):
-                body = Template(body).render(**inputs)
+                body = _sandbox.from_string(body).render(**inputs)
         except Exception as e:
             raise NodeExecutionError(
                 node_id=node.id,
