@@ -5,17 +5,17 @@ version: "API 3.0"
 integration_type: device
 description: >
   Chaitin Muyun host security platform JSON-RPC API integration. Configure
-  the management URL, API Token, and optional organization ID. All business
+  the device URL, API Token, and optional organization ID. All business
   APIs are called through POST /rpc with JSON-RPC 2.0 payloads.
 description_cn: >
-  长亭牧云主机安全平台 API 3.0 接入。配置管理端地址、API Token 和可选机构 ID；
+  长亭牧云主机安全平台 API 3.0 接入。配置设备地址、API Token 和可选机构 ID；
   业务接口统一通过 POST /rpc 的 JSON-RPC 2.0 调用。
 auth:
   type: custom
   secret: chaitin_muyun_api_token
 credential_fields:
   - key: base_url
-    label: 管理端地址
+    label: 设备地址
     storage: config
     config_key: base_url
     input_type: url

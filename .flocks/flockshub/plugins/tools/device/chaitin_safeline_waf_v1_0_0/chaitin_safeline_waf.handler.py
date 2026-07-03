@@ -15,7 +15,7 @@ from flocks.tool.registry import ToolContext, ToolResult
 
 SERVICE_ID = "chaitin_safeline_waf"
 STORAGE_KEY = "chaitin_safeline_waf_api"
-PRODUCT_VERSION = "OpenAPI"
+PRODUCT_VERSION = "1.0"
 DEFAULT_TIMEOUT = 30
 DEFAULT_VERIFY_SSL = False
 CATALOG_FILE = Path(__file__).with_name("chaitin_safeline_waf_api_catalog.json")

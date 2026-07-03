@@ -5,7 +5,7 @@ category: custom
 enabled: true
 requires_confirmation: true
 provider: chaitin_safeline_waf
-version: "OpenAPI"
+version: "1.0"
 inputSchema:
   type: object
   properties:

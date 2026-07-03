@@ -241,6 +241,7 @@ function buildDeviceAddSessionContext(templates: DeviceTemplate[]): string {
     buildCustomDeviceModeRoutingPrompt(),
     '信息足够时，不要只输出表格或操作步骤；必须在回复末尾输出一个 ```json 代码块，页面只会读取这个 JSON 草稿用于一键回填。',
     'JSON 草稿格式为 {"storage_key":"...","device_name":"...","fields":{"base_url":"..."},"verify_ssl":false}。',
+    'fields 只能使用设备模板列出的字段；账号/用户名只有模板包含 username/user/account 字段时才填写，不能写入 base_url 或 url。',
     '不要把真实密码、Token、Secret、API Key 写入 JSON；这些密钥字段留空或省略，并提示用户稍后在设备接入表单中填写。',
     '',
     '当前可见设备模板：',
@@ -253,6 +254,17 @@ function normalizeExtractedValue(value: unknown): string | undefined {
   const text = String(value).trim();
   if (!text || text === '-' || text === '未提供' || text === '待填写') return undefined;
   return text.replace(/^`|`$/g, '').trim();
+}
+
+function looksLikeDeviceAddress(value: string): boolean {
+  const text = value.trim();
+  if (!text) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return true;
+  if (/^localhost(?::\d+)?(?:\/.*)?$/i.test(text)) return true;
+  if (/^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:\/.*)?$/.test(text)) return true;
+  if (/^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:\/.*)?$/i.test(text)) return true;
+  if (/^[a-z0-9-]+:\d+(?:\/.*)?$/i.test(text)) return true;
+  return false;
 }
 
 function parseJsonDraft(text: string): ExtractedDeviceDraft | null {
@@ -343,6 +355,9 @@ function normalizeDraftFields(template: DeviceTemplate, fields: Record<string, s
       : lower === 'url' || lower === 'baseurl'
         ? (allowed.has('base_url') ? 'base_url' : key)
         : labelToKey.get(lower) ?? key;
+    if (resolved === 'base_url' && !looksLikeDeviceAddress(value)) {
+      continue;
+    }
     if (allowed.size === 0 || allowed.has(resolved)) {
       normalized[resolved] = value;
     }

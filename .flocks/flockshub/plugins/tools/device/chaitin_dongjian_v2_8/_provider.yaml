@@ -5,24 +5,24 @@ version: "2.8"
 integration_type: device
 description: >
   Chaitin Dongjian (X-Ray) security assessment system OpenAPI V2.8
-  integration. Configure the management URL and token. The handler normalizes
+  integration. Configure the device URL and API Token. The handler normalizes
   the base URL to /api/v2.
 description_cn: >
-  长亭洞鉴（X-Ray）安全评估系统 OpenAPI V2.8 接入。配置管理端地址和 token；
+  长亭洞鉴（X-Ray）安全评估系统 OpenAPI V2.8 接入。配置设备地址和 API Token；
   handler 会将地址归一化到 /api/v2。
 auth:
   type: custom
   secret: chaitin_dongjian_token
 credential_fields:
   - key: base_url
-    label: 管理端地址
+    label: 设备地址
     storage: config
     config_key: base_url
     input_type: url
     required: true
     placeholder: "https://dongjian.example.com"
   - key: token
-    label: OpenAPI Token
+    label: API Token
     storage: secret
     config_key: token
     secret_id: chaitin_dongjian_token

@@ -586,6 +586,71 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('已填充设备配置表单');
   });
 
+  it('does not fill the device address from account-like Rex draft values', async () => {
+    const user = userEvent.setup();
+    mocks.sessionId = 'session-1';
+    mocks.listTemplates.mockResolvedValue({
+      data: [
+        buildTemplate({
+          storage_key: 'chaitin_safeline_waf',
+          service_id: 'chaitin_safeline_waf',
+          name: '长亭雷池 WAF',
+          vendor: 'chaitin',
+          credential_schema: [
+            {
+              key: 'base_url',
+              label: '设备地址',
+              storage: 'config',
+              sensitive: false,
+              required: true,
+              input_type: 'url',
+              config_key: 'base_url',
+            },
+            {
+              key: 'api_token',
+              label: 'API Token',
+              storage: 'secret',
+              sensitive: true,
+              required: true,
+              input_type: 'password',
+              config_key: 'api_token',
+            },
+          ],
+        }),
+      ],
+    });
+    mocks.getSessionMessagesPage.mockResolvedValue({
+      items: [
+        {
+          info: { role: 'assistant' },
+          parts: [
+            {
+              type: 'text',
+              text: '```json\n{"storage_key":"chaitin_safeline_waf","device_name":"长亭雷池","fields":{"url":"admin","api_token":"token-from-user"},"verify_ssl":false}\n```',
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(await screen.findByRole('button', { name: /mock stream done/ }));
+    await user.click(await screen.findByRole('button', { name: /^填充表单$/ }));
+
+    expect(await screen.findByDisplayValue('长亭雷池')).toBeInTheDocument();
+    expect(screen.getByText(/设备地址/)).toBeInTheDocument();
+    expect(screen.getByText(/API Token/)).toBeInTheDocument();
+    expect(screen.queryByText(/管理端地址/)).toBeNull();
+    expect(screen.queryByText(/OpenAPI Token/)).toBeNull();
+    expect(screen.queryByDisplayValue('admin')).toBeNull();
+    expect(screen.getByDisplayValue('token-from-user')).toBeInTheDocument();
+    const blankTextInputs = screen.getAllByRole('textbox')
+      .filter((input) => (input as HTMLInputElement).value === '');
+    expect(blankTextInputs.length).toBeGreaterThan(0);
+  });
+
   it('returns to the Rex session and asks for testing guidance after confirming integration', async () => {
     const user = userEvent.setup();
     mocks.sessionId = 'session-1';
