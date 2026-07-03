@@ -177,12 +177,6 @@ def request_restart_webui(
     return parse_supervisor_status(data)
 
 
-def request_stop_webui(*, paths=None, timeout: float | None = 30.0) -> SupervisorStatus:
-    """Ask the supervisor daemon to stop WebUI only."""
-    payload = _post_control_json("/stop/webui", paths=paths, timeout=timeout)
-    return parse_supervisor_status(payload)
-
-
 def request_prepare_upgrade(*, paths=None, timeout: float | None = 30.0) -> SupervisorStatus:
     """Ask the supervisor daemon to pause managed services for upgrade handoff."""
     payload = _post_control_json("/upgrade/prepare", paths=paths, timeout=timeout)

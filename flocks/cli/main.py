@@ -145,6 +145,8 @@ def main_callback(
 def _service_config(
     no_browser: bool = False,
     skip_webui_build: bool = False,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
     server_host: Optional[str] = None,
     server_port: Optional[int] = None,
     webui_host: Optional[str] = None,
@@ -159,6 +161,8 @@ def _service_config(
     return build_service_config(
         no_browser=no_browser,
         skip_webui_build=skip_webui_build,
+        public_host=host,
+        public_port=port,
         server_host=server_host,
         server_port=server_port,
         webui_host=webui_host,
@@ -176,12 +180,14 @@ def _restart_runtime_defaults() -> dict[str, Any]:
         status = read_supervisor_status(paths=runtime_paths(), timeout=1.0)
     except Exception:
         return {}
-    return restart_defaults_from_status_payload(status.raw)
+    return restart_defaults_from_status_payload(getattr(status, "raw", status))
 
 
 def _restart_service_config(
     no_browser: bool = False,
     skip_webui_build: bool = False,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
     server_host: Optional[str] = None,
     server_port: Optional[int] = None,
     webui_host: Optional[str] = None,
@@ -191,6 +197,8 @@ def _restart_service_config(
     return _service_config(
         no_browser=no_browser,
         skip_webui_build=skip_webui_build,
+        host=host,
+        port=port,
         server_host=server_host,
         server_port=server_port,
         webui_host=webui_host,
@@ -211,21 +219,25 @@ def start(
     skip_webui_build: bool = typer.Option(
         False,
         "--skip-webui-build",
-        help="Skip `npm run build` before starting WebUI",
+        help="Skip WebUI static asset build before starting Flocks service",
     ),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host"),
+    port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port"),
     server_host: Optional[str] = typer.Option(None, "--server-host", help="Backend server host"),
     server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port"),
     webui_host: Optional[str] = typer.Option(None, "--webui-host", help="WebUI host"),
     webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port"),
 ):
     """
-    Start backend and WebUI in daemon mode
+    Start Flocks service in daemon mode.
     """
     try:
         start_all(
             _service_config(
                 no_browser=no_browser,
                 skip_webui_build=skip_webui_build,
+                host=host,
+                port=port,
                 server_host=server_host,
                 server_port=server_port,
                 webui_host=webui_host,
@@ -240,7 +252,7 @@ def start(
 @app.command()
 def stop():
     """
-    Stop backend and WebUI
+    Stop Flocks service.
     """
     try:
         stop_all(console)
@@ -254,21 +266,25 @@ def restart(
     skip_webui_build: bool = typer.Option(
         False,
         "--skip-webui-build",
-        help="Skip `npm run build` before starting WebUI",
+        help="Skip WebUI static asset build before starting Flocks service",
     ),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host"),
+    port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port"),
     server_host: Optional[str] = typer.Option(None, "--server-host", help="Backend server host"),
     server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port"),
     webui_host: Optional[str] = typer.Option(None, "--webui-host", help="WebUI host"),
     webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port"),
 ):
     """
-    Restart backend and WebUI
+    Restart Flocks service.
     """
     try:
         restart_all(
             _restart_service_config(
                 no_browser=no_browser,
                 skip_webui_build=skip_webui_build,
+                host=host,
+                port=port,
                 server_host=server_host,
                 server_port=server_port,
                 webui_host=webui_host,
@@ -283,7 +299,7 @@ def restart(
 @app.command()
 def status():
     """
-    Show backend and WebUI status
+    Show Flocks service status.
     """
     try:
         show_status(console)
@@ -293,13 +309,13 @@ def status():
 
 @app.command()
 def logs(
-    backend: bool = typer.Option(False, "--backend", help="Only show backend logs"),
-    webui: bool = typer.Option(False, "--webui", help="Only show WebUI logs"),
+    backend: bool = typer.Option(False, "--backend", help="Only show service logs"),
+    webui: bool = typer.Option(False, "--webui", help="Only show service logs"),
     follow: bool = typer.Option(True, "--follow/--no-follow", help="Follow logs in real time"),
     lines: int = typer.Option(50, "--lines", "-n", min=0, help="Number of recent lines to show"),
 ):
     """
-    Show backend and WebUI logs
+    Show Flocks service logs.
     """
     try:
         show_logs(console, backend=backend, webui=webui, follow=follow, lines=lines)
@@ -354,10 +370,17 @@ def serve(
 @app.command(name="service-daemon", hidden=True)
 def service_daemon(
     server_host: str = typer.Option("127.0.0.1", "--server-host", help="Backend server host"),
-    server_port: int = typer.Option(8000, "--server-port", help="Backend server port"),
+    server_port: int = typer.Option(5173, "--server-port", help="Public service port"),
     webui_host: str = typer.Option("127.0.0.1", "--webui-host", help="WebUI host"),
     webui_port: int = typer.Option(5173, "--webui-port", help="WebUI port"),
-    skip_webui_build: bool = typer.Option(False, "--skip-webui-build", help="Skip WebUI build before preview start"),
+    legacy_server_host: Optional[str] = typer.Option(None, "--legacy-server-host", help="Legacy backend host"),
+    legacy_server_port: Optional[int] = typer.Option(8000, "--legacy-server-port", help="Legacy backend port"),
+    server_port_migration_hint: bool = typer.Option(
+        False,
+        "--server-port-migration-hint",
+        help="Print server-port migration hint in parent CLI",
+    ),
+    skip_webui_build: bool = typer.Option(False, "--skip-webui-build", help="Skip WebUI static asset build"),
 ):
     """
     Run the Flocks service supervisor daemon.
@@ -368,6 +391,9 @@ def service_daemon(
             backend_port=server_port,
             frontend_host=webui_host,
             frontend_port=webui_port,
+            legacy_backend_host=legacy_server_host,
+            legacy_backend_port=legacy_server_port,
+            server_port_migration_hint=server_port_migration_hint,
             no_browser=True,
             skip_frontend_build=skip_webui_build,
         ),

@@ -150,10 +150,15 @@ def watchdog_pid_path(paths: RuntimePaths) -> Path:
 def ensure_install_layout(root: Path | None = None) -> Path:
     """Validate that the installed repo still contains backend and WebUI code."""
     current = root or repo_root()
+    from flocks.server.static_webui import resolve_webui_dist_dir
+
     if not (current / "pyproject.toml").exists():
-        raise ServiceError(f"未找到安装目录中的 pyproject.toml: {current}")
+        if resolve_webui_dist_dir() is None:
+            raise ServiceError(f"未找到安装目录中的 pyproject.toml 或 WebUI 静态资源: {current}")
+        return current
     if not (current / "webui" / "package.json").exists():
-        raise ServiceError("未找到 WebUI 源码，请重新安装 Flocks，或设置 FLOCKS_REPO_ROOT 指向有效安装目录。")
+        if resolve_webui_dist_dir() is None:
+            raise ServiceError("未找到 WebUI 静态资源，请重新安装 Flocks，或设置 FLOCKS_REPO_ROOT 指向有效安装目录。")
     return current
 
 
@@ -1102,6 +1107,75 @@ def _backend_command_and_env(root: Path, config: ServiceConfig) -> tuple[list[st
     return command, env
 
 
+def _build_webui_dist(root: Path, config: ServiceConfig, console) -> None:
+    """Build the production WebUI static bundle."""
+    npm = resolve_npm_executable()
+    if not npm:
+        raise ServiceError("WebUI dist 不存在，且未检测到 npm；请先安装 Node.js 22+（包含 npm）后重试。")
+    if not node_version_satisfies_requirement():
+        raise ServiceError(f"检测到的 Node.js 版本过低。构建 WebUI 至少需要 Node.js {MIN_NODE_MAJOR}+。")
+
+    webui_dir = root / "webui"
+    if not (webui_dir / "package.json").exists():
+        raise ServiceError("未找到 WebUI 源码，无法构建静态资源。")
+
+    console.print("[flocks] 准备 Flocks 静态资源...")
+    frontend_env = build_frontend_env(config)
+    run_kwargs: dict[str, object] = {"cwd": webui_dir, "check": False, "env": frontend_env}
+    if sys.platform == "win32":
+        run_kwargs.update({"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"})
+    completed = subprocess.run([npm, "run", "build"], **run_kwargs)
+    if completed.returncode != 0:
+        output = "\n".join(
+            value for value in (getattr(completed, "stdout", None), getattr(completed, "stderr", None)) if value
+        )
+        if windows_frontend_build_assertion_is_recoverable(webui_dir, output):
+            console.print("[flocks] WebUI 构建产物已生成，忽略 Windows Node.js 退出断言。")
+        else:
+            if output:
+                console.print(output)
+            raise ServiceError("WebUI 构建失败。")
+
+
+def _ensure_webui_dist(root: Path, config: ServiceConfig, console) -> None:
+    """Ensure the FastAPI process can serve the production WebUI bundle."""
+    from flocks.server.static_webui import WebUIDistMissingError, ensure_webui_dist_dir
+
+    try:
+        ensure_webui_dist_dir()
+        return
+    except WebUIDistMissingError:
+        if config.skip_frontend_build:
+            raise
+
+    _build_webui_dist(root, config, console)
+    ensure_webui_dist_dir()
+
+
+def _cleanup_backend_start_port(port: int, console, *, root: Path) -> list[int]:
+    """Clean trusted leftovers that can occupy the unified public service port."""
+    cleaned: list[int] = []
+    cleaned.extend(
+        cleanup_trusted_port_owners(
+            port,
+            service="backend",
+            label="后端",
+            console=console,
+            root=root,
+        )
+    )
+    cleaned.extend(
+        cleanup_trusted_port_owners(
+            port,
+            service="webui",
+            label="WebUI",
+            console=console,
+            root=root,
+        )
+    )
+    return sorted(dict.fromkeys(cleaned))
+
+
 def _start_backend_process(
     config: ServiceConfig,
     console,
@@ -1111,30 +1185,25 @@ def _start_backend_process(
     """Start the backend child process for the supervisor."""
     root = ensure_install_layout()
     current = paths if paths is not None else ensure_runtime_dirs()
+    _ensure_webui_dist(root, config, console)
 
     listeners = port_owner_pids(config.backend_port)
     if listeners:
-        cleanup_trusted_port_owners(
-            config.backend_port,
-            service="backend",
-            label="后端",
-            console=console,
-            root=root,
-        )
+        _cleanup_backend_start_port(config.backend_port, console, root=root)
         listeners = port_owner_pids(config.backend_port)
         if listeners:
             raise ServiceError(
-                f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
+                f"server 端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
                 "请先执行 `flocks stop` 或手动清理残留进程。"
             )
     if port_is_in_use(config.backend_port, listeners):
         raise ServiceError(
-            f"后端端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
+            f"server 端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
             "请先安装 lsof 或手动清理残留进程。"
         )
 
     command, env = _backend_command_and_env(root, config)
-    console.print("[flocks] 启动后端服务...")
+    console.print("[flocks] 启动 Flocks service...")
     process = _spawn_process(command, cwd=root, log_path=current.backend_log, env=env)
     record = process_runtime_record(
         process,
@@ -1155,108 +1224,6 @@ def _start_backend_process(
         _emit_service_log_tail(console, current.backend_log, "后端")
         _terminate_process(process, "后端", console)
         raise
-    return process
-
-
-def _start_frontend_process(
-    config: ServiceConfig,
-    console,
-    *,
-    paths: RuntimePaths | None = None,
-) -> subprocess.Popen:
-    """Build and start the WebUI child process."""
-    root = ensure_install_layout()
-    current = paths if paths is not None else ensure_runtime_dirs()
-
-    listeners = port_owner_pids(config.frontend_port)
-    if listeners:
-        upgrade_info = _read_upgrade_runtime_info(config.frontend_port)
-        if upgrade_info.page_active:
-            _resolve_upgrade_runtime(
-                console,
-                frontend_port=upgrade_info.frontend_port or config.frontend_port,
-                attempt_recover=False,
-            )
-            listeners = port_owner_pids(config.frontend_port)
-            if listeners:
-                raise ServiceError(
-                    f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-                    "请先执行 `flocks stop` 或手动清理残留进程。"
-                )
-
-        else:
-            cleanup_trusted_port_owners(
-                config.frontend_port,
-                service="webui",
-                label="WebUI",
-                console=console,
-                root=root,
-            )
-            listeners = port_owner_pids(config.frontend_port)
-            if listeners:
-                raise ServiceError(
-                    f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-                    "请先执行 `flocks stop` 或手动清理残留进程。"
-                )
-    if port_is_in_use(config.frontend_port, listeners):
-        raise ServiceError(
-            f"WebUI 端口 {config.frontend_port} 已被占用，但当前环境无法识别占用 PID；"
-            "请先安装 lsof 或手动清理残留进程。"
-        )
-
-    npm = resolve_npm_executable()
-    if not npm:
-        raise ServiceError("未检测到 npm，请先安装 Node.js 22+（包含 npm）后重试。")
-    if not node_version_satisfies_requirement():
-        raise ServiceError(f"检测到的 Node.js 版本过低。启动 WebUI 至少需要 Node.js {MIN_NODE_MAJOR}+。")
-
-    webui_dir = root / "webui"
-    frontend_env = build_frontend_env(config)
-    if not config.skip_frontend_build:
-        console.print("[flocks] 构建 WebUI...")
-        run_kwargs: dict[str, object] = {"cwd": webui_dir, "check": False, "env": frontend_env}
-        if sys.platform == "win32":
-            run_kwargs.update({"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"})
-        completed = subprocess.run([npm, "run", "build"], **run_kwargs)
-        if completed.returncode != 0:
-            output = "\n".join(
-                value for value in (getattr(completed, "stdout", None), getattr(completed, "stderr", None)) if value
-            )
-            if windows_frontend_build_assertion_is_recoverable(webui_dir, output):
-                console.print("[flocks] WebUI 构建产物已生成，忽略 Windows Node.js 退出断言。")
-            else:
-                if output:
-                    console.print(output)
-                raise ServiceError("WebUI 构建失败。")
-
-    command = [
-        npm,
-        "run",
-        "preview",
-        "--",
-        "--host",
-        config.frontend_host,
-        "--port",
-        str(config.frontend_port),
-    ]
-
-    console.print("[flocks] 启动 WebUI...")
-    process = _spawn_process(command, cwd=webui_dir, log_path=current.frontend_log, env=frontend_env)
-    record = process_runtime_record(
-        process,
-        host=config.frontend_host,
-        port=config.frontend_port,
-        command=command,
-    )
-    _log_startup_config(current.frontend_log, "webui", config.frontend_host, config.frontend_port, record)
-
-    try:
-        wait_for_http([config.frontend_url], "WebUI")
-    except ServiceError:
-        _emit_service_log_tail(console, current.frontend_log, "WebUI")
-        _terminate_process(process, "WebUI", console)
-        raise
-
     return process
 
 
@@ -1387,7 +1354,7 @@ def _wait_for_supervisor_ready(
             last_payload = status.raw
             backend_state = status.backend.state
             webui_state = status.webui.state
-            if backend_state == "healthy" and webui_state == "healthy":
+            if backend_state == "healthy" and webui_state in {"healthy", "static"}:
                 return status.raw
             if backend_state == "degraded" or webui_state == "degraded":
                 return status.raw
@@ -1416,6 +1383,12 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
         "--webui-port",
         str(config.frontend_port),
     ]
+    if config.legacy_backend_host is not None:
+        command.extend(["--legacy-server-host", config.legacy_backend_host])
+    if config.legacy_backend_port is not None:
+        command.extend(["--legacy-server-port", str(config.legacy_backend_port)])
+    if config.server_port_migration_hint:
+        command.append("--server-port-migration-hint")
     if config.skip_frontend_build:
         command.append("--skip-webui-build")
     env = os.environ.copy()
@@ -1440,6 +1413,8 @@ def _legacy_runtime_config(paths: RuntimePaths, fallback: ServiceConfig) -> Serv
         backend_port=_recorded_port(paths.backend_pid, fallback.backend_port),
         frontend_host=_recorded_host(paths.frontend_pid, fallback.frontend_host),
         frontend_port=_recorded_port(paths.frontend_pid, fallback.frontend_port),
+        legacy_backend_host=fallback.legacy_backend_host,
+        legacy_backend_port=fallback.legacy_backend_port,
         no_browser=fallback.no_browser,
         skip_frontend_build=fallback.skip_frontend_build,
     )
@@ -1448,9 +1423,9 @@ def _legacy_runtime_config(paths: RuntimePaths, fallback: ServiceConfig) -> Serv
 def _unique_cleanup_configs(*configs: ServiceConfig) -> list[ServiceConfig]:
     """Deduplicate cleanup configs by backend/WebUI ports."""
     result: list[ServiceConfig] = []
-    seen: set[tuple[int, int]] = set()
+    seen: set[tuple[int, int, int | None]] = set()
     for config in configs:
-        key = (config.backend_port, config.frontend_port)
+        key = (config.backend_port, config.frontend_port, config.legacy_backend_port)
         if key in seen:
             continue
         seen.add(key)
@@ -1512,6 +1487,9 @@ def stop_all(console) -> None:
 def _start_all_without_stop(config: ServiceConfig, console) -> None:
     """Start the supervisor daemon, then print access summary."""
     paths = ensure_runtime_dirs()
+    _print_static_port_migration_hint(config, console)
+    cleanup_legacy_runtime_processes(paths, console)
+    cleanup_orphan_service_ports(config, console)
     process = _start_supervisor_process(config, paths, console)
     console.print("[flocks] [x] 启动 Flocks daemon...")
     payload = _wait_for_supervisor_ready(paths, process=process)
@@ -1560,13 +1538,25 @@ def restart_all(config: ServiceConfig, console) -> None:
         _start_all_unlocked(config, console, paths=paths)
 
 
+def _print_static_port_migration_hint(config: ServiceConfig, console) -> None:
+    """Explain legacy server-port behavior when it differs from public WebUI port."""
+    if (
+        not config.server_port_migration_hint
+        or config.legacy_backend_port is None
+        or config.legacy_backend_port == config.backend_port
+    ):
+        return
+    console.print(
+        "[flocks] API 已与 WebUI 同源，"
+        f"当前统一监听端口为 {config.backend_port}；旧 server 端口 {config.legacy_backend_port} 仅用于残留清理。"
+    )
+
+
 def _print_stop_summary(console, status) -> None:
     """Print stopped services from the last available supervisor status."""
     if status is not None:
         if status.backend.pid is not None:
-            console.print(f"[flocks] server 已停止（PID={status.backend.pid}）。")
-        if status.webui.pid is not None:
-            console.print(f"[flocks] webui 已停止（PID={status.webui.pid}）。")
+            console.print(f"[flocks] flocks 已停止（PID={status.backend.pid}）。")
     console.print("[flocks] daemon 已停止。")
 
 
@@ -1574,7 +1564,11 @@ def cleanup_orphan_service_ports(config: ServiceConfig, console, *, extra_config
     """Clean trusted Flocks leftovers on configured backend/WebUI ports."""
     root = ensure_install_layout()
     cleanup_trusted_daemon_processes(console=console, root=root)
-    for cleanup_config in _unique_cleanup_configs(config, *extra_configs):
+    candidates: list[ServiceConfig] = []
+    for candidate in (config, config.legacy_cleanup_config, *extra_configs):
+        candidates.append(candidate)
+        candidates.append(candidate.legacy_cleanup_config)
+    for cleanup_config in _unique_cleanup_configs(*candidates):
         cleanup_trusted_port_owners(
             cleanup_config.backend_port,
             service="backend",
@@ -1583,9 +1577,23 @@ def cleanup_orphan_service_ports(config: ServiceConfig, console, *, extra_config
             root=root,
         )
         cleanup_trusted_port_owners(
+            cleanup_config.backend_port,
+            service="webui",
+            label="WebUI",
+            console=console,
+            root=root,
+        )
+        cleanup_trusted_port_owners(
             cleanup_config.frontend_port,
             service="webui",
             label="WebUI",
+            console=console,
+            root=root,
+        )
+        cleanup_trusted_port_owners(
+            cleanup_config.frontend_port,
+            service="backend",
+            label="后端",
             console=console,
             root=root,
         )
@@ -1619,20 +1627,17 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
 def _status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
     daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
     backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
-    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
     lines = [
         "[flocks] 服务",
         _daemon_status_line(daemon),
-        _service_status_line("后端", backend),
-        _service_status_line("WebUI", webui),
+        _service_status_line("flocks", backend),
         "",
         "[flocks] 日志",
         f"[flocks]   daemon: {daemon.get('log_path')}",
     ]
-    for label, service in (("后端", backend), ("WebUI", webui)):
-        log_path = service.get("log_path")
-        if log_path:
-            lines.append(f"[flocks]   {label}: {log_path}")
+    log_path = backend.get("log_path")
+    if log_path:
+        lines.append(f"[flocks]   flocks: {log_path}")
     return lines
 
 
@@ -1643,7 +1648,8 @@ def _service_status_line(label: str, payload: dict[str, Any]) -> str:
     state = payload.get("state") or "unknown"
     error = payload.get("last_error")
     suffix = f" last_error={error}" if error else ""
-    return f"[flocks]   {label}: state={state} PID={pid} URL=http://{host}:{port}{suffix}"
+    pid_part = f" PID={pid}" if pid is not None else ""
+    return f"[flocks]   {label}: state={state}{pid_part} URL=http://{host}:{port}{suffix}"
 
 
 def _daemon_status_line(payload: dict[str, Any]) -> str:
@@ -1661,32 +1667,28 @@ def _startup_step_marker(state: object, *, ready_states: set[str]) -> str:
 def _startup_status_lines_from_payload(payload: dict[str, Any], *, include_daemon_step: bool = True) -> list[str]:
     daemon = payload.get("daemon") if isinstance(payload.get("daemon"), dict) else {}
     backend = payload.get("backend") if isinstance(payload.get("backend"), dict) else {}
-    webui = payload.get("webui") if isinstance(payload.get("webui"), dict) else {}
     lines = []
     if include_daemon_step:
         lines.append(f"[flocks] {_startup_step_marker(daemon.get('state'), ready_states={'running'})} 启动 Flocks daemon...")
     lines.extend([
-        f"[flocks] {_startup_step_marker(backend.get('state'), ready_states={'healthy'})} 启动 Flocks server...",
-        f"[flocks] {_startup_step_marker(webui.get('state'), ready_states={'healthy'})} 启动 Flocks webui...",
+        f"[flocks] {_startup_step_marker(backend.get('state'), ready_states={'healthy'})} 启动 Flocks service...",
         "",
         "[flocks] 服务",
         _daemon_status_line(daemon),
-        _service_status_line("server", backend),
-        _service_status_line("webui", webui),
+        _service_status_line("flocks", backend),
         "",
         "[flocks] 日志",
         f"[flocks]   daemon: {daemon.get('log_path')}",
     ])
-    for label, service in (("server", backend), ("webui", webui)):
-        log_path = service.get("log_path")
-        if log_path:
-            lines.append(f"[flocks]   {label}: {log_path}")
+    log_path = backend.get("log_path")
+    if log_path:
+        lines.append(f"[flocks]   flocks: {log_path}")
     return lines
 
 
 def _frontend_url_from_status(status, fallback: str) -> str:
-    if status.webui.port is not None:
-        return f"http://{_format_host_for_url(_loopback_host(status.webui.host))}:{status.webui.port}"
+    if status.backend.port is not None:
+        return f"http://{_format_host_for_url(_loopback_host(status.backend.host))}:{status.backend.port}"
     return fallback
 
 
@@ -1753,19 +1755,18 @@ def selected_log_paths(
     if backend and not webui:
         return [paths.backend_log]
     if webui and not backend:
-        return [paths.frontend_log]
-    return [paths.backend_log, paths.frontend_log]
+        return [paths.backend_log]
+    return [paths.backend_log]
 
 
 def _selected_log_entries(paths: RuntimePaths, *, backend: bool = False, webui: bool = False) -> list[tuple[str, Path]]:
     """Return local log files selected by CLI flags."""
     if backend and not webui:
-        return [("backend", paths.backend_log)]
+        return [("flocks", paths.backend_log)]
     if webui and not backend:
-        return [("webui", paths.frontend_log)]
+        return [("flocks", paths.backend_log)]
     return [
-        ("backend", paths.backend_log),
-        ("webui", paths.frontend_log),
+        ("flocks", paths.backend_log),
         ("daemon", supervisor_log_path(paths)),
     ]
 

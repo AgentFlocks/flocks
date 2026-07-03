@@ -9,7 +9,7 @@ from typing import Protocol
 
 import httpx
 
-from flocks.cli.service_config import ServiceConfig, with_frontend_build
+from flocks.cli.service_config import ServiceConfig
 
 
 @dataclass(frozen=True)
@@ -60,47 +60,28 @@ class BackendProcessAdapter:
         if not tcp_port_accepts_connections(host, port):
             return ServiceProbeResult(healthy=False, reason=f"port {port} is not listening", restart=True)
 
-        from flocks.cli.service_manager import _backend_health_url, _is_healthy_status_response
+        from flocks.cli.service_manager import _backend_health_url, _is_healthy_status_response, backend_access_base_url
 
         url = _backend_health_url(host, port)
         try:
             with httpx.Client(timeout=2.0, trust_env=False) as client:
                 response = client.get(url)
-            healthy = _is_healthy_status_response(response)
-            reason = f"health status={response.status_code}"
+                root_response = client.get(
+                    backend_access_base_url(ServiceConfig(backend_host=host, backend_port=port)),
+                    headers={"Accept": "text/html"},
+                )
+            healthy = _is_healthy_status_response(response) and _is_static_webui_response(root_response)
+            reason = f"health status={response.status_code}, root status={root_response.status_code}"
         except Exception as exc:
             healthy = False
             reason = f"health failed: {exc}"
         return ServiceProbeResult(healthy=healthy, reason=reason)
 
 
-class WebUIProcessAdapter:
-    name = "webui"
-    label = "WebUI"
-
-    def start(self, config: ServiceConfig, paths, *, built_once: bool = False) -> subprocess.Popen:
-        from flocks.cli.service_manager import _StdoutConsole, _start_frontend_process
-
-        resolved = with_frontend_build(config, skip_frontend_build=True) if built_once else config
-        return _start_frontend_process(resolved, _StdoutConsole(), paths=paths)
-
-    def stop(self, process: subprocess.Popen | None) -> None:
-        from flocks.cli.service_manager import _StdoutConsole, _terminate_process
-
-        _terminate_process(process, self.label, _StdoutConsole())
-
-    def probe(self, process: subprocess.Popen | None, host: str, port: int) -> ServiceProbeResult:
-        if process is None:
-            return ServiceProbeResult(healthy=False, reason="stopped")
-        if process.poll() is not None:
-            return ServiceProbeResult(
-                healthy=False,
-                reason=f"process exited with code {process.returncode}",
-                restart=True,
-            )
-        if not tcp_port_accepts_connections(host, port):
-            return ServiceProbeResult(healthy=False, reason=f"port {port} is not listening", restart=True)
-        return ServiceProbeResult(healthy=True)
+def _is_static_webui_response(response: httpx.Response) -> bool:
+    """Return True only when the unified service serves the SPA index."""
+    content_type = response.headers.get("content-type", "").lower()
+    return response.status_code == 200 and "text/html" in content_type
 
 
 def tcp_port_accepts_connections(host: str, port: int) -> bool:

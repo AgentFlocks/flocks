@@ -2128,13 +2128,23 @@ def _service_config_from_payload(
     *,
     skip_frontend_build: bool | None = None,
 ):
-    from flocks.cli.service_config import service_config_from_payload
+    from flocks.cli.service_config import ServiceConfig, service_config_from_payload
 
     resolved_skip_frontend_build = (
         bool(payload.get("skip_frontend_build", True)) if skip_frontend_build is None else skip_frontend_build
     )
+    migrated_payload = dict(payload)
+    backend_port = migrated_payload.get("backend_port")
+    frontend_port = migrated_payload.get("frontend_port")
+    if isinstance(backend_port, int) and isinstance(frontend_port, int) and backend_port != frontend_port:
+        migrated_payload["legacy_backend_host"] = migrated_payload.get("backend_host")
+        migrated_payload["legacy_backend_port"] = backend_port
+        migrated_payload["backend_host"] = migrated_payload.get("frontend_host") or migrated_payload.get("backend_host")
+        migrated_payload["backend_port"] = frontend_port
+        migrated_payload["server_port_migration_hint"] = True
     return service_config_from_payload(
-        payload,
+        migrated_payload,
+        default=ServiceConfig(),
         no_browser=True,
         skip_frontend_build=resolved_skip_frontend_build,
     )
@@ -2202,6 +2212,10 @@ def read_upgrade_runtime_state(frontend_port: int | None = None) -> dict[str, An
     }
 
 
+def _webui_runtime_ready(state: str) -> bool:
+    return state in {"healthy", "static"}
+
+
 def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool) -> None:
     from flocks.cli.service_config import with_frontend_build
     from flocks.cli.service_control import request_restart_webui, request_resume_upgrade
@@ -2212,7 +2226,7 @@ def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool
             paths=None,
             timeout=180.0,
         )
-        if status.webui.state != "healthy":
+        if not _webui_runtime_ready(status.webui.state):
             raise RuntimeError(status.webui.last_error or "WebUI restart did not become healthy")
         return
     except Exception:
@@ -2221,7 +2235,7 @@ def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool
 
     rebuilt_config = with_frontend_build(config, skip_frontend_build=False)
     result = request_restart_webui(rebuilt_config, force_frontend_build=True, paths=None, timeout=180.0)
-    if result.webui.state != "healthy":
+    if not _webui_runtime_ready(result.webui.state):
         raise RuntimeError(result.webui.last_error or "WebUI restart did not become healthy")
 
 
@@ -3473,15 +3487,15 @@ def _build_restart_handoff_argv(
         "start",
         "--no-browser",
         "--skip-webui-build",
-        "--server-host",
+        "--host",
         str(config.backend_host),
-        "--server-port",
+        "--port",
         str(config.backend_port),
-        "--webui-host",
-        str(config.frontend_host),
-        "--webui-port",
-        str(config.frontend_port),
     ]
+    if config.legacy_backend_host is not None:
+        managed_restart_argv.extend(["--server-host", str(config.legacy_backend_host)])
+    if config.legacy_backend_port is not None:
+        managed_restart_argv.extend(["--server-port", str(config.legacy_backend_port)])
     argv = [
         restart_argv[0],
         "-m",

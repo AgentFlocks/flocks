@@ -12,7 +12,13 @@ import pytest
 
 from flocks.cli import service_control, service_manager
 from flocks.updater import updater
-from tests.helpers.service_supervisor import make_short_runtime_root, start_supervisor, stop_supervisor, wait_for_supervisor
+from tests.helpers.service_supervisor import (
+    make_short_runtime_root,
+    start_supervisor,
+    stop_supervisor,
+    wait_for_process_exit,
+    wait_for_supervisor,
+)
 
 
 def _write_pyproject_version(pyproject_path: Path, version: str) -> None:
@@ -805,10 +811,12 @@ def test_build_restart_handoff_argv_rewrites_serve_to_managed_start(
     tmp_path: Path,
 ) -> None:
     config = service_manager.ServiceConfig(
-        backend_host="0.0.0.0",
-        backend_port=9000,
+        backend_host="10.0.0.8",
+        backend_port=5273,
         frontend_host="10.0.0.8",
         frontend_port=5273,
+        legacy_backend_host="0.0.0.0",
+        legacy_backend_port=9000,
     )
     monkeypatch.setattr(updater, "_handoff_service_config", lambda: config)
     monkeypatch.setattr(updater.os, "getpid", lambda: 1234)
@@ -829,14 +837,14 @@ def test_build_restart_handoff_argv_rewrites_serve_to_managed_start(
         "start",
         "--no-browser",
         "--skip-webui-build",
+        "--host",
+        "10.0.0.8",
+        "--port",
+        "5273",
         "--server-host",
         "0.0.0.0",
         "--server-port",
         "9000",
-        "--webui-host",
-        "10.0.0.8",
-        "--webui-port",
-        "5273",
     ]
 
 
@@ -1132,7 +1140,8 @@ def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails_with
         assert status.backend.paused is False
         assert status.backend.pid is not None
         assert status.webui.paused is False
-        assert status.webui.pid is not None
+        assert status.webui.pid is None
+        assert status.webui.state == "static"
         assert updater._read_upgrade_state() is None
     finally:
         stop_supervisor(daemon, thread)
@@ -1167,11 +1176,10 @@ def test_rollback_failed_update_resumes_backend_when_handoff_tasks_fail(
                 "skip_frontend_build": True,
             }
         )
-        service_control.request_prepare_upgrade(paths=paths)
         old_backend = daemon.backend.process
         assert old_backend is not None
-        old_backend.terminate()
-        old_backend.wait(timeout=5)
+        service_control.request_prepare_upgrade(paths=paths)
+        wait_for_process_exit(old_backend)
 
         updater._rollback_failed_update(None, short_root / "install", "2026.3.31")
 
@@ -1180,7 +1188,8 @@ def test_rollback_failed_update_resumes_backend_when_handoff_tasks_fail(
         assert status.webui.paused is False
         assert status.backend.pid is not None
         assert status.backend.pid != old_backend.pid
-        assert status.webui.pid is not None
+        assert status.webui.pid is None
+        assert status.webui.state == "static"
         assert updater._read_upgrade_state() is None
     finally:
         stop_supervisor(daemon, thread)
@@ -1740,14 +1749,14 @@ async def test_perform_update_schedules_handoff_after_handover(
         "start",
         "--no-browser",
         "--skip-webui-build",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5173",
         "--server-host",
         "127.0.0.1",
         "--server-port",
         "8000",
-        "--webui-host",
-        "127.0.0.1",
-        "--webui-port",
-        "5173",
     ]
 
 
@@ -3241,14 +3250,14 @@ async def test_perform_update_spawns_restart_process_on_windows(
         "start",
         "--no-browser",
         "--skip-webui-build",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5173",
         "--server-host",
         "127.0.0.1",
         "--server-port",
         "8000",
-        "--webui-host",
-        "127.0.0.1",
-        "--webui-port",
-        "5173",
     ]
     assert events == ["handover"]
     assert "execv" not in events

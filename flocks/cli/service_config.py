@@ -14,15 +14,34 @@ class ServiceConfigError(ValueError):
 @dataclass(frozen=True)
 class ServiceConfig:
     backend_host: str = "127.0.0.1"
-    backend_port: int = 8000
+    backend_port: int = 5173
     frontend_host: str = "127.0.0.1"
     frontend_port: int = 5173
+    legacy_backend_host: str | None = "127.0.0.1"
+    legacy_backend_port: int | None = 8000
+    server_port_migration_hint: bool = False
     no_browser: bool = False
     skip_frontend_build: bool = False
 
     @property
+    def backend_url(self) -> str:
+        return f"http://{_format_host_for_url(loopback_host(self.backend_host))}:{self.backend_port}"
+
+    @property
     def frontend_url(self) -> str:
-        return f"http://{_format_host_for_url(loopback_host(self.frontend_host))}:{self.frontend_port}"
+        return self.backend_url
+
+    @property
+    def legacy_cleanup_config(self) -> "ServiceConfig":
+        return ServiceConfig(
+            backend_host=self.legacy_backend_host or self.backend_host,
+            backend_port=self.legacy_backend_port or self.backend_port,
+            frontend_host=self.frontend_host,
+            frontend_port=self.frontend_port,
+            no_browser=self.no_browser,
+            server_port_migration_hint=self.server_port_migration_hint,
+            skip_frontend_build=self.skip_frontend_build,
+        )
 
 
 def loopback_host(host: str) -> str:
@@ -44,6 +63,9 @@ def service_config_payload(config: ServiceConfig) -> dict[str, object]:
         "backend_port": config.backend_port,
         "frontend_host": config.frontend_host,
         "frontend_port": config.frontend_port,
+        "legacy_backend_host": config.legacy_backend_host,
+        "legacy_backend_port": config.legacy_backend_port,
+        "server_port_migration_hint": config.server_port_migration_hint,
         "no_browser": config.no_browser,
         "skip_frontend_build": config.skip_frontend_build,
     }
@@ -69,6 +91,9 @@ def service_config_from_payload(
         backend_port=_positive_int(payload.get("backend_port"), base.backend_port),
         frontend_host=_string(payload.get("frontend_host"), base.frontend_host),
         frontend_port=_positive_int(payload.get("frontend_port"), base.frontend_port),
+        legacy_backend_host=_optional_string(payload.get("legacy_backend_host"), base.legacy_backend_host),
+        legacy_backend_port=_optional_positive_int(payload.get("legacy_backend_port"), base.legacy_backend_port),
+        server_port_migration_hint=_bool(payload.get("server_port_migration_hint"), base.server_port_migration_hint),
         no_browser=resolved_no_browser,
         skip_frontend_build=resolved_skip_frontend_build,
     )
@@ -110,6 +135,8 @@ def build_service_config(
     *,
     no_browser: bool = False,
     skip_webui_build: bool = False,
+    public_host: str | None = None,
+    public_port: int | None = None,
     server_host: str | None = None,
     server_port: int | None = None,
     webui_host: str | None = None,
@@ -119,30 +146,36 @@ def build_service_config(
     default_webui_host: str = "127.0.0.1",
     default_webui_port: int = 5173,
 ) -> ServiceConfig:
-    """Build service config from CLI values, environment, and defaults."""
+    """Build service config from CLI values, environment, and defaults.
+
+    Static WebUI mode uses the old WebUI endpoint as the public FastAPI
+    listener so remote deployments keep their existing browser URL.
+    """
+    explicit_public_host = _first_host(public_host, ("FLOCKS_HOST", "FLOCKS_PUBLIC_HOST"))
+    explicit_public_port = _first_port(public_port, ("FLOCKS_PORT", "FLOCKS_PUBLIC_PORT"), "public")
+    explicit_webui_host = _first_host(webui_host, ("FLOCKS_WEBUI_HOST", "FLOCKS_FRONTEND_HOST"))
+    explicit_webui_port = _first_port(webui_port, ("FLOCKS_WEBUI_PORT", "FLOCKS_FRONTEND_PORT"), "webui")
+    explicit_server_host = _first_host(server_host, ("FLOCKS_SERVER_HOST", "FLOCKS_BACKEND_HOST"))
+    explicit_server_port = _first_port(server_port, ("FLOCKS_SERVER_PORT", "FLOCKS_BACKEND_PORT"), "server")
+
+    resolved_public_host = explicit_public_host or explicit_webui_host or explicit_server_host or default_webui_host
+    resolved_public_port = explicit_public_port or explicit_webui_port or explicit_server_port or default_webui_port
+    legacy_host = explicit_server_host or default_server_host
+    legacy_port = explicit_server_port or default_server_port
+    show_server_port_hint = (
+        explicit_server_port is not None
+        and (explicit_public_port is not None or explicit_webui_port is not None)
+        and explicit_server_port != resolved_public_port
+    )
+
     return ServiceConfig(
-        backend_host=_resolve_host(
-            cli_value=server_host,
-            env_names=("FLOCKS_SERVER_HOST", "FLOCKS_BACKEND_HOST"),
-            default=default_server_host,
-        ),
-        backend_port=_resolve_port(
-            cli_value=server_port,
-            env_names=("FLOCKS_SERVER_PORT", "FLOCKS_BACKEND_PORT"),
-            default=default_server_port,
-            label="server",
-        ),
-        frontend_host=_resolve_host(
-            cli_value=webui_host,
-            env_names=("FLOCKS_WEBUI_HOST", "FLOCKS_FRONTEND_HOST"),
-            default=default_webui_host,
-        ),
-        frontend_port=_resolve_port(
-            cli_value=webui_port,
-            env_names=("FLOCKS_WEBUI_PORT", "FLOCKS_FRONTEND_PORT"),
-            default=default_webui_port,
-            label="webui",
-        ),
+        backend_host=resolved_public_host,
+        backend_port=resolved_public_port,
+        frontend_host=resolved_public_host,
+        frontend_port=resolved_public_port,
+        legacy_backend_host=legacy_host,
+        legacy_backend_port=legacy_port,
+        server_port_migration_hint=show_server_port_hint,
         no_browser=no_browser,
         skip_frontend_build=skip_webui_build,
     )
@@ -155,22 +188,25 @@ def with_frontend_build(config: ServiceConfig, *, skip_frontend_build: bool) -> 
         backend_port=config.backend_port,
         frontend_host=config.frontend_host,
         frontend_port=config.frontend_port,
+        legacy_backend_host=config.legacy_backend_host,
+        legacy_backend_port=config.legacy_backend_port,
+        server_port_migration_hint=config.server_port_migration_hint,
         no_browser=config.no_browser,
         skip_frontend_build=skip_frontend_build,
     )
 
 
-def _resolve_host(*, cli_value: str | None, env_names: tuple[str, ...], default: str) -> str:
+def _first_host(cli_value: str | None, env_names: tuple[str, ...]) -> str | None:
     if cli_value is not None:
         return cli_value
     for env_name in env_names:
         env_value = os.getenv(env_name)
         if env_value:
             return env_value
-    return default
+    return None
 
 
-def _resolve_port(*, cli_value: int | None, env_names: tuple[str, ...], default: int, label: str) -> int:
+def _first_port(cli_value: int | None, env_names: tuple[str, ...], label: str) -> int | None:
     if cli_value is not None:
         return cli_value
     for env_name in env_names:
@@ -181,14 +217,22 @@ def _resolve_port(*, cli_value: int | None, env_names: tuple[str, ...], default:
             return int(env_value)
         except ValueError as error:
             raise ServiceConfigError(f"{label} port from {env_name} must be an integer.") from error
-    return default
+    return None
 
 
 def _string(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) and value else fallback
 
 
+def _optional_string(value: Any, fallback: str | None) -> str | None:
+    return value if isinstance(value, str) and value else fallback
+
+
 def _positive_int(value: Any, fallback: int) -> int:
+    return value if _is_positive_int(value) else fallback
+
+
+def _optional_positive_int(value: Any, fallback: int | None) -> int | None:
     return value if _is_positive_int(value) else fallback
 
 

@@ -86,7 +86,6 @@ def start_supervisor(
         config,
         interval=0.05,
         backend_adapter=SleeperProcessAdapter(),
-        webui_adapter=SleeperProcessAdapter(),
     )
     thread = threading.Thread(target=daemon.run, daemon=True)
     thread.start()

@@ -24,7 +24,7 @@ from flocks.cli.service_control import (
     supervisor_log_path,
     supervisor_socket_path,
 )
-from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter, WebUIProcessAdapter
+from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter
 
 SUPERVISOR_CHECK_INTERVAL_SECONDS = 5.0
 SUPERVISOR_HEALTH_FAILURE_THRESHOLD = 2
@@ -64,7 +64,7 @@ def _daemon_log(event: str, details: dict[str, object] | None = None) -> None:
 
 
 def _health_status_from_service_state(state: str) -> str:
-    if state in {"healthy", "starting", "restarting", "stopped", "paused"}:
+    if state in {"healthy", "static", "starting", "restarting", "stopped", "paused"}:
         return state
     return "degraded"
 
@@ -99,7 +99,6 @@ class SupervisorDaemon:
         interval: float = SUPERVISOR_CHECK_INTERVAL_SECONDS,
         failure_threshold: int = SUPERVISOR_HEALTH_FAILURE_THRESHOLD,
         backend_adapter: ProcessAdapter | None = None,
-        webui_adapter: ProcessAdapter | None = None,
     ) -> None:
         from flocks.cli.service_manager import ensure_runtime_dirs
 
@@ -108,7 +107,6 @@ class SupervisorDaemon:
         self.interval = interval
         self.failure_threshold = failure_threshold
         self.backend_adapter = backend_adapter or BackendProcessAdapter()
-        self.webui_adapter = webui_adapter or WebUIProcessAdapter()
         self.started_at = time.time()
         self._lock = threading.RLock()
         self._shutdown_requested = threading.Event()
@@ -126,9 +124,10 @@ class SupervisorDaemon:
         self.webui = ManagedService(
             name="webui",
             label="WebUI",
-            host=config.frontend_host,
-            port=config.frontend_port,
-            log_path=self.paths.frontend_log,
+            host=config.backend_host,
+            port=config.backend_port,
+            log_path=self.paths.backend_log,
+            state="static",
         )
 
     def run(self) -> None:
@@ -268,8 +267,7 @@ class SupervisorDaemon:
                         self._send_json(daemon.status_payload())
                         return
                     if parsed.path == "/stop/webui":
-                        daemon.stop_webui(reason="control stop")
-                        self._send_json(daemon.status_payload())
+                        self._send_json({"error": "static WebUI is served by Flocks service and cannot be stopped separately"}, status=409)
                         return
                     if parsed.path == "/upgrade/prepare":
                         daemon.prepare_upgrade(reason="control upgrade prepare")
@@ -293,8 +291,9 @@ class SupervisorDaemon:
             self.config = service_config_from_payload(payload, self.config)
             self.backend.host = self.config.backend_host
             self.backend.port = self.config.backend_port
-            self.webui.host = self.config.frontend_host
-            self.webui.port = self.config.frontend_port
+            self.webui.host = self.config.backend_host
+            self.webui.port = self.config.backend_port
+            self.webui.log_path = self.paths.backend_log
 
     def request_stop(self) -> None:
         self._shutdown_requested.set()
@@ -390,15 +389,14 @@ class SupervisorDaemon:
 
     def _log_paths_for_service(self, service_name: str) -> list[tuple[str, Path]]:
         if service_name == "backend":
-            return [("backend", self.paths.backend_log)]
+            return [("flocks", self.paths.backend_log)]
         if service_name == "webui":
-            return [("webui", self.paths.frontend_log)]
+            return [("flocks", self.paths.backend_log)]
         if service_name == "daemon":
             return [("daemon", supervisor_log_path(self.paths))]
         if service_name == "all":
             return [
-                ("backend", self.paths.backend_log),
-                ("webui", self.paths.frontend_log),
+                ("flocks", self.paths.backend_log),
                 ("daemon", supervisor_log_path(self.paths)),
             ]
         return []
@@ -407,31 +405,27 @@ class SupervisorDaemon:
         with self._lock:
             self._backend_paused = False
             self._webui_paused = False
-            self._restart_service(self.webui, reason=reason, immediate=True)
             self._restart_service(self.backend, reason=reason, immediate=True)
             self._start_backend_locked(immediate=True)
-            self._start_webui_locked(immediate=True)
+            self._sync_static_webui_state()
 
     def restart_backend(self, *, reason: str) -> None:
         with self._lock:
             self._backend_paused = False
             self._restart_service(self.backend, reason=reason, immediate=True)
             self._start_backend_locked(immediate=True)
+            self._sync_static_webui_state()
 
     def restart_webui(self, *, reason: str, force_frontend_build: bool = False) -> None:
         with self._lock:
             self._webui_paused = False
             if force_frontend_build:
-                self.webui.built_once = False
-            self._restart_service(self.webui, reason=reason, immediate=True)
-            self._start_webui_locked(immediate=True)
+                from flocks.cli.service_config import with_frontend_build
 
-    def stop_webui(self, *, reason: str) -> None:
-        with self._lock:
-            self._webui_paused = True
-            _daemon_log("service_pause", {"service": "webui", "reason": reason})
-            self._stop_service(self.webui)
-            self.webui.last_error = reason
+                self.config = with_frontend_build(self.config, skip_frontend_build=False)
+            self._restart_service(self.backend, reason=f"{reason}: static webui", immediate=True)
+            self._start_backend_locked(immediate=True)
+            self._sync_static_webui_state()
 
     def prepare_upgrade(self, *, reason: str) -> None:
         with self._lock:
@@ -441,7 +435,8 @@ class SupervisorDaemon:
             _daemon_log("service_pause", {"service": "webui", "reason": reason})
             self.backend.last_error = reason
             self.webui.last_error = reason
-            self._stop_service(self.webui)
+            self._stop_service(self.backend)
+            self.webui.state = "paused"
 
     def resume_upgrade(self, *, reason: str) -> None:
         with self._lock:
@@ -450,25 +445,21 @@ class SupervisorDaemon:
             _daemon_log("service_resume", {"service": "backend", "reason": reason})
             _daemon_log("service_resume", {"service": "webui", "reason": reason})
             self._probe_backend_locked()
-            self._probe_webui_locked()
             self._start_backend_locked(immediate=True)
-            self._start_webui_locked(immediate=True)
+            self._sync_static_webui_state()
 
     def shutdown_children(self) -> None:
         with self._lock:
-            self._stop_service(self.webui)
             self._stop_service(self.backend)
+            self.webui.state = "stopped"
 
     def tick(self) -> None:
         with self._lock:
             if not self._backend_paused:
                 self._probe_backend_locked()
-            if not self._webui_paused:
-                self._probe_webui_locked()
             if not self._backend_paused:
                 self._start_backend_locked(immediate=False)
-            if not self._webui_paused:
-                self._start_webui_locked(immediate=False)
+            self._sync_static_webui_state()
 
     def _restart_service(self, service: ManagedService, *, reason: str, immediate: bool) -> None:
         _daemon_log("service_restart", {"service": service.name, "reason": reason})
@@ -503,24 +494,7 @@ class SupervisorDaemon:
         self.backend.state = "healthy"
         self.backend.last_error = None
         self.backend.health_failure_count = 0
-
-    def _start_webui_locked(self, *, immediate: bool) -> None:
-        if self.webui.process is not None and self.webui.process.poll() is None:
-            return
-        if not immediate and time.monotonic() < self.webui.next_restart_at:
-            return
-        self.webui.state = "starting"
-        try:
-            process = self.webui_adapter.start(self.config, self.paths, built_once=self.webui.built_once)
-        except Exception as exc:
-            self._mark_start_failed(self.webui, exc)
-            return
-        self.webui.process = process
-        self.webui.command = tuple(str(item) for item in process.args)
-        self.webui.state = "healthy"
-        self.webui.last_error = None
-        self.webui.health_failure_count = 0
-        self.webui.built_once = True
+        self._sync_static_webui_state()
 
     def _mark_start_failed(self, service: ManagedService, error: Exception) -> None:
         service.process = None
@@ -556,20 +530,27 @@ class SupervisorDaemon:
         if self.backend.health_failure_count >= self.failure_threshold:
             self._restart_service(self.backend, reason=result.reason or "backend health failed", immediate=True)
 
-    def _probe_webui_locked(self) -> None:
-        result = self.webui_adapter.probe(self.webui.process, self.webui.host, self.webui.port)
-        if self.webui.process is None:
-            self.webui.state = "stopped"
-            return
-        if result.restart:
-            self._restart_service(self.webui, reason=result.reason or "webui probe failed", immediate=True)
-            return
-        self.webui.state = "healthy"
-        self.webui.health_failure_count = 0
-        self.webui.last_error = None
-
     def _adapter_for(self, service: ManagedService) -> ProcessAdapter:
-        return self.backend_adapter if service.name == "backend" else self.webui_adapter
+        return self.backend_adapter
+
+    def _sync_static_webui_state(self) -> None:
+        self.webui.host = self.backend.host
+        self.webui.port = self.backend.port
+        self.webui.log_path = self.paths.backend_log
+        self.webui.process = None
+        self.webui.command = ()
+        if self._webui_paused:
+            self.webui.state = "paused"
+            return
+        if self.backend.state == "healthy":
+            self.webui.state = "static"
+            self.webui.last_error = None
+        elif self.backend.state in {"starting", "restarting"}:
+            self.webui.state = self.backend.state
+            self.webui.last_error = self.backend.last_error
+        else:
+            self.webui.state = "degraded"
+            self.webui.last_error = self.backend.last_error or "server is not healthy"
 
 
 def run_service_daemon(
