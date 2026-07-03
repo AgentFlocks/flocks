@@ -107,6 +107,8 @@ class SkillInstallRequest(BaseModel):
             "Install source. Supported formats:\n"
             "  clawhub:<name>         – clawhub.com registry\n"
             "  github:<owner>/<repo>  – GitHub repo\n"
+            "  safeskill://...        – SafeSkill package URI\n"
+            "  safeskill:<source>     – SafeSkill source alias\n"
             "  https://...            – direct URL to SKILL.md\n"
             "  /local/path            – local file or directory\n"
             "  <owner>/<repo>         – shorthand for GitHub"
@@ -329,9 +331,9 @@ async def install_skill(req: SkillInstallRequest, _user=Depends(require_user)):
     Supported sources:
     - `clawhub:<name>` — clawhub.com registry (OpenClaw ecosystem)
     - `github:<owner>/<repo>` or `<owner>/<repo>` — GitHub repository
+    - `safeskill://...` or `safeskill:<source>` — SafeSkill package URI/source
     - `https://...` — direct URL to a SKILL.md file
     - `/local/path` — local filesystem path
-    - `safeskill:<name>` — SafeSkill registry (reserved, future)
     """
     try:
         result = await SkillInstaller.install_from_source(req.source, scope=req.scope)

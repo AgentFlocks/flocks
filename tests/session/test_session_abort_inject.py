@@ -358,6 +358,59 @@ class TestTurnLifecycle:
         return msg
 
     @pytest.mark.asyncio
+    async def test_run_loop_stops_turn_when_messages_are_empty(self):
+        session = SimpleNamespace(
+            id="turn_no_messages_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=[]))
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+
+        result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started", "turn.stopped"]
+        stopped_payload = event_callback.await_args_list[1].args[1]
+        assert stopped_payload["stop_reason"] == "no_messages"
+
+    @pytest.mark.asyncio
+    async def test_run_loop_stops_turn_when_no_user_message_exists(self):
+        session = SimpleNamespace(
+            id="turn_no_user_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        assistant = self._make_msg("msg_001", "assistant", finish="stop")
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=[assistant]))
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+
+        result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started", "turn.stopped"]
+        stopped_payload = event_callback.await_args_list[1].args[1]
+        assert stopped_payload["stop_reason"] == "no_user_message"
+
+    @pytest.mark.asyncio
     async def test_run_loop_continues_for_active_goal_after_stop(self):
         session = SimpleNamespace(
             id="turn_goal_session",

@@ -51,6 +51,24 @@ async def test_console_session_does_not_change_oss_sources(monkeypatch, tmp_path
     assert sources == ["github", "gitee"]
 
 
+@pytest.mark.asyncio
+async def test_console_manifest_only_config_is_filtered_from_oss_sources(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    sources = await _resolve_sources_for_edition(["console-manifest"])
+
+    assert sources == []
+
+
+@pytest.mark.asyncio
+async def test_console_manifest_mixed_config_is_filtered_from_oss_sources(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    sources = await _resolve_sources_for_edition(["github", "console-manifest", "gitee"])
+
+    assert sources == ["github", "gitee"]
+
+
 def test_flockspro_license_active_uses_runtime_capability(monkeypatch):
     monkeypatch.setattr(updater.importlib.util, "find_spec", lambda name: object() if name == "flockspro" else None)
 

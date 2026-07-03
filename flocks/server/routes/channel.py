@@ -71,11 +71,26 @@ async def channel_session_send(req: SessionSendRequest):
     svc = SessionBindingService()
     all_bindings = await svc.list_bindings()
     matched = [b for b in all_bindings if b.session_id == req.session_id]
+    resolved_session_id = req.session_id
+
+    if not matched and req.channel_type:
+        latest = await svc.latest_active_user_binding(
+            channel_id=req.channel_type,
+            account_id=req.account_id,
+            chat_id=req.chat_id,
+        )
+        if latest:
+            matched = [latest]
+            resolved_session_id = latest.session_id
 
     if not matched:
         raise HTTPException(
             status_code=404,
-            detail=f"未找到 session '{req.session_id}' 的渠道绑定",
+            detail=(
+                f"未找到 session '{req.session_id}' 的渠道绑定；"
+                "请使用 im_send_message(resolve_only=true) 重新解析当前 IM 目标，"
+                "或让用户确认目标 IM 会话。"
+            ),
         )
 
     if req.channel_type:
@@ -109,7 +124,10 @@ async def channel_session_send(req: SessionSendRequest):
             text=req.text,
             media_url=req.media_url,
         )
-        results = await OutboundDelivery.deliver(out_ctx, session_id=req.session_id)
+        results = await OutboundDelivery.deliver(
+            out_ctx,
+            session_id=resolved_session_id,
+        )
         all_results.extend(results)
         for r in results:
             if not r.success:
@@ -120,6 +138,7 @@ async def channel_session_send(req: SessionSendRequest):
 
     return {
         "ok": True,
+        "session_id": resolved_session_id,
         "message_ids": [r.message_id for r in all_results if r.message_id],
         "channels": list({b.channel_id for b in matched}),
     }

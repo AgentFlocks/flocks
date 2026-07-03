@@ -134,6 +134,16 @@ class SSHConnectionPool:
     def _key(self, session_id: str, host: str, port: int, username: str) -> tuple[str, str, int, str]:
         return (session_id, host, port, username)
 
+    def _is_connection_closed(self, conn: asyncssh.SSHClientConnection) -> bool:
+        """Return whether an asyncssh connection is already closed."""
+        is_closed = getattr(conn, "is_closed", None)
+        if not callable(is_closed):
+            return False
+        try:
+            return bool(is_closed())
+        except Exception:
+            return False
+
     async def get_connection(
         self,
         session_id: str,
@@ -145,10 +155,8 @@ class SSHConnectionPool:
     ) -> asyncssh.SSHClientConnection:
         """Return an existing connection or create a new one and mark it in use.
 
-        Stale connections are not proactively detected here — the caller is
-        responsible for catching connection errors and calling
-        ``invalidate_connection()`` before retrying.  This avoids relying on
-        asyncssh private attributes for liveness checks.
+        Closed connections are evicted before reuse. Other stale connection
+        failures are handled by the caller, which should invalidate and retry.
         """
         key = self._key(session_id, host, port, username)
 
@@ -156,16 +164,24 @@ class SSHConnectionPool:
             self._prune_idle_locked(time.monotonic())
             if key not in self._locks:
                 self._locks[key] = asyncio.Lock()
+            lock = self._locks[key]
 
-        async with self._locks[key]:
+        async with lock:
             now = time.monotonic()
+            stale_conn: Optional[asyncssh.SSHClientConnection] = None
             async with self._global_lock:
                 entry = self._connections.get(key)
                 if entry is not None:
-                    entry.in_use += 1
-                    entry.last_used = now
-                    self._connections.move_to_end(key)
-                    return entry.conn
+                    if self._is_connection_closed(entry.conn):
+                        self._connections.pop(key, None)
+                        stale_conn = entry.conn
+                    else:
+                        entry.in_use += 1
+                        entry.last_used = now
+                        self._connections.move_to_end(key)
+                        return entry.conn
+            if stale_conn is not None:
+                self._close_connection(stale_conn)
 
             connect_kwargs: dict = dict(
                 host=host,
@@ -207,15 +223,30 @@ class SSHConnectionPool:
             self._enforce_limits_locked()
 
     async def invalidate_connection(
-        self, session_id: str, host: str, port: int, username: str
-    ) -> None:
-        """Close and evict a stale connection so the next call reconnects."""
+        self,
+        session_id: str,
+        host: str,
+        port: int,
+        username: str,
+        *,
+        close_active: bool = True,
+    ) -> bool:
+        """Close and evict a stale connection so the next call reconnects.
+
+        When ``close_active`` is false, a connection still used by other
+        commands is left open so one channel failure doesn't interrupt
+        unrelated in-flight commands sharing the same SSH transport.
+        """
         key = self._key(session_id, host, port, username)
         async with self._global_lock:
+            entry = self._connections.get(key)
+            if entry is not None and not close_active and entry.in_use > 1:
+                return False
             entry = self._connections.pop(key, None)
             self._locks.pop(key, None)
         if entry is not None:
             self._close_connection(entry.conn)
+        return True
 
     async def close_session(self, session_id: str) -> None:
         """Close all connections belonging to *session_id*."""
@@ -375,15 +406,40 @@ async def execute_ssh_command(
                 result.stdout or "",
                 result.stderr or "",
             )
-        except (asyncssh.ConnectionLost, asyncssh.DisconnectError, BrokenPipeError, OSError):
+        except (
+            asyncssh.ConnectionLost,
+            asyncssh.DisconnectError,
+            asyncssh.ChannelOpenError,
+            BrokenPipeError,
+            OSError,
+        ):
             # Stale connection — evict from pool and retry with a fresh one.
-            invalidated = True
-            await _pool.invalidate_connection(session_id, host, port, username)
-            conn = await _pool.get_connection(
-                session_id=session_id,
-                host=host, port=port, username=username,
-                key_path=key_path, password=password,
+            invalidated = await _pool.invalidate_connection(
+                session_id,
+                host,
+                port,
+                username,
+                close_active=False,
             )
+            if invalidated:
+                conn = await _pool.get_connection(
+                    session_id=session_id,
+                    host=host, port=port, username=username,
+                    key_path=key_path, password=password,
+                )
+            else:
+                connect_kwargs: dict = dict(
+                    host=host,
+                    port=port,
+                    username=username,
+                    connect_timeout=15,
+                    known_hosts=None,
+                )
+                if key_path:
+                    connect_kwargs["client_keys"] = [key_path]
+                elif password:
+                    connect_kwargs["password"] = password
+                conn = await asyncssh.connect(**connect_kwargs)
             try:
                 result = await asyncio.wait_for(
                     conn.run(command, check=False),
@@ -395,7 +451,13 @@ async def execute_ssh_command(
                     result.stderr or "",
                 )
             finally:
-                await _pool.release_connection(session_id, host, port, username)
+                if invalidated:
+                    await _pool.release_connection(session_id, host, port, username)
+                else:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
         finally:
             if not invalidated:
                 await _pool.release_connection(session_id, host, port, username)

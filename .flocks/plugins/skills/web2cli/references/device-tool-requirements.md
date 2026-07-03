@@ -48,7 +48,8 @@ $HOME/.flocks/plugins/tools/device/<plugin_id>/
 - 自定义 CLI / WebCLI 默认认证方式为 `cookie/auth-state`：优先复用浏览器保存的 `auth-state.json`，从中按请求域名/path/secure 规则选择 Cookie，并在需要时读取 localStorage
 - 默认认证状态文件：`~/.flocks/browser/<name>/auth-state.json`
 - 优先使用 `auth_state_path` 指向 `~/.flocks/browser/<name>/auth-state.json`
-- 可以额外暴露可选 `username` / `password`，但它们只用于 cookie 失效后的认证恢复，不替代默认的 `auth_state_path`
+- 可以额外暴露可选 `username` / `password`，但它们只用于 cookie 失效后的认证恢复，不替代默认的 `auth_state_path`；两者都必须声明为 `storage: secret`
+- 如果模板需要保存内联登录态，只能使用 `auth_state`，并且必须声明 `storage: secret` 与 `internal: true`；不要在配置表单里展示 Cookie、localStorage、token 明文
 - 不要生成或使用 `auth_state_json` / `Legacy Auth State JSON` 这类内联 JSON 字段；设备配置只保存 state 文件路径，不粘贴 state 文件内容
 - 只有在目标站点确实还依赖额外字段时，才补充 `cookie`、`csrf_token`、`access_token` 或特定认证头；这些字段是 `auth_state_path` 之外的补充，不替代默认的 cookie/auth-state
 - 不要把 `cookie` 或 `token` 设计成和 `auth-state` 并列的多个默认入口；如果用户提供的是 state 文件路径，必须写入 `auth_state_path`
@@ -99,11 +100,11 @@ credential_fields:
     default: "~/.flocks/browser/acme-portal/auth-state.json"
   - key: username
     label: Username
-    storage: config
+    storage: secret
     config_key: username
-    input_type: text
+    input_type: password
     required: false
-    description: 仅在 cookie 失效后需要 Agent 辅助登录刷新 state 时填写
+    description: 仅在 cookie 失效后需要 Agent 辅助登录刷新 state 时填写；不会明文写入数据库
   - key: password
     label: Password
     storage: secret
@@ -112,6 +113,14 @@ credential_fields:
     input_type: password
     required: false
     description: 仅在 cookie 失效后需要 Agent 辅助登录刷新 state 时填写
+  - key: auth_state
+    label: Auth State
+    storage: secret
+    config_key: auth_state
+    input_type: password
+    required: false
+    internal: true
+    description: 内部登录态字段；不要在表单中展示 Cookie/localStorage/token 明文
   - key: cookie
     label: Cookie
     storage: secret
@@ -127,6 +136,14 @@ credential_fields:
 defaults:
   timeout: 30
   category: custom
+browser_auth:
+  login_url: "/login"
+  username_selector: "input[name=username]"
+  password_selector: "input[name=password]"
+  submit_selector: "button[type=submit]"
+  success_check:
+    url_not_contains: "/login"
+    selector: ".main-layout"
 notes: |
   WebCLI 设备建议优先复用稳定隐藏接口，不建议把浏览器自动化作为默认运行时。
   若返回 401/403、跳转登录页或 CSRF 失效，应先按认证失效处理。
@@ -259,9 +276,9 @@ normalize_alert: process
 处理原则：
 
 1. 不要无限重试
-2. 优先返回明确话术，提示 Rex 使用 `flocks browser` 和对应 skill 的认证失败处理去恢复登录态
-3. 如果设备已配置可选 `username` / `password`，Rex 可以在浏览器恢复流程中读取它们辅助登录；如遇验证码、MFA、短信码或人工确认，立即停下并让用户接管
-4. 登录成功后执行 `flocks browser state save <auth_state_path>` 更新 cookie/state 文件
+2. 优先调用 `flocks.browser.device_auth.ensure_browser_auth_state(...)` 尝试恢复登录态
+3. 如果设备已配置可选 `username` / `password`，该 helper 可以用它们辅助登录；如遇验证码、MFA、短信码或人工确认，立即停下并让用户接管
+4. 登录成功后执行 `flocks browser state save <auth_state_path>` 或由 helper 调用 `save_state(...)` 更新 cookie/state 文件
 5. 如仍失败，再提示用户重新登录或更新设备配置中的认证字段
 6. 如果保留了 CLI，可用 CLI 做一次最小验证
 7. 验证通过后，再让用户回到设备页点击“刷新设备模板”

@@ -1,8 +1,19 @@
-# Flocks
+<h1 align="center">Flocks</h1>
 
-**English** | [简体中文](README_zh.md)
+<p align="center">
+  AI-Native SecOps Platform
+</p>
 
-AI-Native SecOps Platform
+<p align="center">
+  <a href="https://agentflocks.github.io/flocks-docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
+  <a href="https://github.com/AgentFlocks/flocks/releases"><img alt="Release" src="https://img.shields.io/badge/release-v2026.6.18-f06f2f?style=for-the-badge"></a>
+</p>
+
+<p align="center">
+  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/lang-English-e33f44?style=for-the-badge"></a>
+  <a href="README_zh.md"><img alt="Chinese" src="https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-e33f44?style=for-the-badge"></a>
+</p>
 
 ![Flocks WebUI](assets/flocks.webp)
 

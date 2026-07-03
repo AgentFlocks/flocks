@@ -111,6 +111,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       showTimestamp?: boolean;
       collapseIntermediateSteps?: boolean;
       processGroupsDefaultOpen?: boolean;
+      processGroupsOpenWhileActive?: boolean;
     };
     onCreateAndSend?: (text: string, imageParts?: unknown[], agentOverride?: string) => Promise<unknown> | unknown;
   }) => (
@@ -121,6 +122,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       data-model={model ? `${model.providerID}/${model.modelID}` : ''}
       data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
       data-process-groups-default-open={String(Boolean(display?.processGroupsDefaultOpen))}
+      data-process-groups-open-while-active={String(Boolean(display?.processGroupsOpenWhileActive))}
       data-hide-input={String(Boolean(hideInput))}
     >
       {sessionId ?? 'no-session'}
@@ -417,11 +419,12 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
   });
 
-  it('defaults session process groups open on the session management page', () => {
+  it('keeps session process groups collapsed by default and open while running', () => {
     renderSessionPage();
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-collapse-intermediate', 'true');
-    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-process-groups-default-open', 'true');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-process-groups-default-open', 'false');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-process-groups-open-while-active', 'true');
   });
 
   it('syncs selected session when query param changes after mount', async () => {

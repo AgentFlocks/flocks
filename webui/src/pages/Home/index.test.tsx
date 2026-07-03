@@ -50,10 +50,10 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-describe('Home create user defined page entry', () => {
+describe('Home create WebUI contract page entry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    createMock.mockResolvedValue({ id: 'session-user-defined-1' });
+    createMock.mockResolvedValue({ id: 'session-webui-contract-1' });
     useAuthMock.mockReturnValue({
       user: {
         id: 'user-1',
@@ -73,18 +73,18 @@ describe('Home create user defined page entry', () => {
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole('button', { name: 'createUserDefinedPage' }));
+    await user.click(screen.getByRole('button', { name: 'createWebUIContractPage' }));
 
     await waitFor(() => {
-      expect(createMock).toHaveBeenCalledWith({ title: 'createUserDefinedPageSessionTitle' });
+      expect(createMock).toHaveBeenCalledWith({ title: 'createWebUIContractPageSessionTitle' });
     });
 
     expect(navigateMock).toHaveBeenCalledWith(
-      `/sessions?session=session-user-defined-1&message=${encodeURIComponent('createUserDefinedPageInitialMessage')}`,
+      `/sessions?session=session-webui-contract-1&message=${encodeURIComponent('createWebUIContractPageInitialMessage')}`,
     );
   });
 
-  it('hides the create user defined page entry for non-admin users', () => {
+  it('hides the create WebUI contract page entry for non-admin users', () => {
     useAuthMock.mockReturnValue({
       user: {
         id: 'user-2',
@@ -101,7 +101,7 @@ describe('Home create user defined page entry', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole('button', { name: 'createUserDefinedPage' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'createWebUIContractPage' })).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
   });
 });

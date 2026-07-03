@@ -34,12 +34,19 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
+MAX_SERVICE_LOG_BYTES = 1024 * 1024 * 1024
+LOG_TRIM_CHUNK_BYTES = 1024 * 1024
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
 DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portalflocks.threatbook.cn"
 DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portalflocks.threatbook.cn"
 MISSING_PORT_OWNER_TOOLS_WARNING = (
     "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
     "可尝试安装：apt/yum install lsof -y"
+)
+WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
+    "UV_HANDLE_CLOSING",
+    "src\\win\\async.c",
+    "src/win/async.c",
 )
 
 
@@ -557,10 +564,12 @@ def _windows_process_snapshot(pid: int) -> dict[str, str] | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode == 0:
             with contextlib.suppress(json.JSONDecodeError):
-                payload = json.loads(completed.stdout.strip() or "{}")
+                payload = json.loads((completed.stdout or "").strip() or "{}")
                 if isinstance(payload, dict):
                     return {
                         "name": str(payload.get("Name") or ""),
@@ -1036,14 +1045,20 @@ def start_frontend(config: ServiceConfig, console) -> None:
     frontend_env = build_frontend_env(config)
     if not config.skip_frontend_build:
         console.print("[flocks] 构建 WebUI...")
-        completed = subprocess.run(
-            [npm, "run", "build"],
-            cwd=webui_dir,
-            check=False,
-            env=frontend_env,
-        )
+        run_kwargs: dict[str, object] = {"cwd": webui_dir, "check": False, "env": frontend_env}
+        if sys.platform == "win32":
+            run_kwargs.update({"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"})
+        completed = subprocess.run([npm, "run", "build"], **run_kwargs)
         if completed.returncode != 0:
-            raise ServiceError("WebUI 构建失败。")
+            output = "\n".join(
+                value for value in (getattr(completed, "stdout", None), getattr(completed, "stderr", None)) if value
+            )
+            if windows_frontend_build_assertion_is_recoverable(webui_dir, output):
+                console.print("[flocks] WebUI 构建产物已生成，忽略 Windows Node.js 退出断言。")
+            else:
+                if output:
+                    console.print(output)
+                raise ServiceError("WebUI 构建失败。")
 
     command = [
         npm,
@@ -1612,6 +1627,15 @@ def websocket_access_base_url(config: ServiceConfig) -> str:
     return _http_to_ws_url(backend_access_base_url(config))
 
 
+def windows_frontend_build_assertion_is_recoverable(webui_dir: Path, output: str) -> bool:
+    """Return True when Windows npm crashed after producing a usable build."""
+    if sys.platform != "win32":
+        return False
+    if not (webui_dir / "dist" / "index.html").exists():
+        return False
+    return any(marker in output for marker in WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS)
+
+
 def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
     """Build frontend proxy environment variables from backend service settings."""
     env = os.environ.copy()
@@ -1680,6 +1704,7 @@ def _spawn_process(
         kwargs["start_new_session"] = True
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _cap_service_log_file(log_path, MAX_SERVICE_LOG_BYTES)
     handle = log_path.open("a", encoding="utf-8")
     try:
         return subprocess.Popen(
@@ -1694,6 +1719,40 @@ def _spawn_process(
         )
     finally:
         handle.close()
+
+
+def _cap_service_log_file(log_path: Path, max_bytes: int = MAX_SERVICE_LOG_BYTES) -> bool:
+    """Keep service logs under *max_bytes* without deleting or renaming them."""
+    if max_bytes <= 0:
+        return False
+    try:
+        size = log_path.stat().st_size
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    if size <= max_bytes:
+        return False
+
+    read_offset = size - max_bytes
+    write_offset = 0
+    try:
+        with log_path.open("r+b") as handle:
+            while read_offset < size:
+                handle.seek(read_offset)
+                chunk = handle.read(min(LOG_TRIM_CHUNK_BYTES, size - read_offset))
+                if not chunk:
+                    break
+                handle.seek(write_offset)
+                handle.write(chunk)
+                read_offset += len(chunk)
+                write_offset += len(chunk)
+            handle.truncate(write_offset)
+        return True
+    except OSError:
+        # Logging must not make daemon startup fail.  If Windows still has a
+        # transient lock, leave the file untouched and continue with append.
+        return False
 
 
 def _run_windows_netstat(port: int) -> str:

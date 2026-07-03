@@ -66,8 +66,8 @@
   "installDialog": {
     "title": "Install Skill",
     "sourceLabel": "Source",
-    "sourcePlaceholder": "Enter a source, e.g.:\nclawhub:github\ngithub:owner/repo\nhttps://raw.githubusercontent.com/...\n/local/path/to/skill",
-    "sourceHint": "Supports clawhub, GitHub, URL, local path, and future safeskill: sources",
+    "sourcePlaceholder": "Enter a source, e.g.:\nclawhub:github\ngithub:owner/repo\nsafeskill://tbx/.../onesig-use@1.0.0\nhttps://raw.githubusercontent.com/...\n/local/path/to/skill",
+    "sourceHint": "Supports clawhub, GitHub, SafeSkill, URL, and local path sources",
     "scopeLabel": "Install scope",
     "scopeGlobal": "Global (~/.flocks/plugins/skills/)",
     "scopeProject": "Project (.flocks/plugins/skills/)",

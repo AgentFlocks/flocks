@@ -10,6 +10,7 @@ description: >
 description_cn: >
   OneSEC 终端安全平台 API 服务。当前配置页需要分别填写 API Key、Secret 和
   Base URL；其中 Base URL 可留空，默认使用 `https://console.onesec.net`。
+docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/onesec-integration"
 auth:
   type: custom
   secret: onesec_api_key

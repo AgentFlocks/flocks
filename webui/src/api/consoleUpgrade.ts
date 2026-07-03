@@ -64,6 +64,8 @@ export interface UpgradeRequestStatus {
 
 export interface ProPackageStatus {
   installed: boolean;
+  runtime_importable?: boolean | null;
+  install_marker_present?: boolean | null;
   installed_version?: string | null;
   flockspro_component_version?: string | null;
   build_id?: string | null;
@@ -86,17 +88,6 @@ export const consoleUpgradeApi = {
 
   getProPackageStatus: async (): Promise<ProPackageStatus> => {
     const response = await client.get('/api/console/pro-package-status');
-    return response.data;
-  },
-
-  syncRevocations: async (): Promise<{
-    revoked_license_ids: string[];
-    imported: boolean;
-    synced_license_ids?: string[];
-    activated_license_id?: string | null;
-    refreshed_license_id?: string | null;
-  }> => {
-    const response = await client.post('/api/console/licenses/sync-revocations');
     return response.data;
   },
 
@@ -163,4 +154,3 @@ export const consoleUpgradeApi = {
     });
   },
 };
-

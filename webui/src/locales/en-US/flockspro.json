@@ -58,6 +58,7 @@
     "refreshing": "Refreshing...",
     "syncLicenseAction": "Sync License Info",
     "syncingLicense": "Syncing...",
+    "consoleSyncWarning": "Console license sync is temporarily unavailable. Local license status was refreshed. {{message}}",
     "applyAction": "Apply for Upgrade",
     "applyNewLicenseAction": "Apply for New License",
     "revokedOrExpiredHint": "The current license is no longer valid. You can submit a new Flocks Pro application.",

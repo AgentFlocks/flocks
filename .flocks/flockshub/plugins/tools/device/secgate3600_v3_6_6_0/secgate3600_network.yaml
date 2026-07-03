@@ -1,0 +1,29 @@
+name: secgate3600_network
+description: SecGate 3600 network interface read-only queries.
+description_cn: SecGate 3600 网络接口只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: secgate3600_api
+version: "3.6.6.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - interface_list
+        - test
+    page_index:
+      type: integer
+    page_size:
+      type: integer
+    body:
+      type: object
+      description: 可选覆盖请求 body，用于传入接口过滤条件。
+  required:
+    - action
+handler:
+  type: script
+  script_file: secgate3600.handler.py
+  function: network

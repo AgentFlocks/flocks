@@ -177,6 +177,15 @@ async def api_question_handler(
                 "session": session_id,
                 "elapsed": elapsed
             })
+            try:
+                from flocks.server.routes.event import publish_event
+                await publish_event("question.rejected", {
+                    "sessionID": session_id,
+                    "requestID": request_id,
+                    "reason": "timeout",
+                })
+            except Exception as event_error:
+                log.error("question.timeout.event_failed", {"error": str(event_error)})
             raise TimeoutError(
                 f"Question timed out after {timeout} seconds waiting for user response"
             )

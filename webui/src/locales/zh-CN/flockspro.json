@@ -58,6 +58,7 @@
     "refreshing": "刷新中...",
     "syncLicenseAction": "同步授权信息",
     "syncingLicense": "同步中...",
+    "consoleSyncWarning": "云端授权同步暂不可用，已继续刷新本地授权状态。{{message}}",
     "applyAction": "申请升级",
     "applyNewLicenseAction": "申请新授权",
     "revokedOrExpiredHint": "当前 License 已失效，可重新提交 Flocks Pro 申请。",

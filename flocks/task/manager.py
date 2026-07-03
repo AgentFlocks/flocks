@@ -820,29 +820,44 @@ class TaskManager:
     def _with_db_connection() -> sqlite3.Connection:
         return Storage.connect_sync()
 
+    @staticmethod
+    def _legacy_table_db_paths() -> list[Path]:
+        paths = [Storage.get_db_path(), TaskStore.get_db_path()]
+        unique: list[Path] = []
+        for path in paths:
+            if path not in unique:
+                unique.append(path)
+        return unique
+
     @classmethod
     def _legacy_tables_exist(cls) -> bool:
-        with cls._with_db_connection() as conn:
-            for table_name in ("tasks", "task_execution_records", "task_queue_refs"):
-                row = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-                    (table_name,),
-                ).fetchone()
-                if row is not None:
-                    return True
+        for db_path in cls._legacy_table_db_paths():
+            if not db_path.exists():
+                continue
+            with Storage.connect_sync(db_path) as conn:
+                for table_name in ("tasks", "task_execution_records", "task_queue_refs"):
+                    row = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                        (table_name,),
+                    ).fetchone()
+                    if row is not None:
+                        return True
         return False
 
     @classmethod
     def _drop_legacy_tables(cls) -> None:
-        with cls._with_db_connection() as conn:
-            conn.executescript(
-                """
-                DROP TABLE IF EXISTS task_queue_refs;
-                DROP TABLE IF EXISTS task_execution_records;
-                DROP TABLE IF EXISTS tasks;
-                """
-            )
-            conn.commit()
+        for db_path in cls._legacy_table_db_paths():
+            if not db_path.exists():
+                continue
+            with Storage.connect_sync(db_path) as conn:
+                conn.executescript(
+                    """
+                    DROP TABLE IF EXISTS task_queue_refs;
+                    DROP TABLE IF EXISTS task_execution_records;
+                    DROP TABLE IF EXISTS tasks;
+                    """
+                )
+                conn.commit()
 
     @classmethod
     async def _enqueue_execution(cls, execution: TaskExecution) -> TaskExecution:

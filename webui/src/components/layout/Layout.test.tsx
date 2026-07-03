@@ -1,10 +1,11 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
+import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
 
 const {
   catalogAPI,
@@ -19,9 +20,10 @@ const {
   getNotificationAckStatus,
   flocksproUsersApi,
   consoleUpgradeApi,
+  updateModalMock,
   useAuth,
   useStats,
-  useUserDefinedPages,
+  useWebUIContractPages,
 } = vi.hoisted(() => ({
   catalogAPI: {
     list: vi.fn(),
@@ -53,14 +55,15 @@ const {
   consoleUpgradeApi: {
     getProPackageStatus: vi.fn(),
   },
+  updateModalMock: vi.fn(() => null),
   useAuth: vi.fn(),
   useStats: vi.fn(),
-  useUserDefinedPages: vi.fn(() => ({
+  useWebUIContractPages: vi.fn(() => ({
     pages: [
       {
         id: 'dash-1',
         title: '自定义仪表盘',
-        route: '/user-defined-pages/dash-1',
+        route: '/contracts/webui/dash-1',
         icon: 'LayoutDashboard',
         order: 10,
         enabled: true,
@@ -125,8 +128,8 @@ vi.mock('@/components/common/Toast', () => ({
   }),
 }));
 
-vi.mock('@/hooks/useUserDefinedPages', () => ({
-  useUserDefinedPages,
+vi.mock('@/hooks/useWebUIContractPages', () => ({
+  useWebUIContractPages,
 }));
 
 vi.mock('@/components/common/LanguageSwitcher', () => ({
@@ -135,12 +138,17 @@ vi.mock('@/components/common/LanguageSwitcher', () => ({
 
 vi.mock('@/components/common/UpdateModal', () => ({
   UPDATE_DISMISSED_KEY: 'update-dismissed',
-  default: () => null,
+  default: (props: Record<string, unknown>) => {
+    updateModalMock(props);
+    return <div role="dialog" aria-label="update-modal" />;
+  },
 }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    t: (key: string, options?: Record<string, string>) => (
+      options?.version ? `${key} ${options.version}` : key
+    ),
     i18n: { language: 'zh-CN', changeLanguage: vi.fn() },
   }),
 }));
@@ -242,6 +250,7 @@ describe('Layout onboarding entry', () => {
         status: 'active',
         must_reset_password: false,
       },
+      logout: vi.fn(),
     });
 
     useStats.mockReturnValue({
@@ -356,8 +365,20 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it('skips GitHub-backed update checks when Flocks Pro is active', async () => {
-    vi.useFakeTimers();
+  it('checks Flocks Pro bundle updates when Flocks Pro is active', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: '2026.6.22',
+      current_version: '2026.6.21',
+      current_bundle_version: '2026.6.21',
+      latest_bundle_version: '2026.6.22',
+      current_core_version: '2026.6.21',
+      latest_core_version: '2026.6.21',
+      current_pro_component_version: '2026.6.20',
+      latest_pro_component_version: '2026.6.22',
+      error: null,
+    });
     flocksproUsersApi.getLicenseStatus.mockResolvedValue({
       pro_enabled: true,
       active: true,
@@ -372,13 +393,43 @@ describe('Layout onboarding entry', () => {
 
     renderHomeWithLayout();
 
-    await flushEffects();
-    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    expect(await screen.findByRole('button', { name: 'hasNewVersion v2026.6.22' })).toBeInTheDocument();
+  });
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_600_000);
+  it('shows the Pro update modal when only the Pro component changed after dismissal', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    localStorage.setItem(UPDATE_DISMISSED_KEY, 'flockspro:v2026.6.18:v2026.6.18:v2026.6.1');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: 'v2026.6.18',
+      current_version: 'v2026.6.18',
+      current_bundle_version: 'v2026.6.18',
+      latest_bundle_version: 'v2026.6.18',
+      current_core_version: 'v2026.6.18',
+      latest_core_version: 'v2026.6.18',
+      current_pro_component_version: 'v2026.6.1',
+      latest_pro_component_version: 'v2026.6.2',
+      edition: 'flockspro',
+      error: null,
     });
-    expect(checkUpdate).not.toHaveBeenCalled();
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      pro_enabled: true,
+      active: true,
+      status: 'active',
+      license_status: 'active',
+    });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      runtime_importable: true,
+      installed_version: 'v2026.6.18',
+      flockspro_component_version: 'v2026.6.1',
+    });
+
+    renderHomeWithLayout();
+
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    await waitFor(() => expect(updateModalMock).toHaveBeenCalled());
   });
 
   it('shows Flocks Pro branding and version for member users', async () => {
@@ -391,6 +442,7 @@ describe('Layout onboarding entry', () => {
         status: 'active',
         must_reset_password: false,
       },
+      logout: vi.fn(),
     });
     flocksproUsersApi.getLicenseStatus.mockResolvedValue({
       pro_enabled: true,
@@ -400,16 +452,208 @@ describe('Layout onboarding entry', () => {
     });
     consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
       installed: true,
-      installed_version: '2026.05.22',
-      flockspro_component_version: '2026.05.22',
+      installed_version: '2026.6.21',
+      flockspro_component_version: '2026.6.20',
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
+    expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
+    expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
+    expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).queryByText('v2026.6.21')).not.toBeInTheDocument();
+    expect(within(accountRow!).getByText('v2026.6.21')).toBeInTheDocument();
+  });
+
+  it('keeps Pro account actions and version placement aligned with the standard layout', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: null,
+      current_version: '2026.6.20',
+      current_bundle_version: '2026.6.22',
+      latest_bundle_version: null,
+      current_core_version: '2026.6.20',
+      latest_core_version: '2026.6.20',
+      current_pro_component_version: '2026.6.22',
+      latest_pro_component_version: '2026.6.22',
+      edition: 'flockspro',
+      error: null,
+    });
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      pro_enabled: true,
+      active: true,
+      status: 'active',
+      license_status: 'active',
+    });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      installed_version: '2026.6.21',
+      flockspro_component_version: '2026.6.21',
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
+    expect(await screen.findByText('v2026.6.22')).toBeInTheDocument();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).queryByText('v2026.6.22')).not.toBeInTheDocument();
+    expect(within(accountRow!).getByText('v2026.6.22')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+
+    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+
+    await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
+
+    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(updateModalMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        edition: 'flockspro',
+      }),
+    );
+  });
+
+  it('keeps new version reminder on the product mark while showing current version in the account area', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: '2026.04.29',
+      current_version: '2026.04.28',
+      release_notes: 'Release line',
+      release_url: 'https://example.com/release',
+      error: null,
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    const updateButton = await screen.findByRole('button', { name: 'hasNewVersion v2026.04.29' });
+    expect(updateButton).toBeInTheDocument();
+    expect(screen.getByText('v2026.04.28')).toBeInTheDocument();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).getByText('Flocks').closest('button')).toBeNull();
+    expect(within(logoRow!).queryByText('v2026.04.28')).not.toBeInTheDocument();
+    expect(within(logoRow!).getByText('newVersion')).toBeInTheDocument();
+    expect(within(accountRow!).getByText('v2026.04.28')).toBeInTheDocument();
+
+    await user.click(screen.getByTitle('collapseNav'));
+
+    const collapsedUpdateButton = screen.getByRole('button', { name: 'hasNewVersion v2026.04.29' });
+    expect(collapsedUpdateButton).toHaveClass('h-2.5');
+    expect(collapsedUpdateButton).toHaveClass('w-2.5');
+    expect(screen.queryByText('newVersion')).not.toBeInTheDocument();
+  });
+
+  it('opens the account menu with settings and logout actions', async () => {
+    const user = userEvent.setup();
+    const logout = vi.fn().mockResolvedValue(undefined);
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-1',
+        username: 'admin',
+        role: 'admin',
+        status: 'active',
+        must_reset_password: false,
+      },
+      logout,
     });
 
     renderHomeWithLayout();
 
-    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
-    expect(await screen.findByText('Flocks Pro pro-v2026.05.22')).toBeInTheDocument();
-    expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
-    expect(checkUpdate).not.toHaveBeenCalled();
+    expect(await screen.findByText('admin.roleAdmin')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+
+    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+
+    await user.click(screen.getByRole('button', { name: 'logout' }));
+    expect(logout).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the update dialog from the account menu', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('admin.roleAdmin')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+    await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
+
+    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(updateModalMock).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'logout' })).not.toBeInTheDocument();
+  });
+
+  it('keeps desktop layout animation while collapsing the sidebar', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    const aside = container.querySelector('aside');
+    const contentShell = container.querySelector('main')?.parentElement;
+    expect(aside).toHaveClass('transition-all');
+    expect(contentShell).toHaveClass('transition-all');
+
+    await user.click(screen.getByTitle('collapseNav'));
+
+    expect(aside).toHaveClass('w-16');
+    expect(aside).toHaveClass('transition-all');
+    expect(contentShell).toHaveClass('lg:pl-16');
+    expect(contentShell).toHaveClass('transition-all');
+  });
+
+  it('only keeps the account divider in the sidebar chrome', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild;
+    const accountRow = sidebarShell?.children.item(2);
+
+    expect(logoRow).not.toHaveClass('border-b');
+    expect(accountRow).toHaveClass('border-t');
+  });
+
+  it('keeps the collapsed account menu selectable outside the sidebar width', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    await user.click(screen.getByTitle('collapseNav'));
+    await user.click(screen.getByRole('button', { name: 'admin settings' }));
+
+    expect(container.querySelector('aside > div')).toHaveClass('overflow-visible');
+    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    expect(screen.getByRole('button', { name: 'logout' })).toBeInTheDocument();
   });
 
   it('enforces a ten-minute minimum gap for focus-triggered update checks', async () => {
@@ -575,7 +819,7 @@ describe('Layout onboarding entry', () => {
   });
 });
 
-describe('Layout user defined pages navigation', () => {
+describe('Layout WebUI contract pages navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
@@ -594,6 +838,7 @@ describe('Layout user defined pages navigation', () => {
         status: 'active',
         must_reset_password: false,
       },
+      logout: vi.fn(),
     });
     useStats.mockReturnValue({
       stats: {
@@ -613,21 +858,21 @@ describe('Layout user defined pages navigation', () => {
     consoleUpgradeApi.getProPackageStatus.mockResolvedValue({ pro_enabled: false });
   });
 
-  it('renders custom user defined page links under the home section', async () => {
+  it('renders custom WebUI contract page links under the home section', async () => {
     renderHomeWithLayout();
     expect(await screen.findByRole('link', { name: '自定义仪表盘' })).toHaveAttribute(
       'href',
-      '/user-defined-pages/dash-1',
+      '/contracts/webui/dash-1',
     );
   });
 
-  it('does not render custom page links until their build is ready', async () => {
-    useUserDefinedPages.mockReturnValue({
+  it('does not render WebUI contract page links until their build is ready', async () => {
+    useWebUIContractPages.mockReturnValue({
       pages: [
         {
           id: 'ready-page',
           title: '可用页面',
-          route: '/user-defined-pages/ready-page',
+          route: '/contracts/webui/ready-page',
           icon: 'LayoutDashboard',
           order: 10,
           enabled: true,
@@ -638,7 +883,7 @@ describe('Layout user defined pages navigation', () => {
         {
           id: 'failed-page',
           title: '失败页面',
-          route: '/user-defined-pages/failed-page',
+          route: '/contracts/webui/failed-page',
           icon: 'LayoutDashboard',
           order: 20,
           enabled: true,
@@ -656,5 +901,156 @@ describe('Layout user defined pages navigation', () => {
 
     expect(await screen.findByRole('link', { name: '可用页面' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '失败页面' })).not.toBeInTheDocument();
+  });
+
+  it('renders WebUI workspaces and device integration in the scene workspace group', async () => {
+    const user = userEvent.setup();
+    const workspacePages = [
+      {
+        id: 'risk-dashboard',
+        title: '态势看板',
+        route: '/contracts/webui/risk-dashboard',
+        icon: 'Activity',
+        order: 30,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'scene_workspace',
+        workspaceTitle: '场景工作区',
+        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
+      },
+      {
+        id: 'ops-overview',
+        title: '运营总览',
+        route: '/contracts/webui/ops-overview',
+        icon: 'ShieldCheck',
+        order: 10,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'scene_workspace',
+        workspaceTitle: '场景工作区',
+        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
+      },
+      {
+        id: 'investigation-list',
+        title: '调查列表',
+        route: '/contracts/webui/investigation-list',
+        icon: 'AlertTriangle',
+        order: 20,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'scene_workspace',
+        workspaceTitle: '场景工作区',
+        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
+      },
+    ];
+    useWebUIContractPages.mockReturnValue({
+      pages: workspacePages,
+      workspaces: [
+        {
+          id: 'scene_workspace',
+          title: '场景工作区',
+          route: '/contracts/webui/workspaces/scene_workspace',
+          icon: 'ShieldCheck',
+          order: 10,
+          enabled: true,
+          placement: 'sceneWorkspace',
+          defaultPageId: 'ops-overview',
+          sections: [
+            {
+              id: 'posture',
+              label: '态势',
+              pageIds: ['risk-dashboard'],
+              defaultPageId: 'risk-dashboard',
+              contentPadding: 'none',
+              themeOverride: 'dark',
+            },
+            {
+              id: 'operations',
+              label: '调查列表',
+              pageIds: ['ops-overview', 'investigation-list'],
+              defaultPageId: 'ops-overview',
+              contentPadding: 'comfortable',
+            },
+          ],
+          pages: workspacePages,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    const workspaceLink = await screen.findByRole('link', { name: '场景工作区' });
+    expect(workspaceLink).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/scene_workspace',
+    );
+    expect(workspaceLink.querySelectorAll('svg')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: '调查列表' })).not.toBeInTheDocument();
+
+    const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThan(sectionHeadings.indexOf('agentHub'));
+    expect(sectionHeadings).not.toContain('systemCenter');
+
+    const sceneSection = Array.from(container.querySelectorAll('h3'))
+      .find((heading) => heading.textContent === 'sceneWorkspaces')
+      ?.parentElement;
+    expect(sceneSection?.querySelector('a[href="/contracts/webui/workspaces/scene_workspace"]')).not.toBeNull();
+    expect(sceneSection?.querySelector('a[href="/devices"]')).not.toBeNull();
+
+    const agentSection = Array.from(container.querySelectorAll('h3'))
+      .find((heading) => heading.textContent === 'agentHub')
+      ?.parentElement;
+    expect(agentSection?.querySelector('a[href="/devices"]')).toBeNull();
+    expect(agentSection?.querySelector('a[href="/models"]')).not.toBeNull();
+    expect(agentSection?.querySelector('a[href="/channels"]')).not.toBeNull();
+
+    await user.click(workspaceLink);
+
+    const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
+    expect(workspaceMenu).toBeInTheDocument();
+    expect(workspaceMenu).toHaveClass('w-52');
+    expect(workspaceMenu).toHaveClass('bg-zinc-100');
+    expect(screen.getByRole('link', { name: '态势' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/scene_workspace/risk-dashboard',
+    );
+    expect(screen.getByRole('link', { name: '运营总览' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/scene_workspace/ops-overview',
+    );
+    expect(screen.getAllByRole('link', { name: '调查列表' }).find((link) => link.getAttribute('href')?.endsWith('/investigation-list'))).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/scene_workspace/investigation-list',
+    );
+
+    const workspaceMenuScope = within(workspaceMenu);
+    const collapseButtons = workspaceMenuScope.getAllByTitle('workspace.collapseSidebar');
+    await user.click(collapseButtons[collapseButtons.length - 1]);
+    expect(screen.queryByRole('link', { name: '运营总览' })).not.toBeInTheDocument();
+
+    await user.click(workspaceMenuScope.getByTitle('workspace.expandSidebar'));
+    expect(screen.getByRole('link', { name: '运营总览' })).toBeInTheDocument();
+
+    await user.click(workspaceMenuScope.getByRole('button', { name: '调查列表' }));
+    expect(screen.queryByRole('link', { name: '运营总览' })).not.toBeInTheDocument();
+
+    await user.click(workspaceMenuScope.getByRole('button', { name: '调查列表' }));
+    expect(screen.getByRole('link', { name: '运营总览' })).toBeInTheDocument();
+
+    await user.unhover(workspaceLink);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
+    });
   });
 });

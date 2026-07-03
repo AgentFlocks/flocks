@@ -183,6 +183,7 @@ Acceptance checklist:
 
 - [ ] Inputs are correctly recognized and parsed.
 - [ ] Each node has a clear responsibility and outputs fields downstream nodes can read.
+- [ ] Every edge in `workflow.json` has a non-empty `mapping` and maps only fields the downstream node needs.
 - [ ] Branch, filtering, aggregation, or analysis logic matches expectations.
 - [ ] Output fields and file formats are clear.
 - [ ] `workflow.md` and `workflow.json` describe the same flow.

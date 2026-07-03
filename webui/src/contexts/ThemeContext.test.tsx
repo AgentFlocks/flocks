@@ -5,16 +5,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThemeContext, ThemeProvider } from './ThemeContext';
 
 function ThemeProbe() {
-  const { theme, toggleTheme, setTheme } = useContext(ThemeContext);
+  const { theme, effectiveTheme, toggleTheme, setTheme, setTemporaryThemeOverride } = useContext(ThemeContext);
 
   return (
     <div>
       <span data-testid="theme-value">{theme}</span>
+      <span data-testid="effective-theme-value">{effectiveTheme}</span>
       <button type="button" onClick={toggleTheme}>
         toggle
       </button>
       <button type="button" onClick={() => setTheme('dark')}>
         set dark
+      </button>
+      <button type="button" onClick={() => setTemporaryThemeOverride('dark')}>
+        temp dark
+      </button>
+      <button type="button" onClick={() => setTemporaryThemeOverride(null)}>
+        clear temp
       </button>
     </div>
   );
@@ -45,7 +52,7 @@ describe('ThemeProvider', () => {
     mockPreferredScheme(false);
   });
 
-  it('uses system dark preference when no stored theme exists', async () => {
+  it('defaults to light when no stored theme exists', async () => {
     mockPreferredScheme(true);
 
     render(
@@ -54,10 +61,10 @@ describe('ThemeProvider', () => {
       </ThemeProvider>,
     );
 
-    expect(screen.getByTestId('theme-value')).toHaveTextContent('dark');
-    expect(document.documentElement).toHaveClass('dark');
-    expect(document.documentElement.style.colorScheme).toBe('dark');
-    await waitFor(() => expect(localStorage.getItem('flocks_theme')).toBe('dark'));
+    expect(screen.getByTestId('theme-value')).toHaveTextContent('light');
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(document.documentElement.style.colorScheme).toBe('light');
+    await waitFor(() => expect(localStorage.getItem('flocks_theme')).toBe('light'));
   });
 
   it('prefers the stored theme over system preference', async () => {
@@ -93,8 +100,44 @@ describe('ThemeProvider', () => {
     });
 
     expect(screen.getByTestId('theme-value')).toHaveTextContent('dark');
+    expect(screen.getByTestId('effective-theme-value')).toHaveTextContent('dark');
     expect(document.documentElement).toHaveClass('dark');
     expect(document.documentElement.style.colorScheme).toBe('dark');
     await waitFor(() => expect(localStorage.getItem('flocks_theme')).toBe('dark'));
+  });
+
+  it('temporarily overrides the displayed theme without changing the stored preference', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_theme', 'light');
+
+    render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId('theme-value')).toHaveTextContent('light');
+    expect(screen.getByTestId('effective-theme-value')).toHaveTextContent('light');
+    expect(document.documentElement).not.toHaveClass('dark');
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'temp dark' }));
+    });
+
+    expect(screen.getByTestId('theme-value')).toHaveTextContent('light');
+    expect(screen.getByTestId('effective-theme-value')).toHaveTextContent('dark');
+    expect(document.documentElement).toHaveClass('dark');
+    expect(document.documentElement.style.colorScheme).toBe('dark');
+    expect(localStorage.getItem('flocks_theme')).toBe('light');
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'clear temp' }));
+    });
+
+    expect(screen.getByTestId('theme-value')).toHaveTextContent('light');
+    expect(screen.getByTestId('effective-theme-value')).toHaveTextContent('light');
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(document.documentElement.style.colorScheme).toBe('light');
+    expect(localStorage.getItem('flocks_theme')).toBe('light');
   });
 });

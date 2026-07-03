@@ -127,7 +127,28 @@
     "process": {
       "title": "过程（{{count}} 项）",
       "reasoningCount": "{{count}} 段思考",
-      "toolCount": "{{count}} 次工具调用"
+      "toolCount": "{{count}} 次工具调用",
+      "textCount": "{{count}} 段中间回复"
+    },
+    "questionResult": {
+      "answered": "已回答",
+      "unanswered": "未回答",
+      "questionLabel": "问题",
+      "answerLabel": "回答",
+      "yes": "是",
+      "no": "否"
+    },
+    "bash": {
+      "command": "命令",
+      "workdir": "工作目录",
+      "duration": "耗时",
+      "timeout": "超时",
+      "timedOut": "已超时",
+      "aborted": "已中止",
+      "stdout": "标准输出",
+      "stderr": "标准错误",
+      "output": "输出",
+      "noOutput": "无输出"
     },
     "you": "你",
     "sending": "发送中...",

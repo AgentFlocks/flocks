@@ -137,4 +137,5 @@ def test_python_runtime_can_cleanup_node_globals_after_execute() -> None:
 
     assert outputs == {"ok": True}
     assert "temporary_payload" not in runtime.globals
-    assert runtime.globals["outputs"] == {"ok": True}
+    assert "inputs" not in runtime.globals
+    assert "outputs" not in runtime.globals

@@ -85,6 +85,9 @@ export const workspaceAPI = {
   downloadUrl: (path: string) =>
     `${client.defaults.baseURL ?? ''}/api/workspace/download?path=${encodeURIComponent(path)}`,
 
+  previewUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/preview?path=${encodeURIComponent(path)}`,
+
   downloadZip: (paths: string[], archiveName = 'workspace_files.zip') =>
     client.post(
       '/api/workspace/download/zip',
@@ -95,12 +98,24 @@ export const workspaceAPI = {
   move: (src: string, dst: string) =>
     client.post<{ src: string; dst: string; moved: boolean }>('/api/workspace/move', { src, dst }),
 
+  reveal: (path: string) =>
+    client.post<{ path: string; opened: boolean; target: 'file' | 'directory'; mode: string }>(
+      '/api/workspace/reveal',
+      { path },
+    ),
+
   // Memory (read-only)
   listMemory: () =>
     client.get<WorkspaceNode[]>('/api/workspace/memory/list'),
 
   readMemoryFile: (path: string) =>
     client.get<WorkspaceFileContentResponse>('/api/workspace/memory/file', { params: { path } }),
+
+  memoryDownloadUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/memory/download?path=${encodeURIComponent(path)}`,
+
+  memoryPreviewUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/memory/preview?path=${encodeURIComponent(path)}`,
 
   // Stats
   stats: () =>
