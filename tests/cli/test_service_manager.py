@@ -439,6 +439,12 @@ def test_daemon_log_service_name_uses_daemon_only(tmp_path: Path) -> None:
     assert daemon._log_paths_for_service("supervisor") == []
 
 
+def test_daemon_log_event_prefix_uses_daemon(capsys) -> None:
+    service_supervisor._daemon_log("stopped")
+
+    assert "daemon.stopped" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("disconnect_error", [BrokenPipeError, ConnectionResetError, ConnectionAbortedError])
 def test_supervisor_control_send_json_ignores_disconnected_client(disconnect_error: type[Exception]) -> None:
     daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())

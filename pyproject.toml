@@ -109,9 +109,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["flocks"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"webui/dist" = "flocks/webui_static"
-
 [tool.ruff]
 line-length = 120
 target-version = "py312"

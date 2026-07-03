@@ -56,12 +56,12 @@ class ManagedService:
 
 
 def _daemon_log(event: str, details: dict[str, object] | None = None) -> None:
-    """Write a structured supervisor log line to stdout."""
+    """Write a structured daemon log line to stdout."""
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     suffix = ""
     if details:
         suffix = " " + json.dumps(details, ensure_ascii=True, sort_keys=True)
-    sys.stdout.write(f"[{timestamp}] supervisor.{event}{suffix}\n")
+    sys.stdout.write(f"[{timestamp}] daemon.{event}{suffix}\n")
     sys.stdout.flush()
 
 

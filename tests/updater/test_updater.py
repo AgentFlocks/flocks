@@ -538,12 +538,14 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
     assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--frozen", "--no-python-downloads"]
 
 
-def test_wheel_build_config_does_not_force_include_flockshub() -> None:
+def test_wheel_build_config_does_not_force_include_runtime_or_build_outputs() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     wheel_config = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
+    forced_includes = wheel_config.get("force-include", {})
 
-    assert ".flocks/flockshub" not in wheel_config.get("force-include", {})
+    assert ".flocks/flockshub" not in forced_includes
+    assert "webui/dist" not in forced_includes
 
 
 def test_build_frontend_subprocess_env_prepends_bundled_node_on_windows(
