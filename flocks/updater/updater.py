@@ -2037,7 +2037,11 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
 
     from flocks.cli import service_manager
 
-    remaining = service_manager.port_owner_pids(frontend_port)
+    remaining = [
+        pid
+        for pid in service_manager.port_owner_pids(frontend_port)
+        if _looks_like_upgrade_page_process(pid)
+    ]
     if remaining:
         log.info(
             "updater.upgrade_page.port_fallback_kill",
@@ -2059,13 +2063,27 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
         wait_attempts = 40
         wait_interval = 0.25
         for _ in range(wait_attempts):
-            if not service_manager.port_owner_pids(frontend_port):
+            if not any(_looks_like_upgrade_page_process(pid) for pid in service_manager.port_owner_pids(frontend_port)):
                 return
             time.sleep(wait_interval)
         return
 
     if remaining:
         time.sleep(0.3)
+
+
+def _looks_like_upgrade_page_process(pid: int) -> bool:
+    """Return True only for the temporary upgrade-page http.server process."""
+    try:
+        from flocks.cli import service_manager
+
+        command_line = service_manager._process_command_line(pid).lower()
+    except Exception:
+        return False
+    if not command_line:
+        return False
+    page_dir = str(_upgrade_page_dir()).lower()
+    return "http.server" in command_line and "upgrade-page" in command_line and page_dir in command_line
 
 
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:

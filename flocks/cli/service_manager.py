@@ -30,6 +30,8 @@ from flocks.cli.service_config import ServiceConfig, loopback_host
 from flocks.cli.service_control import (
     read_logs,
     read_supervisor_status,
+    request_restart,
+    request_resume_upgrade,
     request_stop,
     stream_logs,
     supervisor_is_running,
@@ -1243,7 +1245,6 @@ def _start_backend_process(
         )
 
     command, env = _backend_command_and_env(root, config)
-    console.print("[flocks] 启动 Flocks service...")
     process = _spawn_process(command, cwd=root, log_path=current.backend_log, env=env)
     record = process_runtime_record(
         process,
@@ -1446,6 +1447,15 @@ def _service_config_matches(left: ServiceConfig, right: ServiceConfig) -> bool:
     )
 
 
+def _supervisor_backend_is_healthy(status) -> bool:
+    """Return whether a supervisor status represents an accessible Flocks service."""
+    return (
+        not status.backend.paused
+        and status.backend.state.lower() == "healthy"
+        and status.backend.health.lower() == "healthy"
+    )
+
+
 def _legacy_runtime_config(paths: RuntimePaths, fallback: ServiceConfig) -> ServiceConfig:
     """Build cleanup config from legacy runtime records when present."""
     return ServiceConfig(
@@ -1542,6 +1552,7 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
 
 def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) -> None:
     """Ensure the supervisor daemon is running; caller must hold lifecycle lock."""
+    _resolve_upgrade_runtime(console, frontend_port=config.frontend_port, attempt_recover=True)
     if supervisor_is_running(paths):
         status = None
         try:
@@ -1553,9 +1564,23 @@ def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) 
             _stop_all_unlocked(console, paths=paths)
             _start_all_without_stop(config, console)
             return
+        if status is not None and (status.backend.paused or status.backend.state.lower() == "paused"):
+            console.print("[flocks] Flocks daemon 已在运行，但 Flocks service 处于暂停状态，正在恢复...")
+            status = request_resume_upgrade(config, paths=paths)
+            _print_status_payload(status.raw, console, include_daemon_step=False)
+            if not config.no_browser and _supervisor_backend_is_healthy(status):
+                open_default_browser(_frontend_url_from_status(status, config.frontend_url), console)
+            return
+        if status is not None and not _supervisor_backend_is_healthy(status):
+            console.print("[flocks] Flocks daemon 已在运行，但 Flocks service 不可用，正在重启...")
+            status = request_restart(config, paths=paths)
+            _print_status_payload(status.raw, console, include_daemon_step=False)
+            if not config.no_browser and _supervisor_backend_is_healthy(status):
+                open_default_browser(_frontend_url_from_status(status, config.frontend_url), console)
+            return
         console.print("[flocks] Flocks daemon 已在运行。")
         show_status(console)
-        if not config.no_browser:
+        if status is not None and not config.no_browser and _supervisor_backend_is_healthy(status):
             try:
                 url = _frontend_url_from_status(status, config.frontend_url)
             except Exception:

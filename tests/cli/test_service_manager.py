@@ -30,6 +30,7 @@ class DummyConsole:
 @pytest.fixture(autouse=True)
 def _skip_backend_webui_dist_check(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "_ensure_webui_dist", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", lambda *_args, **_kwargs: {"action": "noop", "error": None})
 
 
 def _make_runtime_paths(tmp_path: Path) -> service_manager.RuntimePaths:
@@ -944,6 +945,29 @@ def test_start_all_starts_supervisor_when_control_api_is_down(monkeypatch) -> No
     assert call_order == ["ensure_runtime_dirs", "_start_all_without_stop"]
 
 
+def test_start_all_resolves_upgrade_runtime_before_supervisor_status(monkeypatch) -> None:
+    events: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+
+    def resolve_upgrade_runtime(_console, *, frontend_port: int, attempt_recover: bool) -> dict[str, object]:
+        events.append(f"upgrade:{frontend_port}:{attempt_recover}")
+        return {"action": "cleaned", "error": None}
+
+    def supervisor_running(_paths) -> bool:
+        events.append("supervisor")
+        return False
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", resolve_upgrade_runtime)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", supervisor_running)
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: events.append("start"))
+
+    service_manager.start_all(service_manager.ServiceConfig(frontend_port=5173), console)
+
+    assert events == ["upgrade:5173:True", "supervisor", "start"]
+
+
 def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
     calls: list[str] = []
     console = DummyConsole()
@@ -958,6 +982,72 @@ def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
 
     assert calls == ["status"]
     assert "[flocks] Flocks daemon 已在运行。" in console.messages
+
+
+def test_start_all_resumes_paused_supervisor_before_opening_browser(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+    paused_payload = _supervisor_status_payload()
+    paused_payload["backend"].update({
+        "pid": None,
+        "state": "paused",
+        "health": "paused",
+        "paused": True,
+        "last_error": "control upgrade prepare",
+    })
+    paused_payload["webui"].update({
+        "state": "paused",
+        "health": "paused",
+        "paused": True,
+        "last_error": "control upgrade prepare",
+    })
+    resumed_status = _supervisor_status()
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(paused_payload))
+    monkeypatch.setattr(
+        service_manager,
+        "request_resume_upgrade",
+        lambda _config, **_kwargs: calls.append("resume") or resumed_status,
+    )
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: calls.append("status"))
+    monkeypatch.setattr(service_manager, "open_default_browser", lambda url, _console: calls.append(f"browser:{url}"))
+
+    service_manager.start_all(service_manager.ServiceConfig(), console)
+
+    assert calls == ["resume", "status", "browser:http://127.0.0.1:9000"]
+    assert "[flocks] Flocks daemon 已在运行，但 Flocks service 处于暂停状态，正在恢复..." in console.messages
+
+
+def test_start_all_does_not_open_browser_when_restarted_service_remains_unhealthy(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+    degraded_payload = _supervisor_status_payload()
+    degraded_payload["backend"].update({
+        "state": "degraded",
+        "health": "degraded",
+        "last_error": "port unavailable",
+    })
+    degraded_status = _supervisor_status(degraded_payload)
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: degraded_status)
+    monkeypatch.setattr(
+        service_manager,
+        "request_restart",
+        lambda _config, **_kwargs: calls.append("restart") or degraded_status,
+    )
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: calls.append("status"))
+    monkeypatch.setattr(service_manager, "open_default_browser", lambda *_args, **_kwargs: calls.append("browser"))
+
+    service_manager.start_all(service_manager.ServiceConfig(), console)
+
+    assert calls == ["restart", "status"]
+    assert "[flocks] Flocks daemon 已在运行，但 Flocks service 不可用，正在重启..." in console.messages
 
 
 def test_start_all_restarts_running_daemon_when_config_changes(monkeypatch) -> None:
@@ -1130,6 +1220,7 @@ def test_start_backend_process_does_not_write_runtime_metadata(monkeypatch, tmp_
     }]
     assert spawn_env is not None
     assert spawn_env.get("PYTHONUNBUFFERED") == "1"
+    assert "[flocks] 启动 Flocks service..." not in console.messages
 
 
 def test_start_backend_rolls_back_when_probe_fails(monkeypatch, tmp_path: Path) -> None:

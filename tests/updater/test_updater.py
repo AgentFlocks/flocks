@@ -1353,6 +1353,51 @@ def test_start_upgrade_page_server_binds_configured_frontend_host(
     assert captured["wait_host"] == "0.0.0.0"
 
 
+def test_stop_upgrade_page_server_does_not_kill_unified_flocks_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    killed: list[int] = []
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [111])
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: "/env/bin/python -m flocks.cli.main serve --host 127.0.0.1 --port 5173",
+    )
+    monkeypatch.setattr(updater.os, "kill", lambda pid, _sig: killed.append(pid))
+
+    updater._stop_upgrade_page_server(frontend_port=5173)
+
+    assert killed == []
+
+
+def test_stop_upgrade_page_server_kills_only_upgrade_page_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    page_dir = flocks_root / "run" / "upgrade-page"
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    killed: list[int] = []
+
+    def fake_command_line(pid: int) -> str:
+        if pid == 222:
+            return f"/env/bin/python -m http.server 5173 --directory {page_dir}"
+        return "/env/bin/python -m flocks.cli.main serve --host 127.0.0.1 --port 5173"
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [111, 222])
+    monkeypatch.setattr(service_manager, "_process_command_line", fake_command_line)
+    monkeypatch.setattr(updater.os, "kill", lambda pid, _sig: killed.append(pid))
+    monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
+
+    updater._stop_upgrade_page_server(frontend_port=5173)
+
+    assert killed == [222]
+
+
 def test_wait_for_upgrade_page_uses_access_host_for_local_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
