@@ -292,6 +292,291 @@ async def test_pro_package_status_treats_install_marker_as_installed(
     assert payload["inactive_reason"] == "flockspro_not_installed"
 
 
+async def test_downgrade_pro_package_reports_console_and_preserves_request(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+    from flocks.updater.models import UpdateProgress
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    request_id = "req_downgrade_001"
+    await Storage.set("console:upgrade_request_ids", [request_id], "json")
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "activated",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_downgrade",
+            "license_id": "lic_downgrade",
+            "license_status": "poc",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {
+                "license_id": "lic_downgrade",
+                "console_account_name": "alice",
+                "passport_uid": "pass_1",
+                "auto_install_pro_version": "v2026.6.24",
+            },
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    posted_payloads: list[dict] = []
+    local_downgrade_started = False
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self) -> dict:
+            return {"id": "instrec_downgrade", "ok": True}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            assert url == "https://console.example.com/v1/pro-bundles/installations"
+            assert headers == {"Authorization": "Bearer token_abc"}
+            posted_payloads.append(json)
+            return _Response()
+
+    async def _fake_downgrade(*, restart: bool, reason: str | None = None, after_uninstall=None):
+        nonlocal local_downgrade_started
+        assert restart is True
+        assert reason == "user_requested"
+        assert posted_payloads == []
+        assert after_uninstall is not None
+        yield UpdateProgress(stage="downgrading", message="Removing Flocks Pro component...", success=None)
+        local_downgrade_started = True
+        yield UpdateProgress(stage="reporting", message="Reporting OSS downgrade to Console...", success=None)
+        await after_uninstall()
+        assert posted_payloads, "Console must be synced after local downgrade"
+        yield UpdateProgress(stage="done", message="Downgraded to OSS edition.", success=True)
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _Client())
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_downgrade", _fake_downgrade)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {
+            "release_id": "rel_downgrade",
+            "bundle_release_id": "rel_downgrade",
+            "installed_version": "v2026.6.24",
+            "core_version": "v2026.6.21",
+            "flockspro_component_version": "v2026.6.24",
+            "build_id": "job_downgrade",
+        },
+    )
+    monkeypatch.setattr(
+        console_routes,
+        "_get_pro_capability_status",
+        lambda: {"pro_enabled": True, "active": True, "license_id": "lic_downgrade"},
+    )
+
+    resp = await client.post("/api/console/pro-package/downgrade", json={"reason": "user_requested"})
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert "Reporting OSS downgrade to Console" in resp.text
+    assert local_downgrade_started is True
+    assert posted_payloads[0]["install_result"] == "downgraded"
+    assert posted_payloads[0]["runtime_edition"] == "oss"
+    assert posted_payloads[0]["request_id"] == request_id
+    assert posted_payloads[0]["license_id"] == "lic_downgrade"
+    assert posted_payloads[0]["bundle_version"] == "v2026.6.24"
+    assert "installed_version" not in posted_payloads[0]
+    assert "oss_version" not in posted_payloads[0]
+    stored = await Storage.get(f"console:upgrade_request:{request_id}")
+    assert stored["status"] == "activated"
+    assert stored["details"]["local_downgrade_reported_at"]
+    assert stored["details"]["local_downgrade_result"] == "done"
+    assert stored["details"]["local_downgrade_installation_id"] == "instrec_downgrade"
+
+
+async def test_report_pro_bundle_downgrade_uses_request_target_when_marker_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    await _set_bound_console_session()
+    posted_payloads: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self) -> dict:
+            return {"id": "instrec_fallback", "ok": True}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            posted_payloads.append(json)
+            return _Response()
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _Client())
+    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: {})
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"license_id": "lic_fallback"})
+
+    record = {
+        "request_id": "req_fallback",
+        "license_id": "lic_fallback",
+        "approved_bundle_release_id": "rel_fallback",
+        "details": {
+            "bundle_release_id": "rel_fallback",
+            "bundle_version_update_to": "v2026.7.8",
+            "core_version_update_to": "v2026.7.1",
+            "flockspro_component_version_update_to": "v2026.7.8-pro",
+            "target_build_id": "build_fallback",
+        },
+    }
+
+    await console_routes._report_pro_bundle_downgrade(record, reason="retry_after_marker_missing")
+
+    assert posted_payloads[0]["request_id"] == "req_fallback"
+    assert posted_payloads[0]["release_id"] == "rel_fallback"
+    assert posted_payloads[0]["bundle_release_id"] == "rel_fallback"
+    assert posted_payloads[0]["license_id"] == "lic_fallback"
+    assert posted_payloads[0]["bundle_version"] == "v2026.7.8"
+    assert posted_payloads[0]["core_version"] == "v2026.7.1"
+    assert posted_payloads[0]["flockspro_component_version"] == "v2026.7.8-pro"
+    assert posted_payloads[0]["build_id"] == "build_fallback"
+
+
+async def test_downgrade_pro_package_does_not_report_when_local_downgrade_fails(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.updater.models import UpdateProgress
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    posted_payloads: list[dict] = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            posted_payloads.append(json)
+            raise AssertionError("Console downgrade receipt must not be sent before local downgrade succeeds")
+
+    async def _fake_downgrade(*, restart: bool, reason: str | None = None, after_uninstall=None):
+        assert after_uninstall is not None
+        yield UpdateProgress(stage="downgrading", message="Removing Flocks Pro component...", success=None)
+        yield UpdateProgress(stage="error", message="local uninstall failed", success=False)
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _Client())
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_downgrade", _fake_downgrade)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: {"bundle_version": "v2026.6.24"})
+
+    resp = await client.post("/api/console/pro-package/downgrade", json={"reason": "user_requested"})
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert "local uninstall failed" in resp.text
+    assert posted_payloads == []
+
+
+async def test_downgrade_pro_package_reports_console_failure_after_local_downgrade(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+    from flocks.updater.models import UpdateProgress
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
+    request_id = "req_downgrade_report_failed"
+    await Storage.set("console:upgrade_request_ids", [request_id], "json")
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "activated",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_report_failed",
+            "license_id": "lic_report_failed",
+            "license_status": "poc",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {
+                "license_id": "lic_report_failed",
+                "console_account_name": "alice",
+                "passport_uid": "pass_1",
+                "auto_install_pro_version": "v2026.6.24",
+            },
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            request = httpx.Request("POST", url)
+            response = httpx.Response(status.HTTP_503_SERVICE_UNAVAILABLE, request=request, json={"message": "console down"})
+            raise httpx.HTTPStatusError("console down", request=request, response=response)
+
+    called = False
+
+    async def _fake_downgrade(*, restart: bool, reason: str | None = None, after_uninstall=None):
+        nonlocal called
+        called = True
+        assert after_uninstall is not None
+        yield UpdateProgress(stage="downgrading", message="Removing Flocks Pro component...", success=None)
+        yield UpdateProgress(stage="reporting", message="Reporting OSS downgrade to Console...", success=None)
+        await after_uninstall()
+        yield UpdateProgress(stage="done", message="should not run", success=True)
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _Client())
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_downgrade", _fake_downgrade)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: {"installed_version": "v2026.6.24"})
+
+    resp = await client.post("/api/console/pro-package/downgrade", json={"reason": "user_requested"})
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert "console down" in resp.text
+    assert called is True
+    stored = await Storage.get(f"console:upgrade_request:{request_id}")
+    assert stored["details"]["local_downgrade_result"] == "failed"
+    assert stored["details"]["local_downgrade_error"] == "console down"
+    assert stored["details"]["local_downgrade_report_error"] == "console down"
+
+
 async def test_flockspro_license_status_fallback_reports_uninstalled(monkeypatch: pytest.MonkeyPatch):
     from flocks.server.routes import flockspro_license as license_routes
 

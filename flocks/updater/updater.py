@@ -1879,7 +1879,7 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
 
 
 def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) -> None:
-    receipt_path = _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+    receipt_path = _pending_pro_bundle_install_receipt_path()
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     bundle_version = str(
         marker_payload.get("bundle_version")
@@ -1903,6 +1903,62 @@ def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) ->
         os.chmod(receipt_path, 0o600)
     except OSError:
         pass
+
+
+def _pending_pro_bundle_install_receipt_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+def _pro_bundle_install_marker_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-installed.json"
+
+
+def _archive_json_marker(path: Path, archive_name: str, reason: str | None = None) -> None:
+    if not path.exists():
+        return
+    archive_dir = path.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    archived = archive_dir / f"{archive_name}-{suffix}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload["archived_at"] = datetime.now(timezone.utc).isoformat()
+            payload["archive_reason"] = reason or "downgraded_to_oss"
+            archived.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        else:
+            shutil.copy2(path, archived)
+    except Exception:
+        shutil.copy2(path, archived)
+    path.unlink(missing_ok=True)
+
+
+def _archive_pro_bundle_install_marker(reason: str | None = None) -> None:
+    _archive_json_marker(_pro_bundle_install_marker_path(), "pro-bundle-installed", reason)
+
+
+def _archive_pending_pro_bundle_install_receipt(reason: str | None = None) -> None:
+    _archive_json_marker(
+        _pending_pro_bundle_install_receipt_path(),
+        "pro-bundle-install-receipt-pending",
+        reason,
+    )
+
+
+async def _uninstall_pro_component(
+    *,
+    uv_path: str,
+    install_root: Path,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    python_path = _venv_python_path(install_root)
+    if not python_path.exists():
+        return f"Python environment may need manual repair: missing {python_path}"
+    cmd = [uv_path, "pip", "uninstall", "--python", str(python_path), "-y", "flockspro"]
+    code, _, err = await _run_async(cmd, cwd=install_root, timeout=180, env=env)
+    if code != 0:
+        return f"Flocks Pro component uninstall failed: {err}"
+    return None
 
 
 class _NullConsole:
@@ -2892,6 +2948,115 @@ async def perform_pro_bundle_install(
         force_console_manifest=True,
     ):
         yield progress
+
+
+async def perform_pro_bundle_downgrade(
+    *,
+    restart: bool = True,
+    reason: str | None = None,
+    after_uninstall: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncGenerator[UpdateProgress, None]:
+    """Remove the local Pro component and return this installation to OSS runtime."""
+    from flocks.updater.deploy import detect_deploy_mode
+
+    if detect_deploy_mode() == "docker":
+        yield UpdateProgress(
+            stage="error",
+            message="Downgrading to OSS is not supported in Docker deployments. Please redeploy with the OSS image.",
+            success=False,
+        )
+        return
+
+    install_root = _get_repo_root()
+    current_version = get_current_version()
+    marker = _read_pro_bundle_install_marker()
+    component_installed = _is_pro_component_installed()
+    if not component_installed and not marker:
+        yield UpdateProgress(stage="done", message="Already running the OSS edition.", success=True)
+        return
+
+    yield UpdateProgress(stage="checking", message="Checking local Pro installation...")
+    uv_path = _find_executable("uv")
+    if not uv_path:
+        yield UpdateProgress(
+            stage="error",
+            message="Downgrade failed: uv is required but was not found.",
+            success=False,
+        )
+        return
+
+    sync_env = _build_uv_sync_env()
+    yield UpdateProgress(stage="downgrading", message="Removing Flocks Pro component...")
+    uninstall_error = await _uninstall_pro_component(uv_path=uv_path, install_root=install_root, env=sync_env)
+    if uninstall_error is not None:
+        yield UpdateProgress(stage="error", message=uninstall_error, success=False)
+        return
+
+    if after_uninstall is not None:
+        yield UpdateProgress(stage="reporting", message="Reporting OSS downgrade to Console...")
+        await after_uninstall()
+
+    try:
+        _archive_pending_pro_bundle_install_receipt(reason=reason or "downgraded_to_oss")
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but pending install receipt cleanup failed: {exc}",
+            success=False,
+        )
+        return
+
+    try:
+        _archive_pro_bundle_install_marker(reason=reason or "downgraded_to_oss")
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but install marker cleanup failed: {exc}",
+            success=False,
+        )
+        return
+
+    if not restart:
+        try:
+            _refresh_global_cli_entry(install_root)
+        except Exception as exc:
+            log.warning("updater.refresh_cli.failed", {"error": str(exc)})
+        yield UpdateProgress(stage="done", message="Downgraded to OSS edition.", success=True)
+        return
+
+    yield UpdateProgress(stage="restarting", message="Restarting service...")
+    await asyncio.sleep(0.8)
+
+    if "--reload" in sys.argv:
+        log.info("updater.downgrade.reload_exit3")
+        sys.exit(3)
+
+    try:
+        restart_argv = _build_restart_argv(install_root)
+        sync_timeout = _dependency_sync_timeout_seconds()
+        handoff_argv = _build_restart_handoff_argv(
+            restart_argv,
+            install_root,
+            uv_path=uv_path,
+            sync_timeout=sync_timeout,
+            version=current_version,
+            current_version=current_version,
+        )
+        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv})
+        subprocess.Popen(
+            handoff_argv,
+            cwd=install_root,
+            close_fds=True,
+        )
+        os._exit(0)
+    except Exception as exc:
+        log.error("updater.downgrade.restart_failed", {"error": str(exc)})
+        yield UpdateProgress(
+            stage="error",
+            message=f"Failed to restart service after downgrade: {exc}",
+            success=False,
+        )
+        return
 
 
 async def perform_update(

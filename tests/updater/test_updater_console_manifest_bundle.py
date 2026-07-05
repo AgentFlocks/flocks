@@ -313,6 +313,83 @@ def test_console_manifest_release_identity_writes_product_and_core_versions(
 
 
 @pytest.mark.asyncio
+async def test_perform_pro_bundle_downgrade_archives_pending_install_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from flocks.updater import deploy as deploy_mod
+
+    flocks_root = tmp_path / "flocks-root"
+    run_dir = flocks_root / "run"
+    run_dir.mkdir(parents=True)
+    pending_receipt = run_dir / "pro-bundle-install-receipt-pending.json"
+    pending_receipt.write_text(
+        json.dumps(
+            {
+                "install_result": "success",
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_marker = run_dir / "pro-bundle-installed.json"
+    install_marker.write_text(
+        json.dumps(
+            {
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+                "installed_at": "2026-06-24T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    uninstall_calls: list[tuple[str, str]] = []
+    report_calls: list[str] = []
+
+    async def _fake_uninstall_pro_component(*, uv_path, install_root, env):
+        uninstall_calls.append((uv_path, str(install_root)))
+        return None
+
+    async def _after_uninstall():
+        report_calls.append("reported")
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.21")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_uninstall_pro_component", _fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _install_root: None)
+
+    progresses = [
+        step
+        async for step in updater.perform_pro_bundle_downgrade(
+            restart=False,
+            reason="user_requested",
+            after_uninstall=_after_uninstall,
+        )
+    ]
+
+    assert progresses[-1].stage == "done"
+    assert uninstall_calls == [("/usr/bin/uv", str(tmp_path / "install-root"))]
+    assert report_calls == ["reported"]
+    assert not pending_receipt.exists()
+    assert not install_marker.exists()
+    archived_pending = list((run_dir / "archive").glob("pro-bundle-install-receipt-pending-*.json"))
+    assert len(archived_pending) == 1
+    archived_payload = json.loads(archived_pending[0].read_text(encoding="utf-8"))
+    assert archived_payload["install_result"] == "success"
+    assert archived_payload["archive_reason"] == "user_requested"
+    archived_marker = list((run_dir / "archive").glob("pro-bundle-installed-*.json"))
+    assert len(archived_marker) == 1
+
+
+@pytest.mark.asyncio
 async def test_load_console_session_token_falls_back_to_shared_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
