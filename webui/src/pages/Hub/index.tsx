@@ -60,6 +60,8 @@ const TYPE_LABEL: Record<HubPluginType, string> = {
   tool: 'Tool',
   device: 'Device',
   workflow: 'Workflow',
+  webui: 'WebUI',
+  component: 'Component',
 };
 
 const TYPE_LABEL_CN: Record<HubPluginType, string> = {
@@ -68,11 +70,15 @@ const TYPE_LABEL_CN: Record<HubPluginType, string> = {
   tool: 'Tool',
   device: '设备',
   workflow: 'Workflow',
+  webui: 'WebUI',
+  component: '组件',
 };
 
+const HUB_PLUGIN_TYPES: HubPluginType[] = ['skill', 'agent', 'tool', 'device', 'workflow', 'webui', 'component'];
+
 function normalizePluginType(value: string | null): HubPluginType | '' {
-  if (value === 'skill' || value === 'agent' || value === 'tool' || value === 'device' || value === 'workflow') {
-    return value;
+  if (HUB_PLUGIN_TYPES.includes(value as HubPluginType)) {
+    return value as HubPluginType;
   }
   return '';
 }
@@ -426,7 +432,7 @@ export default function HubPage() {
               onChange={value => setTypeFilter(value as HubPluginType | '')}
               options={[
                 { value: '', label: text.all },
-                ...(['skill', 'agent', 'tool', 'device', 'workflow'] as HubPluginType[]).map(type => ({
+                ...HUB_PLUGIN_TYPES.map(type => ({
                   value: type,
                   label: formatPluginTypeLabel(type, i18n.language),
                   count: facetCounts.type[type] ?? 0,
@@ -905,6 +911,24 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             <InfoBlock label={text.useCase} value={entry.useCases.join(', ') || '-'} />
             <InfoBlock label={text.trust} value={entry.trust} />
             <InfoBlock label={text.manifest} value={entry.manifestPath} />
+            {entry.type === 'component' && manifest?.components?.length ? (
+              <div>
+                <div className="text-xs text-gray-400 mb-2">
+                  {language.toLowerCase().startsWith('zh') ? '组件内容' : 'Component items'}
+                </div>
+                <div className="space-y-2">
+                  {manifest.components.map((item) => (
+                    <div
+                      key={`${item.type}:${item.id}`}
+                      className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                    >
+                      <span className="font-mono text-gray-800">{item.id}</span>
+                      <span className="text-xs text-gray-500">{formatPluginTypeLabel(item.type, language)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
         {activeTab === 'flow' && (

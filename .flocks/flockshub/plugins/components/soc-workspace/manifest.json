@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "soc-workspace",
+  "type": "component",
+  "name": "SOC Workspace Component",
+  "description": "Composite installer for the Flocks SOC workspace: pages, tools, denoise workflow, and triage workflow.",
+  "descriptionCn": "Flocks SOC 工作区组件安装器：包含页面、工具、降噪工作流和研判工作流。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "integration"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/components/soc-workspace"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [
+      "soc_workspace_query"
+    ],
+    "network": false,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": []
+  },
+  "entrypoints": [
+    "component.json"
+  ],
+  "components": [
+    {
+      "type": "webui",
+      "id": "soc_ui"
+    },
+    {
+      "type": "tool",
+      "id": "soc_workspace_query"
+    },
+    {
+      "type": "workflow",
+      "id": "stream_alert_denoise"
+    },
+    {
+      "type": "workflow",
+      "id": "stream_alert_triage"
+    }
+  ],
+  "checksums": {}
+}

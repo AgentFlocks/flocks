@@ -1,6 +1,6 @@
 import client from './client';
 
-export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow';
+export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
 export type HubPluginState =
   | 'available'
   | 'installed'
@@ -37,6 +37,11 @@ export interface HubManifest extends HubCatalogEntry {
   author?: string;
   license?: string;
   homepage?: string;
+  components?: Array<{
+    type: HubPluginType;
+    id: string;
+    optional?: boolean;
+  }>;
   dependencies: Record<string, string[]>;
   permissions: {
     tools: string[];

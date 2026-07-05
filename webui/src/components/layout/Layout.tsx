@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation, matchPath } from 'react-router-dom';
+import { Outlet, Link, useLocation, matchPath, useNavigate } from 'react-router-dom';
 import {
   Home,
   MessageSquare,
@@ -22,6 +22,7 @@ import {
   Settings,
   ArrowUpCircle,
   RefreshCw,
+  Loader2,
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
@@ -56,6 +57,9 @@ import {
   buildWebUIContractWorkspaceSections,
   getLocalizedWebUIContractTitle,
 } from '@/utils/webuiContractWorkspaceSections';
+import { sessionApi } from '@/api/session';
+import { useToast } from '@/components/common/Toast';
+import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -118,8 +122,21 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
   };
 }
 
+function isSocWorkspace(workspace: WebUIContractWorkspaceListItem | null): boolean {
+  if (!workspace) return false;
+  const id = workspace.id.toLowerCase();
+  const title = `${workspace.title} ${workspace.titleEn ?? ''}`.toLowerCase();
+  return id === 'soc_ui'
+    || id === 'soc_dashboard'
+    || id.startsWith('soc_')
+    || id.startsWith('soc-')
+    || title.includes('soc workspace')
+    || workspace.title.includes('SOC 工作区');
+}
+
 export default function Layout() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -131,6 +148,7 @@ export default function Layout() {
   const { t, i18n } = useTranslation('nav');
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
+  const toast = useToast();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -149,9 +167,11 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
+  const canCreateWorkspaceCustomPage = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
   const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
+  const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
   const workspaceMenuCloseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -526,6 +546,7 @@ export default function Layout() {
   const activeWorkspaceMenuTitle = activeWorkspaceMenu
     ? getLocalizedWebUIContractTitle(activeWorkspaceMenu, i18n.language)
     : '';
+  const showWorkspaceCustomPageAction = canCreateWorkspaceCustomPage && isSocWorkspace(activeWorkspaceMenu);
 
   const cancelWorkspaceMenuClose = useCallback(() => {
     if (workspaceMenuCloseTimerRef.current === null) return;
@@ -570,6 +591,41 @@ export default function Layout() {
       return next;
     });
   }, []);
+
+  const handleCreateWorkspaceCustomPage = useCallback(async () => {
+    if (!activeWorkspaceMenu || creatingWorkspaceCustomPageSession) return;
+    setCreatingWorkspaceCustomPageSession(true);
+    try {
+      const session = await sessionApi.create({
+        title: tWebUIContractPage('workspace.customPageSessionTitle', {
+          workspace: activeWorkspaceMenuTitle,
+        }),
+      });
+      const message = tWebUIContractPage('workspace.socCustomPageInitialMessage', {
+        workspaceId: activeWorkspaceMenu.id,
+        workspaceTitle: activeWorkspaceMenuTitle,
+        workspaceRoute: activeWorkspaceMenu.route,
+      });
+      const displayLabel = tWebUIContractPage('workspace.socCustomPageDisplayLabel');
+      setOpenWorkspaceMenuId(null);
+      setSidebarOpen(false);
+      navigate(
+        `/sessions?session=${session.id}&message=${encodeURIComponent(message)}&display=${encodeURIComponent(displayLabel)}`,
+      );
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : tWebUIContractPage('workspace.customPageCreateError');
+      toast.error(tWebUIContractPage('workspace.customPageCreateError'), detail);
+    } finally {
+      setCreatingWorkspaceCustomPageSession(false);
+    }
+  }, [
+    activeWorkspaceMenu,
+    activeWorkspaceMenuTitle,
+    creatingWorkspaceCustomPageSession,
+    navigate,
+    tWebUIContractPage,
+    toast,
+  ]);
 
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
@@ -967,6 +1023,22 @@ export default function Layout() {
                 {tWebUIContractPage('workspace.empty')}
               </div>
             )}
+
+            {showWorkspaceCustomPageAction ? (
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  onClick={() => void handleCreateWorkspaceCustomPage()}
+                  disabled={creatingWorkspaceCustomPageSession}
+                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:text-zinc-300"
+                >
+                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
+                  {creatingWorkspaceCustomPageSession ? (
+                    <Loader2 className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
+                  ) : null}
+                </button>
+              </div>
+            ) : null}
           </div>
         </nav>
       )}

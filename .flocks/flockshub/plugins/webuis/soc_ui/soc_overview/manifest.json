@@ -1,0 +1,12 @@
+{
+  "id": "soc-overview",
+  "title": "SOC 总览",
+  "titleEn": "SOC Overview",
+  "route": "/contracts/webui/soc-overview",
+  "icon": "Shield",
+  "order": 10,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}

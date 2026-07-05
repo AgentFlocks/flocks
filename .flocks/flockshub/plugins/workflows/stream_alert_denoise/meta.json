@@ -1,0 +1,10 @@
+{
+  "name": "stream_alert_denoise",
+  "description": "Streaming-friendly HTTP alert deduplication pipeline: supports syslog real-time single alerts, alerts list, or alert_file path. Normalizes (TDP/Skyeye auto-detection, mixed batches) -> filters (remove scans / non-HTTP) -> deduplicates (URI normalization + 5-gram Jaccard MinHash LSH). Each output alert carries the full normalized fields plus dedup annotation: dedup_key (MD5), is_duplicate (cross-batch), _lsh_cluster_id, _source_type, _process_type. Results appended to JSONL files: ~/.flocks/workspace/workflows/stream_alert_denoise/<YYYY-MM-DD>/dedup_result_NNN.jsonl (max 10,000 records per file; each file starts with a timestamp header line).",
+  "category": "default",
+  "status": "active",
+  "createdBy": null,
+  "createdAt": 1780892155315,
+  "updatedAt": 1782910584761,
+  "id": "stream_alert_denoise"
+}

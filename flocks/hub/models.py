@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-PluginType = Literal["skill", "agent", "tool", "device", "workflow"]
+PluginType = Literal["skill", "agent", "tool", "device", "workflow", "webui", "component"]
 PluginState = Literal[
     "available",
     "installed",
@@ -49,6 +49,12 @@ class HubRisk(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class HubComponentRef(BaseModel):
+    type: PluginType
+    id: str
+    optional: bool = False
+
+
 class HubPluginManifest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -73,6 +79,7 @@ class HubPluginManifest(BaseModel):
     permissions: HubPermissions = Field(default_factory=HubPermissions)
     risk: HubRisk = Field(default_factory=HubRisk)
     entrypoints: list[str] = Field(default_factory=list)
+    components: list[HubComponentRef] = Field(default_factory=list)
     checksums: dict[str, str] = Field(default_factory=dict)
 
 
@@ -103,6 +110,7 @@ class InstalledPluginRecord(BaseModel):
     type: PluginType
     version: str = "0.0.0"
     source: str = ""
+    installedBy: Optional[str] = None
     installedAt: int
     enabled: bool = True
     scope: Literal["global", "project"] = "global"
