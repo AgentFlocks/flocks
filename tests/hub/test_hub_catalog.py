@@ -75,6 +75,15 @@ def test_bundled_hub_catalog_loads():
     assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "device", "workflow", "webui", "component"}
 
 
+def test_workflow_catalog_exposes_chinese_names():
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="workflow")}
+
+    assert entries["stream_alert_denoise"].nameCn == "流式HTTP降噪工作流"
+    assert entries["stream_alert_triage"].nameCn == "HTTP研判工作流"
+    assert entries["loop_host_forensics_fast"].nameCn == "批量主机快速巡检工作流"
+    assert entries["tdp_alert_triage"].nameCn == "TDP 告警调查工作流"
+
+
 def test_pentest_agents_are_listed_in_agent_catalog():
     entries = list_catalog(plugin_type="agent")
     ids = {entry.id for entry in entries}

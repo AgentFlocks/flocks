@@ -62,6 +62,7 @@ class HubPluginManifest(BaseModel):
     id: str
     type: PluginType
     name: str
+    nameCn: Optional[str] = None
     description: str = ""
     version: str = "0.0.0"
     author: Optional[str] = None
@@ -87,6 +88,7 @@ class HubIndexEntry(BaseModel):
     id: str
     type: PluginType
     name: str
+    nameCn: Optional[str] = None
     description: str = ""
     descriptionCn: Optional[str] = None
     version: str = "0.0.0"
@@ -122,6 +124,7 @@ class HubCatalogEntry(BaseModel):
     id: str
     type: PluginType
     name: str
+    nameCn: Optional[str] = None
     description: str = ""
     descriptionCn: Optional[str] = None
     version: str = "0.0.0"

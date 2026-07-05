@@ -195,6 +195,12 @@ function getHubDescription(entry: Pick<HubCatalogEntry, 'description' | 'descrip
   );
 }
 
+function getHubName(entry: Pick<HubCatalogEntry, 'id' | 'name' | 'nameCn'>, language: string) {
+  const name = entry.name?.trim();
+  const nameCn = entry.nameCn?.trim();
+  return language.toLowerCase().startsWith('zh') ? (nameCn || name || entry.id) : (name || nameCn || entry.id);
+}
+
 interface HubFilterSnapshot {
   query?: string;
   type?: HubPluginType | '';
@@ -680,7 +686,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
               <td className="px-3 py-2 text-gray-500">{formatPluginTypeLabel(item.type, language)}</td>
               <td className="max-w-0 px-3 py-2">
                 <button onClick={() => onSelect(item)} className="w-full text-left">
-                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{item.name}</div>
+                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{getHubName(item, language)}</div>
                   <div className="truncate text-[11px] text-gray-500">{getHubDescription(item, language)}</div>
                 </button>
               </td>
@@ -885,7 +891,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
       <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-gray-900">{entry.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
             <StateBadge state={entry.state} text={text} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>

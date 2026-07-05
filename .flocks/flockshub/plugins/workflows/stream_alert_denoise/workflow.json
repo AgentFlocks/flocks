@@ -1,5 +1,6 @@
 {
   "name": "stream_alert_denoise",
+  "nameCn": "流式HTTP降噪工作流",
   "description": "Streaming-friendly HTTP alert deduplication pipeline: supports syslog real-time single alerts, alerts list, or alert_file path. Normalizes (TDP/Skyeye auto-detection, mixed batches) -> filters (remove scans / non-HTTP) -> deduplicates (URI normalization + 5-gram Jaccard MinHash LSH). Each output alert carries the full normalized fields plus dedup annotation: dedup_key (MD5), is_duplicate (cross-batch), _lsh_cluster_id, _source_type, _process_type. Results appended to JSONL files: ~/.flocks/workspace/workflows/stream_alert_denoise/<YYYY-MM-DD>/dedup_result_NNN.jsonl (max 10,000 records per file; each file starts with a timestamp header line).",
   "description_cn": "流式 HTTP 告警去重 Pipeline。支持三种输入：syslog 实时单条、alerts 批次列表、alert_file 文件路径。处理流程：归一化 → 过滤 → 去重（URI 归一化 + 5-gram MinHash LSH，跨批次持久化，FIFO LRU）。输出告警保留全部归一化字段，追加去重字段：dedup_key、is_duplicate、_lsh_cluster_id 等。结果追加写入 ~/.flocks/workspace/workflows/stream_alert_denoise/<YYYY-MM-DD>/dedup_result_NNN.jsonl，每文件最多 10,000 条（不含首行 header），超出时自动新建序号文件，每个文件首行为含时间戳的 header JSON 行。",
   "start": "receive_alert",

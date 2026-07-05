@@ -1,5 +1,6 @@
 {
   "name": "tdp_alert_triage",
+  "nameCn": "TDP 告警调查工作流",
   "description": "NDR/TDP HTTP alert triage workflow. Parallel: threat intel query / vuln query / HTTP attack analysis (5-status unified prompt).",
   "description_cn": "TDP/NDR HTTP 告警研判工作流 — 情报查询 / 漏洞查询 / HTTP攻击分析（5 分类研判 prompt）三节点并行执行",
   "start": "receive_alert",

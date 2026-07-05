@@ -13,6 +13,7 @@ export interface HubCatalogEntry {
   id: string;
   type: HubPluginType;
   name: string;
+  nameCn?: string;
   description: string;
   descriptionCn?: string;
   version: string;

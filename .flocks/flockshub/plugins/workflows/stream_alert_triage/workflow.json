@@ -1,5 +1,6 @@
 {
   "name": "stream_alert_triage",
+  "nameCn": "HTTP研判工作流",
   "description": "你好",
   "description_cn": "你好",
   "start": "load_dedup_file",
