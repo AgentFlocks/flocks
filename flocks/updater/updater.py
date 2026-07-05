@@ -1954,7 +1954,7 @@ async def _uninstall_pro_component(
     python_path = _venv_python_path(install_root)
     if not python_path.exists():
         return f"Python environment may need manual repair: missing {python_path}"
-    cmd = [uv_path, "pip", "uninstall", "--python", str(python_path), "-y", "flockspro"]
+    cmd = [uv_path, "pip", "uninstall", "--python", str(python_path), "flockspro"]
     code, _, err = await _run_async(cmd, cwd=install_root, timeout=180, env=env)
     if code != 0:
         return f"Flocks Pro component uninstall failed: {err}"

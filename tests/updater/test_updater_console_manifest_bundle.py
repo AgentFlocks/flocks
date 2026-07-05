@@ -313,6 +313,40 @@ def test_console_manifest_release_identity_writes_product_and_core_versions(
 
 
 @pytest.mark.asyncio
+async def test_uninstall_pro_component_uses_uv_uninstall_without_yes_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    install_root = tmp_path / "install"
+    python_path = updater._venv_python_path(install_root)
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def _fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        captured["env"] = env
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_run_async", _fake_run_async)
+
+    error = await updater._uninstall_pro_component(
+        uv_path="/usr/bin/uv",
+        install_root=install_root,
+        env={"UV_NO_PROGRESS": "1"},
+    )
+
+    assert error is None
+    assert captured["cmd"] == ["/usr/bin/uv", "pip", "uninstall", "--python", str(python_path), "flockspro"]
+    assert "-y" not in captured["cmd"]
+    assert captured["cwd"] == install_root
+    assert captured["timeout"] == 180
+    assert captured["env"] == {"UV_NO_PROGRESS": "1"}
+
+
+@pytest.mark.asyncio
 async def test_perform_pro_bundle_downgrade_archives_pending_install_receipt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
