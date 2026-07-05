@@ -36,6 +36,10 @@ def update_command(
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
     from flocks.updater import build_updated_frontend, check_update, perform_update, detect_deploy_mode
+    from flocks.cli.install_profile import is_cn_install_language
+
+    if region is None and is_cn_install_language():
+        region = "cn"
 
     if not yes and not check and region is None:
         use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)

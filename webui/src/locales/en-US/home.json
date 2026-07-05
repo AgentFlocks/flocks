@@ -9,7 +9,7 @@
   "createWebUIContractPageError": "Failed to create a custom page session. Please try again later.",
   "openSource": "Open Source",
   "systemCard": {
-    "title": "Flocks System",
+    "title": "System",
     "tagline": "AI-Native Security Platform",
     "cannotConnect": "Cannot connect to backend service"
   },

@@ -54,7 +54,7 @@
   "error": {
     "backendUnavailable": "Cannot connect to backend service",
     "backendError": "Backend service error",
-    "backendErrorHint": "Please ensure the Flocks backend is running",
+    "backendErrorHint": "Please ensure the backend service is running",
     "processingFailed": "Processing failed",
     "deleteFailed": "Delete failed",
     "saveFailed": "Save failed"

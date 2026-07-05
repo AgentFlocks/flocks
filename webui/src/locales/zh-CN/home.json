@@ -9,7 +9,7 @@
   "createWebUIContractPageError": "无法创建自定义页面会话，请稍后重试",
   "openSource": "开源项目",
   "systemCard": {
-    "title": "Flocks 系统",
+    "title": "系统",
     "tagline": "AI 原生安全平台",
     "cannotConnect": "无法连接到后端服务"
   },

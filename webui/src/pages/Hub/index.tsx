@@ -24,6 +24,7 @@ import FlowCanvas from '@/pages/WorkflowDetail/FlowCanvas';
 import type { WorkflowJSON } from '@/api/workflow';
 import { useTranslation } from 'react-i18next';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
+import { useProductName } from '@/contexts/ProductNameContext';
 
 type ViewMode = 'table' | 'tree';
 
@@ -92,7 +93,7 @@ function formatPluginTypeLabel(type: HubPluginType, language: string): string {
 
 const HUB_TEXT = {
   zh: {
-    description: '浏览随 Flocks 打包的本地插件广场，并安装到本机插件目录。',
+    description: '浏览打包的本地插件广场，并安装到本机插件目录。',
     treeView: '目录视图',
     tableView: '表格视图',
     refresh: '刷新',
@@ -134,7 +135,7 @@ const HUB_TEXT = {
     },
   },
   en: {
-    description: 'Browse bundled Flocks Hub plugins and install them into the local plugin directory.',
+    description: 'Browse bundled Hub plugins and install them into the local plugin directory.',
     treeView: 'Directory View',
     tableView: 'Table View',
     refresh: 'Refresh',
@@ -257,8 +258,13 @@ function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot):
 
 export default function HubPage() {
   const { i18n } = useTranslation();
+  const { productName } = useProductName();
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
+  const hubTitle = `${productName} Hub`;
+  const hubDescription = i18n.language.toLowerCase().startsWith('zh')
+    ? `浏览随 ${productName} 打包的本地插件广场，并安装到本机插件目录。`
+    : `Browse bundled ${hubTitle} plugins and install them into the local plugin directory.`;
   const urlPluginId = searchParams.get('plugin') || searchParams.get('id') || '';
   const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
@@ -390,8 +396,8 @@ export default function HubPage() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader
-        title="Flocks Hub"
-        description={text.description}
+        title={hubTitle}
+        description={hubDescription}
         icon={<Archive className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">

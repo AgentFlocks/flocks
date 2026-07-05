@@ -259,6 +259,17 @@ class TestExceptionToErrorDict:
         assert result["data"]["isRetryable"] is True
         assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
 
+    def test_incomplete_chunked_read_exception_is_retryable_connection_error(self):
+        runner = _make_runner()
+        exc = Exception(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
     def test_exception_with_status_code_429(self):
         runner = _make_runner()
         exc = Exception("Rate limited")

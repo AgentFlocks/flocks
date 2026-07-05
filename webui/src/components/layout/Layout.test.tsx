@@ -450,7 +450,7 @@ describe('Layout onboarding entry', () => {
     await waitFor(() => expect(updateModalMock).toHaveBeenCalled());
   });
 
-  it('shows Flocks Pro branding and version for member users', async () => {
+  it('shows configured product branding and Pro version for member users', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     useAuth.mockReturnValue({
       user: {
@@ -476,10 +476,9 @@ describe('Layout onboarding entry', () => {
 
     const { container } = renderHomeWithLayout();
 
-    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
-    expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
     await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
 
     const sidebarShell = container.querySelector('aside > div');
@@ -487,6 +486,7 @@ describe('Layout onboarding entry', () => {
     const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
     expect(logoRow).not.toBeNull();
     expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).getByText('Flocks')).toBeInTheDocument();
     expect(within(logoRow!).queryByText('v2026.6.21')).not.toBeInTheDocument();
     expect(within(accountRow!).getByText('v2026.6.21')).toBeInTheDocument();
   });
@@ -521,7 +521,6 @@ describe('Layout onboarding entry', () => {
 
     const { container } = renderHomeWithLayout();
 
-    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.22')).toBeInTheDocument();
 
     const sidebarShell = container.querySelector('aside > div');
@@ -529,12 +528,13 @@ describe('Layout onboarding entry', () => {
     const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
     expect(logoRow).not.toBeNull();
     expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).getByText('Flocks')).toBeInTheDocument();
     expect(within(logoRow!).queryByText('v2026.6.22')).not.toBeInTheDocument();
     expect(within(accountRow!).getByText('v2026.6.22')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
@@ -605,7 +605,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
