@@ -55,7 +55,7 @@ def workflow_config_route_fakes(
         kind: str = "workflow.integration-config",
     ) -> dict[str, Any] | None:
         if kind != "workflow.integration-config":
-            return None
+            return stored.get(f"{kind}/{requested_workflow_id}")
         return stored.get(requested_workflow_id)
 
     async def _fake_put_config(
@@ -64,14 +64,28 @@ def workflow_config_route_fakes(
         *,
         kind: str | None = None,
     ) -> None:
-        assert kind in (None, "workflow.integration-config")
-        stored[requested_workflow_id] = config
+        assert kind in (
+            None,
+            "workflow.integration-config",
+            "workflow_kafka_config",
+            "workflow_poller_config",
+            "workflow_syslog_config",
+        )
+        key = requested_workflow_id if kind in (None, "workflow.integration-config") else f"{kind}/{requested_workflow_id}"
+        stored[key] = config
 
     async def _fake_kv_get(_key: Any) -> None:
         return None
 
     async def _fake_statuses(_workflow_id: str, _workflow_json: dict[str, Any]) -> list[dict[str, Any]]:
         return []
+
+    async def _fake_persist_workflow_triggers(
+        _workflow_id: str,
+        _workflow_data: dict[str, Any],
+        _triggers: list[Any],
+    ) -> None:
+        return None
 
     monkeypatch.setattr(
         workflow_routes,
@@ -86,6 +100,7 @@ def workflow_config_route_fakes(
     monkeypatch.setattr(workflow_routes.WorkflowStore, "get_config", _fake_get_config)
     monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
     monkeypatch.setattr(workflow_routes.WorkflowStore, "kv_get", _fake_kv_get)
+    monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist_workflow_triggers)
     monkeypatch.setattr(
         workflow_routes,
         "default_trigger_runtime",
@@ -104,6 +119,7 @@ def test_workflow_config_manage_is_registered_as_builtin_tool() -> None:
     assert tool.info.native is True
     assert tool.info.category.value == "system"
     assert "workflow_id" in tool.info.get_schema().properties
+    assert "config_type" in tool.info.get_schema().properties
 
 
 @pytest.mark.asyncio
@@ -244,3 +260,170 @@ async def test_workflow_config_manage_sync_writes_missing_config(
     assert output["source"] == "storage"
     assert workflow_config_route_fakes["wf-1"]["kind"] == "workflow.integration-config"
     assert workflow_config_route_fakes["wf-1"]["triggers"][0]["type"] == "syslog"
+
+
+@pytest.mark.asyncio
+async def test_workflow_config_manage_get_reads_poller_config(
+    workflow_config_route_fakes: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_config_route_fakes["workflow_poller_config/wf-1"] = {
+        "workflowId": "wf-1",
+        "enabled": True,
+        "intervalSeconds": 180,
+        "cronExpression": None,
+        "timeoutSeconds": 7200,
+        "noOverlap": True,
+        "inputs": {"input_date": "2026-07-06"},
+    }
+    monkeypatch.setattr(
+        "flocks.workflow.poller_manager.default_manager",
+        SimpleNamespace(get_status=lambda workflow_id: {"workflowId": workflow_id, "state": "running"}),
+    )
+
+    result = await ToolRegistry.execute(
+        "workflow_config_manage",
+        action="get",
+        workflow_id="wf-1",
+        config_type="poller",
+    )
+
+    assert result.success is True, result.error
+    output = _output_json(result)
+    assert output["configType"] == "poller"
+    assert output["storageKey"] == "workflow_poller_config/wf-1"
+    assert output["config"]["intervalSeconds"] == 180
+    assert output["runtime"]["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_workflow_config_manage_get_reads_syslog_trigger_fallback(
+    workflow_config_route_fakes: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "flocks.ingest.syslog.manager.default_manager",
+        SimpleNamespace(get_listener_status=lambda workflow_id: {"workflowId": workflow_id, "state": "listening"}),
+    )
+
+    result = await ToolRegistry.execute(
+        "workflow_config_manage",
+        action="get",
+        workflow_id="wf-1",
+        config_type="syslog",
+    )
+
+    assert result.success is True, result.error
+    output = _output_json(result)
+    assert output["configType"] == "syslog"
+    assert output["source"] == "trigger_fallback"
+    assert output["config"]["port"] == 514
+    assert output["runtime"]["state"] == "listening"
+
+
+@pytest.mark.asyncio
+async def test_workflow_config_manage_poller_diff_does_not_write_config(
+    workflow_config_route_fakes: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "flocks.workflow.poller_manager.default_manager",
+        SimpleNamespace(get_status=lambda workflow_id: {"workflowId": workflow_id, "state": "stopped"}),
+    )
+
+    result = await ToolRegistry.execute(
+        "workflow_config_manage",
+        action="diff",
+        workflow_id="wf-1",
+        config_type="poller",
+        config={
+            "workflowId": "wf-1",
+            "enabled": True,
+            "intervalSeconds": 180,
+            "timeoutSeconds": 7200,
+            "noOverlap": True,
+            "inputs": {"input_date": "2026-07-06"},
+        },
+    )
+
+    assert result.success is True, result.error
+    output = _output_json(result)
+    assert output["configType"] == "poller"
+    assert output["changed"] is True
+    assert "intervalSeconds" in output["diff"]
+    assert workflow_config_route_fakes == {}
+
+
+@pytest.mark.asyncio
+async def test_workflow_config_manage_put_poller_config_uses_tool_permission_and_route(
+    workflow_config_route_fakes: dict[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    permissions: list[PermissionRequest] = []
+
+    async def _permission_callback(request: PermissionRequest) -> None:
+        permissions.append(request)
+
+    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+        return {"workflowId": workflow_id, "state": "running"}
+
+    monkeypatch.setattr(
+        "flocks.workflow.poller_manager.default_manager",
+        SimpleNamespace(
+            get_status=lambda workflow_id: {"workflowId": workflow_id, "state": "running"},
+            restart_workflow=_fake_restart,
+        ),
+    )
+    ctx = ToolContext(
+        session_id="test-session",
+        message_id="test-message",
+        permission_callback=_permission_callback,
+    )
+
+    result = await ToolRegistry.execute(
+        "workflow_config_manage",
+        ctx=ctx,
+        action="put",
+        workflow_id="wf-1",
+        config_type="poller",
+        config={
+            "workflowId": "wf-1",
+            "enabled": True,
+            "intervalSeconds": 180,
+            "timeoutSeconds": 7200,
+            "noOverlap": True,
+            "inputs": {"input_date": "2026-07-06"},
+        },
+    )
+
+    assert result.success is True, result.error
+    assert permissions
+    assert permissions[0].permission == "workflow_config"
+    assert permissions[0].metadata["config_type"] == "poller"
+    written = workflow_config_route_fakes["workflow_poller_config/wf-1"]
+    assert written["workflowId"] == "wf-1"
+    assert written["enabled"] is True
+    assert written["intervalSeconds"] == 180
+    output = _output_json(result)
+    assert output["configType"] == "poller"
+    assert output["config"]["intervalSeconds"] == 180
+
+
+@pytest.mark.asyncio
+async def test_workflow_config_manage_rejects_mismatched_runtime_workflow_id(
+    workflow_config_route_fakes: dict[str, dict[str, Any]],
+) -> None:
+    result = await ToolRegistry.execute(
+        "workflow_config_manage",
+        action="diff",
+        workflow_id="wf-1",
+        config_type="poller",
+        config={
+            "workflowId": "wf-2",
+            "enabled": True,
+        },
+    )
+
+    assert result.success is False
+    assert "workflowId does not match" in (result.error or "")
+    assert workflow_config_route_fakes == {}

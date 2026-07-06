@@ -1,8 +1,9 @@
-"""Built-in workflow integration config management tool.
+"""Built-in workflow config management tool.
 
-This tool gives Rex a first-class path to the workflow config store from inside
-the Flocks backend process. It intentionally reuses the existing workflow route
-helpers so the tool and WebUI keep the same config shape and validation rules.
+This tool gives Rex a first-class path to workflow config stores from inside the
+Flocks backend process. It intentionally reuses the existing workflow route
+helpers so the tool and WebUI keep the same config shape, validation rules, and
+runtime side effects.
 """
 
 from __future__ import annotations
@@ -27,9 +28,21 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.workflow_config_manage")
 
 _ACTIONS = {"get", "status", "sync", "diff", "put"}
-DESCRIPTION = """Read, compare, sync, or update a workflow integration config from the Flocks backend store.
+_CONFIG_TYPES = {"integration", "kafka", "poller", "syslog"}
+_RUNTIME_CONFIG_KINDS = {
+    "kafka": "workflow_kafka_config",
+    "poller": "workflow_poller_config",
+    "syslog": "workflow_syslog_config",
+}
+_RUNTIME_TRIGGER_TYPES = {
+    "kafka": "kafka",
+    "poller": "schedule",
+    "syslog": "syslog",
+}
 
-Use this instead of reading server_api_token/service_api_token or curling local backend endpoints when a workflow guide asks to inspect or update workflow publish/trigger config.
+DESCRIPTION = """Read, compare, sync, or update workflow configs from the Flocks backend store.
+
+Use this instead of reading server_api_token/service_api_token or curling local backend endpoints when a workflow guide asks to inspect or update workflow publish, trigger, or runtime config.
 
 Actions:
 - get: read the effective workflow integration config and runtime summary.
@@ -38,14 +51,20 @@ Actions:
 - sync: ensure the config exists in WorkflowStore, migrating config.json fallback when needed.
 - put: normalize and save the full proposed config into WorkflowStore.
 
+Config types:
+- integration: publish/trigger template config. This is the default for backward compatibility.
+- poller: background schedule/poller runtime config.
+- syslog: Syslog listener runtime config.
+- kafka: Kafka consumer runtime config.
+
 Important:
-- This tool manages the workflow integration template only. Runtime start/stop, Syslog listener bind, and API service publishing remain separate runtime operations.
+- This tool manages config reads/writes only. Non-config runtime commands such as API service publishing/unpublishing remain separate runtime operations.
 - For sync and put, show the plan/diff to the user first and get confirmation before invoking the tool.
 - Do not ask the user for backend API tokens or expose secrets in chat."""
 
-DESCRIPTION_CN = """读取、对比、同步或写入工作流集成配置库。
+DESCRIPTION_CN = """读取、对比、同步或写入工作流配置库。
 
-当工作流 guide 要求查看或更新发布/触发配置时，优先使用本工具，不要读取 server_api_token/service_api_token，也不要手工 curl 本机后端接口。
+当工作流 guide 要求查看或更新发布、触发或运行态配置时，优先使用本工具，不要读取 server_api_token/service_api_token，也不要手工 curl 本机后端接口。
 
 动作：
 - get：读取当前生效的集成配置和运行态摘要。
@@ -54,7 +73,13 @@ DESCRIPTION_CN = """读取、对比、同步或写入工作流集成配置库。
 - sync：确保配置库存在模板，必要时从 config.json 兜底迁移。
 - put：规范化后把完整候选配置写入 WorkflowStore。
 
-注意：本工具只管理工作流集成模板；启动/停止 Syslog listener、发布/停止 API 服务等运行态动作仍使用对应运行态接口。"""
+配置类型：
+- integration：发布/触发模板配置；默认值，用于兼容旧调用。
+- poller：后台定时/poller 运行态配置。
+- syslog：Syslog listener 运行态配置。
+- kafka：Kafka consumer 运行态配置。
+
+注意：本工具只管理配置读写；发布/停止 API 服务等非配置运行态动作仍使用对应运行态接口。"""
 
 
 def _workflow_routes():
@@ -138,11 +163,174 @@ async def _read_effective_config(workflow_id: str) -> Dict[str, Any]:
     }
 
 
-async def _normalize_proposed_config(workflow_id: str, config: Any) -> Dict[str, Any]:
+def _runtime_storage_key(config_type: str, workflow_id: str) -> str:
+    return f"{_RUNTIME_CONFIG_KINDS[config_type]}/{workflow_id}"
+
+
+async def _runtime_status(workflow_id: str, config_type: str) -> Dict[str, Any] | None:
+    try:
+        if config_type == "kafka":
+            from flocks.ingest.kafka.manager import default_manager as kafka_manager
+
+            return kafka_manager.get_consumer_status(workflow_id)
+        if config_type == "poller":
+            from flocks.workflow.poller_manager import default_manager as poller_manager
+
+            return poller_manager.get_status(workflow_id)
+        if config_type == "syslog":
+            from flocks.ingest.syslog.manager import default_manager as syslog_manager
+
+            return syslog_manager.get_listener_status(workflow_id)
+    except Exception as exc:
+        return {"error": str(exc)}
+    return None
+
+
+def _legacy_runtime_config_from_trigger(routes: Any, workflow_id: str, config_type: str, trigger: Any) -> Dict[str, Any]:
+    if config_type == "kafka":
+        return routes.kafka_trigger_to_legacy_config(workflow_id, trigger)
+    if config_type == "poller":
+        return routes.schedule_trigger_to_legacy_config(workflow_id, trigger)
+    if config_type == "syslog":
+        return routes.syslog_trigger_to_legacy_config(workflow_id, trigger)
+    raise HTTPException(status_code=422, detail=f"Unsupported runtime config type: {config_type}")
+
+
+async def _read_runtime_config(workflow_id: str, config_type: str) -> Dict[str, Any]:
+    routes = _workflow_routes()
+    data = routes._read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+    kind = _RUNTIME_CONFIG_KINDS[config_type]
+    config = await routes.WorkflowStore.get_config(workflow_id, kind=kind)
+    if config is not None:
+        return {
+            "exists": True,
+            "path": None,
+            "storageKey": _runtime_storage_key(config_type, workflow_id),
+            "source": "storage",
+            "stored": True,
+            "config": config,
+            "runtime": await _runtime_status(workflow_id, config_type),
+        }
+
+    trigger_type = _RUNTIME_TRIGGER_TYPES[config_type]
+    triggers = await routes._get_workflow_trigger_defs(workflow_id, data)
+    trigger = next((item for item in triggers if item.type == trigger_type), None)
+    if trigger is not None:
+        return {
+            "exists": True,
+            "path": None,
+            "storageKey": _runtime_storage_key(config_type, workflow_id),
+            "source": "trigger_fallback",
+            "stored": False,
+            "config": _legacy_runtime_config_from_trigger(routes, workflow_id, config_type, trigger),
+            "runtime": await _runtime_status(workflow_id, config_type),
+        }
+
+    return {
+        "exists": False,
+        "path": None,
+        "storageKey": _runtime_storage_key(config_type, workflow_id),
+        "source": "missing",
+        "stored": False,
+        "config": None,
+        "runtime": await _runtime_status(workflow_id, config_type),
+    }
+
+
+async def _read_config(workflow_id: str, config_type: str) -> Dict[str, Any]:
+    if config_type == "integration":
+        return await _read_effective_config(workflow_id)
+    return await _read_runtime_config(workflow_id, config_type)
+
+
+def _ensure_runtime_workflow_id(workflow_id: str, config: Dict[str, Any]) -> None:
+    candidate = config.get("workflowId")
+    if candidate not in (None, workflow_id):
+        raise HTTPException(status_code=409, detail="config.workflowId does not match workflow_id")
+
+
+def _with_existing_updated_at(config: Dict[str, Any], current: Dict[str, Any] | None) -> Dict[str, Any]:
+    current_config = (current or {}).get("config")
+    if isinstance(current_config, dict) and current_config.get("updatedAt") is not None:
+        config["updatedAt"] = current_config["updatedAt"]
+    return config
+
+
+def _normalize_runtime_config(
+    workflow_id: str,
+    config_type: str,
+    config: Dict[str, Any],
+    current: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    routes = _workflow_routes()
+    _ensure_runtime_workflow_id(workflow_id, config)
+
+    if config_type == "kafka":
+        req = routes.KafkaConfigRequest.model_validate(config)
+        return _with_existing_updated_at(
+            {
+                "workflowId": workflow_id,
+                "enabled": req.enabled,
+                "inputBroker": req.inputBroker,
+                "inputTopic": req.inputTopic,
+                "inputGroupId": req.inputGroupId,
+                "inputKey": req.inputKey,
+                "autoOffsetReset": req.autoOffsetReset,
+                "inputs": routes._strip_execution_only_comments(req.inputs),
+            },
+            current,
+        )
+
+    if config_type == "poller":
+        req = routes.WorkflowPollerConfigRequest.model_validate(config)
+        cron_expression = (req.cronExpression or "").strip()
+        return _with_existing_updated_at(
+            {
+                "workflowId": workflow_id,
+                "enabled": req.enabled,
+                "intervalSeconds": req.intervalSeconds,
+                "cronExpression": cron_expression or None,
+                "timeoutSeconds": req.timeoutSeconds,
+                "noOverlap": req.noOverlap,
+                "inputs": req.inputs,
+            },
+            current,
+        )
+
+    if config_type == "syslog":
+        req = routes.SyslogConfigRequest.model_validate(config)
+        return _with_existing_updated_at(
+            {
+                "workflowId": workflow_id,
+                "enabled": req.enabled,
+                "protocol": req.protocol,
+                "host": req.host,
+                "port": req.port,
+                "format": req.msg_format,
+                "inputKey": req.input_key,
+            },
+            current,
+        )
+
+    raise HTTPException(status_code=422, detail=f"Unsupported runtime config type: {config_type}")
+
+
+async def _normalize_proposed_config(
+    workflow_id: str,
+    config_type: str,
+    config: Any,
+    current: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     if config is None:
         raise HTTPException(status_code=422, detail="config is required for action='diff' or action='put'")
     if not isinstance(config, dict):
         raise HTTPException(status_code=422, detail="config must be a JSON object")
+
+    if config_type != "integration":
+        return _normalize_runtime_config(workflow_id, config_type, config, current)
 
     routes = _workflow_routes()
     data = routes._read_workflow_from_fs(workflow_id)
@@ -151,9 +339,21 @@ async def _normalize_proposed_config(workflow_id: str, config: Any) -> Dict[str,
     return routes._normalize_workflow_integration_config_template(workflow_id, data, config)
 
 
-def _status_payload(response: Dict[str, Any]) -> Dict[str, Any]:
+def _status_payload(config_type: str, response: Dict[str, Any]) -> Dict[str, Any]:
     config = response.get("config")
     config = config if isinstance(config, dict) else {}
+    if config_type != "integration":
+        return {
+            "exists": response.get("exists"),
+            "source": response.get("source"),
+            "stored": response.get("stored"),
+            "storageKey": response.get("storageKey"),
+            "workflowId": config.get("workflowId"),
+            "configType": config_type,
+            "enabled": config.get("enabled"),
+            "runtime": response.get("runtime"),
+        }
+
     triggers = config.get("triggers") if isinstance(config.get("triggers"), list) else []
     publish = config.get("publish") if isinstance(config.get("publish"), dict) else {}
     runtime = response.get("runtime") if isinstance(response.get("runtime"), dict) else {}
@@ -189,6 +389,32 @@ async def _confirm_write(ctx: ToolContext, *, action: str, workflow_id: str, met
     )
 
 
+async def _sync_runtime_config(workflow_id: str, config_type: str, current: Dict[str, Any]) -> Dict[str, Any]:
+    config = current.get("config")
+    if current.get("stored"):
+        return current
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=404, detail=f"No {config_type} config exists for workflow: {workflow_id}")
+
+    routes = _workflow_routes()
+    await routes.WorkflowStore.put_config(workflow_id, config, kind=_RUNTIME_CONFIG_KINDS[config_type])
+    return await _read_runtime_config(workflow_id, config_type)
+
+
+async def _save_runtime_config(workflow_id: str, config_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    routes = _workflow_routes()
+    if config_type == "kafka":
+        req = routes.KafkaConfigRequest.model_validate(config)
+        return await routes.save_kafka_config(workflow_id, req)
+    if config_type == "poller":
+        req = routes.WorkflowPollerConfigRequest.model_validate(config)
+        return await routes.save_workflow_poller_config(workflow_id, req)
+    if config_type == "syslog":
+        req = routes.SyslogConfigRequest.model_validate(config)
+        return await routes.save_syslog_config(workflow_id, req)
+    raise HTTPException(status_code=422, detail=f"Unsupported runtime config type: {config_type}")
+
+
 @ToolRegistry.register_function(
     name="workflow_config_manage",
     description=DESCRIPTION,
@@ -209,9 +435,16 @@ async def _confirm_write(ctx: ToolContext, *, action: str, workflow_id: str, met
             required=True,
         ),
         ToolParameter(
+            name="config_type",
+            type=ParameterType.STRING,
+            description="Config type to manage: integration, poller, syslog, or kafka. Defaults to integration.",
+            required=False,
+            enum=sorted(_CONFIG_TYPES),
+        ),
+        ToolParameter(
             name="config",
             type=ParameterType.OBJECT,
-            description="Full proposed workflow integration config. Required for action='diff' and action='put'.",
+            description="Full proposed workflow config. Required for action='diff' and action='put'.",
             required=False,
             json_schema={
                 "type": "object",
@@ -219,17 +452,19 @@ async def _confirm_write(ctx: ToolContext, *, action: str, workflow_id: str, met
             },
         ),
     ],
-    tags=["workflow", "config", "integration", "trigger", "syslog", "publish"],
+    tags=["workflow", "config", "integration", "trigger", "syslog", "kafka", "poller", "publish"],
 )
 async def workflow_config_manage(
     ctx: ToolContext,
     action: str,
     workflow_id: str,
+    config_type: str = "integration",
     config: Dict[str, Any] | None = None,
 ) -> ToolResult:
     normalized_action = str(action or "").strip().lower()
     normalized_workflow_id = str(workflow_id or "").strip()
-    title = f"Workflow config: {normalized_workflow_id or workflow_id}"
+    normalized_config_type = str(config_type or "integration").strip().lower()
+    title = f"Workflow config: {normalized_workflow_id or workflow_id} ({normalized_config_type})"
 
     if normalized_action not in _ACTIONS:
         return ToolResult(
@@ -239,30 +474,44 @@ async def workflow_config_manage(
         )
     if not normalized_workflow_id:
         return ToolResult(success=False, error="workflow_id is required", title=title)
+    if normalized_config_type not in _CONFIG_TYPES:
+        return ToolResult(
+            success=False,
+            error=f"Unsupported config_type: {config_type!r}. Expected one of: {', '.join(sorted(_CONFIG_TYPES))}.",
+            title=title,
+        )
 
     try:
         if normalized_action == "get":
-            response = await _read_effective_config(normalized_workflow_id)
+            response = await _read_config(normalized_workflow_id, normalized_config_type)
+            response["configType"] = normalized_config_type
             return ToolResult(success=True, output=response, title=title)
 
         if normalized_action == "status":
-            response = await _read_effective_config(normalized_workflow_id)
-            return ToolResult(success=True, output=_status_payload(response), title=title)
+            response = await _read_config(normalized_workflow_id, normalized_config_type)
+            return ToolResult(success=True, output=_status_payload(normalized_config_type, response), title=title)
 
         if normalized_action == "diff":
-            current = await _read_effective_config(normalized_workflow_id)
-            proposed = await _normalize_proposed_config(normalized_workflow_id, config)
-            diff = _config_diff(current["config"], proposed)
+            current = await _read_config(normalized_workflow_id, normalized_config_type)
+            proposed = await _normalize_proposed_config(
+                normalized_workflow_id,
+                normalized_config_type,
+                config,
+                current,
+            )
+            current_config = current.get("config") if isinstance(current.get("config"), dict) else {}
+            diff = _config_diff(current_config, proposed)
             return ToolResult(
                 success=True,
                 title=title,
                 output={
                     "workflowId": normalized_workflow_id,
+                    "configType": normalized_config_type,
                     "changed": bool(diff),
                     "source": current.get("source"),
                     "storageKey": current.get("storageKey"),
                     "diff": diff,
-                    "current": current["config"],
+                    "current": current_config,
                     "proposed": proposed,
                 },
             )
@@ -270,31 +519,59 @@ async def workflow_config_manage(
         routes = _workflow_routes()
 
         if normalized_action == "sync":
-            await _confirm_write(
-                ctx,
-                action=normalized_action,
-                workflow_id=normalized_workflow_id,
-                metadata={"note": "ensure workflow integration config exists in WorkflowStore"},
-            )
-            response = await routes.sync_workflow_config(normalized_workflow_id)
-            return ToolResult(success=True, output=response, title=title)
-
-        if normalized_action == "put":
-            current = await _read_effective_config(normalized_workflow_id)
-            proposed = await _normalize_proposed_config(normalized_workflow_id, config)
-            diff = _config_diff(current["config"], proposed)
+            current = await _read_config(normalized_workflow_id, normalized_config_type)
             await _confirm_write(
                 ctx,
                 action=normalized_action,
                 workflow_id=normalized_workflow_id,
                 metadata={
+                    "config_type": normalized_config_type,
+                    "storage_key": current.get("storageKey"),
+                    "note": f"ensure {normalized_config_type} config exists in WorkflowStore",
+                },
+            )
+            if normalized_config_type == "integration":
+                response = await routes.sync_workflow_config(normalized_workflow_id)
+            else:
+                response = await _sync_runtime_config(normalized_workflow_id, normalized_config_type, current)
+            response["configType"] = normalized_config_type
+            return ToolResult(success=True, output=response, title=title)
+
+        if normalized_action == "put":
+            current = await _read_config(normalized_workflow_id, normalized_config_type)
+            proposed = await _normalize_proposed_config(
+                normalized_workflow_id,
+                normalized_config_type,
+                config,
+                current,
+            )
+            current_config = current.get("config") if isinstance(current.get("config"), dict) else {}
+            diff = _config_diff(current_config, proposed)
+            await _confirm_write(
+                ctx,
+                action=normalized_action,
+                workflow_id=normalized_workflow_id,
+                metadata={
+                    "config_type": normalized_config_type,
                     "storage_key": current.get("storageKey"),
                     "changed": bool(diff),
                     "diff": diff,
                 },
             )
-            response = await routes.update_workflow_config(normalized_workflow_id, proposed)
-            return ToolResult(success=True, output={**response, "diff": diff}, title=title)
+            if normalized_config_type == "integration":
+                response = await routes.update_workflow_config(normalized_workflow_id, proposed)
+                output = {**response, "configType": normalized_config_type, "diff": diff}
+            else:
+                save_response = await _save_runtime_config(normalized_workflow_id, normalized_config_type, proposed)
+                response = await _read_runtime_config(normalized_workflow_id, normalized_config_type)
+                output = {
+                    **response,
+                    "workflowId": normalized_workflow_id,
+                    "configType": normalized_config_type,
+                    "saveResult": save_response,
+                    "diff": diff,
+                }
+            return ToolResult(success=True, output=output, title=title)
 
         return ToolResult(success=False, error=f"Unsupported action: {action!r}", title=title)
     except HTTPException as exc:
@@ -310,6 +587,7 @@ async def workflow_config_manage(
             {
                 "action": normalized_action,
                 "workflow_id": normalized_workflow_id,
+                "config_type": normalized_config_type,
                 "error": str(exc),
             },
         )

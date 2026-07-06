@@ -1,6 +1,6 @@
 # stream_alert_denoise 配置引导
 
-这个文件是 `stream_alert_denoise` 的工作流专属 `guide.md`。Rex 处理这个工作流的发布、接入、规则、样例或查配置快捷入口时，必须先读取本文全文，再把 `workflow.md`、`workflow.json`、`workflow_config_manage(action="get" 或 "status", workflow_id="stream_alert_denoise")` 的结果和工作流目录下的 `config.json` 作为支撑上下文。
+这个文件是 `stream_alert_denoise` 的工作流专属 `guide.md`。Rex 处理这个工作流的发布、接入、规则、样例或查配置快捷入口时，必须先读取本文全文，再把 `workflow.md`、`workflow.json`、`workflow_config_manage(action="get" 或 "status", workflow_id="stream_alert_denoise")`、必要时 `workflow_config_manage(action="get" 或 "status", workflow_id="stream_alert_denoise", config_type="syslog")` 的结果和工作流目录下的 `config.json` 作为支撑上下文。
 
 `workflow-config-guide` skill 只提供交互协议；本文才是本工作流配置细节、默认选项、提问顺序和验证方式的来源。
 
@@ -18,10 +18,12 @@ Rex 引导用户时必须遵守：
 
 - 配置库读取/写入必须使用内置工具 `workflow_config_manage`，不要读取 `server_api_token` 或 `service_api_token`，也不要手工 curl 本机后端配置接口。
 - 查配置使用 `workflow_config_manage(action="get", workflow_id="stream_alert_denoise")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_denoise")`。
+- 查 Syslog 运行态配置使用 `workflow_config_manage(action="get", workflow_id="stream_alert_denoise", config_type="syslog")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_denoise", config_type="syslog")`。
 - 修改配置前先使用 `workflow_config_manage(action="diff", workflow_id="stream_alert_denoise", config={...})` 展示差异并用 question 工具确认；确认后才使用 `workflow_config_manage(action="put", workflow_id="stream_alert_denoise", config={...})`。
+- 修改 Syslog 运行态配置前先使用 `workflow_config_manage(action="diff", workflow_id="stream_alert_denoise", config_type="syslog", config={...})` 展示差异并用 question 工具确认；确认后才使用 `workflow_config_manage(action="put", workflow_id="stream_alert_denoise", config_type="syslog", config={...})`。
 - 如果后端配置库没有模板，只能使用 `workflow_config_manage(action="sync", workflow_id="stream_alert_denoise")`，让后端从工作流目录 `config.json` 迁移或生成模板。
 - `config.json` 只能作为模板来源或兜底迁移来源，不是直接写入目标，也不能证明配置已生效。
-- 需要启动或停止 Syslog listener/API 服务时，必须使用对应运行态接口；不要通过修改模板字段冒充运行态状态。
+- 需要启动或停止 Syslog listener 时，配置读写必须使用 `workflow_config_manage(config_type="syslog")`；发布或停止 API 服务等非配置动作使用对应运行态接口。不要通过修改模板字段冒充运行态状态。
 - 如果 `workflow_config_manage` 不可用、返回未授权、拒绝访问、连接失败或后端不可达，必须停止配置流程，明确说明本次未应用、未发布、未启动；如已生成目标配置，只能保存草稿到 outputs，不要继续读取 token 或改写 `config.json`。
 
 ## 1. 工作流定位
@@ -276,18 +278,21 @@ API 批量最小样例：
 
 1. 优先用 `workflow_config_manage(action="get", workflow_id="stream_alert_denoise")` 读取后端 Storage/SQL 的生效配置。
 2. 如果库里没有，调用 `workflow_config_manage(action="sync", workflow_id="stream_alert_denoise")`，由后端读取工作流目录下的 `config.json` 并迁移到 Storage/SQL。
-3. `config.json` 是导入/兜底模板，不是运行态开关。
-4. 不要直接写 `config.json` 来表示发布、接入或触发配置已经生效。
-5. 启停、发布、取消发布等运行态动作必须调用运行时接口，不要通过修改 `config.json` 完成。
-6. 如果 `workflow_config_manage` 或后端配置库不可用，只能把目标配置保存为草稿到 outputs，并明确说明未应用、未发布、未启动。
+3. 如果要读取或修改 Syslog listener 配置，必须使用 `workflow_config_manage(action="get" -> "diff" -> "put", workflow_id="stream_alert_denoise", config_type="syslog")`。
+4. `config.json` 是导入/兜底模板，不是运行态开关。
+5. 不要直接写 `config.json` 来表示发布、接入或触发配置已经生效。
+6. 不要读取 `server_api_token`，不要用 curl 调 `/api/workflow/stream_alert_denoise/syslog-config` 读取或写入 Syslog 配置。
+7. 启停、发布、取消发布等非配置运行态动作必须调用运行时接口，不要通过修改 `config.json` 完成。
+8. 如果 `workflow_config_manage` 或后端配置库不可用，只能把目标配置保存为草稿到 outputs，并明确说明未应用、未发布、未启动。
 
 应用变更前必须展示：
 
 - 计划。
 - publish / triggers / 参数模板 diff。
+- Syslog 配置变更时必须展示 `workflow_config_manage(config_type="syslog")` 生成的 diff。
 - 影响说明，特别是是否会改变 LSH 状态、JSONL 写入或运行态服务。
 - question 工具确认：应用、保存草稿或暂不修改。
-- 用户确认应用后，使用 `workflow_config_manage(action="put", workflow_id="stream_alert_denoise", config={...})` 写入完整配置。
+- 用户确认应用后，使用 `workflow_config_manage(action="put", workflow_id="stream_alert_denoise", config_type="<type>", config={...})` 写入完整配置。
 
 当前 `config.json` 已经是 runtime 消费的结构：`kind: workflow.integration-config`，顶层包含 `publish` 和 `triggers`。不要生成旧的 `publishTemplates` wrapper。
 
@@ -298,8 +303,9 @@ API 批量最小样例：
 1. 读取本文。
 2. 读取 `workflow.md` 和 `workflow.json`。
 3. 调用 `workflow_config_manage(action="get", workflow_id="stream_alert_denoise")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_denoise")`。
-4. 如后端无配置，再查看工作流目录下 `config.json` 是否只是兜底模板。
-5. 汇总已配置项、缺失项和最推荐下一步。
+4. 调用 `workflow_config_manage(action="get", workflow_id="stream_alert_denoise", config_type="syslog")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_denoise", config_type="syslog")`。
+5. 如后端无配置，再查看工作流目录下 `config.json` 是否只是兜底模板。
+6. 汇总已配置项、缺失项和最推荐下一步。
 
 查配置时重点报告：
 

@@ -89,13 +89,13 @@ Rex 验证时应优先做轻量检查：
 
 发布配置模板的生效来源：
 
-- 必须优先使用内置工具 `workflow_config_manage(action="get", workflow_id="<id>")` 读取 Storage/SQL 中的生效模板。
+- 必须优先使用内置工具 `workflow_config_manage(action="get", workflow_id="<id>")` 读取 Storage/SQL 中的生效模板；读取运行态配置时使用 `workflow_config_manage(action="get", workflow_id="<id>", config_type="poller")`、`workflow_config_manage(action="get", workflow_id="<id>", config_type="syslog")` 或 `workflow_config_manage(action="get", workflow_id="<id>", config_type="kafka")`。
 - 如果库里没有，调用 `workflow_config_manage(action="sync", workflow_id="<id>")`，由后端读取工作流目录下的 `config.json` 并迁移到 Storage/SQL。
-- 修改配置前先调用 `workflow_config_manage(action="diff", workflow_id="<id>", config={...})` 生成差异；用户确认后才调用 `workflow_config_manage(action="put", workflow_id="<id>", config={...})` 写入完整配置。
+- 修改配置前先调用 `workflow_config_manage(action="diff", workflow_id="<id>", config_type="<type>", config={...})` 生成差异；用户确认后才调用 `workflow_config_manage(action="put", workflow_id="<id>", config_type="<type>", config={...})` 写入完整配置。
 - `config.json` 是导入/兜底模板，不是运行态开关。
 - 不要直接写 `config.json` 来表示发布、接入或触发配置已经生效。
-- 不要读取 `server_api_token` 或 `service_api_token`，不要手工 curl 本机后端配置接口；如果 `workflow_config_manage` 不可用或失败，只能保存草稿并说明未应用。
-- 启停、发布、取消发布等运行态动作必须调用运行时接口，不要通过修改 `config.json` 完成。
+- 不要读取 `server_api_token` 或 `service_api_token`，不要手工 curl 本机后端配置接口，例如 `/config`、`/poller-config`、`/syslog-config` 或 `/kafka-config`；如果 `workflow_config_manage` 不可用或失败，只能保存草稿并说明未应用。
+- 支持的运行态配置读写必须调用 `workflow_config_manage(config_type=...)`；启停、发布、取消发布等非配置运行态动作才调用运行时接口，不要通过修改 `config.json` 完成。
 - 如果后端配置库不可用，只能把目标配置保存为草稿到 outputs，并明确说明未应用、未发布、未启动。
 
 应用变更前：
@@ -110,7 +110,7 @@ Rex 验证时应优先做轻量检查：
 
 1. 读取本文件。
 2. 读取 `workflow.md` 和 `workflow.json`。
-3. 调用 `workflow_config_manage(action="get", workflow_id="<id>")` 或 `workflow_config_manage(action="status", workflow_id="<id>")`。
+3. 调用 `workflow_config_manage(action="get", workflow_id="<id>")` 或 `workflow_config_manage(action="status", workflow_id="<id>")`；需要查看定时、Syslog 或 Kafka 配置时，补充对应 `config_type`。
 4. 必要时查看 `config.json` 是否只是兜底模板。
 5. 汇总已配置项、缺失项和最推荐下一步。
 

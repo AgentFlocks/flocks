@@ -18,7 +18,9 @@ Rex 引导用户时必须遵守：
 
 - 配置库读取/写入必须使用内置工具 `workflow_config_manage`，不要读取 `server_api_token` 或 `service_api_token`，也不要手工 curl 本机后端配置接口。
 - 查配置使用 `workflow_config_manage(action="get", workflow_id="stream_alert_triage")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_triage")`。
+- 查定时触发配置使用 `workflow_config_manage(action="get", workflow_id="stream_alert_triage", config_type="poller")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_triage", config_type="poller")`。
 - 修改配置前先使用 `workflow_config_manage(action="diff", workflow_id="stream_alert_triage", config={...})` 展示差异并用 question 工具确认；确认后才使用 `workflow_config_manage(action="put", workflow_id="stream_alert_triage", config={...})`。
+- 修改定时触发配置前先使用 `workflow_config_manage(action="diff", workflow_id="stream_alert_triage", config_type="poller", config={...})` 展示差异并用 question 工具确认；确认后才使用 `workflow_config_manage(action="put", workflow_id="stream_alert_triage", config_type="poller", config={...})`。
 - 如果后端配置库没有模板，只能使用 `workflow_config_manage(action="sync", workflow_id="stream_alert_triage")`，让后端从工作流目录 `config.json` 迁移或生成模板。
 - `config.json` 只能作为模板来源或兜底迁移来源，不是直接写入目标，也不能证明配置已生效。
 - 需要启动或停止 API 服务、定时触发或其它运行态能力时，必须使用对应运行态接口；不要通过修改模板字段冒充运行态状态。
@@ -316,20 +318,22 @@ leader/follower 规则：
 
 1. 优先引导为手动运行或 API run 输入参数模板。
 2. 如果用户要发布成 API 服务，应使用 `workflow_config_manage(action="get" 或 "sync" 或 "diff" 或 "put", workflow_id="stream_alert_triage")` 流程。
-3. 如果用户要开启定时触发，默认建议 3 分钟一次；应用前必须确认触发输入来源、输出模式、是否允许写入 `soc.db` 和是否允许触发 LLM。
+3. 如果用户要开启定时触发，默认建议 3 分钟一次；应用前必须确认触发输入来源、输出模式、是否允许写入 `soc.db` 和是否允许触发 LLM，并使用 `workflow_config_manage(action="get" -> "diff" -> "put", workflow_id="stream_alert_triage", config_type="poller")` 读取和写入 poller 配置。
 4. 如果需要扩展工作流目录下的 `config.json`，必须使用 runtime 消费的结构：`kind: workflow.integration-config`，顶层包含 `publish` 和 `triggers`。
 5. 不要生成旧的 `publishTemplates` wrapper。
 6. 不要直接写 `config.json` 来表示发布、接入或触发配置已经生效。
 7. 启停、发布、取消发布等运行态动作必须调用运行时接口。
-8. 如果后端配置接口不可用，只能把目标配置保存为草稿到 outputs，并明确说明未应用、未发布、未启动。
+8. 不要读取 `server_api_token`，不要用 curl 调 `/api/workflow/stream_alert_triage/poller-config` 读取或写入定时配置。
+9. 如果后端配置接口不可用，只能把目标配置保存为草稿到 outputs，并明确说明未应用、未发布、未启动。
 
 应用变更前必须展示：
 
 - 计划。
 - 输入参数或 publish / triggers 模板 diff。
+- poller 配置变更时必须展示 `workflow_config_manage(config_type="poller")` 生成的 diff。
 - 是否会触发 LLM、情报工具、`triage_cache.pkl` 写入、`soc.db` 写入、`triage_result_NNN.jsonl` 写入。
 - question 工具确认：应用、保存草稿或暂不修改。
-- 用户确认应用后，使用 `workflow_config_manage(action="put", workflow_id="stream_alert_triage", config={...})` 写入完整配置。
+- 用户确认应用后，使用 `workflow_config_manage(action="put", workflow_id="stream_alert_triage", config_type="<type>", config={...})` 写入完整配置。
 
 不要通过删除 `triage_cache.pkl` 来“重置配置”。缓存清理是运行数据操作，必须单独说明影响并取得确认。
 
@@ -340,8 +344,9 @@ leader/follower 规则：
 1. 读取本文。
 2. 读取 `workflow.md` 和 `workflow.json`。
 3. 调用 `workflow_config_manage(action="get", workflow_id="stream_alert_triage")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_triage")`。
-4. 如果后端无配置，再检查工作流目录是否有 `config.json`。
-5. 汇总已配置项、缺失项和最推荐下一步。
+4. 调用 `workflow_config_manage(action="get", workflow_id="stream_alert_triage", config_type="poller")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_triage", config_type="poller")`。
+5. 如果后端无配置，再检查工作流目录是否有 `config.json`。
+6. 汇总已配置项、缺失项和最推荐下一步。
 
 查配置时重点报告：
 
