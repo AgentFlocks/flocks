@@ -420,6 +420,7 @@ const DEFAULT_TIME_RANGE: TimeRangeKey = '7d';
 const PAGE_SIZE = 50;
 const QUERY_LIMIT = 10000;
 const ALERT_TABLE_COLUMN_WIDTH = 220;
+const TIMELINE_HOUR_MS = 60 * 60 * 1000;
 
 function numberValue(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
@@ -431,6 +432,11 @@ function textValue(value: unknown, fallback = '') {
 
 function formatNumber(value: number) {
   return value.toLocaleString('zh-CN');
+}
+
+function formatTimelineHourLabel(value: number) {
+  const tick = new Date(Math.round(value / TIMELINE_HOUR_MS) * TIMELINE_HOUR_MS);
+  return `${tick.getMonth() + 1}-${tick.getDate()} ${String(tick.getHours()).padStart(2, '0')}:00`;
 }
 
 function pad2(value: number) {
@@ -937,19 +943,21 @@ function displayThreatName(incident: IncidentCluster) {
     .replace(/[。.]$/, '');
 }
 
-function buildTimeline(incidents: IncidentCluster[]): TimelineBucket[] {
+function buildTimeline(incidents: IncidentCluster[], timeWindow: [Date, Date] | null = null): TimelineBucket[] {
   const dates = incidents.map(dateFromIncident).filter(Boolean) as Date[];
-  if (!dates.length) {
+  if (!dates.length && !timeWindow) {
     return Array.from({ length: 36 }, (_, index) => ({ label: `${String(index).padStart(2, '0')}:00`, total: 0, success: 0, failed: 0, unknown: 0 }));
   }
-  const start = Math.min(...dates.map((date) => date.getTime()));
-  const end = Math.max(...dates.map((date) => date.getTime()));
+  const rawStart = timeWindow ? timeWindow[0].getTime() : Math.min(...dates.map((date) => date.getTime()));
+  const rawEnd = timeWindow ? timeWindow[1].getTime() : Math.max(...dates.map((date) => date.getTime()));
   const bucketCount = 42;
-  const span = Math.max(end - start, bucketCount * 60 * 1000);
+  const start = Math.floor(rawStart / TIMELINE_HOUR_MS) * TIMELINE_HOUR_MS;
+  const minEnd = rawStart + bucketCount * 60 * 1000;
+  const end = Math.max(Math.ceil(Math.max(rawEnd, minEnd) / TIMELINE_HOUR_MS) * TIMELINE_HOUR_MS, start + 4 * TIMELINE_HOUR_MS);
+  const span = end - start;
   const buckets = Array.from({ length: bucketCount }, (_, index) => {
-    const tick = new Date(start + (span * index) / Math.max(bucketCount - 1, 1));
     return {
-      label: `${tick.getMonth() + 1}-${tick.getDate()} ${String(tick.getHours()).padStart(2, '0')}:00`,
+      label: formatTimelineHourLabel(start + (span * index) / Math.max(bucketCount - 1, 1)),
       total: 0,
       success: 0,
       failed: 0,
@@ -1520,7 +1528,7 @@ export default function SocAlertsPage() {
   const currentPage = Math.min(page, pageCount);
   const pagedIncidents = sortedIncidents.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
-  const timeline = useMemo(() => buildTimeline(filteredIncidents), [filteredIncidents]);
+  const timeline = useMemo(() => buildTimeline(filteredIncidents, resolveTimeWindow(appliedTimeFilter)), [appliedTimeFilter, filteredIncidents]);
   return (
     <div className="relative min-h-full overflow-y-auto bg-[#f5f7fb] text-slate-900" style={{ isolation: 'isolate' }}>
       {openMenu && <button type="button" aria-label={tr('关闭筛选菜单')} className="absolute inset-0 cursor-default" style={{ zIndex: 5 }} onClick={() => setOpenMenu(null)} />}
@@ -1622,21 +1630,22 @@ export default function SocAlertsPage() {
         </div>
       </div>
 
-      <section className="relative z-0 border-y border-slate-200 bg-white px-6 py-4">
+      <section className="relative z-0 border-t border-slate-200 bg-white px-6 py-4">
         {timelineOpen && <TimelineChart buckets={timeline} tr={tr} />}
-        <div className="flex justify-center">
-          <button
-            type="button"
-            onClick={() => setTimelineOpen((open) => !open)}
-            className="mt-1 flex h-6 w-16 items-center justify-center rounded bg-slate-100 text-sm text-slate-500 hover:bg-slate-200 hover:text-slate-700"
-            aria-label={timelineOpen ? tr('折叠趋势图') : tr('展开趋势图')}
-          >
-            {timelineOpen ? '⌃' : '⌄'}
-          </button>
-        </div>
       </section>
+      <div className="relative z-10 flex h-8 items-end justify-center border-b border-slate-200 bg-white">
+        <button
+          type="button"
+          onClick={() => setTimelineOpen((open) => !open)}
+          className="flex h-7 w-16 items-center justify-center bg-slate-100 text-sm text-slate-500 shadow-[0_1px_0_rgba(148,163,184,0.25)] transition hover:bg-slate-200 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
+          style={{ clipPath: 'polygon(9px 0, calc(100% - 9px) 0, 100% 100%, 0 100%)' }}
+          aria-label={timelineOpen ? tr('折叠趋势图') : tr('展开趋势图')}
+        >
+          {timelineOpen ? '⌃' : '⌄'}
+        </button>
+      </div>
 
-      <section className="relative z-0 bg-white px-6 pb-6 pt-4">
+      <section className="relative z-0 bg-white px-6 pb-6 pt-5">
         <div className="flex flex-wrap border-b border-slate-200">
           <div className="min-w-44 border-x border-t-2 border-t-red-500 bg-white px-6 py-3 text-sm font-medium text-slate-950">
             {tr('全部')} ({formatNumber(filteredIncidents.length)})
