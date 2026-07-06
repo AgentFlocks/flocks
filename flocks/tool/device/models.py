@@ -54,15 +54,24 @@ CREATE TABLE IF NOT EXISTS device_integrations (
     updated_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_device_storage_key ON device_integrations(storage_key);
-CREATE INDEX IF NOT EXISTS idx_device_group       ON device_integrations(group_id);
 """)
 
+
 # Upgrade hook for installations created before group_id was added.
-# Storage wraps each DDL in try/except so the duplicate-column error on fresh
-# installs is silently ignored.
-Storage.register_ddl(
-    "ALTER TABLE device_integrations ADD COLUMN group_id TEXT NOT NULL DEFAULT '';"
-)
+async def _ensure_device_integrations_group_id(db: Any) -> None:
+    cursor = await db.execute("PRAGMA table_info(device_integrations)")
+    columns = {str(row[1]) for row in await cursor.fetchall()}
+    if "group_id" in columns:
+        return
+    await db.execute("ALTER TABLE device_integrations ADD COLUMN group_id TEXT NOT NULL DEFAULT '';")
+
+
+Storage.register_ddl(_ensure_device_integrations_group_id)
+
+Storage.register_ddl("""
+CREATE INDEX IF NOT EXISTS idx_device_group ON device_integrations(group_id);
+""")
+
 
 # Per-device tool enabled/disabled overrides.
 #

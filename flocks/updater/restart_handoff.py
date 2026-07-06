@@ -23,12 +23,8 @@ from flocks.utils.log import append_upgrade_text_log
 DEFAULT_PARENT_TIMEOUT_SECONDS = 20.0
 DEFAULT_PORT_TIMEOUT_SECONDS = 10.0
 POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
+SUPERVISOR_STOP_TIMEOUT_SECONDS = 20.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
-
-
-class _NullConsole:
-    def print(self, *args, **kwargs) -> None:
-        return None
 
 
 def _record_handoff_log(message: str) -> None:
@@ -68,50 +64,37 @@ def _wait_for_backend_port_free(
     return not _backend_port_in_use(port)
 
 
-def _ensure_backend_port_free(backend_port: int, backend_pid_file: Path) -> bool:
+def _ensure_backend_port_free(backend_port: int) -> bool:
     if _wait_for_backend_port_free(backend_port):
         return True
 
-    _record_handoff_log(f"backend_port_still_in_use port={backend_port}; stopping backend")
-    try:
-        service_manager.stop_one(backend_port, backend_pid_file, "backend", _NullConsole())
-    except Exception as exc:
-        _record_handoff_log(f"backend_stop_failed port={backend_port} error={exc}")
-        return False
-
+    _record_handoff_log(f"backend_port_still_in_use port={backend_port}")
     return _wait_for_backend_port_free(backend_port, timeout_seconds=POST_STOP_PORT_TIMEOUT_SECONDS)
 
 
-def _cli_subcommand(argv: Sequence[str]) -> str | None:
-    for index, value in enumerate(argv[:-2]):
-        if value == "-m" and argv[index + 1] == "flocks.cli.main":
-            return argv[index + 2]
-    return None
-
-
-def _record_backend_runtime_if_direct_serve(
-    process: subprocess.Popen,
-    restart_argv: Sequence[str],
+def _stop_supervisor_before_restart(
     *,
-    backend_host: str,
-    backend_port: int,
-    backend_pid_file: Path,
-) -> None:
-    if _cli_subcommand(restart_argv) != "serve":
-        return
+    timeout_seconds: float = SUPERVISOR_STOP_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    from flocks.cli import service_control
+
+    paths = service_manager.runtime_paths()
+    if not service_control.supervisor_is_running(paths):
+        return True
 
     try:
-        service_manager.write_runtime_record(
-            backend_pid_file,
-            service_manager.process_runtime_record(
-                process,
-                host=backend_host,
-                port=backend_port,
-                command=restart_argv,
-            ),
-        )
+        service_control.request_stop(paths=paths, timeout=timeout_seconds)
     except Exception as exc:
-        _record_handoff_log(f"backend_runtime_record_failed error={exc}")
+        _record_handoff_log(f"supervisor_stop_request_failed error={exc}")
+        return False
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not service_control.supervisor_is_running(paths):
+            return True
+        time.sleep(poll_interval_seconds)
+    return not service_control.supervisor_is_running(paths)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -121,7 +104,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend-port", type=int, required=True)
     parser.add_argument("--frontend-host", required=True)
     parser.add_argument("--frontend-port", type=int, required=True)
-    parser.add_argument("--backend-pid-file", required=True)
+    parser.add_argument("--backend-pid-file")
     parser.add_argument("--install-root", required=True)
     parser.add_argument("--uv-path", required=True)
     parser.add_argument("--sync-timeout", type=int, required=True)
@@ -134,6 +117,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pro-bundle-manifest-path")
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
+    parser.add_argument("--prepare-handover", action="store_true")
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.restart_argv and args.restart_argv[0] == "--":
@@ -176,15 +160,67 @@ def _rollback_failed_upgrade(args: argparse.Namespace, error: str) -> None:
         _record_handoff_log(f"rollback_failed error={exc}")
 
 
+def _prepare_upgrade_handover(args: argparse.Namespace) -> bool:
+    from flocks.updater import updater
+
+    try:
+        updater._prepare_upgrade_handover(args.version)
+    except Exception as exc:
+        _record_handoff_log(f"prepare_handover_failed error={exc}")
+        return False
+    return True
+
+
+def _rollback_upgrade_handover() -> None:
+    from flocks.updater import updater
+
+    try:
+        updater.rollback_upgrade_handover()
+    except Exception as exc:
+        _record_handoff_log(f"handover_rollback_failed error={exc}")
+
+
 def _cleanup_dir(path_value: str | None) -> None:
     if not path_value:
         return
     shutil.rmtree(Path(path_value), ignore_errors=True)
 
 
+def _cli_subcommand(argv: Sequence[str]) -> str | None:
+    """Return the flocks.cli.main subcommand embedded in a Python argv."""
+    for index, value in enumerate(argv[:-2]):
+        if value == "-m" and argv[index + 1] == "flocks.cli.main":
+            return argv[index + 2]
+    return None
+
+
+def _restart_argv_for_current_runtime(args: argparse.Namespace, restart_argv: Sequence[str]) -> list[str]:
+    if _cli_subcommand(restart_argv) != "serve":
+        return list(restart_argv)
+
+    argv = [
+        restart_argv[0],
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        str(args.frontend_host),
+        "--port",
+        str(args.frontend_port),
+        "--server-host",
+        str(args.backend_host),
+        "--server-port",
+        str(args.backend_port),
+    ]
+    _record_handoff_log(f"legacy_serve_restart_migrated argv={argv}")
+    return argv
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    restart_argv = list(args.restart_argv)
+    restart_argv = _restart_argv_for_current_runtime(args, args.restart_argv)
     if not restart_argv:
         _record_handoff_log("missing_restart_argv")
         return 2
@@ -200,8 +236,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    backend_pid_file = Path(args.backend_pid_file)
-    if not _ensure_backend_port_free(args.backend_port, backend_pid_file):
+    if args.prepare_handover:
+        if not _prepare_upgrade_handover(args):
+            _cleanup_dir(args.cleanup_dir)
+            return 1
+    elif not _ensure_backend_port_free(args.backend_port):
         _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
         _cleanup_dir(args.cleanup_dir)
         return 1
@@ -215,6 +254,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
+    if not _stop_supervisor_before_restart():
+        _record_handoff_log("supervisor_stop_timeout")
+        if args.prepare_handover:
+            _rollback_upgrade_handover()
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
     try:
         process = subprocess.Popen(
             restart_argv,
@@ -223,16 +269,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
     except OSError as exc:
         _record_handoff_log(f"restart_spawn_failed error={exc}")
+        if args.prepare_handover:
+            _rollback_upgrade_handover()
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    _record_backend_runtime_if_direct_serve(
-        process,
-        restart_argv,
-        backend_host=args.backend_host,
-        backend_port=args.backend_port,
-        backend_pid_file=backend_pid_file,
-    )
     _record_handoff_log(f"restart_spawned pid={process.pid}")
     _cleanup_dir(args.cleanup_dir)
     return 0

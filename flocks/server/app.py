@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Callable, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -26,6 +26,7 @@ from flocks.utils.langfuse import initialize as init_observability, shutdown as 
 from flocks.auth.service import AuthService
 from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.server.static_webui import maybe_serve_static_webui
 
 # Load .env file at startup
 try:
@@ -659,6 +660,13 @@ _REQUEST_LOG_SKIP_EXACT = frozenset({
     "/api/session/status",
 })
 
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "frame-ancestors 'self'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
 
 def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
@@ -681,7 +689,7 @@ def _should_log_request(path: str, status_code: int) -> bool:
 # CORS Configuration
 #
 # Priority order:
-#   1. Runtime env vars exported by ``start_backend()`` → add the concrete
+#   1. Runtime env vars exported by the supervised backend launcher → add the concrete
 #      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.
@@ -780,7 +788,15 @@ class _DeferredCORSMiddleware:
         await self._inner(scope, receive, send)
 
 
-# Instance Context Middleware
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Attach baseline browser security headers to every HTTP response."""
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
 @app.middleware("http")
 async def instance_context_middleware(request: Request, call_next):
     """
@@ -796,7 +812,7 @@ async def instance_context_middleware(request: Request, call_next):
     from urllib.parse import unquote
     from flocks.project.instance import Instance
     from flocks.project.bootstrap import instance_bootstrap
-    
+
     # Skip instance context for global routes, static files, and simple endpoints
     skip_prefixes = {
         "/global", "/docs", "/redoc", "/openapi.json", "/health",
@@ -889,6 +905,15 @@ async def auth_guard_middleware(request: Request, call_next):
         return await call_next(request)
     finally:
         clear_auth_context(token)
+
+
+@app.middleware("http")
+async def static_webui_middleware(request: Request, call_next):
+    """Serve the SPA shell before auth for browser navigations."""
+    static_response = await maybe_serve_static_webui(request)
+    if static_response is not None:
+        return static_response
+    return await call_next(request)
 
 
 # Error Handlers
