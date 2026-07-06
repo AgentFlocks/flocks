@@ -47,6 +47,7 @@ const {
   hubAPI: {
     catalog: vi.fn(),
     install: vi.fn(),
+    installStream: vi.fn(),
   },
   toast: {
     error: vi.fn(),
@@ -283,6 +284,7 @@ describe('SessionPage session actions menu', () => {
       data: [{ id: 'soc-workspace', type: 'component', state: 'installed' }],
     });
     hubAPI.install.mockResolvedValue({ data: { id: 'soc-workspace' } });
+    hubAPI.installStream.mockResolvedValue(undefined);
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
     client.post.mockResolvedValue({ data: secondSession });
@@ -450,6 +452,7 @@ describe('SessionPage session actions menu', () => {
       expect(hubAPI.catalog).toHaveBeenCalledWith({ type: 'component', q: 'soc-workspace' });
     });
     expect(hubAPI.install).not.toHaveBeenCalled();
+    expect(hubAPI.installStream).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(client.post).toHaveBeenCalledWith(
         '/api/session/session-2/prompt_async',
@@ -470,20 +473,64 @@ describe('SessionPage session actions menu', () => {
   it('installs the SOC workspace component before starting alert operations setup', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({
-      data: [{ id: 'soc-workspace', type: 'component', state: 'available' }],
+      data: [{
+        id: 'soc-workspace',
+        type: 'component',
+        name: 'SOC Workspace Component',
+        nameCn: 'SOC 工作区场景套件',
+        state: 'available',
+      }],
+    });
+    hubAPI.installStream.mockImplementationOnce(async (_type, _id, onProgress) => {
+      onProgress({
+        event: 'start',
+        id: 'soc-workspace',
+        type: 'component',
+        name: 'SOC Workspace Component',
+        nameCn: 'SOC 工作区场景套件',
+        total: 1,
+        items: [{
+          type: 'webui',
+          id: 'soc_ui',
+          name: 'SOC Workspace WebUI',
+          status: 'pending',
+        }],
+      });
+      onProgress({
+        event: 'item',
+        id: 'soc-workspace',
+        type: 'component',
+        name: 'SOC Workspace Component',
+        nameCn: 'SOC 工作区场景套件',
+        total: 1,
+        item: {
+          type: 'webui',
+          id: 'soc_ui',
+          name: 'SOC Workspace WebUI',
+          status: 'installed',
+        },
+      });
+      onProgress({
+        event: 'complete',
+        id: 'soc-workspace',
+        type: 'component',
+        name: 'SOC Workspace Component',
+        nameCn: 'SOC 工作区场景套件',
+        total: 1,
+      });
     });
 
     renderSessionPage();
     await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
 
     await waitFor(() => {
-      expect(hubAPI.install).toHaveBeenCalledWith('component', 'soc-workspace');
+      expect(hubAPI.installStream).toHaveBeenCalledWith('component', 'soc-workspace', expect.any(Function));
     });
+    expect(await screen.findByText('场景套件安装进度')).toBeInTheDocument();
+    expect(screen.getByText('SOC Workspace WebUI')).toBeInTheDocument();
+    expect(screen.getByText('已安装')).toBeInTheDocument();
     expect(global.confirm).toHaveBeenCalledWith('welcome.socComponentInstallConfirm');
-    expect(toast.success).toHaveBeenCalledWith(
-      'welcome.socComponentInstalledTitle',
-      'welcome.socComponentInstalledDescription',
-    );
+    expect(toast.success).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(client.post).toHaveBeenCalledWith(
         '/api/session/session-2/prompt_async',
@@ -515,6 +562,7 @@ describe('SessionPage session actions menu', () => {
       );
     });
     expect(hubAPI.install).not.toHaveBeenCalled();
+    expect(hubAPI.installStream).not.toHaveBeenCalled();
     expect(client.post).not.toHaveBeenCalled();
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
@@ -522,9 +570,15 @@ describe('SessionPage session actions menu', () => {
   it('shows a localized error title when SOC workspace component installation fails', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({
-      data: [{ id: 'soc-workspace', type: 'component', state: 'available' }],
+      data: [{
+        id: 'soc-workspace',
+        type: 'component',
+        name: 'SOC Workspace Component',
+        nameCn: 'SOC 工作区场景套件',
+        state: 'available',
+      }],
     });
-    hubAPI.install.mockRejectedValueOnce(new Error('install failed'));
+    hubAPI.installStream.mockRejectedValueOnce(new Error('install failed'));
 
     renderSessionPage();
     await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
@@ -535,6 +589,8 @@ describe('SessionPage session actions menu', () => {
         'install failed',
       );
     });
+    expect(await screen.findByText('场景套件安装进度')).toBeInTheDocument();
+    expect(screen.getByText('安装失败: SOC 工作区场景套件')).toBeInTheDocument();
     expect(client.post).not.toHaveBeenCalled();
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
@@ -553,6 +609,7 @@ describe('SessionPage session actions menu', () => {
       expect(hubAPI.catalog).toHaveBeenCalledWith({ type: 'component', q: 'soc-workspace' });
     });
     expect(hubAPI.install).not.toHaveBeenCalled();
+    expect(hubAPI.installStream).not.toHaveBeenCalled();
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 

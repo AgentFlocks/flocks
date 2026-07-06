@@ -884,6 +884,65 @@ describe('Layout WebUI contract pages navigation', () => {
     );
   });
 
+  it('keeps sidebar workspace groups expanded by default and allows collapsing each group', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    renderHomeWithLayout();
+
+    const aiWorkbenchToggle = await screen.findByRole('button', { name: 'aiWorkbench' });
+    const sceneWorkspacesToggle = screen.getByRole('button', { name: 'sceneWorkspaces' });
+    const agentHubToggle = screen.getByRole('button', { name: 'agentHub' });
+
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+
+    await user.click(aiWorkbenchToggle);
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['aiWorkbench']));
+    expect(screen.queryByRole('link', { name: 'sessions' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+    await user.click(aiWorkbenchToggle);
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+
+    await user.click(sceneWorkspacesToggle);
+    expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['sceneWorkspaces']));
+    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+    await user.click(sceneWorkspacesToggle);
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+
+    await user.click(agentHubToggle);
+    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['agentHub']));
+    expect(screen.queryByRole('link', { name: 'agents' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    await user.click(agentHubToggle);
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+  });
+
+  it('restores collapsed sidebar workspace groups after refresh', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    localStorage.setItem('flocks_layout_collapsed_nav_sections', JSON.stringify(['sceneWorkspaces']));
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByRole('button', { name: 'sceneWorkspaces' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'aiWorkbench' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'agentHub' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+  });
+
   it('does not render WebUI contract page links until their build is ready', async () => {
     useWebUIContractPages.mockReturnValue({
       pages: [
@@ -1016,7 +1075,7 @@ describe('Layout WebUI contract pages navigation', () => {
 
     const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
     expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
-    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThan(sectionHeadings.indexOf('agentHub'));
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeLessThan(sectionHeadings.indexOf('agentHub'));
     expect(sectionHeadings).not.toContain('systemCenter');
 
     const sceneSection = Array.from(container.querySelectorAll('h3'))

@@ -33,9 +33,36 @@ import { useTranslation } from 'react-i18next';
 // re-import dismissal helpers from the modal modules (a static named import
 // would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
+
 function isOnboardingDismissed(): boolean {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
+
+function readCollapsedNavSectionIds(): Set<string> {
+  try {
+    const rawValue = localStorage.getItem(COLLAPSED_NAV_SECTIONS_KEY);
+    if (!rawValue) return new Set();
+    const parsedValue: unknown = JSON.parse(rawValue);
+    if (!Array.isArray(parsedValue)) return new Set();
+    return new Set(parsedValue.filter((item): item is string => typeof item === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
+  try {
+    if (sectionIds.size === 0) {
+      localStorage.removeItem(COLLAPSED_NAV_SECTIONS_KEY);
+      return;
+    }
+    localStorage.setItem(COLLAPSED_NAV_SECTIONS_KEY, JSON.stringify(Array.from(sectionIds).sort()));
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
 const OnboardingModal = lazy(() => import('@/components/common/OnboardingModal'));
 const UpdateModal = lazy(() => import('@/components/common/UpdateModal'));
 const NotificationModal = lazy(() => import('@/components/common/NotificationModal'));
@@ -74,8 +101,10 @@ interface LayoutNavItem {
 }
 
 interface LayoutNavSection {
+  id?: string;
   name: string;
   items: LayoutNavItem[];
+  collapsible?: boolean;
 }
 
 function formatProVersion(version?: string | null): string | null {
@@ -172,6 +201,7 @@ export default function Layout() {
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
+  const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(readCollapsedNavSectionIds);
   const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
   const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
   const workspaceMenuCloseTimerRef = useRef<number | null>(null);
@@ -476,7 +506,9 @@ export default function Layout() {
           ],
         },
         {
+          id: 'aiWorkbench',
           name: t('aiWorkbench'),
+          collapsible: true,
           items: [
             { name: t('sessions'), href: '/sessions', icon: MessageSquare },
             { name: t('workspace'), href: '/workspace', icon: FolderOpen },
@@ -485,7 +517,18 @@ export default function Layout() {
           ],
         },
         {
+          id: 'sceneWorkspaces',
+          name: t('sceneWorkspaces'),
+          collapsible: true,
+          items: [
+            ...sceneWorkspaceItems,
+            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+          ],
+        },
+        {
+          id: 'agentHub',
           name: t('agentHub'),
+          collapsible: true,
           items: [
             { name: t('agents'), href: '/agents', icon: Bot },
             { name: t('skills'), href: '/skills', icon: BookOpen },
@@ -493,13 +536,6 @@ export default function Layout() {
             { name: t('hub', { productName }), href: '/hub', icon: Archive },
             { name: t('models'), href: '/models', icon: Brain },
             { name: t('channels'), href: '/channels', icon: Radio },
-          ],
-        },
-        {
-          name: t('sceneWorkspaces'),
-          items: [
-            ...sceneWorkspaceItems,
-            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
           ],
         },
       ];
@@ -580,6 +616,19 @@ export default function Layout() {
       setOpenWorkspaceMenuId(null);
     }
   }, [activeWorkspaceMenu, openWorkspaceMenuId]);
+
+  const toggleNavSection = useCallback((sectionId: string) => {
+    setCollapsedNavSectionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sectionId)) {
+        next.delete(sectionId);
+      } else {
+        next.add(sectionId);
+      }
+      saveCollapsedNavSectionIds(next);
+      return next;
+    });
+  }, []);
 
   const toggleWorkspaceSection = useCallback((sectionId: string) => {
     setCollapsedWorkspaceSectionIds((current) => {
@@ -728,72 +777,92 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section) => (
-              <div key={section.name} className="mb-6">
-                {!collapsed && section.name && (
-                  <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
-                    {section.name}
-                  </h3>
-                )}
-                {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
-                <div className="space-y-0.5">
-                  {section.items.map((item) => {
-                    const isActive = location.pathname === item.href
-                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
-                    return (
-                      <Link
-                        key={item.href}
-                        to={item.href}
-                        onMouseEnter={() => {
-                          if (item.opensWorkspaceMenu) {
-                            openWorkspaceMenu(item.workspaceId);
-                          } else {
-                            scheduleWorkspaceMenuClose();
-                          }
-                        }}
-                        onMouseLeave={() => {
-                          if (item.opensWorkspaceMenu) {
-                            scheduleWorkspaceMenuClose();
-                          }
-                        }}
-                        onClick={(event) => {
-                          if (item.opensWorkspaceMenu) {
-                            event.preventDefault();
-                            openWorkspaceMenu(item.workspaceId);
-                            return;
-                          }
-                          setOpenWorkspaceMenuId(null);
-                          setSidebarOpen(false);
-                        }}
-                        title={collapsed ? item.name : undefined}
-                        className={`
-                          flex items-center rounded-lg transition-all duration-150
-                          ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
-                          ${isActive
-                            ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
-                            : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
-                          }
-                        `}
-                      >
-                        <item.icon
-                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
-                        />
-                        {!collapsed && (
-                          <>
-                            <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                            {item.opensWorkspaceMenu && (
-                              <ChevronRight
-                                className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
-                              />
+            {navigation.map((section, sectionIndex) => {
+              const sectionId = (section.id ?? section.name) || `section-${sectionIndex}`;
+              const sectionContentId = `layout-nav-section-${sectionId}`;
+              const sectionCollapsed = Boolean(section.collapsible && collapsedNavSectionIds.has(sectionId));
+              return (
+                <div key={sectionId} className="mb-6">
+                  {!collapsed && section.name && (
+                    <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
+                      {section.collapsible ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleNavSection(sectionId)}
+                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
+                          aria-expanded={!sectionCollapsed}
+                          aria-controls={sectionContentId}
+                        >
+                          <span className="min-w-0 truncate">{section.name}</span>
+                          <ChevronRight className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                        </button>
+                      ) : (
+                        section.name
+                      )}
+                    </h3>
+                  )}
+                  {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
+                  {!sectionCollapsed && (
+                    <div id={sectionContentId} className="space-y-0.5">
+                      {section.items.map((item) => {
+                        const isActive = location.pathname === item.href
+                          || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
+                        return (
+                          <Link
+                            key={item.href}
+                            to={item.href}
+                            onMouseEnter={() => {
+                              if (item.opensWorkspaceMenu) {
+                                openWorkspaceMenu(item.workspaceId);
+                              } else {
+                                scheduleWorkspaceMenuClose();
+                              }
+                            }}
+                            onMouseLeave={() => {
+                              if (item.opensWorkspaceMenu) {
+                                scheduleWorkspaceMenuClose();
+                              }
+                            }}
+                            onClick={(event) => {
+                              if (item.opensWorkspaceMenu) {
+                                event.preventDefault();
+                                openWorkspaceMenu(item.workspaceId);
+                                return;
+                              }
+                              setOpenWorkspaceMenuId(null);
+                              setSidebarOpen(false);
+                            }}
+                            title={collapsed ? item.name : undefined}
+                            className={`
+                              flex items-center rounded-lg transition-all duration-150
+                              ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
+                              ${isActive
+                                ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
+                                : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
+                              }
+                            `}
+                          >
+                            <item.icon
+                              className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
+                            />
+                            {!collapsed && (
+                              <>
+                                <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                                {item.opensWorkspaceMenu && (
+                                  <ChevronRight
+                                    className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
+                                  />
+                                )}
+                              </>
                             )}
-                          </>
-                        )}
-                      </Link>
-                    );
-                  })}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </nav>
 
           {/* Bottom account entry */}

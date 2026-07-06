@@ -12,8 +12,14 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SuiteInstallProgressPanel, {
+  applySuiteInstallProgressEvent,
+  createSuiteInstallProgressState,
+  failSuiteInstallProgress,
+  type SuiteInstallProgressState,
+} from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
-import { hubAPI } from '@/api/hub';
+import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
@@ -132,6 +138,7 @@ export default function SessionPage() {
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
+  const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
@@ -586,10 +593,15 @@ export default function SessionPage() {
     }
   }, [addSession, selectedAgent, toast, t]);
 
+  const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
+    setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
+  }, []);
+
   const handleAlertOperationsSetup = useCallback(async () => {
     if (installingSocWorkspace) return;
 
     setInstallingSocWorkspace(true);
+    let startedComponentInstall = false;
     try {
       const { data } = await hubAPI.catalog({ type: 'component', q: SOC_WORKSPACE_COMPONENT_ID });
       const component = data.find((item) => item.id === SOC_WORKSPACE_COMPONENT_ID && item.type === 'component');
@@ -602,8 +614,9 @@ export default function SessionPage() {
       if (!INSTALLED_HUB_STATES.has(component.state)) {
         const confirmed = window.confirm(t('welcome.socComponentInstallConfirm'));
         if (!confirmed) return;
-        await hubAPI.install('component', SOC_WORKSPACE_COMPONENT_ID);
-        toast.success(t('welcome.socComponentInstalledTitle'), t('welcome.socComponentInstalledDescription'));
+        startedComponentInstall = true;
+        setSuiteInstallProgress(createSuiteInstallProgressState(component));
+        await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
       }
 
       await handleCreateAndSend(
@@ -614,14 +627,22 @@ export default function SessionPage() {
         { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
       );
     } catch (err: any) {
+      const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
+      if (startedComponentInstall) {
+        setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
+          id: SOC_WORKSPACE_COMPONENT_ID,
+          name: 'SOC Workspace Component',
+          nameCn: 'SOC 工作区场景套件',
+        }, message));
+      }
       toast.error(
         t('welcome.socComponentInstallFailedTitle'),
-        err?.message ?? t('welcome.socComponentInstallFailedDescription'),
+        message,
       );
     } finally {
       setInstallingSocWorkspace(false);
     }
-  }, [handleCreateAndSend, installingSocWorkspace, selectedPromptModel, t, toast]);
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();
@@ -1316,6 +1337,14 @@ export default function SessionPage() {
           ))}
           <div className="absolute left-full top-1/2 -translate-y-1/2 border-4 border-transparent border-l-zinc-200 dark:border-l-zinc-800" />
         </div>
+      )}
+
+      {suiteInstallProgress && (
+        <SuiteInstallProgressPanel
+          progress={suiteInstallProgress}
+          language={i18n.language}
+          onClose={() => setSuiteInstallProgress(null)}
+        />
       )}
 
       {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
