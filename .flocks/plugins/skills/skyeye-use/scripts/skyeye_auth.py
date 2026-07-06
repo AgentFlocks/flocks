@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SkyEye Sensor browser auth-state helper.
+"""SkyEye browser auth-state helper.
 
 This script follows the skill's existing browser workflow and only automates
 the manual login step when credentials are available:
@@ -26,13 +26,13 @@ from urllib.parse import urljoin, urlparse
 
 from flocks.browser import helpers
 
-AUTH_DIR = Path.home() / ".flocks" / "browser" / "skyeye-sensor"
+AUTH_DIR = Path.home() / ".flocks" / "browser" / "skyeye"
 DEFAULT_AUTH_STATE = AUTH_DIR / "auth-state.json"
 AUTH_CONFIG = AUTH_DIR / "auth-config.json"
-USERNAME_SECRET_ID = "skyeye_sensor_username"
-PASSWORD_SECRET_ID = "skyeye_sensor_password"
-DEFAULT_LOGIN_PATH = "/login"
-DEFAULT_CAPTCHA_PATH = "/skyeye/admin/code"
+USERNAME_SECRET_ID = "skyeye_username"
+PASSWORD_SECRET_ID = "skyeye_password"
+DEFAULT_LOGIN_PATH = "/skyeye/home/login"
+DEFAULT_CAPTCHA_PATH = "/skyeye/v1/admin/code"
 DEFAULT_TIMEOUT = 25
 ESSENTIAL_LOCAL_STORAGE_KEYS = {"csrf_token", "csrfToken", "system_type"}
 MAX_LOCAL_STORAGE_VALUE_BYTES = 4096
@@ -56,20 +56,31 @@ def _resolve_ref(value: Any) -> Optional[str]:
     return value
 
 
-def _normalise_base_url(value: str) -> str:
+def _split_base_url_and_path(value: str) -> tuple[str, str]:
     candidate = value.strip()
     if not candidate:
-        raise ValueError("SkyEye Sensor base_url is required.")
+        raise ValueError("SkyEye base_url is required.")
     if "://" not in candidate:
         candidate = f"https://{candidate}"
     parsed = urlparse(candidate)
     if not parsed.hostname:
-        raise ValueError(f"Invalid SkyEye Sensor base_url: {value!r}")
+        raise ValueError(f"Invalid SkyEye base_url: {value!r}")
     host = parsed.hostname
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     port = f":{parsed.port}" if parsed.port else ""
-    return f"{parsed.scheme}://{host}{port}".rstrip("/")
+    path = parsed.path or ""
+    return f"{parsed.scheme}://{host}{port}".rstrip("/"), path
+
+
+def _normalise_base_url(value: str) -> str:
+    base_url, _path = _split_base_url_and_path(value)
+    return base_url
+
+
+def _login_path_from_url(value: str) -> str:
+    _base_url, path = _split_base_url_and_path(value)
+    return path if path and path != "/" else ""
 
 
 def _read_config() -> dict[str, Any]:
@@ -90,12 +101,18 @@ def _write_config(data: dict[str, Any]) -> None:
 def _persist_inputs(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     if args.base_url:
         config["base_url"] = _normalise_base_url(args.base_url)
+        inferred_login_path = _login_path_from_url(args.base_url)
+        if inferred_login_path and not args.login_path:
+            config["login_path"] = inferred_login_path
     if args.auth_state:
         config["auth_state_path"] = str(Path(args.auth_state).expanduser())
     if args.login_path:
         config["login_path"] = args.login_path
     if args.captcha_path:
         config["captcha_path"] = args.captcha_path
+
+    if args.base_url or args.auth_state or args.login_path or args.captcha_path:
+        _write_config(config)
 
     if args.save_credentials:
         secrets = _get_secret_manager()
@@ -105,7 +122,7 @@ def _persist_inputs(args: argparse.Namespace, config: dict[str, Any]) -> dict[st
         if args.password:
             secrets.set(PASSWORD_SECRET_ID, args.password)
             config["password"] = f"{{secret:{PASSWORD_SECRET_ID}}}"
-        if args.base_url or args.auth_state or args.username or args.password:
+        if args.username or args.password:
             _write_config(config)
     return config
 
@@ -115,10 +132,10 @@ def saved_auto_login_status() -> dict[str, Any]:
     config = _read_config()
     username = _resolve_ref(config.get("username")) or _get_secret_manager().get(USERNAME_SECRET_ID)
     password = _resolve_ref(config.get("password")) or _get_secret_manager().get(PASSWORD_SECRET_ID)
-    base_url = _resolve_ref(config.get("base_url")) or os.getenv("SKYEYE_SENSOR_BASE_URL")
+    base_url = _resolve_ref(config.get("base_url")) or os.getenv("SKYEYE_BASE_URL")
     auth_state_path = Path(
         _resolve_ref(config.get("auth_state_path"))
-        or os.getenv("SKYEYE_SENSOR_AUTH_STATE")
+        or os.getenv("SKYEYE_AUTH_STATE")
         or DEFAULT_AUTH_STATE
     ).expanduser()
     has_username = bool(str(username or "").strip())
@@ -168,27 +185,27 @@ def _runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     base_url = _normalise_base_url(
         args.base_url
         or _resolve_ref(config.get("base_url"))
-        or os.getenv("SKYEYE_SENSOR_BASE_URL")
+        or os.getenv("SKYEYE_BASE_URL")
         or ""
     )
     auth_state_path = Path(
         args.auth_state
         or _resolve_ref(config.get("auth_state_path"))
-        or os.getenv("SKYEYE_SENSOR_AUTH_STATE")
+        or os.getenv("SKYEYE_AUTH_STATE")
         or DEFAULT_AUTH_STATE
     ).expanduser()
     username = (
         args.username
         or _resolve_ref(config.get("username"))
         or secrets.get(USERNAME_SECRET_ID)
-        or os.getenv("SKYEYE_SENSOR_USERNAME")
+        or os.getenv("SKYEYE_USERNAME")
         or ""
     ).strip()
     password = (
         args.password
         or _resolve_ref(config.get("password"))
         or secrets.get(PASSWORD_SECRET_ID)
-        or os.getenv("SKYEYE_SENSOR_PASSWORD")
+        or os.getenv("SKYEYE_PASSWORD")
         or ""
     ).strip()
 
@@ -257,6 +274,37 @@ def _filter_auth_state_file(path: Path) -> dict[str, Any]:
 def _save_filtered_state(cfg: RuntimeConfig) -> dict[str, Any]:
     saved = helpers.save_state(cfg.auth_state_path, url=cfg.base_url)
     return {**saved, "filter": _filter_auth_state_file(cfg.auth_state_path)}
+
+
+def _auth_state_has_auth_indicators(path: Path) -> dict[str, Any]:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"valid": False, "reason": "auth_state_json_invalid", "error": str(exc)}
+    cookies = state.get("cookies") if isinstance(state, dict) else []
+    origins = state.get("origins") if isinstance(state, dict) else []
+    cookie_names = {
+        str(cookie.get("name") or "")
+        for cookie in cookies or []
+        if isinstance(cookie, dict) and cookie.get("name")
+    }
+    local_storage_names = set()
+    for origin in origins or []:
+        if not isinstance(origin, dict):
+            continue
+        for entry in origin.get("localStorage") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                local_storage_names.add(str(entry.get("name")))
+    has_cookie = bool(cookie_names & {"csrfToken", "sessionid", "JSESSIONID", "PHPSESSID"})
+    has_token = bool(local_storage_names & {"csrf_token", "csrfToken"})
+    return {
+        "valid": has_cookie or has_token,
+        "reason": "auth_state_has_cookie_or_csrf" if (has_cookie or has_token) else "auth_state_missing_auth_indicators",
+        "cookies": len(cookies or []),
+        "origins": len(origins or []),
+        "cookieNames": sorted(cookie_names),
+        "localStorageAuthKeys": sorted(local_storage_names & {"csrf_token", "csrfToken", "system_type"}),
+    }
 
 
 def _open_page(url: str) -> None:
@@ -343,6 +391,15 @@ def validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
             result = _browser_daemon_result(exc, cfg.auth_state_path)
             result["reason"] = "auth_state_load_failed_browser_daemon_not_ready"
             return result
+        lightweight = _auth_state_has_auth_indicators(cfg.auth_state_path)
+        if lightweight.get("valid"):
+            return {
+                "valid": True,
+                "reason": "auth_state_lightweight_valid_after_browser_load_failed",
+                "error": str(exc),
+                "auth_state_path": str(cfg.auth_state_path),
+                "lightweight": lightweight,
+            }
         return {
             "valid": False,
             "reason": "auth_state_load_failed",
@@ -373,16 +430,105 @@ def _login_dom_summary() -> Any:
         return {"error": str(exc)}
 
 
+def _handle_pre_login_prompts() -> dict[str, Any]:
+    script = """(() => {
+  const visible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  };
+  const buttons = Array.from(document.querySelectorAll("button")).filter(visible);
+  const clicked = [];
+  for (const button of buttons) {
+    const text = (button.innerText || button.textContent || "").replace(/\\s+/g, "");
+    if (/确认并继续|同意|我同意|继续|关闭/.test(text)) {
+      button.click();
+      clicked.push(text);
+      break;
+    }
+  }
+  const checkboxes = Array.from(document.querySelectorAll(".authorize-check input[type='checkbox'], .protocol input[type='checkbox'], .q-checkbox__original"))
+    .filter(visible);
+  for (const checkbox of checkboxes) {
+    if (!checkbox.checked) {
+      checkbox.click();
+      clicked.push("checkbox");
+    }
+  }
+  return {clicked};
+})()"""
+    try:
+        result = helpers.js(script)
+        return result if isinstance(result, dict) else {"result": result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def _wait_for_login_form_ready(cfg: RuntimeConfig) -> dict[str, bool]:
     script = """(() => {
-  const exists = (selector) => Boolean(document.querySelector(selector));
+  const visible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  };
+  const pick = (selectors) => selectors
+    .map((selector) => Array.from(document.querySelectorAll(selector)).find(visible))
+    .find(Boolean);
+  const textInputs = Array.from(document.querySelectorAll("input"))
+    .filter((el) => visible(el) && !["hidden", "password", "checkbox", "radio", "submit", "button"].includes((el.type || "").toLowerCase()));
+  const nonCaptchaTextInputs = textInputs.filter((el) => !/验证码|captcha|code|vcode/i.test([
+    el.placeholder || "",
+    el.name || "",
+    el.id || "",
+    String(el.className || ""),
+    el.closest("div")?.className || ""
+  ].join(" ")));
+  const username = pick([
+    ".sys-account input",
+    ".account input",
+    "input[placeholder*='用户名']",
+    "input[placeholder*='账号']",
+    "input[name*='user' i]",
+    "input[id*='user' i]"
+  ]) || nonCaptchaTextInputs[0];
+  const password = pick([
+    ".sys-password input",
+    ".password input[type='password']",
+    "input[placeholder*='密码']",
+    "input[type='password']"
+  ]);
+  const captcha = pick([
+    ".sys-code input",
+    ".authority-code input",
+    ".code-input input",
+    "input[placeholder*='验证码']",
+    "input[name*='captcha' i]",
+    "input[id*='captcha' i]",
+    "input[name*='code' i]",
+    "input[id*='code' i]"
+  ]) || textInputs.find((el) => /验证码|captcha|code|vcode/i.test([
+    el.placeholder || "",
+    el.name || "",
+    el.id || "",
+    String(el.className || ""),
+    el.closest("div")?.className || ""
+  ].join(" ")));
   const textButton = Array.from(document.querySelectorAll("button"))
+    .filter(visible)
     .some((el) => /登\\s*录|login/i.test((el.innerText || "").trim()));
+  const submit = pick([
+    "button.login-button",
+    ".login-button",
+    ".login-form button.q-button--primary",
+    "button[type='submit']"
+  ]);
   return {
-    username: exists("input[placeholder='请输入用户名']") || exists(".login-form input[type='text']"),
-    password: exists("input[placeholder='请输入密码']") || exists(".login-form input[type='password']"),
-    captcha: exists("input[placeholder='请输入验证码']") || exists(".code-input input"),
-    submit: exists(".login-form button.q-button--primary") || textButton
+    username: Boolean(username),
+    password: Boolean(password),
+    captcha: Boolean(captcha),
+    submit: Boolean(submit) || textButton
   };
 })()"""
     deadline = time.time() + cfg.timeout
@@ -394,7 +540,7 @@ def _wait_for_login_form_ready(cfg: RuntimeConfig) -> dict[str, bool]:
             return {key: bool(value) for key, value in last_state.items()}
         time.sleep(0.5)
     raise RuntimeError(
-        "SkyEye Sensor login form was not rendered before timeout: "
+        "SkyEye login form was not rendered before timeout: "
         + json.dumps({"state": last_state, "dom": _login_dom_summary()}, ensure_ascii=False)
     )
 
@@ -471,7 +617,7 @@ def _captcha_image_from_browser(cfg: RuntimeConfig) -> bytes:
 }})()"""
         data_url = str(helpers.js(script) or "")
     if "," not in data_url:
-        raise RuntimeError("SkyEye Sensor captcha fetch did not return a data URL.")
+        raise RuntimeError("SkyEye captcha fetch did not return a data URL.")
     return base64.b64decode(data_url.split(",", 1)[1])
 
 
@@ -491,16 +637,65 @@ def _fill_and_submit(cfg: RuntimeConfig, code: str) -> dict[str, Any]:
     }
     script = f"""(() => {{
   const cfg = {json.dumps(payload, ensure_ascii=False)};
-  const username = document.querySelector("input[placeholder='请输入用户名']")
-    || document.querySelector(".login-form input[type='text']");
-  const password = document.querySelector("input[placeholder='请输入密码']")
-    || document.querySelector(".login-form input[type='password']");
-  const captcha = document.querySelector("input[placeholder='请输入验证码']")
-    || document.querySelector(".code-input input");
+  const visible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  }};
+  const pick = (selectors) => selectors
+    .map((selector) => Array.from(document.querySelectorAll(selector)).find(visible))
+    .find(Boolean);
+  const textInputs = Array.from(document.querySelectorAll("input"))
+    .filter((el) => visible(el) && !["hidden", "password", "checkbox", "radio", "submit", "button"].includes((el.type || "").toLowerCase()));
+  const nonCaptchaTextInputs = textInputs.filter((el) => !/验证码|captcha|code|vcode/i.test([
+    el.placeholder || "",
+    el.name || "",
+    el.id || "",
+    String(el.className || ""),
+    el.closest("div")?.className || ""
+  ].join(" ")));
+  const username = pick([
+    ".sys-account input",
+    ".account input",
+    "input[placeholder*='用户名']",
+    "input[placeholder*='账号']",
+    "input[name*='user' i]",
+    "input[id*='user' i]"
+  ]) || nonCaptchaTextInputs[0];
+  const password = pick([
+    ".sys-password input",
+    ".password input[type='password']",
+    "input[placeholder*='密码']",
+    "input[type='password']"
+  ]);
+  const captcha = pick([
+    ".sys-code input",
+    ".authority-code input",
+    ".code-input input",
+    "input[placeholder*='验证码']",
+    "input[name*='captcha' i]",
+    "input[id*='captcha' i]",
+    "input[name*='code' i]",
+    "input[id*='code' i]"
+  ]) || textInputs.find((el) => /验证码|captcha|code|vcode/i.test([
+    el.placeholder || "",
+    el.name || "",
+    el.id || "",
+    String(el.className || ""),
+    el.closest("div")?.className || ""
+  ].join(" ")));
   const agreement = document.querySelector(".protocol input[type='checkbox']")
+    || document.querySelector(".authorize-check input[type='checkbox']")
     || document.querySelector(".q-checkbox__original");
-  const submit = document.querySelector(".login-form button.q-button--primary")
+  const submit = pick([
+    "button.login-button",
+    ".login-button",
+    ".login-form button.q-button--primary",
+    "button[type='submit']"
+  ])
     || Array.from(document.querySelectorAll("button"))
+      .filter(visible)
       .find((el) => /登\\s*录|login/i.test((el.innerText || "").trim()));
 
   function setValue(el, value) {{
@@ -521,7 +716,7 @@ def _fill_and_submit(cfg: RuntimeConfig, code: str) -> dict[str, Any]:
     agreement: false
   }};
   if (!filled.username || !filled.password || !filled.captcha) {{
-    throw new Error("missing SkyEye Sensor login input");
+    throw new Error("missing SkyEye login input");
   }}
   if (agreement) {{
     if (!agreement.checked) agreement.click();
@@ -530,7 +725,7 @@ def _fill_and_submit(cfg: RuntimeConfig, code: str) -> dict[str, Any]:
     filled.agreement = Boolean(agreement.checked);
   }}
   if (!submit) {{
-    throw new Error("missing SkyEye Sensor login submit button");
+    throw new Error("missing SkyEye login submit button");
   }}
   submit.click();
   return filled;
@@ -568,6 +763,7 @@ def refresh_auth_state(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, 
 
     try:
         _open_page(_login_url(cfg))
+        _handle_pre_login_prompts()
         form_state = _wait_for_login_form_ready(cfg)
     except Exception as exc:
         if _is_browser_daemon_error(exc):
@@ -607,6 +803,7 @@ def refresh_auth_state(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, 
         try:
             helpers.goto_url(_login_url(cfg))
             helpers.wait_for_load(timeout=10)
+            _handle_pre_login_prompts()
             form_state = _wait_for_login_form_ready(cfg)
         except Exception:
             pass
@@ -629,9 +826,9 @@ def ensure_auth_state(cfg: RuntimeConfig, captcha_code: str = "", force_refresh:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Ensure SkyEye Sensor browser auth-state")
+    parser = argparse.ArgumentParser(description="Ensure SkyEye browser auth-state")
     parser.add_argument("action", nargs="?", choices=["ensure", "validate", "refresh", "status"], default="ensure")
-    parser.add_argument("--base-url", help="SkyEye Sensor base URL, for example https://sensor.example.com")
+    parser.add_argument("--base-url", help="SkyEye base URL, for example https://skyeye.example.com")
     parser.add_argument("--username", help="Username for CDP-assisted login")
     parser.add_argument("--password", help="Password for CDP-assisted login")
     parser.add_argument("--auth-state", help=f"Auth-state path, default: {DEFAULT_AUTH_STATE}")
