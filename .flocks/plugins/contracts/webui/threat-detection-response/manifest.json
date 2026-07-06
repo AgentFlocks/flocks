@@ -1,0 +1,11 @@
+{
+  "id": "threat-detection-response",
+  "title": "威胁检测响应态势",
+  "route": "/contracts/webui/threat-detection-response",
+  "icon": "ShieldAlert",
+  "order": 100,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}
