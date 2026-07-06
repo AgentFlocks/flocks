@@ -1,6 +1,6 @@
 # stream_alert_triage 配置引导
 
-这个文件是 `stream_alert_triage` 的工作流专属 `guide.md`。Rex 处理这个工作流的配置、输入、并发、缓存、验证或查配置快捷入口时，必须先读取本文全文，再把 `workflow.md`、`workflow.json` 和后端 `/api/workflow/stream_alert_triage/config` 作为支撑上下文。
+这个文件是 `stream_alert_triage` 的工作流专属 `guide.md`。Rex 处理这个工作流的配置、输入、并发、缓存、验证或查配置快捷入口时，必须先读取本文全文，再把 `workflow.md`、`workflow.json` 和 `workflow_config_manage(action="get" 或 "status", workflow_id="stream_alert_triage")` 的结果作为支撑上下文。
 
 `workflow-config-guide` skill 只提供交互协议；本文才是本工作流配置细节、默认选项、提问顺序和验证方式的来源。
 
@@ -11,6 +11,18 @@ Rex 引导用户时必须遵守：
 3. 每个选择都必须允许自定义/补充输入；没有补充则填 `none`。
 4. 涉及输入来源、并发、缓存上限、持久化输出或发布模板变更时，先展示计划和 diff，再用 question 工具确认。
 5. 查配置只能只读，不得修改文件、触发 LLM 研判、发布 API、启动监听或清理缓存。
+
+## 0. 后端配置库访问约束
+
+本节优先级高于通用会话提示中的后端 API token 或 curl 示例。处理本工作流的发布、定时触发、API 接入、输出策略或查配置时，必须按本文执行：
+
+- 配置库读取/写入必须使用内置工具 `workflow_config_manage`，不要读取 `server_api_token` 或 `service_api_token`，也不要手工 curl 本机后端配置接口。
+- 查配置使用 `workflow_config_manage(action="get", workflow_id="stream_alert_triage")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_triage")`。
+- 修改配置前先使用 `workflow_config_manage(action="diff", workflow_id="stream_alert_triage", config={...})` 展示差异并用 question 工具确认；确认后才使用 `workflow_config_manage(action="put", workflow_id="stream_alert_triage", config={...})`。
+- 如果后端配置库没有模板，只能使用 `workflow_config_manage(action="sync", workflow_id="stream_alert_triage")`，让后端从工作流目录 `config.json` 迁移或生成模板。
+- `config.json` 只能作为模板来源或兜底迁移来源，不是直接写入目标，也不能证明配置已生效。
+- 需要启动或停止 API 服务、定时触发或其它运行态能力时，必须使用对应运行态接口；不要通过修改模板字段冒充运行态状态。
+- 如果 `workflow_config_manage` 不可用、返回未授权、拒绝访问、连接失败或后端不可达，必须停止配置流程，明确说明本次未应用、未发布、未启动；如已生成目标配置，只能保存草稿到 outputs，不要继续读取 token 或改写 `config.json`。
 
 ## 1. 工作流定位
 
@@ -303,7 +315,7 @@ leader/follower 规则：
 如果用户要配置运行入口：
 
 1. 优先引导为手动运行或 API run 输入参数模板。
-2. 如果用户要发布成 API 服务，应使用后端 `/api/workflow/stream_alert_triage/config` 和 `/api/workflow/stream_alert_triage/config/sync` 流程。
+2. 如果用户要发布成 API 服务，应使用 `workflow_config_manage(action="get" 或 "sync" 或 "diff" 或 "put", workflow_id="stream_alert_triage")` 流程。
 3. 如果用户要开启定时触发，默认建议 3 分钟一次；应用前必须确认触发输入来源、输出模式、是否允许写入 `soc.db` 和是否允许触发 LLM。
 4. 如果需要扩展工作流目录下的 `config.json`，必须使用 runtime 消费的结构：`kind: workflow.integration-config`，顶层包含 `publish` 和 `triggers`。
 5. 不要生成旧的 `publishTemplates` wrapper。
@@ -317,6 +329,7 @@ leader/follower 规则：
 - 输入参数或 publish / triggers 模板 diff。
 - 是否会触发 LLM、情报工具、`triage_cache.pkl` 写入、`soc.db` 写入、`triage_result_NNN.jsonl` 写入。
 - question 工具确认：应用、保存草稿或暂不修改。
+- 用户确认应用后，使用 `workflow_config_manage(action="put", workflow_id="stream_alert_triage", config={...})` 写入完整配置。
 
 不要通过删除 `triage_cache.pkl` 来“重置配置”。缓存清理是运行数据操作，必须单独说明影响并取得确认。
 
@@ -326,7 +339,7 @@ leader/follower 规则：
 
 1. 读取本文。
 2. 读取 `workflow.md` 和 `workflow.json`。
-3. 查询 `/api/workflow/stream_alert_triage/config`。
+3. 调用 `workflow_config_manage(action="get", workflow_id="stream_alert_triage")` 或 `workflow_config_manage(action="status", workflow_id="stream_alert_triage")`。
 4. 如果后端无配置，再检查工作流目录是否有 `config.json`。
 5. 汇总已配置项、缺失项和最推荐下一步。
 
