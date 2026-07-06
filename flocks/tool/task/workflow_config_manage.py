@@ -259,6 +259,18 @@ def _with_existing_updated_at(config: Dict[str, Any], current: Dict[str, Any] | 
     return config
 
 
+def _without_updated_at(config: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(config)
+    payload.pop("updatedAt", None)
+    return payload
+
+
+def _runtime_config_matches_proposed(config: Any, proposed: Dict[str, Any]) -> bool:
+    if not isinstance(config, dict):
+        return False
+    return _without_updated_at(config) == _without_updated_at(proposed)
+
+
 def _normalize_runtime_config(
     workflow_id: str,
     config_type: str,
@@ -547,6 +559,23 @@ async def workflow_config_manage(
             )
             current_config = current.get("config") if isinstance(current.get("config"), dict) else {}
             diff = _config_diff(current_config, proposed)
+            if normalized_config_type != "integration" and not diff:
+                output = {
+                    **current,
+                    "workflowId": normalized_workflow_id,
+                    "configType": normalized_config_type,
+                    "changed": False,
+                    "applied": False,
+                    "runtimeFailed": False,
+                    "saveResult": {
+                        "ok": True,
+                        "skipped": True,
+                        "reason": "no_changes",
+                    },
+                    "diff": diff,
+                }
+                return ToolResult(success=True, output=output, title=title)
+
             await _confirm_write(
                 ctx,
                 action=normalized_action,
@@ -562,12 +591,36 @@ async def workflow_config_manage(
                 response = await routes.update_workflow_config(normalized_workflow_id, proposed)
                 output = {**response, "configType": normalized_config_type, "diff": diff}
             else:
-                save_response = await _save_runtime_config(normalized_workflow_id, normalized_config_type, proposed)
+                try:
+                    save_response = await _save_runtime_config(normalized_workflow_id, normalized_config_type, proposed)
+                except HTTPException as exc:
+                    response = await _read_runtime_config(normalized_workflow_id, normalized_config_type)
+                    if _runtime_config_matches_proposed(response.get("config"), proposed):
+                        output = {
+                            **response,
+                            "workflowId": normalized_workflow_id,
+                            "configType": normalized_config_type,
+                            "changed": bool(diff),
+                            "applied": True,
+                            "runtimeFailed": True,
+                            "runtimeError": _error_message(exc),
+                            "saveResult": {
+                                "ok": False,
+                                "error": _error_message(exc),
+                                "status_code": exc.status_code,
+                            },
+                            "diff": diff,
+                        }
+                        return ToolResult(success=True, output=output, title=title)
+                    raise
                 response = await _read_runtime_config(normalized_workflow_id, normalized_config_type)
                 output = {
                     **response,
                     "workflowId": normalized_workflow_id,
                     "configType": normalized_config_type,
+                    "changed": bool(diff),
+                    "applied": True,
+                    "runtimeFailed": False,
                     "saveResult": save_response,
                     "diff": diff,
                 }
