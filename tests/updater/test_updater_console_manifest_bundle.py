@@ -424,6 +424,60 @@ async def test_perform_pro_bundle_downgrade_archives_pending_install_receipt(
 
 
 @pytest.mark.asyncio
+async def test_perform_pro_bundle_downgrade_continues_when_report_callback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from flocks.updater import deploy as deploy_mod
+
+    flocks_root = tmp_path / "flocks-root"
+    run_dir = flocks_root / "run"
+    run_dir.mkdir(parents=True)
+    install_marker = run_dir / "pro-bundle-installed.json"
+    install_marker.write_text(
+        json.dumps(
+            {
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+                "installed_at": "2026-06-24T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _fake_uninstall_pro_component(*, uv_path, install_root, env):
+        return None
+
+    async def _after_uninstall():
+        raise RuntimeError("console unavailable")
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.21")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_uninstall_pro_component", _fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _install_root: None)
+
+    progresses = [
+        step
+        async for step in updater.perform_pro_bundle_downgrade(
+            restart=False,
+            reason="user_requested",
+            after_uninstall=_after_uninstall,
+        )
+    ]
+
+    assert [step.stage for step in progresses] == ["checking", "downgrading", "reporting", "done"]
+    assert progresses[-1].success is True
+    assert not install_marker.exists()
+    archived_marker = list((run_dir / "archive").glob("pro-bundle-installed-*.json"))
+    assert len(archived_marker) == 1
+
+
+@pytest.mark.asyncio
 async def test_load_console_session_token_falls_back_to_shared_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

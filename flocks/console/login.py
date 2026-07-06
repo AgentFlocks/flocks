@@ -69,6 +69,10 @@ def _pending_pro_bundle_install_receipt_path() -> Path:
     return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
 
 
+def _pending_pro_bundle_downgrade_receipt_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-downgrade-receipt-pending.json"
+
+
 def _sync_local_pro_license_from_heartbeat_response(data: dict[str, Any]) -> None:
     license_path = _local_pro_license_path()
     state = _read_json_file(license_path)
@@ -500,11 +504,30 @@ class ConsoleLoginService:
         client: httpx.AsyncClient,
         session: dict[str, Any],
     ) -> bool:
+        install_reported = await cls._report_pending_pro_bundle_receipt(
+            client=client,
+            session=session,
+            path=_pending_pro_bundle_install_receipt_path(),
+        )
+        downgrade_reported = await cls._report_pending_pro_bundle_receipt(
+            client=client,
+            session=session,
+            path=_pending_pro_bundle_downgrade_receipt_path(),
+        )
+        return install_reported or downgrade_reported
+
+    @classmethod
+    async def _report_pending_pro_bundle_receipt(
+        cls,
+        *,
+        client: httpx.AsyncClient,
+        session: dict[str, Any],
+        path: Path,
+    ) -> bool:
         console_base = cls._console_base_url_for_session(session)
         token = str(session.get("console_session_token") or "").strip()
         if not console_base or not token:
             return False
-        path = _pending_pro_bundle_install_receipt_path()
         payload = _read_json_file(path)
         if not payload:
             return False

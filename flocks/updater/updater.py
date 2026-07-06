@@ -2994,7 +2994,10 @@ async def perform_pro_bundle_downgrade(
 
     if after_uninstall is not None:
         yield UpdateProgress(stage="reporting", message="Reporting OSS downgrade to Console...")
-        await after_uninstall()
+        try:
+            await after_uninstall()
+        except Exception as exc:
+            log.warning("updater.downgrade.report_failed_pending_retry", {"error": str(exc)})
 
     try:
         _archive_pending_pro_bundle_install_receipt(reason=reason or "downgraded_to_oss")
