@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@flocks/webui-contract-sdk';
 
 type Tone = 'red' | 'orange' | 'blue' | 'green' | 'purple' | 'slate';
@@ -490,6 +490,18 @@ function timeFilterParams(filter: TimeFilterState) {
     startTime: Math.floor(start.getTime() / 1000),
     endTime: Math.floor(end.getTime() / 1000),
   };
+}
+
+function contractFilterParams(filters: Record<FilterKey, string[]>) {
+  const activeFilters = Object.fromEntries(
+    FILTER_CONFIGS
+      .map((config) => [
+        config.key,
+        (filters[config.key] || []).filter((value) => value && value !== ALL_FILTER_VALUE),
+      ] as const)
+      .filter(([, values]) => values.length > 0),
+  );
+  return Object.keys(activeFilters).length ? { filters: activeFilters } : {};
 }
 
 function timeFilterLabel(filter: TimeFilterState, tr: Translate = identityTr) {
@@ -1407,26 +1419,31 @@ export default function SocAlertsPage() {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(true);
+  const loadSeqRef = useRef(0);
 
-  const load = useCallback(async (activeTimeFilter: TimeFilterState) => {
+  const load = useCallback(async (activeTimeFilter: TimeFilterState, activeFilters: Record<FilterKey, string[]>) => {
+    const loadSeq = loadSeqRef.current + 1;
+    loadSeqRef.current = loadSeq;
     setLoading(true);
     setError('');
     try {
       const response = await api
         .contract('soc-alerts', 'soc.alerts.operations')
-        .operation<AlertOperationsData>('list', { params: { limit: QUERY_LIMIT, ...timeFilterParams(activeTimeFilter) } });
+        .operation<AlertOperationsData>('list', { params: { limit: QUERY_LIMIT, ...timeFilterParams(activeTimeFilter), ...contractFilterParams(activeFilters) } });
+      if (loadSeq !== loadSeqRef.current) return;
       setData(normalizeData(response.data));
     } catch (err) {
+      if (loadSeq !== loadSeqRef.current) return;
       setError(err instanceof Error ? err.message : tr('SOC 告警数据源请求失败'));
       setData(EMPTY_DATA);
     } finally {
-      setLoading(false);
+      if (loadSeq === loadSeqRef.current) setLoading(false);
     }
   }, [tr]);
 
   useEffect(() => {
-    void load(appliedTimeFilter);
-  }, [appliedTimeFilter, load]);
+    void load(appliedTimeFilter, appliedFilters);
+  }, [appliedFilters, appliedTimeFilter, load]);
 
   const filterOptions = useMemo(() => (
     Object.fromEntries(FILTER_CONFIGS.map((config) => [config.key, buildFilterOptions(data.incidents, config.key)])) as Record<FilterKey, string[]>
@@ -1449,10 +1466,10 @@ export default function SocAlertsPage() {
     const intervalMs = REFRESH_INTERVAL_MS[refreshKey];
     if (!intervalMs) return undefined;
     const timer = window.setInterval(() => {
-      void load(appliedTimeFilter);
+      void load(appliedTimeFilter, appliedFilters);
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [appliedTimeFilter, load, refreshKey]);
+  }, [appliedFilters, appliedTimeFilter, load, refreshKey]);
 
   useEffect(() => {
     if (!openMenu) return undefined;
