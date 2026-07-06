@@ -120,6 +120,32 @@ class InstalledPluginRecord(BaseModel):
     installPath: Optional[str] = None
 
 
+HubInstallProgressStatus = Literal["pending", "installing", "installed", "skipped", "failed", "completed"]
+
+
+class HubInstallProgressItem(BaseModel):
+    type: PluginType
+    id: str
+    name: Optional[str] = None
+    nameCn: Optional[str] = None
+    optional: bool = False
+    status: HubInstallProgressStatus = "pending"
+    message: Optional[str] = None
+
+
+class HubInstallProgressEvent(BaseModel):
+    event: Literal["start", "item", "complete", "error"]
+    id: str
+    type: PluginType
+    name: str
+    nameCn: Optional[str] = None
+    total: int = 0
+    item: Optional[HubInstallProgressItem] = None
+    items: list[HubInstallProgressItem] = Field(default_factory=list)
+    record: Optional[InstalledPluginRecord] = None
+    message: Optional[str] = None
+
+
 class HubCatalogEntry(BaseModel):
     id: str
     type: PluginType

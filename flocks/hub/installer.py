@@ -5,15 +5,24 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from flocks.hub import local
 from flocks.hub.catalog import load_manifest
 from flocks.hub.files import plugin_root
-from flocks.hub.models import HubPluginManifest, InstalledPluginRecord, PluginType
+from flocks.hub.models import (
+    HubComponentRef,
+    HubInstallProgressEvent,
+    HubInstallProgressItem,
+    HubPluginManifest,
+    InstalledPluginRecord,
+    PluginType,
+)
 from flocks.hub.security import SKIP_NAMES, validate_package
 
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
+InstallProgressCallback = Callable[[HubInstallProgressEvent], Awaitable[None]]
 
 
 def _copytree_skip_caches(src: Path, dst: Path) -> None:
@@ -242,24 +251,107 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
             pass
 
 
-async def _install_component_refs(manifest: HubPluginManifest, *, scope: str) -> None:
+def component_install_items(manifest: HubPluginManifest) -> list[HubInstallProgressItem]:
+    items: list[HubInstallProgressItem] = []
     seen: set[tuple[PluginType, str]] = set()
-    component_key = f"component:{manifest.id}"
     for ref in manifest.components:
         key = (ref.type, ref.id)
         if key in seen:
             continue
         seen.add(key)
+        name = ref.id
+        name_cn = None
+        try:
+            ref_manifest = load_manifest(ref.type, ref.id)
+            name = ref_manifest.name or ref.id
+            name_cn = ref_manifest.nameCn
+        except Exception:
+            pass
+        items.append(
+            HubInstallProgressItem(
+                type=ref.type,
+                id=ref.id,
+                name=name,
+                nameCn=name_cn,
+                optional=ref.optional,
+            )
+        )
+    return items
+
+
+async def _emit_component_progress(
+    callback: InstallProgressCallback | None,
+    manifest: HubPluginManifest,
+    event: str,
+    *,
+    item: HubInstallProgressItem | None = None,
+    items: list[HubInstallProgressItem] | None = None,
+    record: InstalledPluginRecord | None = None,
+    message: str | None = None,
+) -> None:
+    if callback is None:
+        return
+    event_item = item.model_copy(deep=True) if item is not None else None
+    event_items = [entry.model_copy(deep=True) for entry in items] if items is not None else []
+    await callback(
+        HubInstallProgressEvent(
+            event=event,
+            id=manifest.id,
+            type=manifest.type,
+            name=manifest.name,
+            nameCn=manifest.nameCn,
+            total=len(event_items) if items is not None else len(component_install_items(manifest)),
+            item=event_item,
+            items=event_items,
+            record=record,
+            message=message,
+        )
+    )
+
+
+async def _install_component_refs(
+    manifest: HubPluginManifest,
+    *,
+    scope: str,
+    progress: InstallProgressCallback | None = None,
+) -> None:
+    seen: set[tuple[PluginType, str]] = set()
+    component_key = f"component:{manifest.id}"
+    progress_items = component_install_items(manifest)
+    await _emit_component_progress(progress, manifest, "start", items=progress_items)
+    item_lookup = {(item.type, item.id): item for item in progress_items}
+    for ref in manifest.components:
+        key = (ref.type, ref.id)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = item_lookup.get(key) or HubInstallProgressItem(type=ref.type, id=ref.id, optional=ref.optional)
         if ref.type == "component":
+            item.status = "failed"
+            item.message = "Nested Hub components are not supported"
+            await _emit_component_progress(progress, manifest, "item", item=item)
             raise ValueError("Nested Hub components are not supported")
         if local.infer_local_install(ref.type, ref.id) is not None:
+            item.status = "skipped"
+            item.message = "Already installed"
+            await _emit_component_progress(progress, manifest, "item", item=item)
             continue
+        item.status = "installing"
+        await _emit_component_progress(progress, manifest, "item", item=item)
         try:
             await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
-        except Exception:
+        except Exception as exc:
             if ref.optional:
+                item.status = "skipped"
+                item.message = f"Optional dependency failed to install: {exc}"
+                await _emit_component_progress(progress, manifest, "item", item=item)
                 continue
+            item.status = "failed"
+            item.message = str(exc) or "Install failed"
+            await _emit_component_progress(progress, manifest, "item", item=item)
             raise
+        item.status = "installed"
+        await _emit_component_progress(progress, manifest, "item", item=item)
 
 
 async def _uninstall_component_refs(manifest: HubPluginManifest) -> None:
@@ -289,12 +381,13 @@ async def install_plugin(
     *,
     scope: str = "global",
     installed_by: str | None = None,
+    progress: InstallProgressCallback | None = None,
 ) -> InstalledPluginRecord:
     manifest = load_manifest(plugin_type, plugin_id)
     src = plugin_root(plugin_type, plugin_id)
     validate_package(src, manifest)
     if plugin_type == "component":
-        await _install_component_refs(manifest, scope=scope)
+        await _install_component_refs(manifest, scope=scope, progress=progress)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
     if plugin_type == "webui":
         _copy_webui_package_with_build(plugin_id, src, dst)
@@ -313,6 +406,8 @@ async def install_plugin(
     )
     local.save_installed_record(record)
     await _refresh_runtime(plugin_type)
+    if plugin_type == "component":
+        await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
     return record
 
 

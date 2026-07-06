@@ -84,6 +84,12 @@ def test_workflow_catalog_exposes_chinese_names():
     assert entries["tdp_alert_triage"].nameCn == "TDP 告警调查工作流"
 
 
+def test_soc_workspace_component_exposes_chinese_name():
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="component")}
+
+    assert entries["soc-workspace"].nameCn == "SOC 工作区场景套件"
+
+
 def test_pentest_agents_are_listed_in_agent_catalog():
     entries = list_catalog(plugin_type="agent")
     ids = {entry.id for entry in entries}
@@ -489,6 +495,47 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     assert removed.status_code == 200
     available_catalog = client.get("/api/hub/catalog", params={"state": "available"}).json()
     assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
+
+
+def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    client = TestClient(app, raise_server_exceptions=True)
+
+    response = client.post("/api/hub/plugins/component/soc-workspace/install/stream", json={"scope": "global"})
+
+    assert response.status_code == 200
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["event"] == "start"
+    assert frames[0]["type"] == "component"
+    assert frames[0]["id"] == "soc-workspace"
+    assert [item["status"] for item in frames[0]["items"]] == ["pending", "pending", "pending", "pending"]
+
+    installed_children = {
+        (frame["item"]["type"], frame["item"]["id"])
+        for frame in frames
+        if frame["event"] == "item" and frame["item"]["status"] == "installed"
+    }
+    assert installed_children == {
+        ("webui", "soc_ui"),
+        ("tool", "soc_workspace_query"),
+        ("workflow", "stream_alert_denoise"),
+        ("workflow", "stream_alert_triage"),
+    }
+    assert frames[-1]["event"] == "complete"
+    assert frames[-1]["record"]["id"] == "soc-workspace"
 
 
 def test_hub_routes_legacy_removed_plugins_return_gone(isolated_hub_env):

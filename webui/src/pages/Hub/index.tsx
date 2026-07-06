@@ -16,10 +16,20 @@ import {
   Table2,
   Trash2,
   X,
+  XCircle,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
-import { hubAPI, HubCatalogEntry, HubFileContent, HubFileNode, HubManifest, HubPluginType } from '@/api/hub';
+import {
+  hubAPI,
+  HubCatalogEntry,
+  HubFileContent,
+  HubFileNode,
+  HubInstallProgressEvent,
+  HubInstallProgressItem,
+  HubManifest,
+  HubPluginType,
+} from '@/api/hub';
 import FlowCanvas from '@/pages/WorkflowDetail/FlowCanvas';
 import type { WorkflowJSON } from '@/api/workflow';
 import { useTranslation } from 'react-i18next';
@@ -62,7 +72,7 @@ const TYPE_LABEL: Record<HubPluginType, string> = {
   device: 'Device',
   workflow: 'Workflow',
   webui: 'WebUI',
-  component: 'Component',
+  component: 'Scenario Suite',
 };
 
 const TYPE_LABEL_CN: Record<HubPluginType, string> = {
@@ -72,7 +82,7 @@ const TYPE_LABEL_CN: Record<HubPluginType, string> = {
   device: '设备',
   workflow: 'Workflow',
   webui: 'WebUI',
-  component: '组件',
+  component: '场景套件',
 };
 
 const HUB_PLUGIN_TYPES: HubPluginType[] = ['skill', 'agent', 'tool', 'device', 'workflow', 'webui', 'component'];
@@ -118,6 +128,20 @@ const HUB_TEXT = {
     noMatches: '没有匹配的插件',
     parseWorkflowFailed: 'workflow.json 解析失败',
     readWorkflowFailed: '无法读取 workflow.json',
+    suiteInstallTitle: '场景套件安装进度',
+    suiteInstallRunning: '正在安装',
+    suiteInstallCompleted: '安装完成',
+    suiteInstallFailed: '安装失败',
+    suiteInstallProgress: '安装进度',
+    suiteInstallDismiss: '关闭',
+    suiteItemStatuses: {
+      pending: '等待中',
+      installing: '安装中',
+      installed: '已安装',
+      skipped: '已跳过',
+      failed: '失败',
+      completed: '已完成',
+    },
     tabs: { overview: '概览', flow: '流程图', files: '文件', deps: '依赖', permissions: '权限', versions: '版本' },
     id: 'ID',
     manifest: 'Manifest',
@@ -160,6 +184,20 @@ const HUB_TEXT = {
     noMatches: 'No matching plugins',
     parseWorkflowFailed: 'Failed to parse workflow.json',
     readWorkflowFailed: 'Failed to read workflow.json',
+    suiteInstallTitle: 'Scenario suite install progress',
+    suiteInstallRunning: 'Installing',
+    suiteInstallCompleted: 'Installed',
+    suiteInstallFailed: 'Install failed',
+    suiteInstallProgress: 'Progress',
+    suiteInstallDismiss: 'Close',
+    suiteItemStatuses: {
+      pending: 'Pending',
+      installing: 'Installing',
+      installed: 'Installed',
+      skipped: 'Skipped',
+      failed: 'Failed',
+      completed: 'Completed',
+    },
     tabs: { overview: 'Overview', flow: 'Flow', files: 'Files', deps: 'Dependencies', permissions: 'Permissions', versions: 'Versions' },
     id: 'ID',
     manifest: 'Manifest',
@@ -216,6 +254,16 @@ interface HubFacetCounts {
   state: Record<string, number>;
 }
 
+interface SuiteInstallProgressState {
+  id: string;
+  name: string;
+  nameCn?: string;
+  status: 'running' | 'completed' | 'failed';
+  total: number;
+  items: HubInstallProgressItem[];
+  message?: string;
+}
+
 function matchesCatalogEntry(entry: HubCatalogEntry, filters: HubFilterSnapshot) {
   if (filters.type && entry.type !== filters.type) return false;
   if (filters.useCase && !entry.useCases.includes(filters.useCase)) return false;
@@ -262,6 +310,34 @@ function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot):
   return counts;
 }
 
+function progressItemKey(item: Pick<HubInstallProgressItem, 'type' | 'id'>) {
+  return `${item.type}:${item.id}`;
+}
+
+function mergeProgressItem(items: HubInstallProgressItem[], nextItem: HubInstallProgressItem) {
+  const nextKey = progressItemKey(nextItem);
+  let found = false;
+  const nextItems = items.map(item => {
+    if (progressItemKey(item) !== nextKey) return item;
+    found = true;
+    return { ...item, ...nextItem };
+  });
+  if (!found) nextItems.push(nextItem);
+  return nextItems;
+}
+
+function getSuiteDisplayName(progress: Pick<SuiteInstallProgressState, 'id' | 'name' | 'nameCn'>, language: string) {
+  const name = progress.name?.trim();
+  const nameCn = progress.nameCn?.trim();
+  return language.toLowerCase().startsWith('zh') ? (nameCn || name || progress.id) : (name || nameCn || progress.id);
+}
+
+function getProgressItemDisplayName(item: HubInstallProgressItem, language: string) {
+  const name = item.name?.trim();
+  const nameCn = item.nameCn?.trim();
+  return language.toLowerCase().startsWith('zh') ? (nameCn || name || item.id) : (name || nameCn || item.id);
+}
+
 export default function HubPage() {
   const { i18n } = useTranslation();
   const { productName } = useProductName();
@@ -287,6 +363,7 @@ export default function HubPage() {
   const [pageSize, setPageSize] = useState(25);
   const [selected, setSelected] = useState<HubCatalogEntry | null>(null);
   const [actionId, setActionId] = useState<string | null>(null);
+  const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [taxonomy, setTaxonomy] = useState<HubTaxonomyResponse | null>(null);
 
   const fetchCatalog = async (silent = false) => {
@@ -371,17 +448,100 @@ export default function HubPage() {
     }
   };
 
+  const handleSuiteInstallProgress = (progress: HubInstallProgressEvent) => {
+    setSuiteInstallProgress(current => {
+      const base: SuiteInstallProgressState = current ?? {
+        id: progress.id,
+        name: progress.name,
+        nameCn: progress.nameCn,
+        status: 'running',
+        total: progress.total,
+        items: [],
+      };
+
+      if (progress.event === 'start') {
+        return {
+          id: progress.id,
+          name: progress.name,
+          nameCn: progress.nameCn,
+          status: 'running',
+          total: progress.total,
+          items: progress.items ?? [],
+          message: progress.message,
+        };
+      }
+
+      if (progress.event === 'item' && progress.item) {
+        return {
+          ...base,
+          total: progress.total || base.total,
+          items: mergeProgressItem(base.items, progress.item),
+          message: progress.message ?? base.message,
+        };
+      }
+
+      if (progress.event === 'complete') {
+        return {
+          ...base,
+          status: 'completed',
+          total: progress.total || base.total,
+          message: progress.message,
+        };
+      }
+
+      if (progress.event === 'error') {
+        return {
+          ...base,
+          status: 'failed',
+          total: progress.total || base.total,
+          message: progress.message,
+        };
+      }
+
+      return base;
+    });
+  };
+
   const runAction = async (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => {
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
-      if (action === 'install') await hubAPI.install(entry.type, entry.id);
+      if (action === 'install' && entry.type === 'component') {
+        setSuiteInstallProgress({
+          id: entry.id,
+          name: entry.name,
+          nameCn: entry.nameCn,
+          status: 'running',
+          total: 0,
+          items: [],
+        });
+        await hubAPI.installStream(entry.type, entry.id, handleSuiteInstallProgress);
+      } else if (action === 'install') {
+        await hubAPI.install(entry.type, entry.id);
+      }
       if (action === 'update') await hubAPI.update(entry.type, entry.id);
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
       const nextItems = await fetchCatalog(true);
       const updated = nextItems?.find(item => item.type === entry.type && item.id === entry.id);
       if (updated) {
         setSelected(current => (current?.type === entry.type && current?.id === entry.id ? updated : current));
+      }
+    } catch (error) {
+      if (action === 'install' && entry.type === 'component') {
+        const message = error instanceof Error ? error.message : text.suiteInstallFailed;
+        setSuiteInstallProgress(current => current
+          ? { ...current, status: 'failed', message }
+          : {
+            id: entry.id,
+            name: entry.name,
+            nameCn: entry.nameCn,
+            status: 'failed',
+            total: 0,
+            items: [],
+            message,
+          });
+      } else {
+        console.error(error);
       }
     } finally {
       setActionId(null);
@@ -549,6 +709,15 @@ export default function HubPage() {
           onAction={runAction}
           actionId={actionId}
           text={text}
+        />
+      )}
+
+      {suiteInstallProgress && (
+        <SuiteInstallProgressPanel
+          progress={suiteInstallProgress}
+          language={i18n.language}
+          text={text}
+          onClose={() => setSuiteInstallProgress(null)}
         />
       )}
     </div>
@@ -926,7 +1095,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             {entry.type === 'component' && manifest?.components?.length ? (
               <div>
                 <div className="text-xs text-gray-400 mb-2">
-                  {language.toLowerCase().startsWith('zh') ? '组件内容' : 'Component items'}
+                  {language.toLowerCase().startsWith('zh') ? '套件内容' : 'Suite items'}
                 </div>
                 <div className="space-y-2">
                   {manifest.components.map((item) => (
@@ -985,6 +1154,111 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
       </div>
     </div>
   );
+}
+
+function SuiteInstallProgressPanel({ progress, language, text, onClose }: {
+  progress: SuiteInstallProgressState;
+  language: string;
+  text: HubText;
+  onClose: () => void;
+}) {
+  const total = progress.total || progress.items.length;
+  const settledCount = progress.items.filter(item => (
+    item.status === 'installed' || item.status === 'skipped' || item.status === 'failed'
+  )).length;
+  const percent = total > 0 ? Math.round((settledCount / total) * 100) : 0;
+  const title = progress.status === 'completed'
+    ? text.suiteInstallCompleted
+    : progress.status === 'failed'
+      ? text.suiteInstallFailed
+      : text.suiteInstallRunning;
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50 w-[420px] max-w-[calc(100vw-2rem)] rounded-lg border border-gray-200 bg-white shadow-2xl">
+      <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+            {progress.status === 'completed' ? (
+              <CheckCircle className="w-4 h-4 text-green-600" />
+            ) : progress.status === 'failed' ? (
+              <XCircle className="w-4 h-4 text-red-600" />
+            ) : (
+              <Loader2 className="w-4 h-4 animate-spin text-slate-600" />
+            )}
+            <span>{text.suiteInstallTitle}</span>
+          </div>
+          <div className="mt-1 truncate text-xs text-gray-500">
+            {title}: {getSuiteDisplayName(progress, language)}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          aria-label={text.suiteInstallDismiss}
+          title={text.suiteInstallDismiss}
+          className="shrink-0 rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="px-4 py-3">
+        <div className="flex items-center justify-between text-xs text-gray-500">
+          <span>{text.suiteInstallProgress}</span>
+          <span>{settledCount} / {total}</span>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
+          <div
+            className={`h-full rounded-full transition-all ${
+              progress.status === 'failed' ? 'bg-red-500' : progress.status === 'completed' ? 'bg-green-500' : 'bg-slate-700'
+            }`}
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="max-h-72 overflow-auto px-2 pb-2">
+        {progress.items.map(item => (
+          <div
+            key={progressItemKey(item)}
+            className="grid grid-cols-[1rem_1fr_auto] items-center gap-2 rounded-md px-2 py-2 text-xs hover:bg-gray-50"
+          >
+            <InstallProgressStatusIcon status={item.status} />
+            <div className="min-w-0">
+              <div className="truncate font-medium text-gray-800">{getProgressItemDisplayName(item, language)}</div>
+              <div className="truncate font-mono text-[11px] text-gray-400">
+                {formatPluginTypeLabel(item.type, language)} · {item.id}
+              </div>
+              {item.message && <div className="mt-0.5 truncate text-[11px] text-gray-500">{item.message}</div>}
+            </div>
+            <span className={`rounded-full px-2 py-0.5 ${
+              item.status === 'installed'
+                ? 'bg-green-50 text-green-700'
+                : item.status === 'failed'
+                  ? 'bg-red-50 text-red-700'
+                  : item.status === 'skipped'
+                    ? 'bg-gray-100 text-gray-500'
+                    : item.status === 'installing'
+                      ? 'bg-slate-100 text-slate-700'
+                      : 'bg-gray-50 text-gray-400'
+            }`}>
+              {text.suiteItemStatuses[item.status]}
+            </span>
+          </div>
+        ))}
+        {progress.items.length === 0 && (
+          <div className="px-2 py-6 text-center text-xs text-gray-400">{text.suiteItemStatuses.pending}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InstallProgressStatusIcon({ status }: { status: HubInstallProgressItem['status'] }) {
+  if (status === 'installing') return <Loader2 className="w-4 h-4 animate-spin text-slate-600" />;
+  if (status === 'installed' || status === 'completed') return <CheckCircle className="w-4 h-4 text-green-600" />;
+  if (status === 'failed') return <XCircle className="w-4 h-4 text-red-600" />;
+  if (status === 'skipped') return <CheckCircle className="w-4 h-4 text-gray-400" />;
+  return <span className="ml-1 h-2 w-2 rounded-full bg-gray-300" />;
 }
 
 function FileTree({ node, onOpen, root = false }: { node: HubFileNode; onOpen: (path: string) => void; root?: boolean }) {
