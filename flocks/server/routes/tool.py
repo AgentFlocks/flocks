@@ -4,7 +4,7 @@ Tool routes - API endpoints for tool management and execution
 
 import asyncio
 import time
-from typing import List, Optional, Dict, Any
+from typing import Annotated, List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
@@ -477,7 +477,7 @@ async def list_tools(
     """
     # Initialize registry if needed
     started_at = time.perf_counter()
-    ToolRegistry.init()
+    await ToolRegistry.init_async()
     
     # Parse category filter
     cat_filter = None
@@ -540,13 +540,15 @@ async def get_tool(tool_name: str):
 async def update_tool(
     tool_name: str,
     request: ToolUpdateRequest,
-    device_id: Optional[str] = Query(
-        None,
-        description=(
-            "设备实例 UUID。提供时仅修改该设备的工具开关（per-device 覆盖），"
-            "不影响其他同版本设备；省略时修改全局 tool_settings（影响所有设备）。"
+    device_id: Annotated[
+        Optional[str],
+        Query(
+            description=(
+                "设备实例 UUID。提供时仅修改该设备的工具开关（per-device 覆盖），"
+                "不影响其他同版本设备；省略时修改全局 tool_settings（影响所有设备）。"
+            ),
         ),
-    ),
+    ] = None,
     _admin: object = Depends(require_admin),
 ):
     """
@@ -577,7 +579,7 @@ async def update_tool(
       ``info.enabled`` flag, mirroring the gate in
       :meth:`ToolRegistry._apply_tool_settings`.
     """
-    ToolRegistry.init()
+    await ToolRegistry.init_async()
 
     tool = ToolRegistry.get(tool_name)
     if not tool:

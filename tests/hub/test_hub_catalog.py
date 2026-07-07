@@ -201,6 +201,21 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
 
 
+def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
+    from flocks.server.routes import hub as hub_routes
+
+    calls: list[str] = []
+    monkeypatch.setattr(hub_routes, "clear_catalog_caches", lambda: calls.append("catalog"))
+    monkeypatch.setattr(
+        "flocks.tool.device.plugin_index.clear_device_template_cache",
+        lambda: calls.append("device"),
+    )
+
+    hub_routes._clear_hub_runtime_caches()
+
+    assert calls == ["catalog", "device"]
+
+
 def test_hub_routes_legacy_removed_plugins_return_gone(isolated_hub_env):
     from flocks.server.routes.hub import router
 

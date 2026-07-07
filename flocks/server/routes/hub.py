@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from flocks.hub.catalog import category_counts, legacy_removed_plugin_message, list_catalog, load_manifest
+from flocks.hub.catalog import category_counts, clear_catalog_caches, legacy_removed_plugin_message, list_catalog, load_manifest
 from flocks.hub.files import file_tree, read_file_content
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.hub.models import (
@@ -46,6 +47,16 @@ def _guard_legacy_removed_plugin(plugin_type: PluginType, plugin_id: str) -> Non
         raise HTTPException(status_code=410, detail=detail)
 
 
+def _clear_hub_runtime_caches() -> None:
+    clear_catalog_caches()
+    try:
+        from flocks.tool.device.plugin_index import clear_device_template_cache
+
+        clear_device_template_cache()
+    except Exception:
+        pass
+
+
 @router.get("/hub/catalog", response_model=list[HubCatalogEntry])
 async def hub_catalog(
     type: Optional[PluginType] = Query(default=None),  # noqa: A002 - API field name
@@ -57,7 +68,8 @@ async def hub_catalog(
     risk: Optional[str] = None,
     q: Optional[str] = None,
 ):
-    return list_catalog(
+    return await asyncio.to_thread(
+        list_catalog,
         plugin_type=type,
         category=_split_csv(category),
         tags=_split_csv(tags),
@@ -71,7 +83,7 @@ async def hub_catalog(
 
 @router.get("/hub/categories")
 async def hub_categories():
-    return category_counts()
+    return await asyncio.to_thread(category_counts)
 
 
 @router.get("/hub/plugins/{plugin_type}/{plugin_id}", response_model=HubPluginManifest)
@@ -137,5 +149,5 @@ async def hub_uninstall_plugin(plugin_type: PluginType, plugin_id: str):
 
 @router.post("/hub/refresh")
 async def hub_refresh():
-    # The bundled catalog is filesystem-backed, so refresh just returns the current count.
-    return {"count": len(list_catalog())}
+    _clear_hub_runtime_caches()
+    return {"count": len(await asyncio.to_thread(list_catalog))}

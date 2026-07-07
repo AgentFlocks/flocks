@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import asyncio
 from pathlib import Path
 
 from flocks.hub import local
-from flocks.hub.catalog import load_manifest
+from flocks.hub.catalog import clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
 from flocks.hub.models import InstalledPluginRecord, PluginType
 from flocks.hub.security import SKIP_NAMES, validate_package
@@ -134,8 +135,8 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
         from flocks.tool.device.plugin_index import clear_device_template_cache
         from flocks.tool.registry import ToolRegistry
 
-        ToolRegistry.init()
-        ToolRegistry.refresh_plugin_tools()
+        await ToolRegistry.init_async()
+        await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
         clear_device_template_cache()
         # Drop the descriptor cache so freshly installed/uninstalled
         # API plugins surface in ``_load_provider_yaml_metadata`` (and
@@ -149,6 +150,17 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
             await scan_skill_workflows()
         except Exception:
             pass
+
+
+def _clear_device_template_cache_if_needed(plugin_type: PluginType) -> None:
+    if plugin_type not in {"tool", "device"}:
+        return
+    try:
+        from flocks.tool.device.plugin_index import clear_device_template_cache
+
+        clear_device_template_cache()
+    except Exception:
+        pass
 
 
 async def install_plugin(
@@ -172,6 +184,7 @@ async def install_plugin(
         scope=scope,
     )
     local.save_installed_record(record)
+    clear_catalog_caches()
     await _refresh_runtime(plugin_type)
     return record
 
@@ -230,6 +243,8 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)
     if install_path is None or not install_path.exists():
         local.remove_installed_record(plugin_type, plugin_id)
+        clear_catalog_caches()
+        _clear_device_template_cache_if_needed(plugin_type)
         return False
     project_root = local.install_root(plugin_type, "project").resolve()
     resolved_install_path = install_path.resolve()
@@ -249,6 +264,7 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     )
     shutil.rmtree(install_path)
     local.remove_installed_record(plugin_type, plugin_id)
+    clear_catalog_caches()
     _cleanup_orphan_api_services(orphan_keys)
     await _refresh_runtime(plugin_type)
     return True

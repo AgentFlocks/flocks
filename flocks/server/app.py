@@ -389,17 +389,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("agent.watcher.init_failed", {"error": str(e)})
 
-    # Start Tool file watcher (auto-reload plugin tools on file changes)
+    # Warm ToolRegistry in the background so the first Tool page load usually
+    # hits a hot in-memory registry instead of doing plugin discovery.
     try:
         from flocks.tool.registry import ToolRegistry
 
+        def _init_tool_registry() -> None:
+            ToolRegistry.init()
+            log.info("tool.registry.initialized")
+
+        _schedule_startup_phase(app, log, "tool.registry.init", lambda: asyncio.to_thread(_init_tool_registry))
+
+        # Start Tool file watcher (auto-reload plugin tools on file changes)
         def _start_tool_watcher() -> None:
             ToolRegistry.start_watcher()
             log.info("tool.watcher.initialized")
 
         _schedule_startup_phase(app, log, "tool.watcher.start", _start_tool_watcher)
     except Exception as e:
-        log.warning("tool.watcher.init_failed", {"error": str(e)})
+        log.warning("tool.registry.init_failed", {"error": str(e)})
 
     # Start WebUI page watcher (auto-build user custom pages)
     try:

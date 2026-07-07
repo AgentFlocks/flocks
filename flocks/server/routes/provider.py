@@ -1139,7 +1139,7 @@ async def list_api_services() -> List[APIServiceSummary]:
         from flocks.tool.registry import ToolRegistry
         from flocks.config.api_versioning import shadowed_legacy_ids
 
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
 
         configured_services = set(ConfigWriter.list_api_services_raw().keys())
         discovered_services = ToolRegistry.get_api_service_ids()
@@ -1168,6 +1168,10 @@ async def list_api_services() -> List[APIServiceSummary]:
 
 async def update_api_service(provider_id: str, request: APIServiceUpdateRequest) -> APIServiceSummary:
     try:
+        from flocks.tool.registry import ToolRegistry
+
+        await ToolRegistry.init_async()
+
         existing = ConfigWriter.get_api_service_raw(provider_id) or {}
         existing["enabled"] = request.enabled
         if request.verify_ssl is not None:
@@ -2124,7 +2128,7 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
 
-            ToolRegistry.init()
+            await ToolRegistry.init_async()
 
             _set_api_service_tools_enabled(provider_id, True)
 
@@ -2595,7 +2599,7 @@ async def refresh_api_services_status():
 
         # Also discover services from registered tools (covers YAML API tools)
         from flocks.tool.registry import ToolRegistry
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
         service_ids: set = set(api_services.keys()) | ToolRegistry.get_api_service_ids()
 
         refreshed_at = int(time.time())

@@ -51,11 +51,12 @@ class TestAPIServiceManagement:
                 side_effect=lambda service_id: [object(), object()] if service_id == "threatbook_api" else [object()],
             ),
         ):
-            mock_tool_registry.init = MagicMock()
+            mock_tool_registry.init_async = AsyncMock()
             mock_tool_registry.get_api_service_ids.return_value = {"fofa"}
 
             result = await list_api_services()
 
+        mock_tool_registry.init_async.assert_awaited_once()
         assert [item.id for item in result] == ["fofa", "threatbook_api"]
         assert result[0].enabled is False
         assert result[0].status == "disabled"
@@ -97,6 +98,10 @@ class TestAPIServiceManagement:
             patch(
                 "flocks.server.routes.provider._build_api_service_summary",
                 return_value=expected_summary,
+            ),
+            patch(
+                "flocks.tool.registry.ToolRegistry.init_async",
+                new=AsyncMock(),
             ),
         ):
             result = await update_api_service(
