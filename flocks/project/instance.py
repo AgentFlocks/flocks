@@ -190,8 +190,17 @@ class Instance:
                 
                 cls._cache[directory] = asyncio.create_task(create_context())
         
-        # Wait for context to be ready
-        ctx = await cls._cache[directory]
+        # Wait for context to be ready.  If initialization fails, drop the
+        # failed task so a later request can retry after transient storage or
+        # startup recovery completes.
+        task = cls._cache[directory]
+        try:
+            ctx = await task
+        except Exception:
+            async with cls._lock:
+                if cls._cache.get(directory) is task:
+                    cls._cache.pop(directory, None)
+            raise
         
         # Execute fn within context
         if fn:

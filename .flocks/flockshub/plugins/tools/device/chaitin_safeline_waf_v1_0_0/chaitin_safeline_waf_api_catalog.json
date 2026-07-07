@@ -1,0 +1,498 @@
+{
+  "schema_version": 1,
+  "source": "长亭雷池WAF/长亭雷池WAF.docx",
+  "entries": [
+    {
+      "method": "DELETE",
+      "path": "/api/ACLRuleAPI",
+      "kind": "mutation",
+      "description": "删除指定 ID 的 ACL Rule，并可通过参数指定加入白名单"
+    },
+    {
+      "method": "GET",
+      "path": "/api/ACLRuleAPI",
+      "kind": "readonly",
+      "description": "根据 ID 查找指定 ACL Rule Template，返回其所包含的所有 ACL Rule"
+    },
+    {
+      "method": "POST",
+      "path": "/api/ACLRuleAPI",
+      "kind": "mutation",
+      "description": "新建一条包含指定内容的 ACL Rule，并加入指定 Template"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/ACLRuleExecutionLogAPI",
+      "kind": "mutation",
+      "description": "删除日志"
+    },
+    {
+      "method": "GET",
+      "path": "/api/ACLRuleExecutionLogAPI",
+      "kind": "readonly",
+      "description": "查询 ACL 执行日志的统计数据，以 5 分钟为间隔，按时间顺序排列"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/ACLRuleTemplateAPI",
+      "kind": "mutation",
+      "description": "删除频率限制规则"
+    },
+    {
+      "method": "GET",
+      "path": "/api/ACLRuleTemplateAPI",
+      "kind": "readonly",
+      "description": "查看频率限制规则"
+    },
+    {
+      "method": "POST",
+      "path": "/api/ACLRuleTemplateAPI",
+      "kind": "mutation",
+      "description": "新建频率限制规则"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/ACLRuleTemplateAPI",
+      "kind": "mutation",
+      "description": "编辑指定 ID 的 ACLRuleTemplate"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/ACLWhiteListAPI",
+      "kind": "mutation",
+      "description": "删除指定 ID 对应的 ACL White List"
+    },
+    {
+      "method": "GET",
+      "path": "/api/ACLWhiteListAPI",
+      "kind": "readonly",
+      "description": "根据参数过滤已有的 ACL White List，并返回所有符合条件的项目"
+    },
+    {
+      "method": "POST",
+      "path": "/api/ACLWhiteListAPI",
+      "kind": "mutation",
+      "description": "新建 ACL 白名单"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/ClearACLRuleAPI",
+      "kind": "mutation",
+      "description": "清空 ACL Rule Template 的所有用户，并可通过参数指定加入白名单"
+    },
+    {
+      "method": "POST",
+      "path": "/api/ESDownloadIndices",
+      "kind": "mutation",
+      "description": "新建「下载索引归档」日志下载任务，需要到日志下载管理界面下载归档"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/ESIndexLifecycle",
+      "kind": "mutation",
+      "description": "修改索引生命周期"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/ESIndices",
+      "kind": "mutation",
+      "description": "删除归档"
+    },
+    {
+      "method": "GET",
+      "path": "/api/ESIndices",
+      "kind": "readonly",
+      "description": "查看索引信息"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/ESIndices",
+      "kind": "mutation",
+      "description": "恢复归档"
+    },
+    {
+      "method": "GET",
+      "path": "/api/FilterV2API",
+      "kind": "readonly",
+      "description": "限制用户列表-满足条件的用户; 查询限制用户列表-已知用户; 查询访问频率限制规则; 查询攻击检测日志列表页和详情页; 查询 IP 组; 查询防护策略"
+    },
+    {
+      "method": "GET",
+      "path": "/api/FilterHistory",
+      "kind": "readonly",
+      "description": "查看攻击检测日志筛选历史"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/SavedFilter",
+      "kind": "mutation",
+      "description": "删除筛选器"
+    },
+    {
+      "method": "GET",
+      "path": "/api/SavedFilter",
+      "kind": "readonly",
+      "description": "获取筛选器"
+    },
+    {
+      "method": "POST",
+      "path": "/api/SavedFilter",
+      "kind": "mutation",
+      "description": "新建筛选器"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/SavedFilter",
+      "kind": "mutation",
+      "description": "编辑筛选器"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/EditIPGroupItem",
+      "kind": "mutation",
+      "description": "IP 列表删除 IP"
+    },
+    {
+      "method": "POST",
+      "path": "/api/EditIPGroupItem",
+      "kind": "mutation",
+      "description": "IP 列表添加 IP"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/IPGroupAPI",
+      "kind": "mutation",
+      "description": "删除 IP 组"
+    },
+    {
+      "method": "GET",
+      "path": "/api/IPGroupAPI",
+      "kind": "readonly",
+      "description": "获取 IP 组信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/IPGroupAPI",
+      "kind": "mutation",
+      "description": "新建 IP 组"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/IPGroupAPI",
+      "kind": "mutation",
+      "description": "编辑 IP 组名称和备注"
+    },
+    {
+      "method": "GET",
+      "path": "/api/LogFlagConfig",
+      "kind": "readonly",
+      "description": "获取标记"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/LogFlagConfig",
+      "kind": "mutation",
+      "description": "修改标记"
+    },
+    {
+      "method": "GET",
+      "path": "/_api/DashboardConfigAPI",
+      "kind": "readonly",
+      "description": "获取配置"
+    },
+    {
+      "method": "POST",
+      "path": "/_api/DashboardConfigAPI",
+      "kind": "mutation",
+      "description": "修改配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/HTTPReplayAPI",
+      "kind": "mutation",
+      "description": "重放请求"
+    },
+    {
+      "method": "GET",
+      "path": "/api/LogAggregationConfigAPI",
+      "kind": "readonly",
+      "description": "获取配置"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/LogAggregationConfigAPI",
+      "kind": "mutation",
+      "description": "修改配置"
+    },
+    {
+      "method": "GET",
+      "path": "/api/OverviewAPI",
+      "kind": "readonly",
+      "description": "统计信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/report/v2/ReportTask",
+      "kind": "mutation",
+      "description": "手动生成节点状态报告"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/report/v2/ReportTask",
+      "kind": "mutation",
+      "description": "编辑定时报告任务"
+    },
+    {
+      "method": "POST",
+      "path": "/api/report/v2/SendReport",
+      "kind": "mutation",
+      "description": "报告外发"
+    },
+    {
+      "method": "GET",
+      "path": "/api/SoftwareReverseProxyWebsiteAPI",
+      "kind": "readonly",
+      "description": "手动生成一个报告"
+    },
+    {
+      "method": "GET",
+      "path": "/api/traffic_learning/v1/AutoIntf",
+      "kind": "readonly",
+      "description": "获取自动发现业务列表"
+    },
+    {
+      "method": "POST",
+      "path": "/api/traffic_learning/v1/AutoIntf",
+      "kind": "mutation",
+      "description": "自动发现业务移入业务建模"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/traffic_learning/v1/Intf",
+      "kind": "mutation",
+      "description": "编辑智学习业务信息，支持批量"
+    },
+    {
+      "method": "POST",
+      "path": "/api/traffic_learning/v1/Intf",
+      "kind": "mutation",
+      "description": "手动创建智学习业务"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/traffic_learning/v1/Intf",
+      "kind": "mutation",
+      "description": "编辑智学习业务信息"
+    },
+    {
+      "method": "GET",
+      "path": "/api/traffic_learning/v1/IntfConfig",
+      "kind": "readonly",
+      "description": "获取某个站点的业务配置信息"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/traffic_learning/v1/IntfConfig",
+      "kind": "mutation",
+      "description": "编辑某个站点的业务配置信息"
+    },
+    {
+      "method": "GET",
+      "path": "/api/traffic_learning/v1/Overview",
+      "kind": "readonly",
+      "description": "获取智学习总览信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/traffic_learning/v1/ToggleIntf",
+      "kind": "mutation",
+      "description": "修改业务模型状态，包括开始/停止检测，开始/结束/重新开始业务学习，支持批量操作"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/CertAPI",
+      "kind": "mutation",
+      "description": "根据指定的 ID 删除证书"
+    },
+    {
+      "method": "GET",
+      "path": "/api/CertAPI",
+      "kind": "readonly",
+      "description": "获取已经上传的所有证书"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/HardwareReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "批量删除指定 ID 对应的站点配置"
+    },
+    {
+      "method": "GET",
+      "path": "/api/HardwareReverseProxyWebsiteAPI",
+      "kind": "readonly",
+      "description": "根据查询条件，过滤并返回已经存在的站点配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/HardwareReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/HardwareReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/HardwareTrafficDetectionWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "GET",
+      "path": "/api/HardwareTrafficDetectionWebsiteAPI",
+      "kind": "readonly",
+      "description": "根据查询条件，过滤并返回已经存在的站点配置，在使用工作于流量监测模式下的硬件版时调用"
+    },
+    {
+      "method": "POST",
+      "path": "/api/HardwareTrafficDetectionWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/HardwareTrafficDetectionWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/HardwareTransparentBridgingWebsiteAPI",
+      "kind": "mutation",
+      "description": "批量删除指定 ID 对应的站点配置"
+    },
+    {
+      "method": "GET",
+      "path": "/api/HardwareTransparentBridgingWebsiteAPI",
+      "kind": "readonly",
+      "description": "根据查询条件，过滤并返回已经存在的站点配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/HardwareTransparentBridgingWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/HardwareTransparentBridgingWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/HardwareTransparentProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "批量删除指定 ID 对应的站点配置"
+    },
+    {
+      "method": "GET",
+      "path": "/api/HardwareTransparentProxyWebsiteAPI",
+      "kind": "readonly",
+      "description": "根据查询条件，过滤并返回已经存在的站点配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/HardwareTransparentProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/HardwareTransparentProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/SoftwareClusterReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "批量删除指定 ID 对应的站点配置"
+    },
+    {
+      "method": "GET",
+      "path": "/api/SoftwareClusterReverseProxyWebsiteAPI",
+      "kind": "readonly",
+      "description": "根据查询条件，过滤并返回已经存在的站点配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/SoftwareClusterReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/SoftwareClusterReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/SoftwarePortMirroringWebsiteAPI",
+      "kind": "mutation",
+      "description": "批量删除指定 ID 对应的站点配置"
+    },
+    {
+      "method": "GET",
+      "path": "/api/SoftwarePortMirroringWebsiteAPI",
+      "kind": "readonly",
+      "description": "根据查询条件，过滤并返回已经存在的站点配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/SoftwarePortMirroringWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/SoftwarePortMirroringWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/SoftwareReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "批量删除指定 ID 对应的站点配置"
+    },
+    {
+      "method": "POST",
+      "path": "/api/SoftwareReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "新建站点"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/SoftwareReverseProxyWebsiteAPI",
+      "kind": "mutation",
+      "description": "编辑站点"
+    },
+    {
+      "method": "POST",
+      "path": "/api/UploadForbiddenPageAPI",
+      "kind": "mutation",
+      "description": "上传访问被拦截时，所返回响应页面"
+    },
+    {
+      "method": "POST",
+      "path": "/api/UploadSSLCertAPI",
+      "kind": "mutation",
+      "description": "当为站点开启 SSL时，使用此 API 上传证书 - name 参数如果不传，则会使用证书的域名拼接作为名字（可能会很长） - id 参数如果不传代表新建，否则为编辑这个 ID 的证书"
+    }
+  ]
+}

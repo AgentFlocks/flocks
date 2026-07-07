@@ -78,7 +78,8 @@ class WorkflowStore:
 
         await Storage._ensure_init()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
+
+        async def _open_and_migrate() -> None:
             cls._conn = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
@@ -93,14 +94,26 @@ class WorkflowStore:
             cls._init_pid = current_pid
             cls._db_path = db_path
             await cls._migrate_legacy_kv()
+
+        try:
+            await _open_and_migrate()
             log.info("workflow.store.initialized")
-        except Exception:
+        except Exception as exc:
             if cls._conn:
                 await cls._conn.close()
             cls._conn = None
             cls._initialized = False
             cls._init_pid = None
             cls._db_path = None
+            if Storage._is_db_corruption_error(exc):
+                await Storage.recover_corrupt_db(
+                    db_path,
+                    action="workflow.store.init",
+                    exc=exc,
+                    reinitialize=_open_and_migrate,
+                )
+                log.info("workflow.store.initialized")
+                return
             raise
 
     @classmethod

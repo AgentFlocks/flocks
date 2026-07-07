@@ -61,7 +61,8 @@ class TaskStore:
         db_path = cls.get_db_path()
         db_existed_before_init = db_path.exists()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
+
+        async def _open_and_migrate() -> None:
             cls._conn = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
@@ -78,13 +79,25 @@ class TaskStore:
             cls._initialized = True
             cls._init_pid = current_pid
             await cls._normalize_legacy_paused_executions()
+
+        try:
+            await _open_and_migrate()
             log.info("task.store.initialized")
-        except Exception:
+        except Exception as exc:
             if cls._conn:
                 await cls._conn.close()
             cls._conn = None
             cls._initialized = False
             cls._init_pid = None
+            if Storage._is_db_corruption_error(exc):
+                await Storage.recover_corrupt_db(
+                    db_path,
+                    action="task.store.init",
+                    exc=exc,
+                    reinitialize=_open_and_migrate,
+                )
+                log.info("task.store.initialized")
+                return
             raise
 
     @classmethod

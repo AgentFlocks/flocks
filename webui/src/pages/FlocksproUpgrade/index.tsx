@@ -11,6 +11,7 @@ import {
   type UpgradeRequestCreatePayload,
   type UpgradeRequestStatus,
 } from '@/api/consoleUpgrade';
+import { useProductName } from '@/contexts/ProductNameContext';
 import { type UpdateProgress } from '@/api/update';
 import { extractErrorMessage } from '@/utils/error';
 import { checkRestartReadiness } from '@/utils/restartPolling';
@@ -302,6 +303,7 @@ function requestDurationDays(item: UpgradeRequestStatus): number | null {
 
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
+  const { productName } = useProductName();
   const [searchParams, setSearchParams] = useSearchParams();
   const [consoleLoginStatus, setConsoleLoginStatus] = useState<ConsoleLoginSessionStatus | null>(null);
   const [consoleLoginLoading, setConsoleLoginLoading] = useState(false);
@@ -315,7 +317,6 @@ export default function FlocksproUpgradePage() {
   const [submittingApply, setSubmittingApply] = useState(false);
   const [applyForm, setApplyForm] = useState<UpgradeApplyFormState>(DEFAULT_FORM);
   const [applyFormError, setApplyFormError] = useState<string | null>(null);
-  const productName = applyForm.product.trim() || DEFAULT_FORM.product;
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [upgradeSteps, setUpgradeSteps] = useState<UpdateProgress[]>([]);
   const [upgradeError, setUpgradeError] = useState<string | null>(null);
@@ -992,8 +993,8 @@ export default function FlocksproUpgradePage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t('title')}
-        description={t('description')}
+        title={t('title', { productName })}
+        description={t('description', { productName })}
         icon={<ArrowUpCircle className="w-8 h-8" />}
       />
 
@@ -1050,10 +1051,14 @@ export default function FlocksproUpgradePage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">
-              {isProLoaded ? t('upgrade.installedTitle', { version: proVersion }) : t('upgrade.title')}
+              {isProLoaded
+                ? t('upgrade.installedTitle', { productName, version: proVersion })
+                : t('upgrade.title', { productName })}
             </h2>
             <p className="text-sm text-gray-500 mt-1">
-              {isProLoaded ? t('upgrade.installedDescription') : t('upgrade.description')}
+              {isProLoaded
+                ? t('upgrade.installedDescription', { productName })
+                : t('upgrade.description', { productName })}
             </p>
           </div>
           {isProLoaded ? (
@@ -1226,7 +1231,7 @@ export default function FlocksproUpgradePage() {
           >
             {currentLicenseInvalid && (
               <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800">
-                {t('upgrade.revokedOrExpiredHint')}
+                {t('upgrade.revokedOrExpiredHint', { productName })}
               </div>
             )}
             <div className={`flex flex-wrap items-center justify-between gap-3 border-b pb-3 ${
@@ -1388,12 +1393,12 @@ export default function FlocksproUpgradePage() {
       {showApplyDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
           <div className="w-full max-w-lg rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
-            <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.applyDialogTitle')}</h3>
+            <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.applyDialogTitle', { productName })}</h3>
             <div className="space-y-3">
               <div className="space-y-1">
                 <div className="text-sm text-gray-600">{t('upgrade.productLabel')}</div>
                 <input
-                  value={applyForm.product}
+                  value={productName}
                   readOnly
                   className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700"
                 />

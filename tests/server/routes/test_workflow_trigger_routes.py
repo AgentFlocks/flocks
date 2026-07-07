@@ -690,6 +690,7 @@ async def test_create_workflow_trigger_persists_and_restarts_runtime(
             "type": "custom_webhook",
             "enabled": True,
             "source": {"path": "/alerts/demo", "method": "POST"},
+            "auth": {"type": "api_key", "apiKey": "demo-secret"},
             "mapping": {"payload": "$.body"},
         },
     )
@@ -872,6 +873,86 @@ async def test_webhook_route_authorizes_and_dispatches_trigger(
     assert body["inputs"]["payload"] == {"severity": "high"}
     assert isinstance(body["deliveryId"], str)
     assert "result" not in body
+
+
+@pytest.mark.asyncio
+async def test_webhook_route_rejects_trigger_without_auth(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": True,
+                        "auth": {"type": "none"},
+                    }
+                ],
+            },
+        },
+    )
+    dispatched = False
+
+    async def _fake_dispatch_event(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal dispatched
+        dispatched = True
+        return {"matched": True, "executed": True}
+
+    monkeypatch.setattr(
+        workflow_routes,
+        "default_trigger_runtime",
+        SimpleNamespace(dispatch_event=_fake_dispatch_event),
+    )
+
+    response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        json={"severity": "high"},
+    )
+
+    assert response.status_code == 401, response.text
+    assert dispatched is False
+
+
+@pytest.mark.asyncio
+async def test_create_webhook_trigger_requires_real_auth(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
+                "edges": [],
+                "triggers": [],
+            },
+        },
+    )
+
+    response = await client.post(
+        "/api/workflow/wf-1/triggers",
+        json={
+            "id": "hook-default",
+            "type": "custom_webhook",
+            "enabled": True,
+            "auth": {"type": "none"},
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert "authentication" in response.text
 
 
 @pytest.mark.asyncio

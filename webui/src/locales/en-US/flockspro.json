@@ -1,5 +1,5 @@
 {
-  "title": "Flocks Pro",
+  "title": "{{productName}}",
   "description": "Complete console account login, upgrade application, and upgrade execution locally.",
   "actions": {
     "refresh": "Refresh",
@@ -33,11 +33,11 @@
     "logoutAction": "Log Out"
   },
   "upgrade": {
-    "title": "Upgrade to Flocks Pro",
+    "title": "Upgrade to {{productName}}",
     "description": "Review the current license information, submit applications, and track approval status.",
-    "installedTitle": "Flocks Pro {{version}}",
-    "installedDescription": "Flocks Pro is installed and the license is activated.",
-    "installedVersion": "Flocks Pro Version",
+    "installedTitle": "{{productName}} {{version}}",
+    "installedDescription": "{{productName}} is installed and the license is activated.",
+    "installedVersion": "{{productName}} Version",
     "licenseStatus": "License Status",
     "licenseId": "License ID",
     "expiresAt": "License Expires At",
@@ -70,7 +70,7 @@
     "waitingDowngradeRestart": "Pro component removed. Waiting for service to restart as OSS...",
     "applyAction": "Apply for Upgrade",
     "applyNewLicenseAction": "Apply for New License",
-    "revokedOrExpiredHint": "The current license is no longer valid. You can submit a new Flocks Pro application.",
+    "revokedOrExpiredHint": "The current license is no longer valid. You can submit a new {{productName}} application.",
     "loginFirst": "Log in console account before applying for upgrade.",
     "pendingRequestExists": "An upgrade request is already active. Refresh status or cancel it before creating a new one.",
     "currentRequest": "Current Request",
@@ -102,8 +102,8 @@
     "rejectedTitle": "Request rejected",
     "dismissRejected": "Dismiss rejection feedback",
     "startUpgrade": "Start Upgrade",
-    "inDevelopment": "Flocks Pro upgrade is under development",
-    "installingHint": "Downloading and installing the Flocks Pro component. OSS core will not be upgraded.",
+    "inDevelopment": "{{productName}} upgrade is under development",
+    "installingHint": "Downloading and installing the {{productName}} component. OSS core will not be upgraded.",
     "waitingRestart": "Upgrade is installed. Waiting for service restart...",
     "restartTimeout": "Service restart timed out. Refresh later to confirm status.",
     "afterUpgradeHint": "Starting upgrade will download the Pro bundle, install only the flockspro wheel, and restart automatically.",
@@ -136,7 +136,7 @@
       "durationDays": "Duration Days",
       "account": "Cloud Account"
     },
-    "applyDialogTitle": "Flocks Pro Upgrade Application",
+    "applyDialogTitle": "{{productName}} Upgrade Application",
     "productLabel": "Requested Version",
     "licenseTypeLabel": "Requested License Type",
     "licenseTypePoc": "POC License",

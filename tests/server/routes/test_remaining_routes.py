@@ -508,6 +508,132 @@ class TestConfigRoutes:
             f"No expected keys found. Got: {list(data.keys())}"
         )
 
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_and_updates(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """UI display-name endpoints expose only the visible product name."""
+        from flocks.config.config import Config
+        from flocks.server.routes import config as config_routes
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: False)
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Flocks",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme SOC  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Acme SOC",
+            "configuredDisplayName": "Acme SOC",
+            "faviconUrl": None,
+        }
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme SOC"
+
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"></svg>'
+        resp = await client.post(
+            "/api/config/ui/favicon",
+            files={"file": ("favicon.svg", svg, "image/svg+xml")},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        assert data["displayName"] == "Acme SOC"
+        assert data["faviconUrl"].startswith("/api/config/ui-favicon?v=")
+
+        favicon_resp = await client.get(data["faviconUrl"])
+        assert favicon_resp.status_code == status.HTTP_200_OK
+        assert favicon_resp.content == svg
+        assert (tmp_path / "config" / "assets" / "favicon.svg").is_file()
+
+        resp = await client.delete("/api/config/ui/favicon")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["faviconUrl"] is None
+
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_to_flockspro_when_pro_is_enabled(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Empty display-name config falls back to the active product edition."""
+        from flocks.config.config import Config
+        from flocks.server.routes import config as config_routes
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: True)
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Flocks Pro",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme Pro  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme Pro"
+        assert resp.json()["configuredDisplayName"] == "Acme Pro"
+
+        resp = await client.patch("/api/config/ui", json={"displayName": ""})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Flocks Pro"
+        assert resp.json()["configuredDisplayName"] is None
+
+    @pytest.mark.parametrize(
+        "svg",
+        [
+            b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.com/x.png"/></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><path fill="url(https://example.com/g)"/></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>'.encode("utf-16"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_ui_favicon_rejects_unsafe_svg(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+        svg: bytes,
+    ):
+        """SVG favicons are accepted only when they fit the safe favicon subset."""
+        from flocks.config.config import Config
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.post(
+            "/api/config/ui/favicon",
+            files={"file": ("favicon.svg", svg, "image/svg+xml")},
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert not (tmp_path / "config" / "assets" / "favicon.svg").exists()
+
+        display_resp = await client.get("/api/config/ui-display")
+        assert display_resp.status_code == status.HTTP_200_OK
+        assert display_resp.json()["faviconUrl"] is None
+
 
 # ===========================================================================
 # Permission routes

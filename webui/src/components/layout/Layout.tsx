@@ -48,6 +48,7 @@ import {
 } from '@/api/notifications';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProductName } from '@/contexts/ProductNameContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -128,6 +129,7 @@ export default function Layout() {
   const { t, i18n } = useTranslation('nav');
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
+  const { productName } = useProductName();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -469,7 +471,7 @@ export default function Layout() {
             { name: t('agents'), href: '/agents', icon: Bot },
             { name: t('skills'), href: '/skills', icon: BookOpen },
             { name: t('tools'), href: '/tools', icon: Wrench },
-            { name: t('hub'), href: '/hub', icon: Archive },
+            { name: t('hub', { productName }), href: '/hub', icon: Archive },
             { name: t('models'), href: '/models', icon: Brain },
             { name: t('channels'), href: '/channels', icon: Radio },
           ],
@@ -483,7 +485,7 @@ export default function Layout() {
         },
       ];
     },
-    [webuiContractPages, webuiContractWorkspaces, t],
+    [webuiContractPages, webuiContractWorkspaces, t, productName],
   );
 
   const isFullScreenPage =
@@ -493,7 +495,6 @@ export default function Layout() {
     matchPath('/sessions', location.pathname) ||
     matchPath('/devices', location.pathname) ||
     matchPath('/contracts/webui/*', location.pathname);
-  const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
     ? updateInfo?.edition === 'flockspro'
       ? formatProVersion(currentProductVersion(updateInfo, true))
@@ -757,7 +758,7 @@ export default function Layout() {
                     className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                   >
                     <ArrowUpCircle className="h-4 w-4 text-zinc-400" />
-                    {t('flocksproUpgrade')}
+                    {productName}
                   </Link>
                 )}
                 <button

@@ -1,5 +1,5 @@
 {
-  "title": "Flocks Pro",
+  "title": "{{productName}}",
   "description": "在本地完成云账号登录、升级申请与升级执行。",
   "actions": {
     "refresh": "刷新",
@@ -33,11 +33,11 @@
     "logoutAction": "退出登录"
   },
   "upgrade": {
-    "title": "升级为Flocks Pro",
+    "title": "升级为 {{productName}}",
     "description": "查看当前授权信息、提交申请并跟踪审批进度。",
-    "installedTitle": "Flocks Pro {{version}}",
-    "installedDescription": "Flocks Pro 已安装并完成授权激活。",
-    "installedVersion": "Flocks Pro 版本",
+    "installedTitle": "{{productName}} {{version}}",
+    "installedDescription": "{{productName}} 已安装并完成授权激活。",
+    "installedVersion": "{{productName}} 版本",
     "licenseStatus": "License 状态",
     "licenseId": "License ID",
     "expiresAt": "License 到期时间",
@@ -70,7 +70,7 @@
     "waitingDowngradeRestart": "Pro 组件已卸载，正在等待服务以 OSS 版重启...",
     "applyAction": "申请升级",
     "applyNewLicenseAction": "申请新授权",
-    "revokedOrExpiredHint": "当前 License 已失效，可重新提交 Flocks Pro 申请。",
+    "revokedOrExpiredHint": "当前 License 已失效，可重新提交 {{productName}} 申请。",
     "loginFirst": "请先完成云账号登录后再申请升级。",
     "pendingRequestExists": "当前已有升级申请在处理中，请刷新状态或撤回后再发起新申请。",
     "currentRequest": "当前申请",
@@ -102,8 +102,8 @@
     "rejectedTitle": "申请已被拒绝",
     "dismissRejected": "关闭拒绝反馈",
     "startUpgrade": "开始升级",
-    "inDevelopment": "Flocks Pro升级正在开发中",
-    "installingHint": "正在下载并安装 Flocks Pro 组件，期间不会升级 OSS core。",
+    "inDevelopment": "{{productName}} 升级正在开发中",
+    "installingHint": "正在下载并安装 {{productName}} 组件，期间不会升级 OSS core。",
     "waitingRestart": "升级已安装，正在等待服务重启完成...",
     "restartTimeout": "服务重启超时，请稍后手动刷新页面确认状态。",
     "afterUpgradeHint": "开始升级后将下载 Pro bundle，仅安装 flockspro wheel，并在完成后自动重启。",
@@ -136,7 +136,7 @@
       "durationDays": "有效期天数",
       "account": "云账号"
     },
-    "applyDialogTitle": "Flocks Pro 升级申请",
+    "applyDialogTitle": "{{productName}} 升级申请",
     "productLabel": "申请的版本",
     "licenseTypeLabel": "申请的授权类型",
     "licenseTypePoc": "POC授权（90天）",

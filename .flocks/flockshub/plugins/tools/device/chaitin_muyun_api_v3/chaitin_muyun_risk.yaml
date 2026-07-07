@@ -1,0 +1,36 @@
+name: chaitin_muyun_risk
+description: Chaitin Muyun vulnerability, baseline, and emergency vulnerability query tool.
+description_cn: 长亭牧云漏洞、安全基线和漏洞应急查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_muyun_api
+version: "API 3.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - vuln_list
+        - vuln_detail
+        - security_check_events
+        - baseline_tasks
+        - emergency_vulns
+        - test
+      description: |
+        风险类动作：
+        - vuln_list: 查询通用漏洞事件列表。
+        - vuln_detail: 查询漏洞事件详情。
+        - security_check_events: 查询安全基线事件。
+        - baseline_tasks: 查询核查任务列表。
+        - emergency_vulns: 查询漏洞应急列表。
+    params:
+      type: object
+      description: JSON-RPC params 对象；字段按牧云 API 3.0 对应方法填写。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_muyun.handler.py
+  function: risk

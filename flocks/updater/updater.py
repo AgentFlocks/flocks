@@ -199,17 +199,6 @@ def _looks_like_windows_python_launcher(entry: str) -> bool:
     return _windows_path_stem(entry) in {"python", "pythonw", "py"}
 
 
-def _is_windows_file_in_use_error(exc: BaseException) -> bool:
-    """Return True when *exc* looks like a Windows file-lock failure."""
-    if sys.platform != "win32":
-        return False
-    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 32:
-        return True
-
-    text = str(exc).lower()
-    return "winerror 32" in text or "used by another process" in text
-
-
 def _is_uv_managed_python_runtime_error(text: str) -> bool:
     """Return True when uv reports a broken managed Python runtime cache."""
     if not text:
@@ -1989,13 +1978,15 @@ class _NullConsole:
 
 def _current_service_config():
     from flocks.cli import service_manager
+    from flocks.cli.service_config import service_config_from_status_payload
+    from flocks.cli.service_control import read_supervisor_status
 
-    paths = service_manager.ensure_runtime_dirs()
-    return service_manager.ServiceConfig(
-        backend_host=service_manager._recorded_host(paths.backend_pid, service_manager.ServiceConfig.backend_host),
-        backend_port=service_manager._recorded_port(paths.backend_pid, service_manager.ServiceConfig.backend_port),
-        frontend_host=service_manager._recorded_host(paths.frontend_pid, service_manager.ServiceConfig.frontend_host),
-        frontend_port=service_manager._recorded_port(paths.frontend_pid, service_manager.ServiceConfig.frontend_port),
+    try:
+        status = read_supervisor_status(paths=service_manager.runtime_paths(), timeout=1.0)
+    except Exception as exc:
+        raise RuntimeError("Supervisor control API is unavailable; cannot perform managed upgrade restart.") from exc
+    return service_config_from_status_payload(
+        status.raw,
         no_browser=True,
         skip_frontend_build=True,
     )
@@ -2136,7 +2127,11 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
 
     from flocks.cli import service_manager
 
-    remaining = service_manager.port_owner_pids(frontend_port)
+    remaining = [
+        pid
+        for pid in service_manager.port_owner_pids(frontend_port)
+        if _looks_like_upgrade_page_process(pid)
+    ]
     if remaining:
         log.info(
             "updater.upgrade_page.port_fallback_kill",
@@ -2158,7 +2153,7 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
         wait_attempts = 40
         wait_interval = 0.25
         for _ in range(wait_attempts):
-            if not service_manager.port_owner_pids(frontend_port):
+            if not any(_looks_like_upgrade_page_process(pid) for pid in service_manager.port_owner_pids(frontend_port)):
                 return
             time.sleep(wait_interval)
         return
@@ -2167,8 +2162,23 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
         time.sleep(0.3)
 
 
+def _looks_like_upgrade_page_process(pid: int) -> bool:
+    """Return True only for the temporary upgrade-page http.server process."""
+    try:
+        from flocks.cli import service_manager
+
+        command_line = service_manager._process_command_line(pid).lower()
+    except Exception:
+        return False
+    if not command_line:
+        return False
+    page_dir = str(_upgrade_page_dir()).lower()
+    return "http.server" in command_line and "upgrade-page" in command_line and page_dir in command_line
+
+
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     from flocks.cli import service_manager
+    from flocks.cli.service_control import request_prepare_upgrade
 
     config = _current_service_config()
     payload: dict[str, Any] = {
@@ -2183,9 +2193,8 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     _persist_upgrade_state(payload, last_error=None)
 
     console = _NullConsole()
-    paths = service_manager.ensure_runtime_dirs()
-    frontend_port = service_manager._recorded_port(paths.frontend_pid, config.frontend_port)
-    service_manager.stop_one(frontend_port, paths.frontend_pid, "WebUI", console)
+    paths = service_manager.runtime_paths()
+    request_prepare_upgrade(paths=paths, timeout=30.0)
 
     try:
         payload.update(_start_upgrade_page_server(config, version))
@@ -2198,7 +2207,7 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
         _stop_upgrade_page_server(frontend_port=config.frontend_port)
         _clear_upgrade_state()
         try:
-            service_manager.start_frontend(config, console)
+            _start_frontend_with_fallback(config, console, allow_build_fallback=False)
         except Exception as restart_error:
             log.error("updater.frontend.restore_failed", {"error": str(restart_error)})
         raise
@@ -2206,24 +2215,54 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     return payload
 
 
+def _spawn_restart_handoff(command: list[str], *, cwd: Path) -> subprocess.Popen:
+    creationflags = 0
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            kwargs["startupinfo"] = startupinfo
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, cwd=cwd, close_fds=True, creationflags=creationflags, **kwargs)
+
+
 def _service_config_from_payload(
     payload: dict[str, Any],
     *,
     skip_frontend_build: bool | None = None,
 ):
-    from flocks.cli import service_manager
+    from flocks.cli.service_config import ServiceConfig, service_config_from_payload
 
     resolved_skip_frontend_build = (
         bool(payload.get("skip_frontend_build", True)) if skip_frontend_build is None else skip_frontend_build
     )
-    return service_manager.ServiceConfig(
-        backend_host=str(payload.get("backend_host") or service_manager.ServiceConfig.backend_host),
-        backend_port=int(payload.get("backend_port") or service_manager.ServiceConfig.backend_port),
-        frontend_host=str(payload.get("frontend_host") or service_manager.ServiceConfig.frontend_host),
-        frontend_port=int(payload.get("frontend_port") or service_manager.ServiceConfig.frontend_port),
+    migrated_payload = dict(payload)
+    backend_port = migrated_payload.get("backend_port")
+    frontend_port = migrated_payload.get("frontend_port")
+    if isinstance(backend_port, int) and isinstance(frontend_port, int) and backend_port != frontend_port:
+        migrated_payload["legacy_backend_host"] = migrated_payload.get("backend_host")
+        migrated_payload["legacy_backend_port"] = backend_port
+        migrated_payload["backend_host"] = migrated_payload.get("frontend_host") or migrated_payload.get("backend_host")
+        migrated_payload["backend_port"] = frontend_port
+        migrated_payload["server_port_migration_hint"] = True
+    return service_config_from_payload(
+        migrated_payload,
+        default=ServiceConfig(),
         no_browser=True,
         skip_frontend_build=resolved_skip_frontend_build,
     )
+
+
+def _handoff_service_config():
+    payload = _read_upgrade_state()
+    if payload is not None:
+        return _service_config_from_payload(payload, skip_frontend_build=True)
+    return _current_service_config()
 
 
 def _read_upgrade_server_pid() -> tuple[int | None, bool]:
@@ -2281,25 +2320,31 @@ def read_upgrade_runtime_state(frontend_port: int | None = None) -> dict[str, An
     }
 
 
+def _webui_runtime_ready(state: str) -> bool:
+    return state in {"healthy", "static"}
+
+
 def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool) -> None:
-    from flocks.cli import service_manager
+    from flocks.cli.service_config import with_frontend_build
+    from flocks.cli.service_control import request_restart_webui, request_resume_upgrade
 
     try:
-        service_manager.start_frontend(config, console)
+        status = request_resume_upgrade(
+            config,
+            paths=None,
+            timeout=180.0,
+        )
+        if not _webui_runtime_ready(status.webui.state):
+            raise RuntimeError(status.webui.last_error or "WebUI restart did not become healthy")
         return
     except Exception:
         if not allow_build_fallback or not config.skip_frontend_build:
             raise
 
-    rebuilt_config = service_manager.ServiceConfig(
-        backend_host=config.backend_host,
-        backend_port=config.backend_port,
-        frontend_host=config.frontend_host,
-        frontend_port=config.frontend_port,
-        no_browser=config.no_browser,
-        skip_frontend_build=False,
-    )
-    service_manager.start_frontend(rebuilt_config, console)
+    rebuilt_config = with_frontend_build(config, skip_frontend_build=False)
+    result = request_restart_webui(rebuilt_config, force_frontend_build=True, paths=None, timeout=180.0)
+    if not _webui_runtime_ready(result.webui.state):
+        raise RuntimeError(result.webui.last_error or "WebUI restart did not become healthy")
 
 
 def cleanup_orphan_upgrade_state(*, frontend_port: int | None = None) -> bool:
@@ -3115,7 +3160,6 @@ async def perform_update(
     current_version = get_current_version()
     effective_update_version = current_version
     skip_core_replace = False
-    handover_active = False
     console_manifest_info: ConsoleManifestRelease | None = None
     console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
     fmt = _choose_archive_format(ucfg.archive_format)
@@ -3308,20 +3352,7 @@ async def perform_update(
     )
 
     async def _restore_after_apply_failure() -> None:
-        nonlocal handover_active
         if backup_path is None:
-            if handover_active:
-                await asyncio.to_thread(rollback_upgrade_handover)
-                handover_active = False
-            return
-        if handover_active:
-            await asyncio.to_thread(
-                _rollback_failed_update,
-                backup_path,
-                install_root,
-                current_version,
-            )
-            handover_active = False
             return
         await asyncio.to_thread(
             _restore_backup_if_possible,
@@ -3339,28 +3370,6 @@ async def perform_update(
             )
     except Exception as exc:
         final_replace_error: Exception | None = exc
-        if (
-            sys.platform == "win32"
-            and restart
-            and needs_handover
-            and not handover_active
-            and _is_windows_file_in_use_error(exc)
-        ):
-            log.warning("updater.replace.locked_retry_with_handover", {"error": str(exc)})
-            try:
-                _prepare_upgrade_handover(latest_tag)
-                handover_active = True
-                if not skip_core_replace:
-                    await asyncio.to_thread(
-                        _replace_install_dir,
-                        content_root,
-                        install_root,
-                    )
-            except Exception as retry_exc:
-                final_replace_error = retry_exc
-            else:
-                final_replace_error = None
-
         if final_replace_error is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             await _restore_after_apply_failure()
@@ -3457,32 +3466,12 @@ async def perform_update(
         restart_argv = _build_restart_argv(install_root)
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
-        if handover_active:
-            try:
-                rollback_upgrade_handover()
-            except Exception:
-                pass
-            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to build restart command: {exc}",
             success=False,
         )
         return
-
-    if needs_handover and not handover_active:
-        try:
-            _prepare_upgrade_handover(latest_tag)
-            handover_active = True
-        except Exception as exc:
-            log.error("updater.handover.failed", {"error": str(exc)})
-            await _restore_after_apply_failure()
-            yield UpdateProgress(
-                stage="error",
-                message=f"Failed to prepare WebUI handover: {exc}",
-                success=False,
-            )
-            return
 
     try:
         handoff_argv = _build_restart_handoff_argv(
@@ -3499,6 +3488,7 @@ async def perform_update(
             pro_bundle_manifest_path=pro_bundle_manifest_path,
             bundle_sha256=bundle_sha256,
             cleanup_dir=tmp_dir,
+            prepare_handover=needs_handover,
         )
         log.info(
             "updater.restart.handoff_spawn",
@@ -3507,21 +3497,11 @@ async def perform_update(
                 "restart_argv": restart_argv,
             },
         )
-        subprocess.Popen(
-            handoff_argv,
-            cwd=install_root,
-            close_fds=True,
-        )
+        _spawn_restart_handoff(handoff_argv, cwd=install_root)
         os._exit(0)
     except Exception as exc:
         log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if handover_active:
-            try:
-                rollback_upgrade_handover()
-            except Exception:
-                pass
-            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to restart service: {exc}",
@@ -3642,15 +3622,29 @@ def _build_restart_handoff_argv(
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
     cleanup_dir: Path | None = None,
+    prepare_handover: bool = False,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
-    from flocks.cli import service_manager
-
     if not restart_argv:
         raise ValueError("restart command is empty")
 
-    config = _current_service_config()
-    paths = service_manager.ensure_runtime_dirs()
+    config = _handoff_service_config()
+    managed_restart_argv = [
+        restart_argv[0],
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        str(config.backend_host),
+        "--port",
+        str(config.backend_port),
+    ]
+    if config.legacy_backend_host is not None:
+        managed_restart_argv.extend(["--server-host", str(config.legacy_backend_host)])
+    if config.legacy_backend_port is not None:
+        managed_restart_argv.extend(["--server-port", str(config.legacy_backend_port)])
     argv = [
         restart_argv[0],
         "-m",
@@ -3665,8 +3659,6 @@ def _build_restart_handoff_argv(
         str(config.frontend_host),
         "--frontend-port",
         str(config.frontend_port),
-        "--backend-pid-file",
-        str(paths.backend_pid),
         "--install-root",
         str(install_root),
         "--uv-path",
@@ -3692,7 +3684,9 @@ def _build_restart_handoff_argv(
         argv.extend(["--bundle-sha256", bundle_sha256])
     if cleanup_dir is not None:
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
-    argv.extend(["--", *restart_argv])
+    if prepare_handover:
+        argv.append("--prepare-handover")
+    argv.extend(["--", *managed_restart_argv])
     return argv
 
 
