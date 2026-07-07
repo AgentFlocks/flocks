@@ -10,7 +10,8 @@ async def test_installed_pro_bundle_marker_without_active_license_keeps_oss_sour
     marker.parent.mkdir(parents=True)
     marker.write_text(
         """{
-  "installed_version": "v2026.5.23",
+  "bundle_version": "v2026.5.23",
+  "core_version": "v2026.5.23",
   "flockspro_component_version": "pro-v2026-05-23"
 }""",
         encoding="utf-8",

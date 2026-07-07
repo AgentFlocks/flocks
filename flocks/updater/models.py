@@ -8,10 +8,13 @@ from pydantic import BaseModel
 from flocks.updater.deploy import DeployMode
 
 UpdateStage = Literal[
+    "checking",
+    "reporting",
     "fetching",
     "backing_up",
     "applying",
     "syncing",
+    "downgrading",
     "restarting",
     "done",
     "error",

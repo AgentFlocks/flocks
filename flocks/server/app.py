@@ -197,6 +197,17 @@ async def lifespan(app: FastAPI):
         _recover_orphan_tool_parts,
     )
 
+    try:
+        from flocks.console.scheduler import ConsoleSyncScheduler
+
+        async def _start_console_sync_phase() -> None:
+            await ConsoleSyncScheduler.send_startup_heartbeat()
+            await ConsoleSyncScheduler.start()
+
+        _schedule_startup_phase(app, log, "console.sync.start", _start_console_sync_phase)
+    except Exception as e:
+        log.warning("console.sync.start_failed", {"error": str(e)})
+
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
     try:
@@ -485,6 +496,13 @@ async def lifespan(app: FastAPI):
             task.cancel()
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
+
+    try:
+        from flocks.console.scheduler import ConsoleSyncScheduler
+
+        await ConsoleSyncScheduler.stop()
+    except Exception as exc:
+        log.warning("console.sync.stop_failed", {"error": str(exc)})
 
     # Notify SSE clients before stopping sessions, MCP transports, and other
     # long-lived runtime services so browser listeners see the shutdown event.
