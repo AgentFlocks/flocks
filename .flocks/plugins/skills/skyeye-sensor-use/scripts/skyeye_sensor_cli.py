@@ -46,7 +46,10 @@ def format_timestamp(value: Any) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def resolve_auth_file() -> Path | None:
+def resolve_auth_file(auth_state: str | None = None) -> Path | None:
+    if auth_state:
+        path = Path(auth_state).expanduser()
+        return path if path.exists() else None
     if AUTH_STATE_FILE.exists():
         return AUTH_STATE_FILE
     if COOKIE_FILE.exists():
@@ -57,6 +60,7 @@ def resolve_auth_file() -> Path | None:
 def ensure_browser_auth_state(
     *,
     base_url: str,
+    auth_state: str | None,
     username: str | None,
     password: str | None,
     captcha_code: str | None,
@@ -69,7 +73,7 @@ def ensure_browser_auth_state(
         base_url=base_url,
         username=username,
         password=password,
-        auth_state=str(AUTH_STATE_FILE),
+        auth_state=auth_state or str(AUTH_STATE_FILE),
         login_path="",
         captcha_path="",
         captcha_code=captcha_code or "",
@@ -182,6 +186,7 @@ def pick_first(item: dict, *keys: str, default: str = "-") -> str:
 @click.group()
 @click.option("--token", "-t", help="CSRF Token")
 @click.option("--base-url", "-u", help="Base URL")
+@click.option("--auth-state", help=f"Auth-state path, default: {AUTH_STATE_FILE}")
 @click.option("--username", help="Username for browser/CDP login")
 @click.option("--password", help="Password for browser/CDP login")
 @click.option("--auto-login", is_flag=True, help="Use saved credentials to refresh browser auth-state")
@@ -193,6 +198,7 @@ def cli(
     ctx: click.Context,
     token: str | None,
     base_url: str | None,
+    auth_state: str | None,
     username: str | None,
     password: str | None,
     auto_login: bool,
@@ -210,6 +216,7 @@ def cli(
         try:
             ok, resolved_base_url = ensure_browser_auth_state(
                 base_url=actual_base_url,
+                auth_state=auth_state,
                 username=username,
                 password=password,
                 captcha_code=captcha_code,
@@ -228,7 +235,7 @@ def cli(
         print_error("未提供平台地址。请设置 SKYEYE_SENSOR_BASE_URL 或使用 --base-url。")
         sys.exit(1)
 
-    auth_file = resolve_auth_file()
+    auth_file = resolve_auth_file(auth_state)
     if auth_file is None and not actual_token:
         print_error("未提供认证信息。请提供 auth-state.json、cookie.json 或 --token")
         sys.exit(1)
