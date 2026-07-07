@@ -42,6 +42,7 @@ interface FlocksproLicenseStatus {
   max_members?: number | null;
   fingerprint?: string | null;
   install_id?: string | null;
+  bundle_version?: string | null;
   [key: string]: string | number | boolean | null | undefined;
 }
 
@@ -126,6 +127,19 @@ function proPackageStatusToLicenseStatus(status: ProPackageStatus): FlocksproLic
 function formatProVersion(version?: string | null): string {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
   return normalized ? `pro-v${normalized}` : 'pro-v...';
+}
+
+function firstVersionValue(...values: Array<string | number | boolean | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 function formatDateTimeValue(value?: string | number | null): string {
@@ -405,16 +419,6 @@ export default function FlocksproUpgradePage() {
     [requests],
   );
 
-  const proComponentVersion =
-    latestActivatedRequest?.details?.auto_install_pro_version ||
-    latestActivatedRequest?.details?.flockspro_component_version;
-  const proVersion = formatProVersion(
-    proComponentVersion ||
-      proPackageStatus?.flockspro_component_version ||
-      proPackageStatus?.installed_version ||
-      latestActivatedRequest?.details?.auto_install_version ||
-      latestActivatedRequest?.details?.auto_install_target,
-  );
   const isProRuntimeActive =
     licenseStatus?.pro_enabled === true ||
     licenseStatus?.active === true ||
@@ -437,6 +441,24 @@ export default function FlocksproUpgradePage() {
   const currentDisplayLicenseRequest = currentDisplayLicenseId
     ? accountScopedRequests.find((item) => requestLicenseId(item) === currentDisplayLicenseId)
     : null;
+  const bundleVersion = firstVersionValue(
+    proPackageStatus?.bundle_version,
+    licenseStatus?.bundle_version,
+    currentDisplayLicenseRequest?.details?.auto_install_bundle_version,
+    latestActivatedRequest?.details?.auto_install_bundle_version,
+    currentDisplayLicenseRequest?.details?.bundle_version_update_to,
+    latestActivatedRequest?.details?.bundle_version_update_to,
+  );
+  const proComponentVersion = firstVersionValue(
+    latestActivatedRequest?.details?.auto_install_pro_component_version,
+    latestActivatedRequest?.details?.auto_install_pro_version,
+    latestActivatedRequest?.details?.flockspro_component_version,
+    proPackageStatus?.flockspro_component_version,
+    proPackageStatus?.installed_version,
+    latestActivatedRequest?.details?.auto_install_version,
+    latestActivatedRequest?.details?.auto_install_target,
+  );
+  const proVersion = bundleVersion || formatProVersion(proComponentVersion);
   const showCurrentLicenseCard = Boolean(currentDisplayLicenseId);
   const displayedLicenseStatus = (preferRequestLicense
     ? requestLicenseStatus(currentIssuedRequest as UpgradeRequestStatus)

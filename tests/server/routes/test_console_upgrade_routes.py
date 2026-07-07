@@ -248,7 +248,7 @@ async def test_pro_package_status_reports_installed_marker(
         console_routes,
         "_read_pro_bundle_install_marker",
         lambda: {
-            "installed_version": "pro-v2026-05-13-3",
+            "bundle_version": "pro-v2026-05-13-3",
             "flockspro_component_version": "1.2.3",
             "build_id": "build_1",
             "installed_at": "2026-05-15T12:00:00+00:00",
@@ -276,7 +276,7 @@ async def test_pro_package_status_treats_install_marker_as_installed(
         console_routes,
         "_read_pro_bundle_install_marker",
         lambda: {
-            "installed_version": "pro-v2026.6.23",
+            "bundle_version": "pro-v2026.6.23",
             "flockspro_component_version": "2026.6.23",
             "installed_at": "2026-06-29T04:00:00+00:00",
         },
@@ -335,6 +335,50 @@ async def test_flockspro_license_status_delegates_to_pro_runtime(monkeypatch: py
     assert payload["pro_enabled"] is True
     assert payload["activated"] is True
     assert payload["license_id"] == "lic_1"
+
+
+async def test_flockspro_license_refresh_sends_heartbeat_from_core(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import flockspro_license as license_routes
+
+    app = FastAPI()
+    app.include_router(license_routes.router, prefix="/api/flockspro/license")
+    monkeypatch.setattr(license_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(
+        license_routes,
+        "_get_pro_capability_status",
+        lambda: {"active": True, "pro_enabled": True, "license_status": "poc", "license_id": "lic_1"},
+    )
+    monkeypatch.setattr(license_routes, "require_user", lambda _req: _mock_admin())
+
+    heartbeat_calls: list[str] = []
+    refresh_calls: list[str] = []
+
+    async def _send_heartbeat():
+        heartbeat_calls.append("sent")
+        return {"ok": True}
+
+    class _Checker:
+        async def refresh(self):
+            refresh_calls.append("refreshed")
+            return {"active": True}
+
+    runtime_module = ModuleType("flockspro.license.runtime")
+    runtime_module.get_license_checker = lambda: _Checker()
+    license_module = ModuleType("flockspro.license")
+    flockspro_module = ModuleType("flockspro")
+    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
+    monkeypatch.setattr(license_routes.ConsoleLoginService, "send_heartbeat", _send_heartbeat)
+
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
+        resp = await local_client.post("/api/flockspro/license/refresh")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert heartbeat_calls == ["sent"]
+    assert refresh_calls == ["refreshed"]
+    assert resp.json()["license_id"] == "lic_1"
 
 
 async def test_create_upgrade_request_does_not_link_previous_request_when_omitted(
@@ -768,7 +812,7 @@ async def test_start_approved_request_streams_restart_without_marking_activated(
         console_routes,
         "_read_pro_bundle_install_marker",
         lambda: {
-            "installed_version": "v2026.6.5",
+            "bundle_version": "v2026.6.5",
             "flockspro_component_version": "v2026.6.5",
         },
     )
@@ -812,7 +856,7 @@ async def test_restarting_request_reports_receipt_after_service_restart(
                 "approved_bundle_release_id": "rel_restart",
                 "latest_pro_bundle": {
                     "release_id": "rel_restart",
-                    "display_version": "v2026.6.24",
+                    "bundle_version": "v2026.6.24",
                     "core_version": "v2026.6.21",
                     "flockspro_component_version": "v2026.6.24",
                     "build_id": "job_restart",
@@ -844,7 +888,7 @@ async def test_restarting_request_reports_receipt_after_service_restart(
         lambda: {
             "release_id": "rel_restart",
             "bundle_release_id": "rel_restart",
-            "installed_version": "v2026.6.24",
+            "bundle_version": "v2026.6.24",
             "core_version": "v2026.6.21",
             "flockspro_component_version": "v2026.6.24",
             "build_id": "job_restart",
@@ -857,7 +901,7 @@ async def test_restarting_request_reports_receipt_after_service_restart(
     payload = resp.json()
     assert payload["status"] == "activated"
     assert payload["details"]["auto_install_result"] == "done"
-    assert payload["details"]["auto_install_version"] == "v2026.6.24"
+    assert payload["details"]["auto_install_bundle_version"] == "v2026.6.24"
     assert reported == [("success", None)]
 
 
@@ -977,7 +1021,7 @@ async def test_start_activated_request_reinstalls_when_pro_package_missing(
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
-        lambda: {"installed_version": "v2026.5.9"} if installed else {},
+        lambda: {"bundle_version": "v2026.5.9"} if installed else {},
     )
 
     resp = await client.post(f"/api/console/upgrade-requests/{request_id}/start")
@@ -987,7 +1031,7 @@ async def test_start_activated_request_reinstalls_when_pro_package_missing(
     stored = await Storage.get(f"console:upgrade_request:{request_id}")
     assert stored["status"] == "activated"
     assert stored["details"]["auto_install_result"] == "done"
-    assert stored["details"]["auto_install_version"] == "v2026.5.9"
+    assert stored["details"]["auto_install_bundle_version"] == "v2026.5.9"
 
 
 async def test_start_revoked_request_does_not_reinstall(
@@ -1042,7 +1086,7 @@ async def test_auto_activate_reports_already_latest_install(
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
-        lambda: {"installed_version": "v2026.5.9"},
+        lambda: {"bundle_version": "v2026.5.9"},
     )
 
     record = {
@@ -1057,7 +1101,7 @@ async def test_auto_activate_reports_already_latest_install(
     payload = await console_routes._maybe_auto_activate_upgrade(record)
     assert payload["status"] == "activated"
     assert payload["details"]["auto_install_result"] == "already_latest"
-    assert payload["details"]["auto_install_version"] == "v2026.5.9"
+    assert payload["details"]["auto_install_bundle_version"] == "v2026.5.9"
     assert reported == [("success", None)]
 
 
@@ -1071,7 +1115,7 @@ async def test_auto_activate_reinstalls_when_existing_pro_marker_is_not_target_b
         "payload": {
             "release_id": "rel_20260601",
             "bundle_release_id": "rel_20260601",
-            "installed_version": "v2026.6.1",
+            "bundle_version": "v2026.6.1",
             "flockspro_component_version": "v2026.6.1",
             "build_id": "job_20260601",
         }
@@ -1084,7 +1128,7 @@ async def test_auto_activate_reinstalls_when_existing_pro_marker_is_not_target_b
         marker_state["payload"] = {
             "release_id": "rel_20260605",
             "bundle_release_id": "rel_20260605",
-            "installed_version": "v2026.6.5",
+            "bundle_version": "v2026.6.5",
             "flockspro_component_version": "v2026.6.5",
             "build_id": "job_20260605",
         }
@@ -1113,7 +1157,7 @@ async def test_auto_activate_reinstalls_when_existing_pro_marker_is_not_target_b
             "approved_bundle_release_id": "rel_20260605",
             "latest_pro_bundle": {
                 "release_id": "rel_20260605",
-                "display_version": "v2026.6.5",
+                "bundle_version": "v2026.6.5",
                 "flockspro_component_version": "v2026.6.5",
                 "build_id": "job_20260605",
             },
@@ -1127,7 +1171,7 @@ async def test_auto_activate_reinstalls_when_existing_pro_marker_is_not_target_b
     assert payload["status"] == "activated"
     assert payload["details"]["auto_install_result"] == "done"
     assert payload["details"]["auto_install_release_id"] == "rel_20260605"
-    assert payload["details"]["auto_install_version"] == "v2026.6.5"
+    assert payload["details"]["auto_install_bundle_version"] == "v2026.6.5"
     assert reported == [("success", None)]
 
 
@@ -1153,7 +1197,7 @@ async def test_auto_activate_does_not_mark_activated_when_license_inactive(
         "_get_pro_capability_status",
         lambda: {"pro_enabled": False, "active": False, "license_status": "expired", "inactive_reason": "expired"},
     )
-    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: {"installed_version": "v2026.5.9"})
+    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: {"bundle_version": "v2026.5.9"})
 
     record = {
         "request_id": "req_auto_inactive",
@@ -1205,7 +1249,7 @@ async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
-        lambda: {"installed_version": "v2026.5.9"} if installed else {},
+        lambda: {"bundle_version": "v2026.5.9"} if installed else {},
     )
 
     record = {
@@ -1220,7 +1264,7 @@ async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
     payload = await console_routes._maybe_auto_activate_upgrade(record)
     assert payload["status"] == "activated"
     assert payload["details"]["auto_install_result"] == "done"
-    assert payload["details"]["auto_install_version"] == "v2026.5.9"
+    assert payload["details"]["auto_install_bundle_version"] == "v2026.5.9"
 
 
 async def test_report_pro_bundle_installation_uses_license_id(
@@ -1253,7 +1297,7 @@ async def test_report_pro_bundle_installation_uses_license_id(
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
-        lambda: {"installed_version": "v2026.5.9"},
+        lambda: {"bundle_version": "v2026.5.9"},
     )
 
     record = {
@@ -1266,7 +1310,7 @@ async def test_report_pro_bundle_installation_uses_license_id(
             "approved_bundle_release_id": "rel_receipt",
             "latest_pro_bundle": {
                 "release_id": "rel_receipt",
-                "display_version": "v2026.6.5",
+                "bundle_version": "v2026.6.5",
                 "core_version": "v2026.6.1",
                 "flockspro_component_version": "v2026.6.5",
                 "build_id": "job_receipt",
@@ -1281,7 +1325,7 @@ async def test_report_pro_bundle_installation_uses_license_id(
     assert posted_payloads[0]["release_id"] == "rel_receipt"
     assert posted_payloads[0]["bundle_release_id"] == "rel_receipt"
     assert posted_payloads[0]["core_version"] == "v2026.6.1"
-    assert posted_payloads[0]["oss_version"] == "v2026.6.1"
+    assert "oss_version" not in posted_payloads[0]
     assert posted_payloads[0]["build_id"] == "job_receipt"
 
 
@@ -1317,7 +1361,7 @@ async def test_report_failed_installation_uses_target_bundle_when_marker_is_stal
         lambda: {
             "release_id": "rel_old",
             "bundle_release_id": "rel_old",
-            "installed_version": "v2026.6.1",
+            "bundle_version": "v2026.6.1",
             "flockspro_component_version": "v2026.6.1",
             "build_id": "job_old",
         },
@@ -1333,8 +1377,8 @@ async def test_report_failed_installation_uses_target_bundle_when_marker_is_stal
             "approved_bundle_release_id": "rel_new",
             "latest_pro_bundle": {
                 "release_id": "rel_new",
-                "display_version": "v2026.6.5",
-                "oss_version": "v2026.6.5",
+                "bundle_version": "v2026.6.5",
+                "core_version": "v2026.6.5",
                 "flockspro_component_version": "v2026.6.5",
                 "build_id": "job_new",
             },
@@ -1349,6 +1393,6 @@ async def test_report_failed_installation_uses_target_bundle_when_marker_is_stal
 
     assert posted_payloads[0]["release_id"] == "rel_new"
     assert posted_payloads[0]["bundle_release_id"] == "rel_new"
-    assert posted_payloads[0]["installed_version"] == "v2026.6.5"
+    assert posted_payloads[0]["bundle_version"] == "v2026.6.5"
     assert posted_payloads[0]["build_id"] == "job_new"
     assert posted_payloads[0]["install_result"] == "failed"

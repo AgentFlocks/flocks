@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, AsyncGenerator, Awaitable, Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
@@ -1071,31 +1071,15 @@ def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str
     return "tar.gz"
 
 
-def _console_manifest_display_version(data: dict[str, Any]) -> str:
-    display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
-    if display_version:
-        return display_version
-    core_version = str(data.get("core_version") or "").strip()
-    if core_version:
-        return core_version
-    oss_version = str(data.get("oss_version") or "").strip()
-    if oss_version:
-        return oss_version
-    compare_version = str(data.get("compare_version") or "").strip()
-    return f"v{compare_version}" if compare_version and not compare_version.startswith(("v", "V")) else compare_version
+def _console_manifest_bundle_version(data: dict[str, Any]) -> str:
+    return str(data.get("bundle_version") or "").strip()
 
 
 def _pro_bundle_core_version(data: dict[str, Any]) -> str:
-    core_version = str(data.get("core_version") or "").strip()
-    if core_version:
-        return core_version
-    oss_version = str(data.get("oss_version") or "").strip()
-    if oss_version:
-        return oss_version
-    return _console_manifest_display_version(data)
+    return str(data.get("core_version") or "").strip()
 
 
-def _pro_bundle_oss_version(data: dict[str, Any]) -> str:
+def _pro_bundle_core_version_for_compare(data: dict[str, Any]) -> str:
     return _pro_bundle_core_version(data)
 
 
@@ -1106,22 +1090,21 @@ def _version_label(version: str | None) -> str:
     return normalized if normalized.startswith(("v", "V")) else f"v{normalized}"
 
 
-def _is_pro_bundle_oss_older_than_local(manifest: dict[str, Any], current_version: str | None = None) -> bool:
-    bundle_oss_version = _pro_bundle_oss_version(manifest)
-    if not bundle_oss_version:
+def _is_pro_bundle_core_older_than_local(manifest: dict[str, Any], current_version: str | None = None) -> bool:
+    bundle_core_version = _pro_bundle_core_version_for_compare(manifest)
+    if not bundle_core_version:
         return False
     local_version = str(current_version or get_current_version() or "").strip()
     if not local_version:
         return False
-    return _parse_version(bundle_oss_version) < _parse_version(local_version)
+    return _parse_version(bundle_core_version) < _parse_version(local_version)
 
 
-def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_oss_version: str) -> dict[str, Any]:
+def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_core_version: str) -> dict[str, Any]:
     payload = dict(manifest)
-    effective_label = _version_label(effective_oss_version)
+    effective_label = _version_label(effective_core_version)
     if effective_label:
         payload["core_version"] = effective_label
-        payload["oss_version"] = effective_label
     return payload
 
 
@@ -1211,6 +1194,17 @@ async def _fetch_gitlab_release(
     )
 
 
+def _read_local_pro_license_id() -> str:
+    license_path = _flocks_root() / "flockspro" / "license.json"
+    try:
+        payload = json.loads(license_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("license_id") or "").strip()
+
+
 async def _load_console_session_token() -> str | None:
     def _token_from_payload(payload: Any) -> str | None:
         if not isinstance(payload, dict):
@@ -1262,8 +1256,14 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
         raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置，无法使用 console-manifest 源")
 
     channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
-    url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
+    license_id = (os.getenv("FLOCKSPRO_LICENSE_ID") or _read_local_pro_license_id()).strip()
+    query = {"channel": channel}
+    if license_id:
+        query["license_id"] = license_id
+    url = f"{manifest_base}/v1/manifest/latest?{urlencode(query)}"
     headers: dict[str, str] = {}
+    if license_id:
+        headers["x-license-id"] = license_id
     token = str(console_session_token or "").strip() or await _load_console_session_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -1286,9 +1286,9 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
         if datetime.now(timezone.utc) < frozen_until:
             raise ValueError("console manifest channel frozen_until not reached")
 
-    latest = _console_manifest_display_version(data)
+    latest = _console_manifest_bundle_version(data)
     if not latest:
-        raise ValueError("manifest 响应缺少 compare_version/display_version")
+        raise ValueError("manifest 响应缺少 bundle_version")
     bundle_url = str(
         data.get("bundle_url")
         or data.get("url")
@@ -1837,13 +1837,12 @@ def _merge_console_manifest_release_identity(
         merged["release_id"] = release_id
     if bundle_release_id and not merged.get("bundle_release_id"):
         merged["bundle_release_id"] = bundle_release_id
-    for key in ("display_version", "version", "latest_version", "compare_version", "flockspro_component_version", "build_id"):
+    for key in ("bundle_version", "compare_version", "flockspro_component_version", "build_id"):
         if console_manifest.get(key):
             merged[key] = console_manifest.get(key)
-    core_version = console_manifest.get("core_version") or console_manifest.get("oss_version") or merged.get("core_version") or merged.get("oss_version")
+    core_version = console_manifest.get("core_version") or merged.get("core_version")
     if core_version:
         merged["core_version"] = core_version
-        merged["oss_version"] = core_version
     return merged
 
 
@@ -1852,22 +1851,47 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
     marker.parent.mkdir(parents=True, exist_ok=True)
     release_id = manifest.get("release_id") or manifest.get("bundle_release_id")
     bundle_release_id = manifest.get("bundle_release_id") or manifest.get("release_id")
-    display_version = _console_manifest_display_version(manifest)
-    core_version = manifest.get("core_version") or manifest.get("oss_version")
+    bundle_version = _console_manifest_bundle_version(manifest)
+    core_version = manifest.get("core_version")
     payload = {
         "release_id": release_id,
         "bundle_release_id": bundle_release_id,
-        "bundle_version": display_version,
-        "display_version": display_version,
-        "installed_version": display_version,
+        "bundle_version": bundle_version,
         "core_version": core_version,
-        "oss_version": core_version,
         "flockspro_component_version": manifest.get("flockspro_component_version"),
         "build_id": manifest.get("build_id"),
         "bundle_sha256": bundle_sha256 or manifest.get("bundle_sha256"),
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    _write_pending_pro_bundle_install_receipt(payload)
+
+
+def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) -> None:
+    receipt_path = _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_version = str(
+        marker_payload.get("bundle_version")
+        or ""
+    ).strip()
+    core_version = str(marker_payload.get("core_version") or "").strip()
+    pro_component_version = str(marker_payload.get("flockspro_component_version") or "").strip()
+    receipt = {
+        "release_id": marker_payload.get("release_id") or marker_payload.get("bundle_release_id"),
+        "bundle_release_id": marker_payload.get("bundle_release_id") or marker_payload.get("release_id"),
+        "license_id": _read_local_pro_license_id() or None,
+        "bundle_version": bundle_version,
+        "core_version": core_version,
+        "flockspro_component_version": pro_component_version,
+        "build_id": marker_payload.get("build_id"),
+        "install_result": "success",
+        "reported_at": datetime.now(timezone.utc).isoformat(),
+    }
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(receipt_path, 0o600)
+    except OSError:
+        pass
 
 
 class _NullConsole:
@@ -2578,20 +2602,12 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
 
 def _read_pro_bundle_installed_bundle_version() -> str:
     payload = _read_pro_bundle_install_marker()
-    for key in ("bundle_version", "installed_version", "display_version"):
-        version = str(payload.get(key) or "").strip()
-        if version:
-            return version
-    return ""
+    return str(payload.get("bundle_version") or "").strip()
 
 
 def _read_pro_bundle_installed_core_version() -> str:
     payload = _read_pro_bundle_install_marker()
-    for key in ("core_version", "oss_version"):
-        version = str(payload.get(key) or "").strip()
-        if version:
-            return version
-    return ""
+    return str(payload.get("core_version") or "").strip()
 
 
 def _read_pro_bundle_installed_component_version() -> str:
@@ -3113,13 +3129,13 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
     if profile.sources == ["console-manifest"]:
-        skip_core_replace = _is_pro_bundle_oss_older_than_local(pro_bundle_manifest, current_version)
+        skip_core_replace = _is_pro_bundle_core_older_than_local(pro_bundle_manifest, current_version)
         if skip_core_replace:
-            bundle_oss_version = _pro_bundle_oss_version(pro_bundle_manifest)
+            bundle_core_version = _pro_bundle_core_version_for_compare(pro_bundle_manifest)
             pro_bundle_manifest = _effective_pro_bundle_manifest(pro_bundle_manifest, current_version)
             log.info(
                 "updater.pro_bundle.keep_local_core",
-                {"local_version": current_version, "bundle_oss_version": bundle_oss_version},
+                {"local_version": current_version, "bundle_core_version": bundle_core_version},
             )
         else:
             effective_update_version = latest_tag

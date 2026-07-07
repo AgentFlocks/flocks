@@ -209,6 +209,40 @@ def test_run_prepares_handover_after_parent_exit_without_waiting_for_page_port(
     ]
 
 
+def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    restart_argv = ["python.exe", "-m", "flocks.cli.main", "serve"]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    args = _handoff_args(tmp_path, restart_argv)
+    separator_index = args.index("--")
+    args[separator_index:separator_index] = ["--pro-bundle-manifest-path", str(manifest)]
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port, backend_pid_file: True)
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_report_pending_pro_bundle_install_receipt",
+        lambda args: events.append("receipt"),
+    )
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}") or SimpleNamespace(pid=4321),
+    )
+    monkeypatch.setattr(restart_handoff, "_record_backend_runtime_if_direct_serve", lambda *_args, **_kwargs: None)
+
+    code = restart_handoff.run(args)
+
+    assert code == 0
+    assert events[1:4] == ["tasks", "receipt", f"spawn:{restart_argv}"]
+
+
 def test_run_does_not_spawn_when_parent_exit_times_out(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
 

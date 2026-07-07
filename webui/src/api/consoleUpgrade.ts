@@ -37,8 +37,11 @@ export interface UpgradeRequestDetails {
   notes?: string | null;
   auto_install_target?: string;
   auto_install_version?: string;
+  auto_install_bundle_version?: string;
   auto_install_pro_version?: string;
+  auto_install_pro_component_version?: string;
   flockspro_component_version?: string;
+  bundle_version_update_to?: string;
   auto_install_result?: string;
   auto_install_completed_at?: string;
   license_refreshed_at?: string;
@@ -66,7 +69,9 @@ export interface ProPackageStatus {
   installed: boolean;
   runtime_importable?: boolean | null;
   install_marker_present?: boolean | null;
+  bundle_version?: string | null;
   installed_version?: string | null;
+  core_version?: string | null;
   flockspro_component_version?: string | null;
   build_id?: string | null;
   installed_at?: string | null;
