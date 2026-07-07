@@ -24,6 +24,7 @@ from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
 from flocks.channel.builtin.feishu.media import send_media_feishu
 from flocks.channel.builtin.feishu.monitor import (
     _build_ws_client,
+    _parse_event,
     _start_single_websocket,
     start_websocket,
 )
@@ -79,6 +80,55 @@ def test_resolve_feishu_group_overrides_uses_normalized_group_config() -> None:
 
     assert scope == "group_topic"
     assert agent == "specific"
+
+
+def _feishu_text_event(
+    text: str,
+    mentions: list[dict] | None = None,
+) -> dict:
+    return {
+        "header": {"event_type": "im.message.receive_v1"},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_sender"}},
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_group",
+                "chat_type": "group",
+                "message_type": "text",
+                "content": json.dumps({"text": text}),
+                "mentions": mentions or [
+                    {"key": "@_user_1", "id": {"open_id": "ou_bot"}},
+                ],
+            },
+        },
+    }
+
+
+def test_parse_event_strips_feishu_mention_key() -> None:
+    msg = _parse_event(
+        _feishu_text_event('@_user_1 "friday@park.example.ai"'),
+        {},
+        bot_open_id="ou_bot",
+    )
+
+    assert msg is not None
+    assert msg.mention_text == '"friday@park.example.ai"'
+
+
+def test_parse_event_preserves_email_when_mention_key_matches_domain() -> None:
+    msg = _parse_event(
+        _feishu_text_event(
+            '@ArchSec "friday@park.example.ai", 邮箱域名是park.example.ai',
+            mentions=[{"key": "@park.example.ai", "id": {"open_id": "ou_bot"}}],
+        ),
+        {},
+        bot_open_id="ou_bot",
+    )
+
+    assert msg is not None
+    assert msg.mention_text == (
+        '@ArchSec "friday@park.example.ai", 邮箱域名是park.example.ai'
+    )
 
 
 def test_resolve_webhook_account_config_matches_named_account_token() -> None:
