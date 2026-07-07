@@ -39,15 +39,8 @@ credential_fields:
     secret_id: sangfor_atrust_app_secret
     input_type: password
     required: true
-  - key: locale
-    label: Locale Cookie
-    storage: config
-    config_key: locale
-    input_type: text
-    default: "zh-cn"
-    required: false
   - key: lang
-    label: 默认语言参数
+    label: 返回语言
     storage: config
     config_key: lang
     input_type: text
@@ -65,6 +58,7 @@ notes: |
     - 请求头需要携带 X-Ca-Key、X-Ca-Nonce、X-Ca-TimeStamp、X-Ca-Sign。
     - 签名串由请求 path、按 ASCII 排序后的 query 和紧凑 JSON body 组成。
     - 文档示例包含 lang 参数的 V3 接口默认携带 lang=zh-CN，可在配置或调用参数中覆盖。
+    - handler 内部固定携带 locale=zh-cn Cookie，用于兼容 aTrust 中文本地化响应，无需在表单中配置。
     - 签名密钥格式为 appId={API ID}&appSecret={API密钥}&timestamp={秒级时间戳}&nonce={随机数}。
     - 最终签名为 HMAC-SHA256 十六进制字符串。
   设备侧需要先在 aTrust 控制中心创建 OpenAPI 对接设备，获取 API ID/API 密钥，
