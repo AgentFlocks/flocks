@@ -80,6 +80,58 @@ export interface ProPackageStatus {
   inactive_reason?: string | null;
 }
 
+async function streamUpdateProgress(
+  url: string,
+  init: RequestInit,
+  onProgress: (progress: UpdateProgress) => void,
+): Promise<void> {
+  const res = await fetch(url, init);
+  if (!res.ok || !res.body) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const handleLine = (line: string) => {
+    if (!line.startsWith('data: ')) {
+      return;
+    }
+    let progress: UpdateProgress;
+    try {
+      progress = JSON.parse(line.slice(6));
+    } catch {
+      return;
+    }
+    onProgress(progress);
+    if (progress.stage === 'error') {
+      throw new Error(progress.message);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      handleLine(line.trimEnd());
+    }
+  }
+
+  buffer += decoder.decode();
+  for (const line of buffer.split('\n')) {
+    if (line.trim()) {
+      handleLine(line.trimEnd());
+    }
+  }
+}
+
 export const consoleUpgradeApi = {
   createRequest: async (payload: UpgradeRequestCreatePayload): Promise<UpgradeRequestStatus> => {
     const response = await client.post('/api/console/upgrade-requests', payload);
@@ -112,50 +164,22 @@ export const consoleUpgradeApi = {
   },
 
   startRequest: (requestId: string, onProgress: (progress: UpdateProgress) => void): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      fetch(`/api/console/upgrade-requests/${encodeURIComponent(requestId)}/start`, { method: 'POST' })
-        .then((res) => {
-          if (!res.ok || !res.body) {
-            reject(new Error(`HTTP ${res.status}`));
-            return;
-          }
+    return streamUpdateProgress(
+      `/api/console/upgrade-requests/${encodeURIComponent(requestId)}/start`,
+      { method: 'POST' },
+      onProgress,
+    );
+  },
 
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-
-          const pump = (): Promise<void> =>
-            reader.read().then(({ done, value }) => {
-              if (done) {
-                resolve();
-                return;
-              }
-
-              buffer += decoder.decode(value, { stream: true });
-              const lines = buffer.split('\n');
-              buffer = lines.pop() ?? '';
-
-              for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                  try {
-                    const progress: UpdateProgress = JSON.parse(line.slice(6));
-                    onProgress(progress);
-                    if (progress.stage === 'error') {
-                      reject(new Error(progress.message));
-                      return;
-                    }
-                  } catch {
-                    // Ignore malformed SSE frames.
-                  }
-                }
-              }
-
-              return pump();
-            });
-
-          pump().catch(reject);
-        })
-        .catch(reject);
-    });
+  downgradeProPackage: (reason: string | undefined, onProgress: (progress: UpdateProgress) => void): Promise<void> => {
+    return streamUpdateProgress(
+      '/api/console/pro-package/downgrade',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || 'user_requested' }),
+      },
+      onProgress,
+    );
   },
 };

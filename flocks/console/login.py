@@ -39,6 +39,10 @@ def _read_pro_bundle_marker() -> dict[str, Any]:
     return _read_json_file(_flocks_root() / "run" / "pro-bundle-installed.json")
 
 
+def _marker_has_pro_bundle(marker: dict[str, Any]) -> bool:
+    return any(str(marker.get(key) or "").strip() for key in ("bundle_version", "flockspro_component_version"))
+
+
 def _local_pro_license_path() -> Path:
     return _flocks_root() / "flockspro" / "license.json"
 
@@ -67,6 +71,10 @@ def _read_local_pro_license_status() -> str:
 
 def _pending_pro_bundle_install_receipt_path() -> Path:
     return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+def _pending_pro_bundle_downgrade_receipt_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-downgrade-receipt-pending.json"
 
 
 def _sync_local_pro_license_from_heartbeat_response(data: dict[str, Any]) -> None:
@@ -383,26 +391,20 @@ class ConsoleLoginService:
     @classmethod
     def runtime_version_payload(cls, *, pro_component_version: str | None = None) -> dict[str, str]:
         marker = _read_pro_bundle_marker()
-        core_version = str(
-            marker.get("core_version")
-            or cls._runtime_version()
-        ).strip()
-        bundle_version = str(
-            marker.get("bundle_version")
-            or ""
-        ).strip()
-        pro_component_version = str(marker.get("flockspro_component_version") or pro_component_version or "").strip()
-        has_pro_bundle = bool(bundle_version or pro_component_version)
-        edition = "flockspro" if has_pro_bundle else "oss"
+        if _marker_has_pro_bundle(marker):
+            return {
+                "edition": "flockspro",
+                "core_version": str(marker.get("core_version") or "").strip(),
+                "bundle_version": str(marker.get("bundle_version") or "").strip(),
+                "flockspro_component_version": str(marker.get("flockspro_component_version") or "").strip(),
+            }
+
+        core_version = cls._runtime_version()
         payload = {
-            "edition": edition,
+            "edition": "oss",
         }
         if core_version:
             payload["core_version"] = core_version
-        if edition == "flockspro" and bundle_version:
-            payload["bundle_version"] = bundle_version
-        if edition == "flockspro" and pro_component_version:
-            payload["flockspro_component_version"] = pro_component_version
         return {key: value for key, value in payload.items() if value}
 
     @classmethod
@@ -500,11 +502,30 @@ class ConsoleLoginService:
         client: httpx.AsyncClient,
         session: dict[str, Any],
     ) -> bool:
+        install_reported = await cls._report_pending_pro_bundle_receipt(
+            client=client,
+            session=session,
+            path=_pending_pro_bundle_install_receipt_path(),
+        )
+        downgrade_reported = await cls._report_pending_pro_bundle_receipt(
+            client=client,
+            session=session,
+            path=_pending_pro_bundle_downgrade_receipt_path(),
+        )
+        return install_reported or downgrade_reported
+
+    @classmethod
+    async def _report_pending_pro_bundle_receipt(
+        cls,
+        *,
+        client: httpx.AsyncClient,
+        session: dict[str, Any],
+        path: Path,
+    ) -> bool:
         console_base = cls._console_base_url_for_session(session)
         token = str(session.get("console_session_token") or "").strip()
         if not console_base or not token:
             return False
-        path = _pending_pro_bundle_install_receipt_path()
         payload = _read_json_file(path)
         if not payload:
             return False

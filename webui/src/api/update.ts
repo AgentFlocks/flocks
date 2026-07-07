@@ -4,7 +4,17 @@ import client from './client';
 // Types
 // ======================================================================
 
-export type UpdateStage = 'fetching' | 'backing_up' | 'applying' | 'syncing' | 'restarting' | 'done' | 'error';
+export type UpdateStage =
+  | 'checking'
+  | 'reporting'
+  | 'fetching'
+  | 'backing_up'
+  | 'applying'
+  | 'syncing'
+  | 'downgrading'
+  | 'restarting'
+  | 'done'
+  | 'error';
 
 export type DeployMode = 'docker' | 'source';
 export type UpdateEdition = 'flocks' | 'flockspro';

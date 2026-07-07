@@ -1108,6 +1108,26 @@ def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_core_vers
     return payload
 
 
+def _required_pro_bundle_marker_value(manifest: dict[str, Any], key: str) -> str:
+    value = str(manifest.get(key) or "").strip()
+    if not value:
+        raise ValueError(f"Pro bundle manifest missing required {key}")
+    return value
+
+
+def _validate_pro_bundle_marker_manifest(manifest: dict[str, Any]) -> None:
+    for key in ("bundle_version", "core_version", "flockspro_component_version"):
+        _required_pro_bundle_marker_value(manifest, key)
+
+
+def _pro_bundle_core_version_for_marker(manifest: dict[str, Any]) -> str:
+    return _required_pro_bundle_marker_value(manifest, "core_version")
+
+
+def _pro_bundle_core_version_or_empty(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("core_version") or "").strip()
+
+
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
     return f"flocks-{latest_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
 
@@ -1851,14 +1871,15 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
     marker.parent.mkdir(parents=True, exist_ok=True)
     release_id = manifest.get("release_id") or manifest.get("bundle_release_id")
     bundle_release_id = manifest.get("bundle_release_id") or manifest.get("release_id")
-    bundle_version = _console_manifest_bundle_version(manifest)
-    core_version = manifest.get("core_version")
+    bundle_version = _required_pro_bundle_marker_value(manifest, "bundle_version")
+    core_version = _required_pro_bundle_marker_value(manifest, "core_version")
+    pro_component_version = _required_pro_bundle_marker_value(manifest, "flockspro_component_version")
     payload = {
         "release_id": release_id,
         "bundle_release_id": bundle_release_id,
         "bundle_version": bundle_version,
         "core_version": core_version,
-        "flockspro_component_version": manifest.get("flockspro_component_version"),
+        "flockspro_component_version": pro_component_version,
         "build_id": manifest.get("build_id"),
         "bundle_sha256": bundle_sha256 or manifest.get("bundle_sha256"),
         "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -1868,7 +1889,7 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
 
 
 def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) -> None:
-    receipt_path = _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+    receipt_path = _pending_pro_bundle_install_receipt_path()
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     bundle_version = str(
         marker_payload.get("bundle_version")
@@ -1892,6 +1913,62 @@ def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) ->
         os.chmod(receipt_path, 0o600)
     except OSError:
         pass
+
+
+def _pending_pro_bundle_install_receipt_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+def _pro_bundle_install_marker_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-installed.json"
+
+
+def _archive_json_marker(path: Path, archive_name: str, reason: str | None = None) -> None:
+    if not path.exists():
+        return
+    archive_dir = path.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    archived = archive_dir / f"{archive_name}-{suffix}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload["archived_at"] = datetime.now(timezone.utc).isoformat()
+            payload["archive_reason"] = reason or "downgraded_to_oss"
+            archived.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        else:
+            shutil.copy2(path, archived)
+    except Exception:
+        shutil.copy2(path, archived)
+    path.unlink(missing_ok=True)
+
+
+def _archive_pro_bundle_install_marker(reason: str | None = None) -> None:
+    _archive_json_marker(_pro_bundle_install_marker_path(), "pro-bundle-installed", reason)
+
+
+def _archive_pending_pro_bundle_install_receipt(reason: str | None = None) -> None:
+    _archive_json_marker(
+        _pending_pro_bundle_install_receipt_path(),
+        "pro-bundle-install-receipt-pending",
+        reason,
+    )
+
+
+async def _uninstall_pro_component(
+    *,
+    uv_path: str,
+    install_root: Path,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    python_path = _venv_python_path(install_root)
+    if not python_path.exists():
+        return f"Python environment may need manual repair: missing {python_path}"
+    cmd = [uv_path, "pip", "uninstall", "--python", str(python_path), "flockspro"]
+    code, _, err = await _run_async(cmd, cwd=install_root, timeout=180, env=env)
+    if code != 0:
+        return f"Flocks Pro component uninstall failed: {err}"
+    return None
 
 
 class _NullConsole:
@@ -2600,27 +2677,13 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _read_pro_bundle_installed_bundle_version() -> str:
-    payload = _read_pro_bundle_install_marker()
-    return str(payload.get("bundle_version") or "").strip()
-
-
-def _read_pro_bundle_installed_core_version() -> str:
-    payload = _read_pro_bundle_install_marker()
-    return str(payload.get("core_version") or "").strip()
-
-
-def _read_pro_bundle_installed_component_version() -> str:
-    payload = _read_pro_bundle_install_marker()
-    return str(payload.get("flockspro_component_version") or "").strip()
-
-
 def _current_pro_version_state(local_core_version: str) -> ProVersionState:
-    core_version = _pick_newer_version(_read_pro_bundle_installed_core_version(), local_core_version)
+    marker = _read_pro_bundle_install_marker()
+    core_version = _pro_bundle_core_version_or_empty(marker) if marker else local_core_version
     return ProVersionState(
-        bundle_version=_version_label(_read_pro_bundle_installed_bundle_version()),
+        bundle_version=_version_label(str(marker.get("bundle_version") or "").strip()),
         core_version=_version_label(core_version),
-        pro_component_version=_read_pro_bundle_installed_component_version() or None,
+        pro_component_version=str(marker.get("flockspro_component_version") or "").strip() or None,
     )
 
 
@@ -2640,16 +2703,6 @@ def _is_newer_version(latest: str | None, current: str | None) -> bool:
     if not current_version:
         return True
     return _parse_version(latest_version) > _parse_version(current_version)
-
-
-def _pick_newer_version(left: str | None, right: str | None) -> str:
-    left_version = str(left or "").strip()
-    right_version = str(right or "").strip()
-    if not left_version:
-        return right_version
-    if not right_version:
-        return left_version
-    return left_version if _parse_version(left_version) >= _parse_version(right_version) else right_version
 
 
 def get_current_version() -> str:
@@ -2939,6 +2992,138 @@ async def perform_pro_bundle_install(
         yield progress
 
 
+async def perform_pro_bundle_downgrade(
+    *,
+    restart: bool = True,
+    reason: str | None = None,
+    after_uninstall: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncGenerator[UpdateProgress, None]:
+    """Remove the local Pro component and return this installation to OSS runtime."""
+    from flocks.updater.deploy import detect_deploy_mode
+
+    if detect_deploy_mode() == "docker":
+        yield UpdateProgress(
+            stage="error",
+            message="Downgrading to OSS is not supported in Docker deployments. Please redeploy with the OSS image.",
+            success=False,
+        )
+        return
+
+    install_root = _get_repo_root()
+    current_version = get_current_version()
+    marker = _read_pro_bundle_install_marker()
+    component_installed = _is_pro_component_installed()
+    if not component_installed and not marker:
+        yield UpdateProgress(stage="done", message="Already running the OSS edition.", success=True)
+        return
+    try:
+        oss_core_version = _pro_bundle_core_version_for_marker(marker) if marker else current_version
+    except ValueError as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Downgrade failed: {exc}. Cannot safely report OSS core version without the install marker.",
+            success=False,
+        )
+        return
+
+    yield UpdateProgress(stage="checking", message="Checking local Pro installation...")
+    uv_path = _find_executable("uv")
+    if not uv_path:
+        yield UpdateProgress(
+            stage="error",
+            message="Downgrade failed: uv is required but was not found.",
+            success=False,
+        )
+        return
+
+    sync_env = _build_uv_sync_env()
+    yield UpdateProgress(stage="downgrading", message="Removing Flocks Pro component...")
+    uninstall_error = await _uninstall_pro_component(uv_path=uv_path, install_root=install_root, env=sync_env)
+    if uninstall_error is not None:
+        yield UpdateProgress(stage="error", message=uninstall_error, success=False)
+        return
+
+    if after_uninstall is not None:
+        yield UpdateProgress(stage="reporting", message="Reporting OSS downgrade to Console...")
+        try:
+            await after_uninstall()
+        except Exception as exc:
+            log.warning("updater.downgrade.report_failed_pending_retry", {"error": str(exc)})
+
+    try:
+        if oss_core_version:
+            _write_version_marker(oss_core_version.lstrip("v"))
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but version marker update failed: {exc}",
+            success=False,
+        )
+        return
+
+    try:
+        _archive_pending_pro_bundle_install_receipt(reason=reason or "downgraded_to_oss")
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but pending install receipt cleanup failed: {exc}",
+            success=False,
+        )
+        return
+
+    try:
+        _archive_pro_bundle_install_marker(reason=reason or "downgraded_to_oss")
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but install marker cleanup failed: {exc}",
+            success=False,
+        )
+        return
+
+    if not restart:
+        try:
+            _refresh_global_cli_entry(install_root)
+        except Exception as exc:
+            log.warning("updater.refresh_cli.failed", {"error": str(exc)})
+        yield UpdateProgress(stage="done", message="Downgraded to OSS edition.", success=True)
+        return
+
+    yield UpdateProgress(stage="restarting", message="Restarting service...")
+    await asyncio.sleep(0.8)
+
+    if "--reload" in sys.argv:
+        log.info("updater.downgrade.reload_exit3")
+        sys.exit(3)
+
+    try:
+        restart_argv = _build_restart_argv(install_root)
+        sync_timeout = _dependency_sync_timeout_seconds()
+        handoff_argv = _build_restart_handoff_argv(
+            restart_argv,
+            install_root,
+            uv_path=uv_path,
+            sync_timeout=sync_timeout,
+            version=oss_core_version or current_version,
+            current_version=current_version,
+        )
+        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv})
+        subprocess.Popen(
+            handoff_argv,
+            cwd=install_root,
+            close_fds=True,
+        )
+        os._exit(0)
+    except Exception as exc:
+        log.error("updater.downgrade.restart_failed", {"error": str(exc)})
+        yield UpdateProgress(
+            stage="error",
+            message=f"Failed to restart service after downgrade: {exc}",
+            success=False,
+        )
+        return
+
+
 async def perform_update(
     latest_tag: str,
     *,
@@ -3118,6 +3303,7 @@ async def perform_update(
                 pro_bundle_manifest,
                 console_manifest_payload,
             )
+            _validate_pro_bundle_marker_manifest(pro_bundle_manifest)
         if profile.sources == ["console-manifest"] and pro_wheel_path is None:
             raise ValueError("Pro bundle 中未找到 flockspro wheel")
     except Exception as exc:
@@ -3138,7 +3324,7 @@ async def perform_update(
                 {"local_version": current_version, "bundle_core_version": bundle_core_version},
             )
         else:
-            effective_update_version = latest_tag
+            effective_update_version = _pro_bundle_core_version_for_marker(pro_bundle_manifest)
     else:
         effective_update_version = latest_tag
 

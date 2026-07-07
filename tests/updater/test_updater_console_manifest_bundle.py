@@ -275,6 +275,54 @@ async def test_check_update_force_console_manifest_reports_stale_product_marker_
     assert info.has_update is True
 
 
+@pytest.mark.asyncio
+async def test_check_update_trusts_pro_marker_core_when_global_marker_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    marker = tmp_path / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        """{
+  "bundle_version": "v2026.7.5",
+  "core_version": "v2026.7.4",
+  "flockspro_component_version": "v2026.7.4"
+}""",
+        encoding="utf-8",
+    )
+
+    async def _fake_config():
+        return SimpleNamespace(enabled=True, sources=["github"], repo="", token=None)
+
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="v2026.7.5",
+            release_notes="latest pro",
+            release_url="https://console.example.com/v1/pro-bundles/rel_75/download",
+            bundle_url="https://console.example.com/v1/pro-bundles/rel_75/download",
+            bundle_sha256="sha75",
+            bundle_format="zip",
+            manifest={
+                "bundle_version": "v2026.7.5",
+                "core_version": "v2026.7.4",
+                "flockspro_component_version": "v2026.7.4",
+            },
+        )
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr("flocks.updater.deploy.detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.7.5")
+
+    info = await updater.check_update(force_console_manifest=True)
+
+    assert info.current_version == "v2026.7.5"
+    assert info.current_bundle_version == "v2026.7.5"
+    assert info.current_core_version == "v2026.7.4"
+    assert info.latest_core_version == "v2026.7.4"
+
+
 def test_console_manifest_release_identity_writes_product_and_core_versions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -310,6 +358,191 @@ def test_console_manifest_release_identity_writes_product_and_core_versions(
     assert pending["core_version"] == "v2026.6.21"
     assert pending["flockspro_component_version"] == "v2026.6.23"
     assert "version_info" not in pending
+
+
+def test_pro_bundle_install_marker_requires_all_runtime_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    with pytest.raises(ValueError, match="core_version"):
+        updater._write_pro_bundle_install_marker(
+            {
+                "bundle_version": "v2026.7.5",
+                "flockspro_component_version": "v2026.7.4",
+            }
+        )
+
+    assert not (tmp_path / "run" / "pro-bundle-installed.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_uninstall_pro_component_uses_uv_uninstall_without_yes_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    install_root = tmp_path / "install"
+    python_path = updater._venv_python_path(install_root)
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def _fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        captured["env"] = env
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_run_async", _fake_run_async)
+
+    error = await updater._uninstall_pro_component(
+        uv_path="/usr/bin/uv",
+        install_root=install_root,
+        env={"UV_NO_PROGRESS": "1"},
+    )
+
+    assert error is None
+    assert captured["cmd"] == ["/usr/bin/uv", "pip", "uninstall", "--python", str(python_path), "flockspro"]
+    assert "-y" not in captured["cmd"]
+    assert captured["cwd"] == install_root
+    assert captured["timeout"] == 180
+    assert captured["env"] == {"UV_NO_PROGRESS": "1"}
+
+
+@pytest.mark.asyncio
+async def test_perform_pro_bundle_downgrade_archives_pending_install_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from flocks.updater import deploy as deploy_mod
+
+    flocks_root = tmp_path / "flocks-root"
+    run_dir = flocks_root / "run"
+    run_dir.mkdir(parents=True)
+    pending_receipt = run_dir / "pro-bundle-install-receipt-pending.json"
+    pending_receipt.write_text(
+        json.dumps(
+            {
+                "install_result": "success",
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_marker = run_dir / "pro-bundle-installed.json"
+    install_marker.write_text(
+        json.dumps(
+            {
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+                "installed_at": "2026-06-24T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    uninstall_calls: list[tuple[str, str]] = []
+    report_calls: list[str] = []
+    version_writes: list[str] = []
+
+    async def _fake_uninstall_pro_component(*, uv_path, install_root, env):
+        uninstall_calls.append((uv_path, str(install_root)))
+        return None
+
+    async def _after_uninstall():
+        report_calls.append("reported")
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.24")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_uninstall_pro_component", _fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda version: version_writes.append(version))
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _install_root: None)
+
+    progresses = [
+        step
+        async for step in updater.perform_pro_bundle_downgrade(
+            restart=False,
+            reason="user_requested",
+            after_uninstall=_after_uninstall,
+        )
+    ]
+
+    assert progresses[-1].stage == "done"
+    assert uninstall_calls == [("/usr/bin/uv", str(tmp_path / "install-root"))]
+    assert report_calls == ["reported"]
+    assert version_writes == ["2026.6.21"]
+    assert not pending_receipt.exists()
+    assert not install_marker.exists()
+    archived_pending = list((run_dir / "archive").glob("pro-bundle-install-receipt-pending-*.json"))
+    assert len(archived_pending) == 1
+    archived_payload = json.loads(archived_pending[0].read_text(encoding="utf-8"))
+    assert archived_payload["install_result"] == "success"
+    assert archived_payload["archive_reason"] == "user_requested"
+    archived_marker = list((run_dir / "archive").glob("pro-bundle-installed-*.json"))
+    assert len(archived_marker) == 1
+
+
+@pytest.mark.asyncio
+async def test_perform_pro_bundle_downgrade_continues_when_report_callback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from flocks.updater import deploy as deploy_mod
+
+    flocks_root = tmp_path / "flocks-root"
+    run_dir = flocks_root / "run"
+    run_dir.mkdir(parents=True)
+    install_marker = run_dir / "pro-bundle-installed.json"
+    install_marker.write_text(
+        json.dumps(
+            {
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+                "installed_at": "2026-06-24T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _fake_uninstall_pro_component(*, uv_path, install_root, env):
+        return None
+
+    async def _after_uninstall():
+        raise RuntimeError("console unavailable")
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.21")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_uninstall_pro_component", _fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _install_root: None)
+
+    progresses = [
+        step
+        async for step in updater.perform_pro_bundle_downgrade(
+            restart=False,
+            reason="user_requested",
+            after_uninstall=_after_uninstall,
+        )
+    ]
+
+    assert [step.stage for step in progresses] == ["checking", "downgrading", "reporting", "done"]
+    assert progresses[-1].success is True
+    assert not install_marker.exists()
+    archived_marker = list((run_dir / "archive").glob("pro-bundle-installed-*.json"))
+    assert len(archived_marker) == 1
 
 
 @pytest.mark.asyncio
@@ -593,7 +826,7 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     wheel.write_bytes(b"fake-wheel")
     (bundle_root / "manifest.json").write_text(
         """{
-  "bundle_version": "v2026.5.10",
+  "bundle_version": "v2026.5.11",
   "core_version": "v2026.5.10",
   "flockspro_component_version": "pro-v2026-5-10",
   "flockspro_wheel": "wheels/flockspro-0.1.0-py3-none-any.whl",
@@ -616,12 +849,30 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
     monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.5.10")
-    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", lambda: _async_manifest_info(bundle))
+
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="v2026.5.11",
+            release_notes=None,
+            release_url=str(bundle),
+            bundle_url=str(bundle),
+            bundle_sha256=None,
+            bundle_format="zip",
+            manifest={
+                "bundle_version": "v2026.5.11",
+                "core_version": "v2026.5.10",
+                "flockspro_component_version": "pro-v2026-5-10",
+                "build_id": "job_test",
+            },
+        )
+
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
     monkeypatch.setattr(updater, "_download_console_bundle", lambda *_args, **_kwargs: _async_path(bundle))
     monkeypatch.setattr(updater, "_verify_download_sha256", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
-    monkeypatch.setattr(updater, "_write_version_marker", lambda *_args, **_kwargs: None)
+    version_writes: list[str] = []
+    monkeypatch.setattr(updater, "_write_version_marker", lambda version: version_writes.append(version))
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda *_args, **_kwargs: None)
 
     captured: list[list[str]] = []
@@ -644,7 +895,8 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
     assert marker.is_file()
     marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
-    assert marker_payload["bundle_version"] == "v2026.5.10"
+    assert version_writes == ["2026.5.10"]
+    assert marker_payload["bundle_version"] == "v2026.5.11"
     assert marker_payload["core_version"] == "v2026.5.10"
 
 
