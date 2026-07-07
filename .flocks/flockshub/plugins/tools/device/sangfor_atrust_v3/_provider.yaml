@@ -1,0 +1,71 @@
+name: sangfor_atrust
+vendor: sangfor
+service_id: sangfor_atrust
+version: "3"
+integration_type: device
+description: >
+  Sangfor aTrust Zero Trust Access Control OpenAPI V3 integration.
+  Configure the aTrust controller URL, API ID, and API Secret. The handler
+  signs each request with HMAC-SHA256 x-ca-* headers required by aTrust.
+description_cn: >
+  深信服 aTrust 零信任访问控制系统 OpenAPI V3 接入。配置控制中心地址、
+  API ID 和 API 密钥；handler 会按 aTrust 要求自动计算 HMAC-SHA256
+  签名并注入 x-ca-* 请求头。
+docs_url: "https://bbs.sangfor.com.cn/atrustdeveloper/openapiV3/"
+auth:
+  type: custom
+  flow: hmac_sha256_header
+  secret: sangfor_atrust_app_id
+  secret_secret: sangfor_atrust_app_secret
+credential_fields:
+  - key: base_url
+    label: aTrust 控制中心地址
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://atrust.example.com:4433"
+  - key: app_id
+    label: API ID
+    storage: secret
+    config_key: app_id
+    secret_id: sangfor_atrust_app_id
+    input_type: text
+    required: true
+  - key: app_secret
+    label: API 密钥
+    storage: secret
+    config_key: app_secret
+    secret_id: sangfor_atrust_app_secret
+    input_type: password
+    required: true
+  - key: locale
+    label: Locale Cookie
+    storage: config
+    config_key: locale
+    input_type: text
+    default: "zh-cn"
+    required: false
+  - key: lang
+    label: 默认语言参数
+    storage: config
+    config_key: lang
+    input_type: text
+    default: "zh-CN"
+    required: false
+defaults:
+  timeout: 30
+  category: custom
+  product_version: "3"
+  verify_ssl: false
+  locale: "zh-cn"
+  lang: "zh-CN"
+notes: |
+  深信服 aTrust OpenAPI V3 鉴权规则：
+    - 请求头需要携带 X-Ca-Key、X-Ca-Nonce、X-Ca-TimeStamp、X-Ca-Sign。
+    - 签名串由请求 path、按 ASCII 排序后的 query 和紧凑 JSON body 组成。
+    - 文档示例包含 lang 参数的 V3 接口默认携带 lang=zh-CN，可在配置或调用参数中覆盖。
+    - 签名密钥格式为 appId={API ID}&appSecret={API密钥}&timestamp={秒级时间戳}&nonce={随机数}。
+    - 最终签名为 HMAC-SHA256 十六进制字符串。
+  设备侧需要先在 aTrust 控制中心创建 OpenAPI 对接设备，获取 API ID/API 密钥，
+  并配置允许 Flocks 所在主机访问的接入 IP。
