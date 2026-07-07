@@ -22,6 +22,8 @@
   "upgradeTo": "升级到 {{version}}",
   "upgrading": "升级中...",
   "waitingRestart": "等待重启...",
+  "downloadProgressLabel": "{{percent}}% · {{downloaded}} / {{total}}",
+  "downloadProgressUnknown": "已下载 {{downloaded}}",
   "checkFailed": "检查版本失败",
   "upgradeFailed": "升级失败",
   "restartTimeout": "服务恢复确认超时：{{reason}}。请手动刷新页面确认状态。",
@@ -32,6 +34,7 @@
   "dockerUpgradeHint": "docker pull ghcr.io/agentflocks/flocks:latest",
   "stageLabels": {
     "fetching": "下载最新源码包",
+    "fetchingPro": "下载 Pro bundle",
     "backing_up": "备份当前版本",
     "applying": "应用新版本",
     "syncing": "同步后端依赖",

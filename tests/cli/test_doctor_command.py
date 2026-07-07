@@ -26,8 +26,8 @@ def test_doctor_runs_source_installer_from_source_root(monkeypatch, tmp_path) ->
     monkeypatch.setattr(
         "flocks.cli.service_manager.build_status_lines",
         lambda: [
-            "[flocks] 后端运行中: PID=111 URL=http://127.0.0.1:8000",
-            "[flocks] WebUI 运行中: PID=222 URL=http://127.0.0.1:5173",
+            "[flocks]   daemon: state=running PID=111",
+            "[flocks]   flocks: state=healthy PID=222 URL=http://127.0.0.1:5173",
         ],
     )
 
@@ -37,7 +37,7 @@ def test_doctor_runs_source_installer_from_source_root(monkeypatch, tmp_path) ->
     assert "Flocks source directory:" in result.stdout
     assert "scripts/install.sh" in result.stdout
     assert "安装正常" in result.stdout
-    assert "服务正常" in result.stdout
+    assert "运行状态正常" in result.stdout
     assert len(calls) == 1
 
     command, cwd, check = calls[0]
@@ -71,10 +71,25 @@ def test_doctor_uses_cn_environment_for_zh_install_profile(monkeypatch, tmp_path
     assert isinstance(env, dict)
     assert env["FLOCKS_INSTALL_LANGUAGE"] == "zh-CN"
     assert env["FLOCKS_UV_DEFAULT_INDEX"] == "https://mirrors.aliyun.com/pypi/simple"
-    assert "服务不正常，请执行 `flocks restart`" in result.stdout
+    assert "运行状态异常，请执行 `flocks restart`" in result.stdout
 
 
-def test_service_status_is_healthy_requires_backend_and_webui() -> None:
+def test_service_status_is_healthy_accepts_current_daemon_status() -> None:
+    assert doctor_cmd._service_status_is_healthy(
+        [
+            "[flocks]   daemon: state=running PID=111",
+            "[flocks]   flocks: state=healthy PID=222 URL=http://127.0.0.1:5173",
+        ]
+    )
+    assert not doctor_cmd._service_status_is_healthy(
+        [
+            "[flocks]   daemon: state=running PID=111",
+            "[flocks]   flocks: state=degraded PID=222 URL=http://127.0.0.1:5173",
+        ]
+    )
+
+
+def test_service_status_is_healthy_accepts_legacy_backend_and_webui() -> None:
     assert doctor_cmd._service_status_is_healthy(
         [
             "[flocks] 后端运行中: PID=111 URL=http://127.0.0.1:8000",

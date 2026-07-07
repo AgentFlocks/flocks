@@ -23,6 +23,7 @@ from flocks.config.config import Config
 
 
 T = TypeVar("T", bound=BaseModel)
+DDLScript = str | Callable[[aiosqlite.Connection], Awaitable[None]]
 R = TypeVar("R")
 
 
@@ -76,7 +77,7 @@ class Storage:
     # descriptors and ``_initialized=True`` flag are never silently inherited
     # — a known SQLite corruption vector.
     _init_pid: Optional[int] = None
-    _extension_ddls: List[str] = []
+    _extension_ddls: List[DDLScript] = []
     _sqlite_timeout_s = 5.0
     _sqlite_busy_timeout_ms = 5000
     _sqlite_journal_mode = "WAL"
@@ -683,7 +684,7 @@ class Storage:
         return cls.configure_sync_connection(conn)
 
     @classmethod
-    def register_ddl(cls, ddl: str) -> None:
+    def register_ddl(cls, ddl: DDLScript) -> None:
         """Register an extension DDL script to be executed during ``init()``.
 
         If init() has already completed the DDL is executed immediately
@@ -1075,7 +1076,10 @@ class Storage:
 
                 async def _run_extension_ddl() -> None:
                     async with cls.connect(cls._db_path) as db:
-                        await db.executescript(ddl)
+                        if isinstance(ddl, str):
+                            await db.executescript(ddl)
+                        else:
+                            await ddl(db)
                         await db.commit()
 
                 await cls._run_write_with_retry(

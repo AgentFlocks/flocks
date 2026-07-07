@@ -1293,6 +1293,19 @@ function Main {
     finally {
         Pop-Location
     }
+    Write-Info (Get-LocalizedText -English "Building WebUI static assets..." -Chinese "正在构建 WebUI 静态资源...")
+    Push-Location (Join-Path $RootDir "webui")
+    try {
+        $null = Invoke-NativeCommandOrFail `
+            -Description "WebUI static asset build" `
+            -FilePath "npm.cmd" `
+            -ArgumentList @("run", "build") `
+            -WorkingDirectory (Join-Path $RootDir "webui") `
+            -StreamOutput
+    }
+    finally {
+        Pop-Location
+    }
 
     if ($InstallTui) {
         Install-Bun

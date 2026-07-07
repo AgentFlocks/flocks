@@ -101,20 +101,25 @@ def _print_service_diagnosis() -> None:
         status_lines = build_status_lines()
     except Exception as error:
         console.print(f"[yellow]服务状态检查失败：{error}[/yellow]")
-        console.print("[yellow]服务不正常，请执行 `flocks restart`[/yellow]")
+        console.print("[yellow]运行状态异常，请执行 `flocks restart`[/yellow]")
         return
 
     for line in status_lines:
         console.print(line)
 
     if _service_status_is_healthy(status_lines):
-        console.print("[green]服务正常[/green]")
+        console.print("[green]运行状态正常[/green]")
     else:
-        console.print("[yellow]服务不正常，请执行 `flocks restart`[/yellow]")
+        console.print("[yellow]运行状态异常，请执行 `flocks restart`[/yellow]")
 
 
 def _service_status_is_healthy(status_lines: list[str]) -> bool:
-    """Return whether backend and WebUI both look healthy from status lines."""
+    """Return whether the current or legacy service status looks healthy."""
+    daemon_running = any("daemon:" in line and "state=running" in line for line in status_lines)
+    flocks_healthy = any("flocks:" in line and "state=healthy" in line for line in status_lines)
+    if daemon_running and flocks_healthy:
+        return True
+
     backend_running = any("后端运行中" in line for line in status_lines)
     webui_running = any("WebUI 运行中" in line for line in status_lines)
     return backend_running and webui_running

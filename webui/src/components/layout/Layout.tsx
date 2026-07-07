@@ -337,7 +337,11 @@ export default function Layout() {
           const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
           setIsFlocksproActive(active);
           const version = active
-            ? formatProVersion(packageStatus?.installed_version || packageStatus?.flockspro_component_version)
+            ? formatProVersion(
+                packageStatus?.bundle_version ||
+                  packageStatus?.installed_version ||
+                  packageStatus?.flockspro_component_version,
+              )
             : null;
           setFlocksproVersion(version);
         })

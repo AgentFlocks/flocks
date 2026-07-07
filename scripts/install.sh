@@ -1150,6 +1150,15 @@ main() {
     cd "$ROOT_DIR/webui"
     npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install
   )
+  if is_zh_install; then
+    info "正在构建 WebUI 静态资源..."
+  else
+    info "Building WebUI static assets..."
+  fi
+  (
+    cd "$ROOT_DIR/webui"
+    "$NPM_CMD" run build
+  )
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     install_bun
