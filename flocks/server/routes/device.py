@@ -5,6 +5,7 @@ return responses. No business logic or SQL lives here.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, List, Optional
 
@@ -181,7 +182,7 @@ async def route_list_devices(group_id: Optional[str] = None, refresh: bool = Fal
 
 @router.get("/templates", response_model=List[DeviceTemplate])
 async def route_list_device_templates(refresh: bool = False):
-    return list_device_templates(refresh=refresh)
+    return await asyncio.to_thread(list_device_templates, refresh=refresh)
 
 
 @router.post("/sync")
@@ -337,7 +338,7 @@ async def route_list_device_tools(device_id: str):
     from flocks.tool.registry import ToolRegistry
 
     storage_key: str = row["storage_key"]
-    ToolRegistry.init()
+    await ToolRegistry.init_async()
 
     # Collect tools that belong to this device's plugin (matching provider).
     device_tools = [
@@ -388,7 +389,7 @@ async def route_update_device_tool(
 
     from flocks.tool.registry import ToolRegistry
 
-    ToolRegistry.init()
+    await ToolRegistry.init_async()
     storage_key: str = row["storage_key"]
     tool = ToolRegistry.get(tool_name)
     if tool is None or tool.info.provider != storage_key:

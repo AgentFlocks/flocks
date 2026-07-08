@@ -231,6 +231,14 @@ def _get_all_tool_names() -> List[str]:
     return [t.name for t in ToolRegistry.list_tools()]
 
 
+async def _get_all_tool_names_async() -> List[str]:
+    """Return all registered tool names without blocking the event loop."""
+    from flocks.tool.registry import ToolRegistry
+
+    await ToolRegistry.init_async()
+    return [t.name for t in ToolRegistry.list_tools()]
+
+
 def _compute_native_agent_tools(agent: AgentInfoModel, all_tool_names: List[str]) -> List[str]:
     """Return the concrete tools explicitly declared for the agent."""
     tools = list(agent.tools or [])
@@ -290,7 +298,7 @@ async def list_agents():
         agents = await Agent.list()
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
-        all_tool_names = _get_all_tool_names()
+        all_tool_names = await _get_all_tool_names_async()
         result = []
         for agent in agents:
             if agent.hidden:
@@ -311,7 +319,7 @@ async def get_agent(name: str):
             raise HTTPException(status_code=404, detail=f"Agent {name} not found")
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
-        all_tool_names = _get_all_tool_names()
+        all_tool_names = await _get_all_tool_names_async()
         return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
     except HTTPException:
         raise
@@ -532,7 +540,7 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     agent.delegatable = req.delegatable
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
-                all_tool_names = _get_all_tool_names()
+                all_tool_names = await _get_all_tool_names_async()
                 return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
             yaml_data = read_yaml_agent(name) or {}
             return _custom_agent_data_to_response(yaml_data)
@@ -583,7 +591,7 @@ async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest
 
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
-        all_tool_names = _get_all_tool_names()
+        all_tool_names = await _get_all_tool_names_async()
 
         log.info("agent.delegatable.updated", {"name": name, "source": "override", "delegatable": req.delegatable})
         return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
@@ -728,7 +736,7 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
                 log.info("agent.model.updated", {"name": name, "source": "yaml"})
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
-                all_tool_names = _get_all_tool_names()
+                all_tool_names = await _get_all_tool_names_async()
                 return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
 
             raise HTTPException(status_code=404, detail=f"Custom agent {name} not found")
@@ -818,7 +826,7 @@ async def test_agent(name: str, req: AgentTestRequest = AgentTestRequest()):
 
         # --- 4. init provider / tools ---
         Provider._ensure_initialized()
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
 
         # --- 5. run agent loop in background (publishes to global SSE bus) ---
         from flocks.session.session_loop import SessionLoop, LoopCallbacks

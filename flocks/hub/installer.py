@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from flocks.hub import local
-from flocks.hub.catalog import load_manifest
+from flocks.hub.catalog import clear_catalog_caches, load_manifest
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -221,8 +222,8 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
         from flocks.tool.device.plugin_index import clear_device_template_cache
         from flocks.tool.registry import ToolRegistry
 
-        ToolRegistry.init()
-        ToolRegistry.refresh_plugin_tools()
+        await ToolRegistry.init_async()
+        await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
         clear_device_template_cache()
         # Drop the descriptor cache so freshly installed/uninstalled
         # API plugins surface in ``_load_provider_yaml_metadata`` (and
@@ -430,6 +431,17 @@ async def _uninstall_component_refs(manifest: HubPluginManifest) -> bool:
     return removed
 
 
+def _clear_device_template_cache_if_needed(plugin_type: PluginType) -> None:
+    if plugin_type not in {"tool", "device"}:
+        return
+    try:
+        from flocks.tool.device.plugin_index import clear_device_template_cache
+
+        clear_device_template_cache()
+    except Exception:
+        pass
+
+
 async def install_plugin(
     plugin_type: PluginType,
     plugin_id: str,
@@ -464,6 +476,7 @@ async def install_plugin(
             installed_by=installed_by,
         )
         local.save_installed_record(record)
+        clear_catalog_caches()
         await _refresh_runtime(plugin_type)
         if plugin_type == "component":
             await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
@@ -533,7 +546,9 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
         children_removed = await _uninstall_component_refs(manifest) if manifest is not None else False
         had_record = record is not None
         local.remove_installed_record(plugin_type, plugin_id)
-        if manifest is not None and (children_removed or had_record):
+        clear_catalog_caches()
+        _clear_device_template_cache_if_needed(plugin_type)
+        if children_removed or had_record:
             await _refresh_runtime(plugin_type)
         return children_removed or had_record
     project_root = local.install_root(plugin_type, "project").resolve()
@@ -560,6 +575,7 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
         install_path.unlink()
     _remove_attached_access_contracts(plugin_type, plugin_id, record.scope if record else "global")
     local.remove_installed_record(plugin_type, plugin_id)
+    clear_catalog_caches()
     _cleanup_orphan_api_services(orphan_keys)
     await _refresh_runtime(plugin_type)
     return True
