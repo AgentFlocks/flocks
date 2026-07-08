@@ -350,6 +350,33 @@ def _is_project_install_path(plugin_type: PluginType, install_path: Path) -> boo
     return resolved_install_path == project_root or project_root in resolved_install_path.parents
 
 
+def _bundled_source_for_ref(ref: HubComponentRef) -> str | None:
+    try:
+        ref_manifest = load_manifest(ref.type, ref.id)
+    except Exception:
+        return None
+    if ref_manifest.source.kind != "bundled":
+        return None
+    return f"bundled:{ref_manifest.source.path or ''}"
+
+
+def _can_adopt_existing_ref(
+    ref: HubComponentRef,
+    record: InstalledPluginRecord,
+    component_key: str,
+    install_path: Path | None,
+) -> bool:
+    if not ref.adoptExisting:
+        return False
+    if record.installedBy not in {None, component_key}:
+        return False
+    if record.scope == "project":
+        return False
+    if install_path is not None and _is_project_install_path(ref.type, install_path):
+        return False
+    return record.source == _bundled_source_for_ref(ref)
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
@@ -359,6 +386,7 @@ async def _install_component_refs(
     seen: set[tuple[PluginType, str]] = set()
     component_key = f"component:{manifest.id}"
     rollback_refs: list[tuple[PluginType, str]] = []
+    adopted_records: list[InstalledPluginRecord] = []
     progress_items = component_install_items(manifest)
     await _emit_component_progress(progress, manifest, "start", items=progress_items)
     item_lookup = {(item.type, item.id): item for item in progress_items}
@@ -374,7 +402,16 @@ async def _install_component_refs(
                 item.message = "Nested Hub components are not supported"
                 await _emit_component_progress(progress, manifest, "item", item=item)
                 raise ValueError("Nested Hub components are not supported")
-            if local.infer_local_install(ref.type, ref.id) is not None:
+            existing_path = local.infer_local_install(ref.type, ref.id)
+            if existing_path is not None:
+                existing_record = local.get_record(ref.type, ref.id)
+                if existing_record is not None and _can_adopt_existing_ref(ref, existing_record, component_key, existing_path):
+                    adopted_records.append(existing_record)
+                    local.save_installed_record(existing_record.model_copy(update={"installedBy": component_key}))
+                    item.status = "installed"
+                    item.message = "Already installed; adopted by component"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
                 item.status = "skipped"
                 item.message = "Already installed"
                 await _emit_component_progress(progress, manifest, "item", item=item)
@@ -398,6 +435,8 @@ async def _install_component_refs(
             item.status = "installed"
             await _emit_component_progress(progress, manifest, "item", item=item)
     except Exception:
+        for original_record in reversed(adopted_records):
+            local.save_installed_record(original_record)
         await _rollback_component_ref_installs(rollback_refs, component_key)
         raise
     return rollback_refs
@@ -418,7 +457,9 @@ async def _uninstall_component_refs(manifest: HubPluginManifest) -> bool:
             if install_path is None or _is_project_install_path(ref.type, install_path):
                 continue
         elif record.installedBy != component_key:
-            continue
+            install_path = Path(record.installPath) if record.installPath else local.infer_local_install(ref.type, ref.id)
+            if not _can_adopt_existing_ref(ref, record, component_key, install_path):
+                continue
         removed = True
         try:
             await uninstall_plugin(ref.type, ref.id)

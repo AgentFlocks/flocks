@@ -423,6 +423,54 @@ async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_
     assert not triage_dir.exists()
 
 
+async def test_hub_component_adopts_existing_soc_workspace_tool(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    tool_dir = home_plugins / "tools" / "python" / "soc_workspace_query"
+
+    await install_plugin("tool", "soc_workspace_query")
+    assert (tool_dir / "soc_workspace_query.py").is_file()
+    assert local.get_record("tool", "soc_workspace_query").installedBy is None
+
+    await install_plugin("component", "soc-workspace")
+
+    assert local.get_record("tool", "soc_workspace_query").installedBy == "component:soc-workspace"
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert local.get_record("tool", "soc_workspace_query") is None
+    assert not tool_dir.exists()
+
+
+async def test_hub_component_uninstall_cleans_adoptable_legacy_tool_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    await install_plugin("component", "soc-workspace")
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    tool_dir = home_plugins / "tools" / "python" / "soc_workspace_query"
+    tool_record = local.get_record("tool", "soc_workspace_query")
+    assert tool_record is not None
+    assert tool_record.installedBy == "component:soc-workspace"
+    local.save_installed_record(tool_record.model_copy(update={"installedBy": None}))
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert local.get_record("tool", "soc_workspace_query") is None
+    assert not tool_dir.exists()
+
+
 async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
     async def noop_refresh(_plugin_type):
         return None
