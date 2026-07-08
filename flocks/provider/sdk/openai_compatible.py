@@ -24,14 +24,16 @@ from flocks.provider.provider import (
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
     ThinkTagExtractor,
+    apply_openai_token_limit,
     build_reasoning_metadata,
+    create_chat_completion_with_fallbacks,
     _coerce_bool,
     _normalize_stream_usage,
-    _supports_include_usage_fallback,
     extract_reasoning_content_with_source,
     extract_reasoning_details,
     format_openai_content,
     format_openai_messages,
+    resolve_openai_token_limit,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -179,7 +181,8 @@ class OpenAICompatibleProvider(BaseProvider):
         formatted_messages = self._format_messages(messages)
         
         # Extract parameters
-        max_tokens = kwargs.get("max_tokens")
+        max_tokens = resolve_openai_token_limit(kwargs)
+        max_completion_tokens_explicit = kwargs.get("max_completion_tokens") is not None
         tools = kwargs.get("tools")
         thinking = kwargs.get("thinking")
 
@@ -201,8 +204,12 @@ class OpenAICompatibleProvider(BaseProvider):
         if extra_body:
             request_params["extra_body"] = extra_body
         
-        if max_tokens:
-            request_params["max_tokens"] = max_tokens
+        apply_openai_token_limit(
+            request_params,
+            max_tokens,
+            prefer_completion_tokens=True,
+            completion_tokens_explicit=max_completion_tokens_explicit,
+        )
         if tools:
             # Some compatible APIs don't support tools
             try:
@@ -210,7 +217,13 @@ class OpenAICompatibleProvider(BaseProvider):
             except Exception:
                 self.log.warn("openai_compatible.tools.not_supported", {"model": model_id})
         
-        response = await client.chat.completions.create(**request_params)
+        response = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            request_params,
+            max_tokens=max_tokens,
+            logger=self.log,
+            log_prefix="openai_compatible",
+        )
 
         # Format response
         choice = response.choices[0]
@@ -244,7 +257,8 @@ class OpenAICompatibleProvider(BaseProvider):
         formatted_messages = self._format_messages(messages)
         
         # Extract parameters
-        max_tokens = kwargs.get("max_tokens")
+        max_tokens = resolve_openai_token_limit(kwargs)
+        max_completion_tokens_explicit = kwargs.get("max_completion_tokens") is not None
         tools = kwargs.get("tools")
         thinking = kwargs.get("thinking")
 
@@ -274,8 +288,12 @@ class OpenAICompatibleProvider(BaseProvider):
         if extra_body:
             request_params["extra_body"] = extra_body
         
-        if max_tokens:
-            request_params["max_tokens"] = max_tokens
+        apply_openai_token_limit(
+            request_params,
+            max_tokens,
+            prefer_completion_tokens=True,
+            completion_tokens_explicit=max_completion_tokens_explicit,
+        )
         if tools:
             # Some compatible APIs don't support tools
             try:
@@ -291,18 +309,13 @@ class OpenAICompatibleProvider(BaseProvider):
             "include_usage": True,
         })
 
-        try:
-            stream = await client.chat.completions.create(**request_params)
-        except Exception as exc:
-            if not _supports_include_usage_fallback(exc):
-                raise
-            self.log.warn("openai_compatible.stream.include_usage_unsupported", {
-                "model": model_id,
-                "error": str(exc),
-            })
-            request_params = dict(request_params)
-            request_params.pop("stream_options", None)
-            stream = await client.chat.completions.create(**request_params)
+        stream = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            request_params,
+            max_tokens=max_tokens,
+            logger=self.log,
+            log_prefix="openai_compatible",
+        )
 
         # Stateful extractor to separate <think>...</think> from content.
         think_extractor = ThinkTagExtractor()
