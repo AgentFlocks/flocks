@@ -309,49 +309,88 @@ async def _emit_component_progress(
     )
 
 
+async def _rollback_component_ref_installs(
+    refs: list[tuple[PluginType, str]],
+    component_key: str,
+) -> None:
+    seen: set[tuple[PluginType, str]] = set()
+    for plugin_type, plugin_id in reversed(refs):
+        key = (plugin_type, plugin_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        record = local.get_record(plugin_type, plugin_id)
+        if record is None or record.installedBy != component_key:
+            continue
+        try:
+            await uninstall_plugin(plugin_type, plugin_id)
+        except FileNotFoundError:
+            local.remove_installed_record(plugin_type, plugin_id)
+        except Exception:
+            continue
+
+
+def _rollback_install_path(plugin_type: PluginType, plugin_id: str, install_path: Path, scope: str) -> None:
+    if ".flocks/plugins" in install_path.as_posix():
+        if install_path.is_dir():
+            shutil.rmtree(install_path, ignore_errors=True)
+        elif install_path.exists():
+            install_path.unlink()
+    _remove_attached_access_contracts(plugin_type, plugin_id, scope)
+    local.remove_installed_record(plugin_type, plugin_id)
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
     scope: str,
     progress: InstallProgressCallback | None = None,
-) -> None:
+) -> list[tuple[PluginType, str]]:
     seen: set[tuple[PluginType, str]] = set()
     component_key = f"component:{manifest.id}"
+    rollback_refs: list[tuple[PluginType, str]] = []
     progress_items = component_install_items(manifest)
     await _emit_component_progress(progress, manifest, "start", items=progress_items)
     item_lookup = {(item.type, item.id): item for item in progress_items}
-    for ref in manifest.components:
-        key = (ref.type, ref.id)
-        if key in seen:
-            continue
-        seen.add(key)
-        item = item_lookup.get(key) or HubInstallProgressItem(type=ref.type, id=ref.id, optional=ref.optional)
-        if ref.type == "component":
-            item.status = "failed"
-            item.message = "Nested Hub components are not supported"
-            await _emit_component_progress(progress, manifest, "item", item=item)
-            raise ValueError("Nested Hub components are not supported")
-        if local.infer_local_install(ref.type, ref.id) is not None:
-            item.status = "skipped"
-            item.message = "Already installed"
-            await _emit_component_progress(progress, manifest, "item", item=item)
-            continue
-        item.status = "installing"
-        await _emit_component_progress(progress, manifest, "item", item=item)
-        try:
-            await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
-        except Exception as exc:
-            if ref.optional:
+    try:
+        for ref in manifest.components:
+            key = (ref.type, ref.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = item_lookup.get(key) or HubInstallProgressItem(type=ref.type, id=ref.id, optional=ref.optional)
+            if ref.type == "component":
+                item.status = "failed"
+                item.message = "Nested Hub components are not supported"
+                await _emit_component_progress(progress, manifest, "item", item=item)
+                raise ValueError("Nested Hub components are not supported")
+            if local.infer_local_install(ref.type, ref.id) is not None:
                 item.status = "skipped"
-                item.message = f"Optional dependency failed to install: {exc}"
+                item.message = "Already installed"
                 await _emit_component_progress(progress, manifest, "item", item=item)
                 continue
-            item.status = "failed"
-            item.message = str(exc) or "Install failed"
+            item.status = "installing"
             await _emit_component_progress(progress, manifest, "item", item=item)
-            raise
-        item.status = "installed"
-        await _emit_component_progress(progress, manifest, "item", item=item)
+            rollback_refs.append(key)
+            try:
+                await install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key)
+            except Exception as exc:
+                await _rollback_component_ref_installs([key], component_key)
+                if ref.optional:
+                    item.status = "skipped"
+                    item.message = f"Optional dependency failed to install: {exc}"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
+                item.status = "failed"
+                item.message = str(exc) or "Install failed"
+                await _emit_component_progress(progress, manifest, "item", item=item)
+                raise
+            item.status = "installed"
+            await _emit_component_progress(progress, manifest, "item", item=item)
+    except Exception:
+        await _rollback_component_ref_installs(rollback_refs, component_key)
+        raise
+    return rollback_refs
 
 
 async def _uninstall_component_refs(manifest: HubPluginManifest) -> None:
@@ -386,29 +425,39 @@ async def install_plugin(
     manifest = load_manifest(plugin_type, plugin_id)
     src = plugin_root(plugin_type, plugin_id)
     validate_package(src, manifest)
-    if plugin_type == "component":
-        await _install_component_refs(manifest, scope=scope, progress=progress)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
-    if plugin_type == "webui":
-        _copy_webui_package_with_build(plugin_id, src, dst)
-    else:
-        _copy_package(src, dst)
-    _copy_attached_access_contracts(plugin_type, plugin_id, src, scope)
-    record = local.make_record(
-        plugin_type=plugin_type,
-        plugin_id=plugin_id,
-        version=manifest.version,
-        source=f"bundled:{manifest.source.path or ''}",
-        install_path=dst,
-        enabled=True,
-        scope=scope,
-        installed_by=installed_by,
-    )
-    local.save_installed_record(record)
-    await _refresh_runtime(plugin_type)
-    if plugin_type == "component":
-        await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
-    return record
+    component_key = f"component:{plugin_id}"
+    component_had_install = plugin_type == "component" and local.infer_local_install(plugin_type, plugin_id) is not None
+    component_ref_installs: list[tuple[PluginType, str]] = []
+    try:
+        if plugin_type == "component":
+            component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress)
+        if plugin_type == "webui":
+            _copy_webui_package_with_build(plugin_id, src, dst)
+        else:
+            _copy_package(src, dst)
+        _copy_attached_access_contracts(plugin_type, plugin_id, src, scope)
+        record = local.make_record(
+            plugin_type=plugin_type,
+            plugin_id=plugin_id,
+            version=manifest.version,
+            source=f"bundled:{manifest.source.path or ''}",
+            install_path=dst,
+            enabled=True,
+            scope=scope,
+            installed_by=installed_by,
+        )
+        local.save_installed_record(record)
+        await _refresh_runtime(plugin_type)
+        if plugin_type == "component":
+            await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
+        return record
+    except Exception:
+        if plugin_type == "component":
+            if not component_had_install:
+                _rollback_install_path(plugin_type, plugin_id, dst, scope)
+            await _rollback_component_ref_installs(component_ref_installs, component_key)
+        raise
 
 
 async def update_plugin(plugin_type: PluginType, plugin_id: str, *, scope: str = "global") -> InstalledPluginRecord:

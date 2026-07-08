@@ -1,4 +1,4 @@
-import client from './client';
+import client, { getApiBase } from './client';
 
 export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
 export type HubPluginState =
@@ -138,8 +138,9 @@ export const hubAPI = {
     scope = 'global',
   ): Promise<void> => {
     return new Promise((resolve, reject) => {
-      fetch(`/api/hub/plugins/${type}/${id}/install/stream`, {
+      fetch(`${getApiBase()}/api/hub/plugins/${type}/${id}/install/stream`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scope }),
       })
