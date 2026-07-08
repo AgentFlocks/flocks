@@ -14611,6 +14611,28 @@
       "riskLevel": "low",
       "manifestPath": "plugins/tools/device/chaitin_dongjian_v2_8/manifest.json",
       "descriptionCn": "长亭洞鉴（X-Ray）安全评估系统 OpenAPI V2.8 接入。"
+    },
+    {
+      "id": "sangfor_atrust_v3",
+      "type": "device",
+      "name": "Sangfor aTrust Zero Trust",
+      "description": "Sangfor aTrust Zero Trust Access Control OpenAPI V3 integration.",
+      "version": "3.0",
+      "category": "integration",
+      "tags": [
+        "iam",
+        "network",
+        "integration"
+      ],
+      "useCases": [
+        "integration",
+        "incident-response",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/tools/device/sangfor_atrust_v3/manifest.json",
+      "descriptionCn": "深信服 aTrust 零信任访问控制系统 OpenAPI V3 接入。"
     }
   ]
 }
