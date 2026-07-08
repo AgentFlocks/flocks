@@ -1,0 +1,34 @@
+name: sangfor_atrust_api_mutation
+description: Sangfor aTrust OpenAPI V3 documented mutation REST caller with confirmation.
+description_cn: 深信服 aTrust OpenAPI V3 文档内变更类 REST 调用工具。所有调用都需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: sangfor_atrust
+version: "3"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_mutation
+    method:
+      type: string
+      description: HTTP 方法，必须和 catalog 中 kind=mutation 的 method/path 匹配。
+    path:
+      type: string
+      description: REST 路径，例如 /api/v3/user/create。
+    query:
+      type: object
+      description: Query string 参数。
+    body:
+      type: object
+      description: JSON body，按 aTrust OpenAPI V3 文档对应接口填写。
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_atrust.handler.py
+  function: api_mutation

@@ -7,6 +7,21 @@ description: 用于处理深信服 EDR（终端检测与响应）相关任务，
 
 ## First
 
+### 登录态处理规则
+
+当用户需要打开深信服 EDR 页面，或需要通过 Web2CLI 抓取 EDR 页面请求时，必须按下面顺序处理登录态，不要一开始就要求用户提供账密：
+
+1. 先调用 `sangfor_edr_auth` 的 `action=status_auth_state` 或 `action=validate_auth_state`，检查 `~/.flocks/browser/sangfor-edr/auth-state.json` 是否存在且可用。
+2. 如果登录态可用，直接复用该 state，继续打开 EDR 页面或执行 Web2CLI 抓取流程。
+3. 如果 state 不存在或已失效，但本地已经保存了 EDR 地址、用户名和密码，调用 `sangfor_edr_auth` 的 `action=ensure_auth_state` 自动刷新登录态。
+4. 如果没有可用 state，也没有保存账密配置，再引导用户选择：
+   - 提供 EDR 访问地址、用户名和密码，自动登录并保存账密配置，后续 state 失效时可直接自动刷新；
+   - 不提供账密，走浏览器手动登录流程。打开 EDR 页面后由用户在可视化浏览器中完成登录，登录成功后保存完整浏览器登录态（包括 cookies、localStorage 等）。
+
+无论采用哪种方式，只要获得可用登录态，就继续原有浏览器 / Web2CLI 流程：加载登录态、打开目标 EDR 页面、按需注入 Web2CLI hook、执行页面操作并导出捕获到的请求。后续再次打开页面时，仍必须先校验 `auth-state.json`；若登录态失效且已保存账密，则自动重新走 CDP 登录并刷新 state。
+
+若自动登录过程中出现验证码识别失败、MFA 校验、页面选择器变化、未检测到登录成功或有效 `sessionid` 等情况，立即回退到原有浏览器手动登录流程。
+
 > ⚠️ **EDR 没有开放 API**，所有操作必须通过浏览器（CDP 直连）完成。
 
 ## 浏览器模式使用指南
