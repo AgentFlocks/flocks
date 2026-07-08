@@ -74,6 +74,84 @@ def test_doctor_uses_cn_environment_for_zh_install_profile(monkeypatch, tmp_path
     assert "运行状态异常，请执行 `flocks restart`" in result.stdout
 
 
+def test_doctor_on_windows_starts_handoff_before_running_installer(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_DOCTOR_WINDOWS_HANDOFF", raising=False)
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(doctor_cmd, "_is_windows", lambda: True)
+    monkeypatch.setattr(doctor_cmd.os, "getpid", lambda: 4242)
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(command, *, cwd, env, close_fds):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["env"] = env
+        captured["close_fds"] = close_fds
+        return object()
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("Windows doctor should hand off before running the installer")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", fail_run)
+
+    result = runner.invoke(cli_main.app, ["doctor"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "scripts/install.ps1" in result.stdout
+    assert "installer will continue in this console" in result.stdout
+    assert captured["cwd"] == doctor_cmd._find_source_root()
+    assert captured["close_fds"] is True
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["FLOCKS_DOCTOR_WINDOWS_HANDOFF"] == "1"
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "-Command" in command
+    assert "Wait-Process -Id 4242" in command[-1]
+    assert "-m flocks.cli.main doctor" in command[-1]
+
+
+def test_doctor_windows_handoff_child_runs_installer_synchronously(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_DOCTOR_WINDOWS_HANDOFF", "1")
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(doctor_cmd, "_is_windows", lambda: True)
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, cwd, check, env):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["check"] = check
+        captured["env"] = env
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("handoff child should run the installer directly")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(doctor_cmd.subprocess, "Popen", fail_popen)
+    monkeypatch.setattr(
+        "flocks.cli.service_manager.build_status_lines",
+        lambda: [
+            "[flocks]   daemon: state=running PID=111",
+            "[flocks]   flocks: state=healthy PID=222 URL=http://127.0.0.1:5173",
+        ],
+    )
+
+    result = runner.invoke(cli_main.app, ["doctor"])
+
+    assert result.exit_code == 0, result.stdout
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[-1].endswith("scripts/install.ps1")
+    assert captured["cwd"] == doctor_cmd._find_source_root()
+    assert captured["check"] is True
+    assert "安装正常" in result.stdout
+    assert "运行状态正常" in result.stdout
+
+
 def test_service_status_is_healthy_accepts_current_daemon_status() -> None:
     assert doctor_cmd._service_status_is_healthy(
         [

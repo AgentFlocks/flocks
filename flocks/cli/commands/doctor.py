@@ -27,13 +27,15 @@ def doctor_command() -> None:
     console.print(f"[cyan]Flocks source directory:[/cyan] {source_root}")
     console.print(f"[cyan]Source install command:[/cyan] {_format_command(command)}")
 
-    try:
-        subprocess.run(command, cwd=source_root, check=True, env=env)
-    except FileNotFoundError as error:
-        console.print(f"[red]Failed to start installer: {error}[/red]")
-        raise typer.Exit(1) from error
-    except subprocess.CalledProcessError as error:
-        raise typer.Exit(error.returncode or 1) from error
+    if _needs_windows_handoff():
+        _start_windows_handoff(source_root, env=env)
+        console.print(
+            "[yellow]Windows detected: the installer will continue in this console "
+            "after the current flocks.exe exits.[/yellow]"
+        )
+        return
+
+    _run_source_install(command, source_root=source_root, env=env)
 
     console.print("[green]安装正常[/green]")
     _print_service_diagnosis()
@@ -67,7 +69,7 @@ def _select_source_install_script(source_root: Path) -> Path:
 def _build_source_install_command(script: Path) -> list[str]:
     """Build the subprocess command for the selected installer."""
     if script.suffix == ".ps1":
-        powershell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+        powershell = _find_powershell()
         return [
             powershell,
             "-NoProfile",
@@ -78,6 +80,17 @@ def _build_source_install_command(script: Path) -> list[str]:
         ]
 
     return ["bash", str(script)]
+
+
+def _run_source_install(command: list[str], *, source_root: Path, env: dict[str, str] | None) -> None:
+    """Run the selected source installer synchronously."""
+    try:
+        subprocess.run(command, cwd=source_root, check=True, env=env)
+    except FileNotFoundError as error:
+        console.print(f"[red]Failed to start installer: {error}[/red]")
+        raise typer.Exit(1) from error
+    except subprocess.CalledProcessError as error:
+        raise typer.Exit(error.returncode or 1) from error
 
 
 def _build_source_install_env() -> dict[str, str] | None:
@@ -91,6 +104,63 @@ def _build_source_install_env() -> dict[str, str] | None:
             continue
         env.setdefault(key, value)
     return env
+
+
+def _needs_windows_handoff() -> bool:
+    """Return whether doctor must release the Windows console entrypoint first."""
+    return _is_windows() and os.environ.get("FLOCKS_DOCTOR_WINDOWS_HANDOFF") != "1"
+
+
+def _start_windows_handoff(source_root: Path, *, env: dict[str, str] | None) -> None:
+    """Start a helper that waits for this process to exit before running doctor."""
+    command = _build_windows_handoff_command(source_root, parent_pid=os.getpid())
+    handoff_env = os.environ.copy() if env is None else env.copy()
+    handoff_env["FLOCKS_DOCTOR_WINDOWS_HANDOFF"] = "1"
+
+    try:
+        subprocess.Popen(command, cwd=source_root, env=handoff_env, close_fds=True)
+    except FileNotFoundError as error:
+        console.print(f"[red]Failed to start installer handoff: {error}[/red]")
+        raise typer.Exit(1) from error
+
+
+def _build_windows_handoff_command(source_root: Path, *, parent_pid: int) -> list[str]:
+    """Build a PowerShell command that reruns doctor after the current PID exits."""
+    python_executable = _source_python_executable(source_root)
+    helper_script = "; ".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f"Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue",
+            f"& {_quote_powershell_string(str(python_executable))} -m flocks.cli.main doctor",
+            "exit $LASTEXITCODE",
+        ]
+    )
+    return [
+        _find_powershell(),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        helper_script,
+    ]
+
+
+def _source_python_executable(source_root: Path) -> Path:
+    """Return the source venv Python, falling back to the current interpreter."""
+    windows_python = source_root / ".venv" / "Scripts" / "python.exe"
+    if windows_python.exists():
+        return windows_python
+    return Path(sys.executable)
+
+
+def _quote_powershell_string(value: str) -> str:
+    """Quote a string as a PowerShell single-quoted literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _find_powershell() -> str:
+    """Return the preferred PowerShell executable name or path."""
+    return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
 
 
 def _print_service_diagnosis() -> None:
