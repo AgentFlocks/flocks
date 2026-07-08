@@ -56,8 +56,8 @@ class TestOpenAICompatibleProviderConfiguration:
         assert kwargs["trust_env"] is True
         timeout_arg = kwargs["timeout"]
         assert getattr(timeout_arg, "connect", None) == 30.0
-        assert getattr(timeout_arg, "read", None) == 600.0
-        assert getattr(timeout_arg, "write", None) == 600.0
+        assert getattr(timeout_arg, "read", None) == 180.0
+        assert getattr(timeout_arg, "write", None) == 1800.0
 
         mock_async_openai.assert_called_once_with(
             api_key="test-api-key",
@@ -88,7 +88,7 @@ async def _stream_from_chunks(*chunks):
 
 class TestOpenAICompatibleProviderTemperature:
     @pytest.mark.asyncio
-    async def test_chat_omits_temperature_when_not_provided(self):
+    async def test_chat_prefers_max_completion_tokens_when_max_tokens_provided(self):
         provider, create = _build_provider_with_client()
         create.return_value = _mock_chat_response()
 
@@ -101,7 +101,8 @@ class TestOpenAICompatibleProviderTemperature:
         kwargs = create.await_args.kwargs
         assert "temperature" not in kwargs
         assert kwargs["model"] == "kimi-k2.5"
-        assert kwargs["max_tokens"] == 20
+        assert kwargs["max_completion_tokens"] == 20
+        assert "max_tokens" not in kwargs
 
     @pytest.mark.asyncio
     async def test_chat_passes_explicit_temperature(self):
@@ -116,6 +117,71 @@ class TestOpenAICompatibleProviderTemperature:
 
         kwargs = create.await_args.kwargs
         assert kwargs["temperature"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_chat_accepts_direct_max_completion_tokens_kwarg(self):
+        provider, create = _build_provider_with_client()
+        create.return_value = _mock_chat_response()
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_completion_tokens=33,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 33
+        assert "max_tokens" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_treats_explicit_max_completion_tokens_as_authoritative(self):
+        provider, create = _build_provider_with_client()
+        create.return_value = _mock_chat_response()
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_tokens=20,
+            max_completion_tokens=33,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 33
+        assert "max_tokens" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_falls_back_to_max_tokens_when_completion_variant_is_rejected(self):
+        provider, create = _build_provider_with_client()
+        create.side_effect = [
+            ValueError("unsupported parameter: max_completion_tokens"),
+            _mock_chat_response(),
+        ]
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_tokens=20,
+        )
+
+        assert create.await_count == 2
+        assert create.await_args_list[0].kwargs["max_completion_tokens"] == 20
+        assert "max_tokens" not in create.await_args_list[0].kwargs
+        assert create.await_args_list[1].kwargs["max_tokens"] == 20
+        assert "max_completion_tokens" not in create.await_args_list[1].kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_does_not_fallback_for_completion_token_value_errors(self):
+        provider, create = _build_provider_with_client()
+        create.side_effect = ValueError("max_completion_tokens must be <= 4096")
+
+        with pytest.raises(ValueError, match="max_completion_tokens must be <= 4096"):
+            await provider.chat(
+                "gpt-5.4",
+                [ChatMessage(role="user", content="hello")],
+                max_completion_tokens=200000,
+            )
+
+        assert create.await_count == 1
 
 
 class TestOpenAICompatibleProviderMiniMaxFallback:
@@ -315,6 +381,85 @@ class TestOpenAICompatibleProviderStreamingUsage:
         assert create.await_count == 2
         assert "stream_options" in create.await_args_list[0].kwargs
         assert "stream_options" not in create.await_args_list[1].kwargs
+        assert chunks[-1].usage == {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+            "total_tokens": 7,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_falls_back_to_max_tokens_when_completion_variant_is_rejected(self):
+        provider, create = _build_provider_with_client()
+        create.side_effect = [
+            ValueError("unsupported parameter: max_completion_tokens"),
+            _stream_from_chunks(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="hello", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+                )
+            ),
+        ]
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.4",
+                [ChatMessage(role="user", content="hello")],
+                max_tokens=20,
+            )
+        ]
+
+        assert create.await_count == 2
+        assert create.await_args_list[0].kwargs["max_completion_tokens"] == 20
+        assert "max_tokens" not in create.await_args_list[0].kwargs
+        assert create.await_args_list[1].kwargs["max_tokens"] == 20
+        assert "max_completion_tokens" not in create.await_args_list[1].kwargs
+        assert chunks[-1].usage == {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+            "total_tokens": 7,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_chains_completion_and_usage_fallbacks(self):
+        provider, create = _build_provider_with_client()
+        create.side_effect = [
+            ValueError("unsupported parameter: max_completion_tokens"),
+            ValueError("unsupported parameter: include_usage"),
+            _stream_from_chunks(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="hello", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+                )
+            ),
+        ]
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.4",
+                [ChatMessage(role="user", content="hello")],
+                max_tokens=20,
+            )
+        ]
+
+        assert create.await_count == 3
+        assert create.await_args_list[0].kwargs["max_completion_tokens"] == 20
+        assert "stream_options" in create.await_args_list[0].kwargs
+        assert create.await_args_list[1].kwargs["max_tokens"] == 20
+        assert "stream_options" in create.await_args_list[1].kwargs
+        assert create.await_args_list[2].kwargs["max_tokens"] == 20
+        assert "stream_options" not in create.await_args_list[2].kwargs
         assert chunks[-1].usage == {
             "prompt_tokens": 5,
             "completion_tokens": 2,

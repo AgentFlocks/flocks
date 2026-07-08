@@ -389,6 +389,7 @@ class Provider:
                             # not enforce auth; let _get_client() fall back to a
                             # sentinel key instead of raising.
                             ALLOW_NO_API_KEY = True
+                            PREFER_MAX_COMPLETION_TOKENS = True
                             
                             def __init__(self):
                                 super().__init__(
