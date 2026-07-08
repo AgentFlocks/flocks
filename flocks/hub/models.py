@@ -53,6 +53,7 @@ class HubComponentRef(BaseModel):
     type: PluginType
     id: str
     optional: bool = False
+    adoptExisting: bool = False
 
 
 class HubPluginManifest(BaseModel):

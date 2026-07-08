@@ -68,7 +68,8 @@
     },
     {
       "type": "tool",
-      "id": "soc_workspace_query"
+      "id": "soc_workspace_query",
+      "adoptExisting": true
     },
     {
       "type": "workflow",

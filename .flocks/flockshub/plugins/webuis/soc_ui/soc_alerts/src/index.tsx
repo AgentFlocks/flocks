@@ -1675,44 +1675,83 @@ export default function SocAlertsPage() {
 }
 
 function TimelineChart({ buckets, tr }: { buckets: TimelineBucket[]; tr: Translate }) {
+  const chartRef = useRef<HTMLDivElement | null>(null);
+  const [chartWidth, setChartWidth] = useState(1000);
   const [activeBucket, setActiveBucket] = useState<{ bucket: TimelineBucket; x: number; y: number } | null>(null);
   const maxValue = niceAxisMax(Math.max(1, ...buckets.map((bucket) => bucket.total)));
   const midValue = maxValue / 2;
   const labelIndexes = Array.from(new Set([0, 0.25, 0.5, 0.75, 1].map((ratio) => Math.round((buckets.length - 1) * ratio))));
-  const chartStep = 920 / Math.max(buckets.length - 1, 1);
+  const plotLeft = 42;
+  const plotRight = 20;
+  const plotTop = 24;
+  const plotMiddle = 100;
+  const plotBottom = 176;
+  const chartHeight = 200;
+  const plotHeight = plotBottom - plotTop;
+  const plotWidth = Math.max(1, chartWidth - plotLeft - plotRight);
+  const chartStep = plotWidth / Math.max(buckets.length - 1, 1);
+  const xForIndex = (index: number) => plotLeft + index * chartStep;
+
+  useEffect(() => {
+    const element = chartRef.current;
+    if (!element) return undefined;
+
+    const setMeasuredWidth = (width: number) => {
+      const nextWidth = Math.max(560, Math.floor(width));
+      setChartWidth((current) => (Math.abs(current - nextWidth) > 1 ? nextWidth : current));
+    };
+
+    setMeasuredWidth(element.getBoundingClientRect().width);
+
+    if (typeof ResizeObserver === 'undefined') {
+      const handleResize = () => setMeasuredWidth(element.getBoundingClientRect().width);
+      window.addEventListener('resize', handleResize);
+      return () => window.removeEventListener('resize', handleResize);
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setMeasuredWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   const showBucket = (bucket: TimelineBucket, event: any) => {
     if (!bucket.total) {
       setActiveBucket(null);
       return;
     }
     const rect = event.currentTarget.ownerSVGElement.getBoundingClientRect();
+    const maxTooltipX = Math.max(48, rect.width - 190);
     setActiveBucket({
       bucket,
-      x: Math.min(Math.max(event.clientX - rect.left + 12, 48), rect.width - 190),
+      x: Math.min(Math.max(event.clientX - rect.left + 12, 48), maxTooltipX),
       y: Math.max(event.clientY - rect.top - 18, 12),
     });
   };
   return (
-    <div className="relative h-64">
+    <div ref={chartRef} className="relative h-72">
       <div className="mb-3 flex items-center justify-end gap-4 text-xs text-slate-500">
         <span><i className="mr-1 inline-block h-3 w-1 bg-red-500" />{tr('攻击成功')}</span>
         <span><i className="mr-1 inline-block h-3 w-1 bg-green-500" />{tr('攻击失败')}</span>
         <span><i className="mr-1 inline-block h-3 w-1" style={{ backgroundColor: '#94a3b8' }} />{tr('未知')}</span>
       </div>
       <svg
-        viewBox="0 0 1000 170"
-        className="h-44 w-full overflow-visible"
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        preserveAspectRatio="none"
+        className="h-52 w-full overflow-visible"
         onMouseLeave={() => setActiveBucket(null)}
       >
-        {[24, 85, 146].map((y) => (
-          <line key={y} x1="42" x2="980" y1={y} y2={y} stroke="#dbe3ef" strokeWidth="1" />
+        {[plotTop, plotMiddle, plotBottom].map((y) => (
+          <line key={y} x1={plotLeft} x2={chartWidth - plotRight} y1={y} y2={y} stroke="#dbe3ef" strokeWidth="1" />
         ))}
         {buckets.map((bucket, index) => {
-          const x = 42 + index * (920 / Math.max(buckets.length - 1, 1));
-          const successHeight = Math.max(bucket.success ? 2 : 0, (bucket.success / maxValue) * 116);
-          const failedHeight = Math.max(bucket.failed ? 2 : 0, (bucket.failed / maxValue) * 116);
-          const unknownHeight = Math.max(bucket.unknown ? 2 : 0, (bucket.unknown / maxValue) * 116);
-          const failedY = 146 - successHeight - failedHeight;
+          const x = xForIndex(index);
+          const successHeight = Math.max(bucket.success ? 2 : 0, (bucket.success / maxValue) * plotHeight);
+          const failedHeight = Math.max(bucket.failed ? 2 : 0, (bucket.failed / maxValue) * plotHeight);
+          const unknownHeight = Math.max(bucket.unknown ? 2 : 0, (bucket.unknown / maxValue) * plotHeight);
+          const failedY = plotBottom - successHeight - failedHeight;
           const unknownY = failedY - unknownHeight;
           return (
             <g
@@ -1724,20 +1763,20 @@ function TimelineChart({ buckets, tr }: { buckets: TimelineBucket[]; tr: Transla
             >
               {unknownHeight > 0 && <rect x={x - 3} y={unknownY} width="7" height={unknownHeight} fill="#cbd5e1" />}
               {failedHeight > 0 && <rect x={x - 3} y={failedY} width="7" height={failedHeight} fill="#22c55e" />}
-              {successHeight > 0 && <rect x={x - 3} y={146 - successHeight} width="7" height={successHeight} fill="#ef4444" />}
-              {bucket.total > 0 && <rect x={x - 5} y="20" width="11" height="126" fill="transparent" />}
+              {successHeight > 0 && <rect x={x - 3} y={plotBottom - successHeight} width="7" height={successHeight} fill="#ef4444" />}
+              {bucket.total > 0 && <rect x={x - 5} y={plotTop - 4} width="11" height={plotHeight + 4} fill="transparent" />}
             </g>
           );
         })}
-        <line x1="42" x2="980" y1="146" y2="146" stroke="#475569" strokeWidth="1" />
-        <text x="8" y="28" fontSize="11" fill="#475569">{formatNumber(maxValue)}</text>
-        <text x="8" y="89" fontSize="11" fill="#475569">{formatNumber(midValue)}</text>
-        <text x="22" y="150" fontSize="11" fill="#475569">0</text>
+        <line x1={plotLeft} x2={chartWidth - plotRight} y1={plotBottom} y2={plotBottom} stroke="#475569" strokeWidth="1" />
+        <text x="8" y={plotTop + 4} fontSize="11" fill="#475569">{formatNumber(maxValue)}</text>
+        <text x="8" y={plotMiddle + 4} fontSize="11" fill="#475569">{formatNumber(midValue)}</text>
+        <text x="22" y={plotBottom + 4} fontSize="11" fill="#475569">0</text>
         {labelIndexes.map((bucketIndex, labelIndex) => {
           const bucket = buckets[bucketIndex];
           const anchor = labelIndex === 0 ? 'start' : labelIndex === labelIndexes.length - 1 ? 'end' : 'middle';
           return (
-            <text key={`${bucket.label}-label-${bucketIndex}`} x={42 + bucketIndex * chartStep} y="166" fontSize="11" fill="#475569" textAnchor={anchor}>{bucket.label}</text>
+            <text key={`${bucket.label}-label-${bucketIndex}`} x={xForIndex(bucketIndex)} y={chartHeight - 4} fontSize="11" fill="#475569" textAnchor={anchor}>{bucket.label}</text>
           );
         })}
       </svg>
