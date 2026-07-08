@@ -26,6 +26,12 @@ export interface SystemStats {
   };
 }
 
+function shouldCountForAgentPage(agent: any): boolean {
+  if (!agent || typeof agent !== 'object') return false;
+  if (agent.mode === 'primary') return true;
+  return !Array.isArray(agent.tags) || !agent.tags.includes('system');
+}
+
 export const statsApi = {
   getSystemStats: async (): Promise<SystemStats> => {
     try {
@@ -40,7 +46,7 @@ export const statsApi = {
       ]);
 
       const dash = taskDash.data || {};
-      const agentList = Array.isArray(agents.data) ? agents.data : [];
+      const agentList = (Array.isArray(agents.data) ? agents.data : []).filter(shouldCountForAgentPage);
       const workflowList = Array.isArray(workflows.data) ? workflows.data : [];
       // Exclude `system` category skills so the count matches the Skills page,
       // which hides system skills (e.g. onboarding) from the user.
