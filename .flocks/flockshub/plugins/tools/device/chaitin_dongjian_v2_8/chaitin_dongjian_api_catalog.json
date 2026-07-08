@@ -1,0 +1,854 @@
+{
+  "schema_version": 1,
+  "source": "洞鉴（X-Ray）安全评估系统OpenAPI接口文档（标准版）V2.8.pdf",
+  "base_path": "/api/v2",
+  "entries": [
+    {
+      "method": "GET",
+      "path": "/project/",
+      "kind": "readonly",
+      "description": "获取组织单位列表",
+      "page": 24
+    },
+    {
+      "method": "POST",
+      "path": "/project/",
+      "kind": "mutation",
+      "description": "创建组织单位",
+      "page": 25
+    },
+    {
+      "method": "POST",
+      "path": "/project/filter/",
+      "kind": "readonly",
+      "description": "功能 2: 根据组织单位全称查询组织单位详情",
+      "page": 27
+    },
+    {
+      "method": "GET",
+      "path": "/project/{id}/",
+      "kind": "readonly",
+      "description": "获取组织单位详情",
+      "page": 29
+    },
+    {
+      "method": "GET",
+      "path": "/template/",
+      "kind": "readonly",
+      "description": "获取策略模版列表",
+      "page": 32
+    },
+    {
+      "method": "GET",
+      "path": "/template/{id}/",
+      "kind": "readonly",
+      "description": "获取策略模版详情",
+      "page": 33
+    },
+    {
+      "method": "POST",
+      "path": "/plan/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取任务计划列表",
+      "page": 36
+    },
+    {
+      "method": "GET",
+      "path": "/plan/{id}/",
+      "kind": "readonly",
+      "description": "获取任务计划详情",
+      "page": 38
+    },
+    {
+      "method": "DELETE",
+      "path": "/plan/{id}/",
+      "kind": "mutation",
+      "description": "删除任务计划",
+      "page": 39
+    },
+    {
+      "method": "POST",
+      "path": "/plan/create/",
+      "kind": "mutation",
+      "description": "创建任务计划",
+      "page": 40
+    },
+    {
+      "method": "POST",
+      "path": "/plan/update/",
+      "kind": "mutation",
+      "description": "更新任务计划",
+      "page": 42
+    },
+    {
+      "method": "POST",
+      "path": "/plan/stop/",
+      "kind": "mutation",
+      "description": "停止循环任务的循环设置，不影响当前正在扫描的任务实例。",
+      "page": 44
+    },
+    {
+      "method": "POST",
+      "path": "/plan/execute/",
+      "kind": "readonly",
+      "description": "例",
+      "page": 45
+    },
+    {
+      "method": "POST",
+      "path": "/plugin/filter/",
+      "kind": "readonly",
+      "description": "获取漏洞插件列表",
+      "page": 49
+    },
+    {
+      "method": "POST",
+      "path": "/custom_plugin/filter/",
+      "kind": "readonly",
+      "description": "获取自定义插件列表",
+      "page": 50
+    },
+    {
+      "method": "GET",
+      "path": "/custom_plugin/{id}/",
+      "kind": "readonly",
+      "description": "漏洞插件的标识，作为策略配置中插件启用/禁用的输入参数",
+      "page": 51
+    },
+    {
+      "method": "POST",
+      "path": "/scannerdict/",
+      "kind": "mutation",
+      "description": "创建字典",
+      "page": 52
+    },
+    {
+      "method": "DELETE",
+      "path": "/scannerdict/",
+      "kind": "mutation",
+      "description": "删除字典列表",
+      "page": 53
+    },
+    {
+      "method": "POST",
+      "path": "/scannerdict/filter/",
+      "kind": "readonly",
+      "description": "获取字典列表",
+      "page": 54
+    },
+    {
+      "method": "GET",
+      "path": "/scannerdict/{id}/",
+      "kind": "readonly",
+      "description": "获取字典详情",
+      "page": 55
+    },
+    {
+      "method": "POST",
+      "path": "/portgroup/filter/",
+      "kind": "readonly",
+      "description": "获取端口组列表",
+      "page": 56
+    },
+    {
+      "method": "POST",
+      "path": "/hostlogrule/filter/",
+      "kind": "readonly",
+      "description": "则”参数",
+      "page": 57
+    },
+    {
+      "method": "POST",
+      "path": "/upload_file/",
+      "kind": "mutation",
+      "description": "上传文件",
+      "page": 58
+    },
+    {
+      "method": "POST",
+      "path": "/engine/filter/",
+      "kind": "readonly",
+      "description": "获取引擎节点列表",
+      "page": 59
+    },
+    {
+      "method": "GET",
+      "path": "/reverse_platform/{uuid}/",
+      "kind": "readonly",
+      "description": "获取反连平台详情",
+      "page": 60
+    },
+    {
+      "method": "POST",
+      "path": "/reverse_platform/filter/",
+      "kind": "readonly",
+      "description": "获取反连平台列表",
+      "page": 61
+    },
+    {
+      "method": "POST",
+      "path": "/whitelist/",
+      "kind": "mutation",
+      "description": "创建全局白名单",
+      "page": 62
+    },
+    {
+      "method": "POST",
+      "path": "/whitelist/update/",
+      "kind": "mutation",
+      "description": "更新全局白名单",
+      "page": 65
+    },
+    {
+      "method": "POST",
+      "path": "/whitelist/filter/",
+      "kind": "readonly",
+      "description": "获取全局白名单列表",
+      "page": 67
+    },
+    {
+      "method": "GET",
+      "path": "/whitelist/{id}/",
+      "kind": "readonly",
+      "description": "获取全局白名单详情",
+      "page": 68
+    },
+    {
+      "method": "POST",
+      "path": "/xprocess/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取任务实例列表",
+      "page": 75
+    },
+    {
+      "method": "GET",
+      "path": "/xprocess/{id}/",
+      "kind": "readonly",
+      "description": "获取任务实例",
+      "page": 77
+    },
+    {
+      "method": "GET",
+      "path": "/xprocess/{id}/progress/",
+      "kind": "readonly",
+      "description": "务是否完成应该根据进度提供的 status 判断。",
+      "page": 78
+    },
+    {
+      "method": "POST",
+      "path": "/xprocess/stop/",
+      "kind": "readonly",
+      "description": "结束正在执行过程中的扫描实例",
+      "page": 80
+    },
+    {
+      "method": "POST",
+      "path": "/xprocess/pause/",
+      "kind": "mutation",
+      "description": "暂停正在执行过程中的扫描实例",
+      "page": 81
+    },
+    {
+      "method": "POST",
+      "path": "/xprocess/resume/",
+      "kind": "mutation",
+      "description": "仅能恢复手动暂停的任务实例",
+      "page": 82
+    },
+    {
+      "method": "POST",
+      "path": "/xprocess/pause/stage/",
+      "kind": "readonly",
+      "description": "当前仅支持扫描策略为被动 Web 扫描（流量）的任务",
+      "page": 83
+    },
+    {
+      "method": "POST",
+      "path": "/xprocess/resume/stage/",
+      "kind": "readonly",
+      "description": "仅支持扫描策略为被动 Web 扫描（流量）的任务",
+      "page": 84
+    },
+    {
+      "method": "POST",
+      "path": "/result/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取任务结果",
+      "page": 89
+    },
+    {
+      "method": "GET",
+      "path": "/result/{id}/",
+      "kind": "readonly",
+      "description": "获取任务结果",
+      "page": 91
+    },
+    {
+      "method": "POST",
+      "path": "/ssh_key/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取 SSH 认证私钥列表",
+      "page": 101
+    },
+    {
+      "method": "POST",
+      "path": "/ssh_key/create/",
+      "kind": "mutation",
+      "description": "创建 SSH 认证私钥",
+      "page": 102
+    },
+    {
+      "method": "POST",
+      "path": "/check_sets/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取检查策略列表",
+      "page": 103
+    },
+    {
+      "method": "POST",
+      "path": "/baseline/task/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取基线任务列表",
+      "page": 105
+    },
+    {
+      "method": "POST",
+      "path": "/baseline/task/create/",
+      "kind": "readonly",
+      "description": "仅支持在线检查",
+      "page": 107
+    },
+    {
+      "method": "POST",
+      "path": "/baseline/task/stop/",
+      "kind": "readonly",
+      "description": "仅支持在线检查",
+      "page": 111
+    },
+    {
+      "method": "POST",
+      "path": "/baseline/task/execute/",
+      "kind": "readonly",
+      "description": "仅支持在线检查",
+      "page": 112
+    },
+    {
+      "method": "POST",
+      "path": "/process/item/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取检查结果",
+      "page": 113
+    },
+    {
+      "method": "POST",
+      "path": "/website/",
+      "kind": "mutation",
+      "description": "批量增加 Web 站点",
+      "page": 118
+    },
+    {
+      "method": "DELETE",
+      "path": "/website/",
+      "kind": "mutation",
+      "description": "批量删除 Web 站点",
+      "page": 119
+    },
+    {
+      "method": "POST",
+      "path": "/website/filter/",
+      "kind": "readonly",
+      "description": "逐步废弃此 API，改用更精简的 /website/filter/simple",
+      "page": 120
+    },
+    {
+      "method": "POST",
+      "path": "/website/filter/simple/",
+      "kind": "readonly",
+      "description": "按条件批量获取简易版 Web 站点列表",
+      "page": 121
+    },
+    {
+      "method": "GET",
+      "path": "/website/{id}/",
+      "kind": "readonly",
+      "description": "获取 Web 站点详情",
+      "page": 122
+    },
+    {
+      "method": "POST",
+      "path": "/website/{id}/",
+      "kind": "mutation",
+      "description": "修改 Web 站点",
+      "page": 125
+    },
+    {
+      "method": "GET",
+      "path": "/website/openapi/{id}/",
+      "kind": "readonly",
+      "description": "获取 API 资产详情",
+      "page": 126
+    },
+    {
+      "method": "GET",
+      "path": "/ip/os/",
+      "kind": "readonly",
+      "description": "直接调用接口即可获取全量的操作系统列表",
+      "page": 134
+    },
+    {
+      "method": "POST",
+      "path": "/ip/",
+      "kind": "mutation",
+      "description": "批量增加主机",
+      "page": 135
+    },
+    {
+      "method": "DELETE",
+      "path": "/ip/",
+      "kind": "mutation",
+      "description": "批量删除主机",
+      "page": 136
+    },
+    {
+      "method": "POST",
+      "path": "/ip/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取主机列表",
+      "page": 137
+    },
+    {
+      "method": "GET",
+      "path": "/ip/{id}/",
+      "kind": "readonly",
+      "description": "获取主机资产详情",
+      "page": 139
+    },
+    {
+      "method": "POST",
+      "path": "/ip/{id}/",
+      "kind": "mutation",
+      "description": "修改主机资产",
+      "page": 142
+    },
+    {
+      "method": "GET",
+      "path": "/service/application_protocol/",
+      "kind": "readonly",
+      "description": "获取服务列表",
+      "page": 146
+    },
+    {
+      "method": "POST",
+      "path": "/service/",
+      "kind": "mutation",
+      "description": "批量增加服务",
+      "page": 147
+    },
+    {
+      "method": "DELETE",
+      "path": "/service/",
+      "kind": "mutation",
+      "description": "批量删除服务",
+      "page": 148
+    },
+    {
+      "method": "POST",
+      "path": "/service/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取服务",
+      "page": 149
+    },
+    {
+      "method": "GET",
+      "path": "/service/{id}/",
+      "kind": "readonly",
+      "description": "获取服务资产",
+      "page": 151
+    },
+    {
+      "method": "POST",
+      "path": "/service/{id}/",
+      "kind": "mutation",
+      "description": "修改服务资产",
+      "page": 152
+    },
+    {
+      "method": "POST",
+      "path": "/domain/",
+      "kind": "mutation",
+      "description": "批量增加域名",
+      "page": 156
+    },
+    {
+      "method": "DELETE",
+      "path": "/domain/",
+      "kind": "mutation",
+      "description": "批量删除域名",
+      "page": 157
+    },
+    {
+      "method": "POST",
+      "path": "/domain/filter/",
+      "kind": "readonly",
+      "description": "逐步废弃此 API，改用更精简的 /domain/filter/simple",
+      "page": 158
+    },
+    {
+      "method": "POST",
+      "path": "/domain/filter/simple/",
+      "kind": "readonly",
+      "description": "按条件批量获取精简的域名",
+      "page": 159
+    },
+    {
+      "method": "GET",
+      "path": "/domain/{id}/",
+      "kind": "readonly",
+      "description": "获取域名资产",
+      "page": 160
+    },
+    {
+      "method": "POST",
+      "path": "/domain/{id}/",
+      "kind": "mutation",
+      "description": "修改域名资产",
+      "page": 161
+    },
+    {
+      "method": "GET",
+      "path": "/vuln/{id}/",
+      "kind": "readonly",
+      "description": "获取漏洞资产详情",
+      "page": 166
+    },
+    {
+      "method": "POST",
+      "path": "/vuln/{id}/",
+      "kind": "mutation",
+      "description": "修改漏洞资产状态",
+      "page": 170
+    },
+    {
+      "method": "DELETE",
+      "path": "/vuln/",
+      "kind": "mutation",
+      "description": "批量删除漏洞资产",
+      "page": 172
+    },
+    {
+      "method": "POST",
+      "path": "/vuln/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取漏洞列表",
+      "page": 173
+    },
+    {
+      "method": "POST",
+      "path": "/vuln/retest/",
+      "kind": "mutation",
+      "description": "复测漏洞资产",
+      "page": 177
+    },
+    {
+      "method": "GET",
+      "path": "/vuln/retest/{task_id}/",
+      "kind": "readonly",
+      "description": "漏洞资产复测结果获取",
+      "page": 178
+    },
+    {
+      "method": "POST",
+      "path": "/auditlog/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取审计日志",
+      "page": 187
+    },
+    {
+      "method": "GET",
+      "path": "/auditlog/action/",
+      "kind": "readonly",
+      "description": "审计日志操作类型",
+      "page": 189
+    },
+    {
+      "method": "POST",
+      "path": "/report/download/",
+      "kind": "readonly",
+      "description": "下载报表",
+      "page": 192
+    },
+    {
+      "method": "POST",
+      "path": "/report/",
+      "kind": "mutation",
+      "description": "创建报表",
+      "page": 193
+    },
+    {
+      "method": "POST",
+      "path": "/report/template/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取报表模版列表",
+      "page": 195
+    },
+    {
+      "method": "POST",
+      "path": "/report/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取报表列表",
+      "page": 197
+    },
+    {
+      "method": "GET",
+      "path": "/report/{id}/",
+      "kind": "readonly",
+      "description": "查询报表详细信息",
+      "page": 199
+    },
+    {
+      "method": "DELETE",
+      "path": "/report/{id}/",
+      "kind": "mutation",
+      "description": "删除报表",
+      "page": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/engine/{id}/",
+      "kind": "readonly",
+      "description": "仅超级管理员可进行此操作",
+      "page": 206
+    },
+    {
+      "method": "GET",
+      "path": "/system/hosts/engine/{id}/",
+      "kind": "readonly",
+      "description": "获取指定引擎的静态 host 配置",
+      "page": 207
+    },
+    {
+      "method": "POST",
+      "path": "/system/hosts/engine/{id}/",
+      "kind": "mutation",
+      "description": "设置引擎节点的静态 hosts 配置",
+      "page": 208
+    },
+    {
+      "method": "GET",
+      "path": "/system/dns/engine/{id}/",
+      "kind": "readonly",
+      "description": "获取指定引擎的 dns 配置",
+      "page": 209
+    },
+    {
+      "method": "POST",
+      "path": "/system/dns/engine/{id}/",
+      "kind": "mutation",
+      "description": "设置引擎节点的 dns 配置",
+      "page": 210
+    },
+    {
+      "method": "GET",
+      "path": "/system/info/engine/{id}/",
+      "kind": "readonly",
+      "description": "获取引擎的系统信息",
+      "page": 211
+    },
+    {
+      "method": "GET",
+      "path": "/system/info/mgmt/",
+      "kind": "readonly",
+      "description": "查询管理节点系统信息和负载信息",
+      "page": 213
+    },
+    {
+      "method": "GET",
+      "path": "/system/info/services/",
+      "kind": "readonly",
+      "description": "查询管理节点服务容器名称列表",
+      "page": 215
+    },
+    {
+      "method": "POST",
+      "path": "/system/info/services/",
+      "kind": "readonly",
+      "description": "查询系统服务工作状态和负载信息",
+      "page": 216
+    },
+    {
+      "method": "POST",
+      "path": "/upload_upgrade_package/",
+      "kind": "mutation",
+      "description": "支持引擎升级包、数据库升级包，需要通过文件上传接口上传安装包",
+      "page": 219
+    },
+    {
+      "method": "POST",
+      "path": "/package/check/",
+      "kind": "mutation",
+      "description": "升级前需通过该接口对升级包进行校验",
+      "page": 220
+    },
+    {
+      "method": "POST",
+      "path": "/engine/upgrade/",
+      "kind": "mutation",
+      "description": "升级前需要通过升级包校验接口校验通过，方可升级成功",
+      "page": 222
+    },
+    {
+      "method": "POST",
+      "path": "/vuln_library/upgrade/",
+      "kind": "mutation",
+      "description": "升级前需要通过升级包校验接口校验通过，方可升级成功",
+      "page": 223
+    },
+    {
+      "method": "POST",
+      "path": "/execution/filter/",
+      "kind": "readonly",
+      "description": "执行状态列表",
+      "page": 224
+    },
+    {
+      "method": "POST",
+      "path": "/customtag/",
+      "kind": "readonly",
+      "description": "获取可用自定义 POC 标签列表",
+      "page": 226
+    },
+    {
+      "method": "POST",
+      "path": "/upload/custompoc/",
+      "kind": "mutation",
+      "description": "通过文件上传创建自定义 POC",
+      "page": 227
+    },
+    {
+      "method": "POST",
+      "path": "/custompoc/",
+      "kind": "mutation",
+      "description": "创建自定义 POC",
+      "page": 228
+    },
+    {
+      "method": "DELETE",
+      "path": "/custompoc/",
+      "kind": "mutation",
+      "description": "批量删除自定义 POC",
+      "page": 230
+    },
+    {
+      "method": "POST",
+      "path": "/custompoc/filter/",
+      "kind": "readonly",
+      "description": "按条件批量获取自定义 POC",
+      "page": 231
+    },
+    {
+      "method": "POST",
+      "path": "/custompoc/update/",
+      "kind": "mutation",
+      "description": "修改自定义 POC",
+      "page": 233
+    },
+    {
+      "method": "GET",
+      "path": "/vuln_category/",
+      "kind": "readonly",
+      "description": "获取可用漏洞类型列表",
+      "page": 235
+    },
+    {
+      "method": "POST",
+      "path": "/business_system/filter/",
+      "kind": "readonly",
+      "description": "筛选业务系统列表",
+      "page": 238
+    },
+    {
+      "method": "GET",
+      "path": "/business_system/{id}/",
+      "kind": "readonly",
+      "description": "获取业务系统详情",
+      "page": 240
+    },
+    {
+      "method": "POST",
+      "path": "/asset_tag/filter/",
+      "kind": "readonly",
+      "description": "筛选资产标签列表",
+      "page": 241
+    },
+    {
+      "method": "GET",
+      "path": "/asset_tag/{id}/",
+      "kind": "readonly",
+      "description": "获取资产标签详情",
+      "page": 242
+    },
+    {
+      "method": "POST",
+      "path": "/network_region/filter/",
+      "kind": "readonly",
+      "description": "筛选网络区域列表",
+      "page": 243
+    },
+    {
+      "method": "GET",
+      "path": "/network_region/{id}/",
+      "kind": "readonly",
+      "description": "获取网络区域详情",
+      "page": 244
+    },
+    {
+      "method": "POST",
+      "path": "/location/filter/",
+      "kind": "readonly",
+      "description": "筛选行政区域规划位置",
+      "page": 245
+    },
+    {
+      "method": "GET",
+      "path": "/location/{id}/",
+      "kind": "readonly",
+      "description": "获取行政规划区域详情",
+      "page": 247
+    },
+    {
+      "method": "POST",
+      "path": "/user/",
+      "kind": "mutation",
+      "description": "创建用户",
+      "page": 250
+    },
+    {
+      "method": "DELETE",
+      "path": "/user/{id}/",
+      "kind": "mutation",
+      "description": "删除用户",
+      "page": 252
+    },
+    {
+      "method": "POST",
+      "path": "/user/filter/",
+      "kind": "readonly",
+      "description": "根据用户名筛选用户",
+      "page": 253
+    },
+    {
+      "method": "POST",
+      "path": "/role/",
+      "kind": "mutation",
+      "description": "创建角色",
+      "page": 255
+    },
+    {
+      "method": "POST",
+      "path": "/role/filter/",
+      "kind": "readonly",
+      "description": "根据角色名称筛选角色列表",
+      "page": 257
+    }
+  ]
+}

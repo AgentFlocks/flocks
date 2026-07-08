@@ -1,0 +1,582 @@
+{
+  "schema_version": 1,
+  "source": "Sangfor aTrust OpenAPI V3 documentation",
+  "entries": [
+    {
+      "method": "GET",
+      "path": "/api/v1/monitor/getUserStatus",
+      "kind": "readonly",
+      "description": "4.1.1 查询在线用户"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/monitor/kickoutUsers",
+      "kind": "mutation",
+      "description": "4.1.2 踢出在线用户"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/spa/sendSpaCode",
+      "kind": "mutation",
+      "description": "4.10.1 申请发送SPA安全码"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/create",
+      "kind": "mutation",
+      "description": "4.2.1.1 新增用户"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/updateById",
+      "kind": "mutation",
+      "description": "4.2.2.1 编辑用户-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/updateByName",
+      "kind": "mutation",
+      "description": "4.2.2.2 编辑用户-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/updateByExternalId",
+      "kind": "mutation",
+      "description": "4.2.2.3 编辑用户-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/bulkUpdateByIdList",
+      "kind": "mutation",
+      "description": "4.2.2.4 批量编辑用户-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/bulkUpdateByNameList",
+      "kind": "mutation",
+      "description": "4.2.2.5 批量编辑用户-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/bulkUpdateByExternalIdList",
+      "kind": "mutation",
+      "description": "4.2.2.6 批量编辑用户-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/bulkDeleteByIdList",
+      "kind": "mutation",
+      "description": "4.2.3.1 批量删除用户-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/bulkDeleteByNameList",
+      "kind": "mutation",
+      "description": "4.2.3.2 批量删除用户-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/bulkDeleteByExternalIdList",
+      "kind": "mutation",
+      "description": "4.2.3.3 批量删除用户-基于外部id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/user/queryById",
+      "kind": "readonly",
+      "description": "4.2.4.1 查询用户详情-基于id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/user/queryByName",
+      "kind": "readonly",
+      "description": "4.2.4.2 查询用户详情-基于名称"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/user/queryByExternalId",
+      "kind": "readonly",
+      "description": "4.2.4.3 查询用户详情-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/queryAll",
+      "kind": "readonly",
+      "description": "4.2.4.4 查询用户列表"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/assignRoleById",
+      "kind": "mutation",
+      "description": "4.2.5.1 关联角色-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/assignRoleByName",
+      "kind": "mutation",
+      "description": "4.2.5.2 关联角色-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/assignRoleByExternalId",
+      "kind": "mutation",
+      "description": "4.2.5.3 关联角色-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/assignResourceById",
+      "kind": "mutation",
+      "description": "4.2.6.1 授权应用-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/assignResourceByName",
+      "kind": "mutation",
+      "description": "4.2.6.2 授权应用-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/assignResourceByExternalId",
+      "kind": "mutation",
+      "description": "4.2.6.3 授权应用-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/user/reportStatus",
+      "kind": "mutation",
+      "description": "4.2.7.1 上报自定义用户状态"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/create",
+      "kind": "mutation",
+      "description": "4.3.1.1 新增组织架构"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/updateById",
+      "kind": "mutation",
+      "description": "4.3.2.1 编辑组织架构-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/updateByFullPath",
+      "kind": "mutation",
+      "description": "4.3.2.2 编辑组织架构-基于路径"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/updateByExternalId",
+      "kind": "mutation",
+      "description": "4.3.2.3 编辑组织架构-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/bulkDeleteByIdList",
+      "kind": "mutation",
+      "description": "4.3.3.1 删除组织架构-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/bulkDeleteByFullPathList",
+      "kind": "mutation",
+      "description": "4.3.3.2 删除组织架构-基于路径"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/bulkDeleteByExternalIdList",
+      "kind": "mutation",
+      "description": "4.3.3.3 删除组织架构-基于外部id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/group/queryById",
+      "kind": "readonly",
+      "description": "4.3.4.1 查询组织架构详情-基于id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/group/queryByFullPath",
+      "kind": "readonly",
+      "description": "4.3.4.2 查询组织架构详情-基于路径"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/group/queryByExternalId",
+      "kind": "readonly",
+      "description": "4.3.4.3 查询组织架构详情-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/queryAll",
+      "kind": "readonly",
+      "description": "4.3.4.4 查询组织架构列表"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/assignRoleById",
+      "kind": "mutation",
+      "description": "4.3.5.1 关联角色-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/assignRoleByFullPath",
+      "kind": "mutation",
+      "description": "4.3.5.2 关联角色-基于路径"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/assignRoleByExternalId",
+      "kind": "mutation",
+      "description": "4.3.5.3 关联角色-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/assignResourceById",
+      "kind": "mutation",
+      "description": "4.3.6.1 授权应用-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/assignResourceByFullPath",
+      "kind": "mutation",
+      "description": "4.3.6.2 授权应用-基于路径"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/group/assignResourceByExternalId",
+      "kind": "mutation",
+      "description": "4.3.6.3 授权应用-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/create",
+      "kind": "mutation",
+      "description": "4.4.1.1 新增角色"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/updateById",
+      "kind": "mutation",
+      "description": "4.4.2.1 编辑角色-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/updateByName",
+      "kind": "mutation",
+      "description": "4.4.2.2 编辑角色-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/updateByExternalId",
+      "kind": "mutation",
+      "description": "4.4.2.3 编辑角色-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/bulkDeleteByIdList",
+      "kind": "mutation",
+      "description": "4.4.3.1 批量删除角色-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/bulkDeleteByNameList",
+      "kind": "mutation",
+      "description": "4.4.3.2 批量删除角色-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/bulkDeleteByExternalIdList",
+      "kind": "mutation",
+      "description": "4.4.3.3 批量删除角色-基于外部id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/role/queryById",
+      "kind": "readonly",
+      "description": "4.4.4.1 查询角色详情-基于id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/role/queryByName",
+      "kind": "readonly",
+      "description": "4.4.4.2 查询角色详情-基于名称"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/role/queryByExternalId",
+      "kind": "readonly",
+      "description": "4.4.4.3 查询角色详情-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/queryAll",
+      "kind": "readonly",
+      "description": "4.4.4.4 查询角色列表"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignUserById",
+      "kind": "mutation",
+      "description": "4.4.5.1 关联用户-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignUserByName",
+      "kind": "mutation",
+      "description": "4.4.5.2 关联用户-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignUserByExternalId",
+      "kind": "mutation",
+      "description": "4.4.5.3 关联用户-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignGroupById",
+      "kind": "mutation",
+      "description": "4.4.6.1 关联组织架构-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignGroupByName",
+      "kind": "mutation",
+      "description": "4.4.6.2 关联组织架构-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignGroupByExternalId",
+      "kind": "mutation",
+      "description": "4.4.6.3 关联组织架构-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignResourceById",
+      "kind": "mutation",
+      "description": "4.4.7.1 授权应用-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignResourceByName",
+      "kind": "mutation",
+      "description": "4.4.7.2 授权应用-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/role/assignResourceByExternalId",
+      "kind": "mutation",
+      "description": "4.4.7.3 授权应用-基于外部id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/resource/createResource",
+      "kind": "mutation",
+      "description": "4.5.1 新增WEB或隧道应用"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/resource/updateResource",
+      "kind": "mutation",
+      "description": "4.5.2 编辑WEB或隧道应用"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/resource/deleteResource",
+      "kind": "mutation",
+      "description": "4.5.3.1 批量删除应用"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/resource/queryAll",
+      "kind": "readonly",
+      "description": "4.5.4.1 查询应用列表"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/resource/queryById",
+      "kind": "readonly",
+      "description": "4.5.4.2 查询应用详情-基于id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/resource/queryByName",
+      "kind": "readonly",
+      "description": "4.5.4.3 查询应用详情-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resource/assignById",
+      "kind": "mutation",
+      "description": "4.5.5.1 应用授权-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resource/assignByName",
+      "kind": "mutation",
+      "description": "4.5.5.2 应用授权-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resourceAssign/queryById",
+      "kind": "readonly",
+      "description": "4.5.5.3 查询应用授权-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resourceAssign/queryByName",
+      "kind": "readonly",
+      "description": "4.5.5.4 查询应用授权-基于名称"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/nodeGroup/queryAll",
+      "kind": "readonly",
+      "description": "4.5.6.1 查询代理网关节点区域"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/resource/createResourceGroup",
+      "kind": "mutation",
+      "description": "4.6.1.1 新增应用分类"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/resource/updateResourceGroup",
+      "kind": "mutation",
+      "description": "4.6.2.1 修改应用分类"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/resource/deleteResourceGroup",
+      "kind": "mutation",
+      "description": "4.6.3.1 批量删除应用分类"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/resourceGroup/queryAll",
+      "kind": "readonly",
+      "description": "4.6.4.1 查询应用分类列表"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resourceGroup/assignById",
+      "kind": "mutation",
+      "description": "4.6.5.1 应用分类授权-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resourceGroup/assignByName",
+      "kind": "mutation",
+      "description": "4.6.5.2 应用分类授权-基于名称"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resourceGroupAssign/queryById",
+      "kind": "readonly",
+      "description": "4.6.5.3 查询应用分类授权-基于id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/resourceGroupAssign/queryByName",
+      "kind": "readonly",
+      "description": "4.6.5.4 查询应用分类授权-基于名称"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/authServer/queryAll",
+      "kind": "readonly",
+      "description": "4.7.1 查询认证服务器列表"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/authServer/query",
+      "kind": "readonly",
+      "description": "4.7.2 查询认证服务器详情"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/userDirectory/queryAll",
+      "kind": "readonly",
+      "description": "4.8.1 查询用户目录列表"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/userDirectory/create",
+      "kind": "mutation",
+      "description": "4.8.2 新增用户目录"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/userDirectory/query",
+      "kind": "readonly",
+      "description": "4.8.3 查询用户目录详情"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/userDirectory/update",
+      "kind": "mutation",
+      "description": "4.8.4 修改用户目录"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/userDirectory/delete",
+      "kind": "mutation",
+      "description": "4.8.5 删除用户目录"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/create",
+      "kind": "mutation",
+      "description": "4.9.1 新增终端信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/update",
+      "kind": "mutation",
+      "description": "4.9.2 修改终端信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/delete",
+      "kind": "mutation",
+      "description": "4.9.3 删除终端信息"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/device/query",
+      "kind": "readonly",
+      "description": "4.9.4 查询单个终端信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/queryAll",
+      "kind": "readonly",
+      "description": "4.9.5 查询全量终端信息"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/assignUser",
+      "kind": "mutation",
+      "description": "4.9.6 终端绑定用户"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/unassignUser",
+      "kind": "mutation",
+      "description": "4.9.7 终端解绑用户"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/setTag",
+      "kind": "mutation",
+      "description": "4.9.8 终端设置标签"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/device/unsetTag",
+      "kind": "mutation",
+      "description": "4.9.9 终端取消标签"
+    }
+  ]
+}

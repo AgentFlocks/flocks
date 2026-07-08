@@ -1,0 +1,36 @@
+name: chaitin_dongjian_api_mutation
+description: Chaitin Dongjian documented mutation REST caller with confirmation.
+description_cn: 长亭洞鉴文档内变更类 REST 调用工具。所有调用都需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: chaitin_dongjian_api
+version: "2.8"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_mutation
+    method:
+      type: string
+      description: HTTP 方法，必须和 catalog 中 kind=mutation 的 method/path 匹配。
+    path:
+      type: string
+      description: REST 路径，例如 /plan/create/。
+    path_params:
+      type: object
+      description: 路径参数。
+    query:
+      type: object
+      description: Query string 参数。
+    body:
+      description: JSON body，按洞鉴 OpenAPI V2.8 对应接口填写。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_dongjian.handler.py
+  function: api_mutation

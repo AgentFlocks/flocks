@@ -1,0 +1,70 @@
+schema_version: 1
+provider: sangfor_atrust
+
+connectivity:
+  tool: sangfor_atrust_identity
+  params:
+    action: auth_server_list
+
+fixtures:
+  sangfor_atrust_monitor:
+    - label: Query online users
+      label_cn: 查询在线用户
+      tags: [smoke, monitor]
+      params:
+        action: online_users
+        pageSize: 20
+        pageIndex: 1
+      assert:
+        success: true
+  sangfor_atrust_identity:
+    - label: List authentication servers
+      label_cn: 查询认证服务器列表
+      tags: [smoke, identity]
+      params:
+        action: auth_server_list
+      assert:
+        success: true
+    - label: List user directories
+      label_cn: 查询用户目录列表
+      tags: [identity]
+      params:
+        action: user_directory_list
+
+  sangfor_atrust_resource:
+    - label: List applications
+      label_cn: 查询应用列表
+      tags: [resource]
+      params:
+        action: resource_list
+        pageSize: 20
+        pageIndex: 1
+      assert:
+        success: true
+
+  sangfor_atrust_endpoint:
+    - label: List endpoints
+      label_cn: 查询终端信息
+      tags: [endpoint]
+      params:
+        action: endpoint_list
+        pageSize: 20
+        pageIndex: 1
+
+  sangfor_atrust_api_readonly:
+    - label: Show API catalog
+      label_cn: 查看 API 目录
+      tags: [api]
+      params:
+        action: api_catalog
+      assert:
+        success: true
+
+  sangfor_atrust_api_mutation:
+    - label: Show API catalog before confirmed mutation
+      label_cn: 变更调用前查看 API 目录
+      tags: [api, mutation]
+      params:
+        action: api_catalog
+      assert:
+        success: true

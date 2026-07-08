@@ -154,6 +154,8 @@ export interface SessionChatProps {
   onStreamingDone?: () => void;
   /** Auto-send this message on mount via prompt_async */
   initialMessage?: string | null;
+  /** Optional short display text for the auto-sent initialMessage bubble. */
+  initialDisplayText?: string | null;
   /** Called immediately after initialMessage has been consumed (sent) */
   onInitialMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
@@ -1450,6 +1452,7 @@ export default function SessionChat({
   onNodeRefDismiss,
   onStreamingDone,
   initialMessage,
+  initialDisplayText,
   agentName,
   model,
   display,
@@ -2761,12 +2764,17 @@ export default function SessionChat({
   // Immediately notifies parent so the message won't re-send if selectedSessionId changes.
   useEffect(() => {
     if (!initialMessage || !sessionId) return;
-    const sentKey = `${sessionId}::${initialMessage}`;
+    const sentKey = `${sessionId}::${initialMessage}::${initialDisplayText ?? ''}`;
     if (initialMessageSentRef.current === sentKey) return;
     initialMessageSentRef.current = sentKey;
-    sendText(initialMessage).catch(() => {});
+    sendText(
+      initialMessage,
+      [],
+      undefined,
+      initialDisplayText ? { displayText: initialDisplayText } : undefined,
+    ).catch(() => {});
     onInitialMessageConsumed?.();
-  }, [initialMessage, sessionId]);
+  }, [initialDisplayText, initialMessage, sessionId]);
 
   const insertMention = useCallback((name: string) => {
     const currentValue = textareaRef.current?.value ?? input;

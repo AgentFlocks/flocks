@@ -1,0 +1,7 @@
+{
+  "_comment": "stream_alert_triage runtime defaults. Workflow inputs override these values.",
+  "triage_output_mode": "soc_db",
+  "soc_db_path": "~/.flocks/data/soc.db",
+  "persist_triage_output": false,
+  "jsonl_output_dir": ""
+}

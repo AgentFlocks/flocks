@@ -358,6 +358,55 @@ class FlocksProConfig(BaseModel):
     url: Optional[str] = None
 
 
+class UIConfig(BaseModel):
+    """WebUI display preferences."""
+
+    model_config = {"populate_by_name": True}
+
+    display_name: Optional[str] = Field(
+        None,
+        alias="displayName",
+        max_length=48,
+        description="Custom product display name used by visible WebUI branding.",
+    )
+    favicon_path: Optional[str] = Field(
+        None,
+        alias="faviconPath",
+        max_length=256,
+        description="Relative path to a custom WebUI favicon stored in the user config directory.",
+    )
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("displayName must be a string")
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+            raise ValueError("displayName must not contain control characters")
+        return normalized
+
+    @field_validator("favicon_path", mode="before")
+    @classmethod
+    def normalize_favicon_path(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("faviconPath must be a string")
+        normalized = value.strip().replace("\\", "/")
+        if not normalized:
+            return None
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            raise ValueError("faviconPath must be a safe relative path")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+            raise ValueError("faviconPath must not contain control characters")
+        return normalized
+
+
 class ExperimentalConfig(BaseModel):
     """Experimental features configuration"""
     model_config = {"extra": "allow", "populate_by_name": True}
@@ -619,6 +668,7 @@ class ConfigInfo(BaseModel):
     )
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
     flockspro: Optional[FlocksProConfig] = None
+    ui: Optional[UIConfig] = None
     compaction: Optional[CompactionConfig] = None
     tool_output: Optional[ToolOutputConfig] = Field(
         None,

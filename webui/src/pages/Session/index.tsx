@@ -11,8 +11,15 @@ import i18n from '@/i18n';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SuiteInstallProgressPanel, {
+  applySuiteInstallProgressEvent,
+  createSuiteInstallProgressState,
+  failSuiteInstallProgress,
+  type SuiteInstallProgressState,
+} from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
+import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
@@ -36,6 +43,8 @@ function sanitizeSessionExportName(value: string) {
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
+const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
+const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ChatModelOption = {
   key: string;
@@ -128,7 +137,10 @@ export default function SessionPage() {
   const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
+  const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
+  const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
+  const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
@@ -334,6 +346,7 @@ export default function SessionPage() {
   useEffect(() => {
     const sessionParam = searchParams.get('session');
     const messageParam = searchParams.get('message');
+    const displayParam = searchParams.get('display');
     if (!sessionParam) return;
 
     if (sessionParam !== selectedSessionId) {
@@ -342,6 +355,9 @@ export default function SessionPage() {
     if (sessionParam) {
       if (messageParam) {
         setPendingInitialMessage(messageParam);
+        setPendingInitialDisplayText(displayParam ? buildInstructionDisplayText(displayParam) : null);
+      } else {
+        setPendingInitialDisplayText(null);
       }
       setSearchParams({}, { replace: true });
     }
@@ -552,6 +568,7 @@ export default function SessionPage() {
     imageParts?: ImagePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
+    options?: PromptDisplayOptions,
   ) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
@@ -567,6 +584,7 @@ export default function SessionPage() {
       const effectiveAgent = agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (modelOverride) payload.model = modelOverride;
+      if (options?.displayText) payload.displayText = options.displayText;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
       });
@@ -574,6 +592,57 @@ export default function SessionPage() {
       toast.error(t('createFailed'), err.message);
     }
   }, [addSession, selectedAgent, toast, t]);
+
+  const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
+    setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
+  }, []);
+
+  const handleAlertOperationsSetup = useCallback(async () => {
+    if (installingSocWorkspace) return;
+
+    setInstallingSocWorkspace(true);
+    let startedComponentInstall = false;
+    try {
+      const { data } = await hubAPI.catalog({ type: 'component', q: SOC_WORKSPACE_COMPONENT_ID });
+      const component = data.find((item) => item.id === SOC_WORKSPACE_COMPONENT_ID && item.type === 'component');
+
+      if (!component) {
+        toast.error(t('welcome.socComponentMissingTitle'), t('welcome.socComponentMissingDescription'));
+        return;
+      }
+
+      if (!INSTALLED_HUB_STATES.has(component.state)) {
+        const confirmed = window.confirm(t('welcome.socComponentInstallConfirm'));
+        if (!confirmed) return;
+        startedComponentInstall = true;
+        setSuiteInstallProgress(createSuiteInstallProgressState(component));
+        await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
+      }
+
+      await handleCreateAndSend(
+        t('welcome.alertOperationsSuggestion'),
+        [],
+        undefined,
+        selectedPromptModel,
+        { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
+      );
+    } catch (err: any) {
+      const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
+      if (startedComponentInstall) {
+        setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
+          id: SOC_WORKSPACE_COMPONENT_ID,
+          name: 'SOC Workspace Component',
+          nameCn: 'SOC 工作区场景套件',
+        }, message));
+      }
+      toast.error(
+        t('welcome.socComponentInstallFailedTitle'),
+        message,
+      );
+    } finally {
+      setInstallingSocWorkspace(false);
+    }
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();
@@ -1023,18 +1092,29 @@ export default function SessionPage() {
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
-          onInitialMessageConsumed={() => setPendingInitialMessage(null)}
+          initialDisplayText={pendingInitialDisplayText}
+          onInitialMessageConsumed={() => {
+            setPendingInitialMessage(null);
+            setPendingInitialDisplayText(null);
+          }}
           onSseStatusChange={selectedSessionId ? setSseStatus : undefined}
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
           onCreateNewSession={handleCreateSession}
-          onStreamingDone={() => setPendingInitialMessage(null)}
+          onStreamingDone={() => {
+            setPendingInitialMessage(null);
+            setPendingInitialDisplayText(null);
+          }}
           supportsVision={effectiveSupportsVision}
           contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (
-            <WelcomeScreen onSuggestion={setInput} />
+            <WelcomeScreen
+              onSuggestion={setInput}
+              onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
+              alertOperationsBusy={installingSocWorkspace}
+            />
           )}
           toolbarSlot={
             <div className="relative" data-agent-selector>
@@ -1259,6 +1339,14 @@ export default function SessionPage() {
         </div>
       )}
 
+      {suiteInstallProgress && (
+        <SuiteInstallProgressPanel
+          progress={suiteInstallProgress}
+          language={i18n.language}
+          onClose={() => setSuiteInstallProgress(null)}
+        />
+      )}
+
       {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
       {openMenuSessionId && menuAnchor && (() => {
         const sid = openMenuSessionId;
@@ -1312,7 +1400,15 @@ export default function SessionPage() {
 
 // ── Welcome Screen (shown when no messages) ──
 
-function WelcomeScreen({ onSuggestion }: { onSuggestion: (text: string) => void }) {
+function WelcomeScreen({
+  onSuggestion,
+  onAlertOperationsSetup,
+  alertOperationsBusy,
+}: {
+  onSuggestion: (text: string) => void;
+  onAlertOperationsSetup: () => void;
+  alertOperationsBusy: boolean;
+}) {
   const { t } = useTranslation('session');
   return (
     <div className="text-center max-w-2xl px-8">
@@ -1324,11 +1420,16 @@ function WelcomeScreen({ onSuggestion }: { onSuggestion: (text: string) => void 
 
       <div className="flex flex-wrap gap-3 justify-center">
         <button
-          onClick={() => onSuggestion(t('welcome.alertTriageSuggestion'))}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-slate-400 hover:bg-slate-50 transition-all duration-200 shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-slate-500/70 dark:hover:bg-zinc-800 dark:hover:shadow-none"
+          onClick={onAlertOperationsSetup}
+          disabled={alertOperationsBusy}
+          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-slate-400 hover:bg-slate-50 transition-all duration-200 shadow-sm hover:shadow-md disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-slate-500/70 dark:hover:bg-zinc-800 dark:hover:shadow-none"
         >
-          <Shield className="w-5 h-5 text-slate-600" />
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.alertTriage')}</span>
+          {alertOperationsBusy ? (
+            <Loader2 className="w-5 h-5 animate-spin text-slate-600" />
+          ) : (
+            <Shield className="w-5 h-5 text-slate-600" />
+          )}
+          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.alertOperations')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}

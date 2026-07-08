@@ -1,12 +1,21 @@
 # SkyEye Sensor 查询参考
 
-CLI 路径：`./.flocks/skills/skyeye-sensor-data-fetch/scripts/skyeye_sensor_cli.py`
+CLI 路径：`scripts/skyeye_sensor_cli.py`（相对于 `skill_load` 输出的 Base directory）
 
-建议在 `./.flocks/skills/skyeye-sensor-data-fetch/scripts` 目录执行，并通过环境变量提供认证信息：
+执行前必须先进入 `skill_load` 输出的 Base directory，或把命令工具的 `workdir` 设置为该目录。不要假设当前工作目录在 skill 目录，也不要拼未加引号的绝对路径。
+
+Windows PowerShell：
+
+```powershell
+Set-Location -LiteralPath '<skill-load 输出的 Base directory>'
+uv run python scripts/skyeye_sensor_auth.py --base-url 'https://<skyeye-sensor-domain>' validate
+```
+
+macOS / Linux：
 
 ```bash
-export SKYEYE_SENSOR_BASE_URL="https://<skyeye-sensor-domain>"
-export SKYEYE_SENSOR_AUTH_STATE="$HOME/.flocks/browser/skyeye-sensor/auth-state.json"
+cd "<skill-load 输出的 Base directory>"
+uv run python scripts/skyeye_sensor_auth.py --base-url 'https://<skyeye-sensor-domain>' validate
 ```
 
 备选认证方式（无 state 文件时）：
@@ -23,13 +32,13 @@ export SKYEYE_SENSOR_AUTH_STATE="$HOME/.flocks/browser/skyeye-sensor/auth-state.
 
 ```bash
 # 告警明细
-uv run python skyeye_sensor_cli.py alarm list --days 7 --page 1 --page-size 10
+uv run python scripts/skyeye_sensor_cli.py alarm list --days 7 --page 1 --page-size 10
 
 # 按条件过滤
-uv run python skyeye_sensor_cli.py alarm list --hours 6 --sip "1.1.1.1"
+uv run python scripts/skyeye_sensor_cli.py alarm list --hours 6 --sip "1.1.1.1"
 
 # 告警统计
-uv run python skyeye_sensor_cli.py alarm count --days 1 --sip "1.1.1.1"
+uv run python scripts/skyeye_sensor_cli.py alarm count --days 1 --sip "1.1.1.1"
 ```
 
 ## 适用范围
@@ -98,19 +107,19 @@ uv run python skyeye_sensor_cli.py alarm count --days 1 --sip "1.1.1.1"
 
 ```bash
 # 最近 7 天，某源 IP 的告警
-uv run python skyeye_sensor_cli.py alarm list --days 7 --sip "1.1.1.1"
+uv run python scripts/skyeye_sensor_cli.py alarm list --days 7 --sip "1.1.1.1"
 
 # 最近 24 小时，高危 + 严重告警
-uv run python skyeye_sensor_cli.py alarm list --hours 24 --hazard-level "3,2"
+uv run python scripts/skyeye_sensor_cli.py alarm list --hours 24 --hazard-level "3,2"
 
 # 指定威胁类型 + 主机状态
-uv run python skyeye_sensor_cli.py alarm list \
+uv run python scripts/skyeye_sensor_cli.py alarm list \
   --days 7 \
   --threat-type "2,3" \
   --host-state "0,1,2,-1"
 
 # 只统计数量
-uv run python skyeye_sensor_cli.py alarm count --days 1 --sip "1.1.1.1"
+uv run python scripts/skyeye_sensor_cli.py alarm count --days 1 --sip "1.1.1.1"
 ```
 
 ---

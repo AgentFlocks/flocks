@@ -7,6 +7,7 @@ import type { Message } from '@/types';
 
 import {
   areChatMessagePartsRenderEqual,
+  buildInstructionDisplayText,
   buildContextUsageBreakdown,
   buildTodoSummary,
   ChatMessageBubble,
@@ -894,6 +895,24 @@ describe('SessionChat instruction display text', () => {
 
     expect(screen.getByText('智能配置')).toBeInTheDocument();
     expect(screen.queryByText(/Please read guide\.md/)).not.toBeInTheDocument();
+  });
+
+  it('sends initialMessage with an instruction display label', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'Please create a SOC workspace custom page.',
+      initialDisplayText: buildInstructionDisplayText('创建 SOC 自定义页面'),
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          displayText: '@@flocks-instruction:创建 SOC 自定义页面',
+          parts: expect.any(Array),
+        }),
+      );
+    });
   });
 });
 

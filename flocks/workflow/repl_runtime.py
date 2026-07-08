@@ -46,6 +46,12 @@ def _drain_text_stream(stream: TextIO, chunks: list[str]) -> None:
 
 @dataclass
 class PythonExecRuntime(Runtime):
+    """Trusted host-process runtime.
+
+    This class intentionally is not a security sandbox. Untrusted workflow
+    execution must use SandboxPythonExecRuntime plus authenticated entrypoints.
+    """
+
     globals: Dict[str, Any] = field(default_factory=dict)
     tool_registry: Optional[Any] = None  # FlocksToolAdapter or compatible
     cancel_checker: Optional[Callable[[], bool]] = None

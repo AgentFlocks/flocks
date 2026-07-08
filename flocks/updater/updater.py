@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, AsyncGenerator, Awaitable, Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
@@ -197,17 +197,6 @@ def _windows_paths_match(left: str, right: str) -> bool:
 def _looks_like_windows_python_launcher(entry: str) -> bool:
     """Return True when *entry* looks like a Windows Python launcher."""
     return _windows_path_stem(entry) in {"python", "pythonw", "py"}
-
-
-def _is_windows_file_in_use_error(exc: BaseException) -> bool:
-    """Return True when *exc* looks like a Windows file-lock failure."""
-    if sys.platform != "win32":
-        return False
-    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 32:
-        return True
-
-    text = str(exc).lower()
-    return "winerror 32" in text or "used by another process" in text
 
 
 def _is_uv_managed_python_runtime_error(text: str) -> bool:
@@ -1082,31 +1071,15 @@ def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str
     return "tar.gz"
 
 
-def _console_manifest_display_version(data: dict[str, Any]) -> str:
-    display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
-    if display_version:
-        return display_version
-    core_version = str(data.get("core_version") or "").strip()
-    if core_version:
-        return core_version
-    oss_version = str(data.get("oss_version") or "").strip()
-    if oss_version:
-        return oss_version
-    compare_version = str(data.get("compare_version") or "").strip()
-    return f"v{compare_version}" if compare_version and not compare_version.startswith(("v", "V")) else compare_version
+def _console_manifest_bundle_version(data: dict[str, Any]) -> str:
+    return str(data.get("bundle_version") or "").strip()
 
 
 def _pro_bundle_core_version(data: dict[str, Any]) -> str:
-    core_version = str(data.get("core_version") or "").strip()
-    if core_version:
-        return core_version
-    oss_version = str(data.get("oss_version") or "").strip()
-    if oss_version:
-        return oss_version
-    return _console_manifest_display_version(data)
+    return str(data.get("core_version") or "").strip()
 
 
-def _pro_bundle_oss_version(data: dict[str, Any]) -> str:
+def _pro_bundle_core_version_for_compare(data: dict[str, Any]) -> str:
     return _pro_bundle_core_version(data)
 
 
@@ -1117,23 +1090,42 @@ def _version_label(version: str | None) -> str:
     return normalized if normalized.startswith(("v", "V")) else f"v{normalized}"
 
 
-def _is_pro_bundle_oss_older_than_local(manifest: dict[str, Any], current_version: str | None = None) -> bool:
-    bundle_oss_version = _pro_bundle_oss_version(manifest)
-    if not bundle_oss_version:
+def _is_pro_bundle_core_older_than_local(manifest: dict[str, Any], current_version: str | None = None) -> bool:
+    bundle_core_version = _pro_bundle_core_version_for_compare(manifest)
+    if not bundle_core_version:
         return False
     local_version = str(current_version or get_current_version() or "").strip()
     if not local_version:
         return False
-    return _parse_version(bundle_oss_version) < _parse_version(local_version)
+    return _parse_version(bundle_core_version) < _parse_version(local_version)
 
 
-def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_oss_version: str) -> dict[str, Any]:
+def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_core_version: str) -> dict[str, Any]:
     payload = dict(manifest)
-    effective_label = _version_label(effective_oss_version)
+    effective_label = _version_label(effective_core_version)
     if effective_label:
         payload["core_version"] = effective_label
-        payload["oss_version"] = effective_label
     return payload
+
+
+def _required_pro_bundle_marker_value(manifest: dict[str, Any], key: str) -> str:
+    value = str(manifest.get(key) or "").strip()
+    if not value:
+        raise ValueError(f"Pro bundle manifest missing required {key}")
+    return value
+
+
+def _validate_pro_bundle_marker_manifest(manifest: dict[str, Any]) -> None:
+    for key in ("bundle_version", "core_version", "flockspro_component_version"):
+        _required_pro_bundle_marker_value(manifest, key)
+
+
+def _pro_bundle_core_version_for_marker(manifest: dict[str, Any]) -> str:
+    return _required_pro_bundle_marker_value(manifest, "core_version")
+
+
+def _pro_bundle_core_version_or_empty(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("core_version") or "").strip()
 
 
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
@@ -1222,6 +1214,17 @@ async def _fetch_gitlab_release(
     )
 
 
+def _read_local_pro_license_id() -> str:
+    license_path = _flocks_root() / "flockspro" / "license.json"
+    try:
+        payload = json.loads(license_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("license_id") or "").strip()
+
+
 async def _load_console_session_token() -> str | None:
     def _token_from_payload(payload: Any) -> str | None:
         if not isinstance(payload, dict):
@@ -1273,8 +1276,14 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
         raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置，无法使用 console-manifest 源")
 
     channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
-    url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
+    license_id = (os.getenv("FLOCKSPRO_LICENSE_ID") or _read_local_pro_license_id()).strip()
+    query = {"channel": channel}
+    if license_id:
+        query["license_id"] = license_id
+    url = f"{manifest_base}/v1/manifest/latest?{urlencode(query)}"
     headers: dict[str, str] = {}
+    if license_id:
+        headers["x-license-id"] = license_id
     token = str(console_session_token or "").strip() or await _load_console_session_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -1297,9 +1306,9 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
         if datetime.now(timezone.utc) < frozen_until:
             raise ValueError("console manifest channel frozen_until not reached")
 
-    latest = _console_manifest_display_version(data)
+    latest = _console_manifest_bundle_version(data)
     if not latest:
-        raise ValueError("manifest 响应缺少 compare_version/display_version")
+        raise ValueError("manifest 响应缺少 bundle_version")
     bundle_url = str(
         data.get("bundle_url")
         or data.get("url")
@@ -1848,13 +1857,12 @@ def _merge_console_manifest_release_identity(
         merged["release_id"] = release_id
     if bundle_release_id and not merged.get("bundle_release_id"):
         merged["bundle_release_id"] = bundle_release_id
-    for key in ("display_version", "version", "latest_version", "compare_version", "flockspro_component_version", "build_id"):
+    for key in ("bundle_version", "compare_version", "flockspro_component_version", "build_id"):
         if console_manifest.get(key):
             merged[key] = console_manifest.get(key)
-    core_version = console_manifest.get("core_version") or console_manifest.get("oss_version") or merged.get("core_version") or merged.get("oss_version")
+    core_version = console_manifest.get("core_version") or merged.get("core_version")
     if core_version:
         merged["core_version"] = core_version
-        merged["oss_version"] = core_version
     return merged
 
 
@@ -1863,22 +1871,104 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
     marker.parent.mkdir(parents=True, exist_ok=True)
     release_id = manifest.get("release_id") or manifest.get("bundle_release_id")
     bundle_release_id = manifest.get("bundle_release_id") or manifest.get("release_id")
-    display_version = _console_manifest_display_version(manifest)
-    core_version = manifest.get("core_version") or manifest.get("oss_version")
+    bundle_version = _required_pro_bundle_marker_value(manifest, "bundle_version")
+    core_version = _required_pro_bundle_marker_value(manifest, "core_version")
+    pro_component_version = _required_pro_bundle_marker_value(manifest, "flockspro_component_version")
     payload = {
         "release_id": release_id,
         "bundle_release_id": bundle_release_id,
-        "bundle_version": display_version,
-        "display_version": display_version,
-        "installed_version": display_version,
+        "bundle_version": bundle_version,
         "core_version": core_version,
-        "oss_version": core_version,
-        "flockspro_component_version": manifest.get("flockspro_component_version"),
+        "flockspro_component_version": pro_component_version,
         "build_id": manifest.get("build_id"),
         "bundle_sha256": bundle_sha256 or manifest.get("bundle_sha256"),
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    _write_pending_pro_bundle_install_receipt(payload)
+
+
+def _write_pending_pro_bundle_install_receipt(marker_payload: dict[str, Any]) -> None:
+    receipt_path = _pending_pro_bundle_install_receipt_path()
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_version = str(
+        marker_payload.get("bundle_version")
+        or ""
+    ).strip()
+    core_version = str(marker_payload.get("core_version") or "").strip()
+    pro_component_version = str(marker_payload.get("flockspro_component_version") or "").strip()
+    receipt = {
+        "release_id": marker_payload.get("release_id") or marker_payload.get("bundle_release_id"),
+        "bundle_release_id": marker_payload.get("bundle_release_id") or marker_payload.get("release_id"),
+        "license_id": _read_local_pro_license_id() or None,
+        "bundle_version": bundle_version,
+        "core_version": core_version,
+        "flockspro_component_version": pro_component_version,
+        "build_id": marker_payload.get("build_id"),
+        "install_result": "success",
+        "reported_at": datetime.now(timezone.utc).isoformat(),
+    }
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(receipt_path, 0o600)
+    except OSError:
+        pass
+
+
+def _pending_pro_bundle_install_receipt_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+def _pro_bundle_install_marker_path() -> Path:
+    return _flocks_root() / "run" / "pro-bundle-installed.json"
+
+
+def _archive_json_marker(path: Path, archive_name: str, reason: str | None = None) -> None:
+    if not path.exists():
+        return
+    archive_dir = path.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    archived = archive_dir / f"{archive_name}-{suffix}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload["archived_at"] = datetime.now(timezone.utc).isoformat()
+            payload["archive_reason"] = reason or "downgraded_to_oss"
+            archived.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        else:
+            shutil.copy2(path, archived)
+    except Exception:
+        shutil.copy2(path, archived)
+    path.unlink(missing_ok=True)
+
+
+def _archive_pro_bundle_install_marker(reason: str | None = None) -> None:
+    _archive_json_marker(_pro_bundle_install_marker_path(), "pro-bundle-installed", reason)
+
+
+def _archive_pending_pro_bundle_install_receipt(reason: str | None = None) -> None:
+    _archive_json_marker(
+        _pending_pro_bundle_install_receipt_path(),
+        "pro-bundle-install-receipt-pending",
+        reason,
+    )
+
+
+async def _uninstall_pro_component(
+    *,
+    uv_path: str,
+    install_root: Path,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    python_path = _venv_python_path(install_root)
+    if not python_path.exists():
+        return f"Python environment may need manual repair: missing {python_path}"
+    cmd = [uv_path, "pip", "uninstall", "--python", str(python_path), "flockspro"]
+    code, _, err = await _run_async(cmd, cwd=install_root, timeout=180, env=env)
+    if code != 0:
+        return f"Flocks Pro component uninstall failed: {err}"
+    return None
 
 
 class _NullConsole:
@@ -1888,13 +1978,15 @@ class _NullConsole:
 
 def _current_service_config():
     from flocks.cli import service_manager
+    from flocks.cli.service_config import service_config_from_status_payload
+    from flocks.cli.service_control import read_supervisor_status
 
-    paths = service_manager.ensure_runtime_dirs()
-    return service_manager.ServiceConfig(
-        backend_host=service_manager._recorded_host(paths.backend_pid, service_manager.ServiceConfig.backend_host),
-        backend_port=service_manager._recorded_port(paths.backend_pid, service_manager.ServiceConfig.backend_port),
-        frontend_host=service_manager._recorded_host(paths.frontend_pid, service_manager.ServiceConfig.frontend_host),
-        frontend_port=service_manager._recorded_port(paths.frontend_pid, service_manager.ServiceConfig.frontend_port),
+    try:
+        status = read_supervisor_status(paths=service_manager.runtime_paths(), timeout=1.0)
+    except Exception as exc:
+        raise RuntimeError("Supervisor control API is unavailable; cannot perform managed upgrade restart.") from exc
+    return service_config_from_status_payload(
+        status.raw,
         no_browser=True,
         skip_frontend_build=True,
     )
@@ -2035,7 +2127,11 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
 
     from flocks.cli import service_manager
 
-    remaining = service_manager.port_owner_pids(frontend_port)
+    remaining = [
+        pid
+        for pid in service_manager.port_owner_pids(frontend_port)
+        if _looks_like_upgrade_page_process(pid)
+    ]
     if remaining:
         log.info(
             "updater.upgrade_page.port_fallback_kill",
@@ -2057,7 +2153,7 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
         wait_attempts = 40
         wait_interval = 0.25
         for _ in range(wait_attempts):
-            if not service_manager.port_owner_pids(frontend_port):
+            if not any(_looks_like_upgrade_page_process(pid) for pid in service_manager.port_owner_pids(frontend_port)):
                 return
             time.sleep(wait_interval)
         return
@@ -2066,8 +2162,23 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
         time.sleep(0.3)
 
 
+def _looks_like_upgrade_page_process(pid: int) -> bool:
+    """Return True only for the temporary upgrade-page http.server process."""
+    try:
+        from flocks.cli import service_manager
+
+        command_line = service_manager._process_command_line(pid).lower()
+    except Exception:
+        return False
+    if not command_line:
+        return False
+    page_dir = str(_upgrade_page_dir()).lower()
+    return "http.server" in command_line and "upgrade-page" in command_line and page_dir in command_line
+
+
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     from flocks.cli import service_manager
+    from flocks.cli.service_control import request_prepare_upgrade
 
     config = _current_service_config()
     payload: dict[str, Any] = {
@@ -2082,9 +2193,8 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     _persist_upgrade_state(payload, last_error=None)
 
     console = _NullConsole()
-    paths = service_manager.ensure_runtime_dirs()
-    frontend_port = service_manager._recorded_port(paths.frontend_pid, config.frontend_port)
-    service_manager.stop_one(frontend_port, paths.frontend_pid, "WebUI", console)
+    paths = service_manager.runtime_paths()
+    request_prepare_upgrade(paths=paths, timeout=30.0)
 
     try:
         payload.update(_start_upgrade_page_server(config, version))
@@ -2097,7 +2207,7 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
         _stop_upgrade_page_server(frontend_port=config.frontend_port)
         _clear_upgrade_state()
         try:
-            service_manager.start_frontend(config, console)
+            _start_frontend_with_fallback(config, console, allow_build_fallback=False)
         except Exception as restart_error:
             log.error("updater.frontend.restore_failed", {"error": str(restart_error)})
         raise
@@ -2105,24 +2215,54 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     return payload
 
 
+def _spawn_restart_handoff(command: list[str], *, cwd: Path) -> subprocess.Popen:
+    creationflags = 0
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            kwargs["startupinfo"] = startupinfo
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, cwd=cwd, close_fds=True, creationflags=creationflags, **kwargs)
+
+
 def _service_config_from_payload(
     payload: dict[str, Any],
     *,
     skip_frontend_build: bool | None = None,
 ):
-    from flocks.cli import service_manager
+    from flocks.cli.service_config import ServiceConfig, service_config_from_payload
 
     resolved_skip_frontend_build = (
         bool(payload.get("skip_frontend_build", True)) if skip_frontend_build is None else skip_frontend_build
     )
-    return service_manager.ServiceConfig(
-        backend_host=str(payload.get("backend_host") or service_manager.ServiceConfig.backend_host),
-        backend_port=int(payload.get("backend_port") or service_manager.ServiceConfig.backend_port),
-        frontend_host=str(payload.get("frontend_host") or service_manager.ServiceConfig.frontend_host),
-        frontend_port=int(payload.get("frontend_port") or service_manager.ServiceConfig.frontend_port),
+    migrated_payload = dict(payload)
+    backend_port = migrated_payload.get("backend_port")
+    frontend_port = migrated_payload.get("frontend_port")
+    if isinstance(backend_port, int) and isinstance(frontend_port, int) and backend_port != frontend_port:
+        migrated_payload["legacy_backend_host"] = migrated_payload.get("backend_host")
+        migrated_payload["legacy_backend_port"] = backend_port
+        migrated_payload["backend_host"] = migrated_payload.get("frontend_host") or migrated_payload.get("backend_host")
+        migrated_payload["backend_port"] = frontend_port
+        migrated_payload["server_port_migration_hint"] = True
+    return service_config_from_payload(
+        migrated_payload,
+        default=ServiceConfig(),
         no_browser=True,
         skip_frontend_build=resolved_skip_frontend_build,
     )
+
+
+def _handoff_service_config():
+    payload = _read_upgrade_state()
+    if payload is not None:
+        return _service_config_from_payload(payload, skip_frontend_build=True)
+    return _current_service_config()
 
 
 def _read_upgrade_server_pid() -> tuple[int | None, bool]:
@@ -2180,25 +2320,31 @@ def read_upgrade_runtime_state(frontend_port: int | None = None) -> dict[str, An
     }
 
 
+def _webui_runtime_ready(state: str) -> bool:
+    return state in {"healthy", "static"}
+
+
 def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool) -> None:
-    from flocks.cli import service_manager
+    from flocks.cli.service_config import with_frontend_build
+    from flocks.cli.service_control import request_restart_webui, request_resume_upgrade
 
     try:
-        service_manager.start_frontend(config, console)
+        status = request_resume_upgrade(
+            config,
+            paths=None,
+            timeout=180.0,
+        )
+        if not _webui_runtime_ready(status.webui.state):
+            raise RuntimeError(status.webui.last_error or "WebUI restart did not become healthy")
         return
     except Exception:
         if not allow_build_fallback or not config.skip_frontend_build:
             raise
 
-    rebuilt_config = service_manager.ServiceConfig(
-        backend_host=config.backend_host,
-        backend_port=config.backend_port,
-        frontend_host=config.frontend_host,
-        frontend_port=config.frontend_port,
-        no_browser=config.no_browser,
-        skip_frontend_build=False,
-    )
-    service_manager.start_frontend(rebuilt_config, console)
+    rebuilt_config = with_frontend_build(config, skip_frontend_build=False)
+    result = request_restart_webui(rebuilt_config, force_frontend_build=True, paths=None, timeout=180.0)
+    if not _webui_runtime_ready(result.webui.state):
+        raise RuntimeError(result.webui.last_error or "WebUI restart did not become healthy")
 
 
 def cleanup_orphan_upgrade_state(*, frontend_port: int | None = None) -> bool:
@@ -2531,35 +2677,13 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _read_pro_bundle_installed_bundle_version() -> str:
-    payload = _read_pro_bundle_install_marker()
-    for key in ("bundle_version", "installed_version", "display_version"):
-        version = str(payload.get(key) or "").strip()
-        if version:
-            return version
-    return ""
-
-
-def _read_pro_bundle_installed_core_version() -> str:
-    payload = _read_pro_bundle_install_marker()
-    for key in ("core_version", "oss_version"):
-        version = str(payload.get(key) or "").strip()
-        if version:
-            return version
-    return ""
-
-
-def _read_pro_bundle_installed_component_version() -> str:
-    payload = _read_pro_bundle_install_marker()
-    return str(payload.get("flockspro_component_version") or "").strip()
-
-
 def _current_pro_version_state(local_core_version: str) -> ProVersionState:
-    core_version = _pick_newer_version(_read_pro_bundle_installed_core_version(), local_core_version)
+    marker = _read_pro_bundle_install_marker()
+    core_version = _pro_bundle_core_version_or_empty(marker) if marker else local_core_version
     return ProVersionState(
-        bundle_version=_version_label(_read_pro_bundle_installed_bundle_version()),
+        bundle_version=_version_label(str(marker.get("bundle_version") or "").strip()),
         core_version=_version_label(core_version),
-        pro_component_version=_read_pro_bundle_installed_component_version() or None,
+        pro_component_version=str(marker.get("flockspro_component_version") or "").strip() or None,
     )
 
 
@@ -2579,16 +2703,6 @@ def _is_newer_version(latest: str | None, current: str | None) -> bool:
     if not current_version:
         return True
     return _parse_version(latest_version) > _parse_version(current_version)
-
-
-def _pick_newer_version(left: str | None, right: str | None) -> str:
-    left_version = str(left or "").strip()
-    right_version = str(right or "").strip()
-    if not left_version:
-        return right_version
-    if not right_version:
-        return left_version
-    return left_version if _parse_version(left_version) >= _parse_version(right_version) else right_version
 
 
 def get_current_version() -> str:
@@ -2878,6 +2992,138 @@ async def perform_pro_bundle_install(
         yield progress
 
 
+async def perform_pro_bundle_downgrade(
+    *,
+    restart: bool = True,
+    reason: str | None = None,
+    after_uninstall: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncGenerator[UpdateProgress, None]:
+    """Remove the local Pro component and return this installation to OSS runtime."""
+    from flocks.updater.deploy import detect_deploy_mode
+
+    if detect_deploy_mode() == "docker":
+        yield UpdateProgress(
+            stage="error",
+            message="Downgrading to OSS is not supported in Docker deployments. Please redeploy with the OSS image.",
+            success=False,
+        )
+        return
+
+    install_root = _get_repo_root()
+    current_version = get_current_version()
+    marker = _read_pro_bundle_install_marker()
+    component_installed = _is_pro_component_installed()
+    if not component_installed and not marker:
+        yield UpdateProgress(stage="done", message="Already running the OSS edition.", success=True)
+        return
+    try:
+        oss_core_version = _pro_bundle_core_version_for_marker(marker) if marker else current_version
+    except ValueError as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Downgrade failed: {exc}. Cannot safely report OSS core version without the install marker.",
+            success=False,
+        )
+        return
+
+    yield UpdateProgress(stage="checking", message="Checking local Pro installation...")
+    uv_path = _find_executable("uv")
+    if not uv_path:
+        yield UpdateProgress(
+            stage="error",
+            message="Downgrade failed: uv is required but was not found.",
+            success=False,
+        )
+        return
+
+    sync_env = _build_uv_sync_env()
+    yield UpdateProgress(stage="downgrading", message="Removing Flocks Pro component...")
+    uninstall_error = await _uninstall_pro_component(uv_path=uv_path, install_root=install_root, env=sync_env)
+    if uninstall_error is not None:
+        yield UpdateProgress(stage="error", message=uninstall_error, success=False)
+        return
+
+    if after_uninstall is not None:
+        yield UpdateProgress(stage="reporting", message="Reporting OSS downgrade to Console...")
+        try:
+            await after_uninstall()
+        except Exception as exc:
+            log.warning("updater.downgrade.report_failed_pending_retry", {"error": str(exc)})
+
+    try:
+        if oss_core_version:
+            _write_version_marker(oss_core_version.lstrip("v"))
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but version marker update failed: {exc}",
+            success=False,
+        )
+        return
+
+    try:
+        _archive_pending_pro_bundle_install_receipt(reason=reason or "downgraded_to_oss")
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but pending install receipt cleanup failed: {exc}",
+            success=False,
+        )
+        return
+
+    try:
+        _archive_pro_bundle_install_marker(reason=reason or "downgraded_to_oss")
+    except Exception as exc:
+        yield UpdateProgress(
+            stage="error",
+            message=f"Flocks Pro component was removed, but install marker cleanup failed: {exc}",
+            success=False,
+        )
+        return
+
+    if not restart:
+        try:
+            _refresh_global_cli_entry(install_root)
+        except Exception as exc:
+            log.warning("updater.refresh_cli.failed", {"error": str(exc)})
+        yield UpdateProgress(stage="done", message="Downgraded to OSS edition.", success=True)
+        return
+
+    yield UpdateProgress(stage="restarting", message="Restarting service...")
+    await asyncio.sleep(0.8)
+
+    if "--reload" in sys.argv:
+        log.info("updater.downgrade.reload_exit3")
+        sys.exit(3)
+
+    try:
+        restart_argv = _build_restart_argv(install_root)
+        sync_timeout = _dependency_sync_timeout_seconds()
+        handoff_argv = _build_restart_handoff_argv(
+            restart_argv,
+            install_root,
+            uv_path=uv_path,
+            sync_timeout=sync_timeout,
+            version=oss_core_version or current_version,
+            current_version=current_version,
+        )
+        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv})
+        subprocess.Popen(
+            handoff_argv,
+            cwd=install_root,
+            close_fds=True,
+        )
+        os._exit(0)
+    except Exception as exc:
+        log.error("updater.downgrade.restart_failed", {"error": str(exc)})
+        yield UpdateProgress(
+            stage="error",
+            message=f"Failed to restart service after downgrade: {exc}",
+            success=False,
+        )
+        return
+
+
 async def perform_update(
     latest_tag: str,
     *,
@@ -2914,7 +3160,6 @@ async def perform_update(
     current_version = get_current_version()
     effective_update_version = current_version
     skip_core_replace = False
-    handover_active = False
     console_manifest_info: ConsoleManifestRelease | None = None
     console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
     fmt = _choose_archive_format(ucfg.archive_format)
@@ -3058,6 +3303,7 @@ async def perform_update(
                 pro_bundle_manifest,
                 console_manifest_payload,
             )
+            _validate_pro_bundle_marker_manifest(pro_bundle_manifest)
         if profile.sources == ["console-manifest"] and pro_wheel_path is None:
             raise ValueError("Pro bundle 中未找到 flockspro wheel")
     except Exception as exc:
@@ -3069,16 +3315,16 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
     if profile.sources == ["console-manifest"]:
-        skip_core_replace = _is_pro_bundle_oss_older_than_local(pro_bundle_manifest, current_version)
+        skip_core_replace = _is_pro_bundle_core_older_than_local(pro_bundle_manifest, current_version)
         if skip_core_replace:
-            bundle_oss_version = _pro_bundle_oss_version(pro_bundle_manifest)
+            bundle_core_version = _pro_bundle_core_version_for_compare(pro_bundle_manifest)
             pro_bundle_manifest = _effective_pro_bundle_manifest(pro_bundle_manifest, current_version)
             log.info(
                 "updater.pro_bundle.keep_local_core",
-                {"local_version": current_version, "bundle_oss_version": bundle_oss_version},
+                {"local_version": current_version, "bundle_core_version": bundle_core_version},
             )
         else:
-            effective_update_version = latest_tag
+            effective_update_version = _pro_bundle_core_version_for_marker(pro_bundle_manifest)
     else:
         effective_update_version = latest_tag
 
@@ -3106,20 +3352,7 @@ async def perform_update(
     )
 
     async def _restore_after_apply_failure() -> None:
-        nonlocal handover_active
         if backup_path is None:
-            if handover_active:
-                await asyncio.to_thread(rollback_upgrade_handover)
-                handover_active = False
-            return
-        if handover_active:
-            await asyncio.to_thread(
-                _rollback_failed_update,
-                backup_path,
-                install_root,
-                current_version,
-            )
-            handover_active = False
             return
         await asyncio.to_thread(
             _restore_backup_if_possible,
@@ -3137,28 +3370,6 @@ async def perform_update(
             )
     except Exception as exc:
         final_replace_error: Exception | None = exc
-        if (
-            sys.platform == "win32"
-            and restart
-            and needs_handover
-            and not handover_active
-            and _is_windows_file_in_use_error(exc)
-        ):
-            log.warning("updater.replace.locked_retry_with_handover", {"error": str(exc)})
-            try:
-                _prepare_upgrade_handover(latest_tag)
-                handover_active = True
-                if not skip_core_replace:
-                    await asyncio.to_thread(
-                        _replace_install_dir,
-                        content_root,
-                        install_root,
-                    )
-            except Exception as retry_exc:
-                final_replace_error = retry_exc
-            else:
-                final_replace_error = None
-
         if final_replace_error is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             await _restore_after_apply_failure()
@@ -3255,32 +3466,12 @@ async def perform_update(
         restart_argv = _build_restart_argv(install_root)
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
-        if handover_active:
-            try:
-                rollback_upgrade_handover()
-            except Exception:
-                pass
-            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to build restart command: {exc}",
             success=False,
         )
         return
-
-    if needs_handover and not handover_active:
-        try:
-            _prepare_upgrade_handover(latest_tag)
-            handover_active = True
-        except Exception as exc:
-            log.error("updater.handover.failed", {"error": str(exc)})
-            await _restore_after_apply_failure()
-            yield UpdateProgress(
-                stage="error",
-                message=f"Failed to prepare WebUI handover: {exc}",
-                success=False,
-            )
-            return
 
     try:
         handoff_argv = _build_restart_handoff_argv(
@@ -3297,6 +3488,7 @@ async def perform_update(
             pro_bundle_manifest_path=pro_bundle_manifest_path,
             bundle_sha256=bundle_sha256,
             cleanup_dir=tmp_dir,
+            prepare_handover=needs_handover,
         )
         log.info(
             "updater.restart.handoff_spawn",
@@ -3305,21 +3497,11 @@ async def perform_update(
                 "restart_argv": restart_argv,
             },
         )
-        subprocess.Popen(
-            handoff_argv,
-            cwd=install_root,
-            close_fds=True,
-        )
+        _spawn_restart_handoff(handoff_argv, cwd=install_root)
         os._exit(0)
     except Exception as exc:
         log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if handover_active:
-            try:
-                rollback_upgrade_handover()
-            except Exception:
-                pass
-            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to restart service: {exc}",
@@ -3440,15 +3622,29 @@ def _build_restart_handoff_argv(
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
     cleanup_dir: Path | None = None,
+    prepare_handover: bool = False,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
-    from flocks.cli import service_manager
-
     if not restart_argv:
         raise ValueError("restart command is empty")
 
-    config = _current_service_config()
-    paths = service_manager.ensure_runtime_dirs()
+    config = _handoff_service_config()
+    managed_restart_argv = [
+        restart_argv[0],
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        str(config.backend_host),
+        "--port",
+        str(config.backend_port),
+    ]
+    if config.legacy_backend_host is not None:
+        managed_restart_argv.extend(["--server-host", str(config.legacy_backend_host)])
+    if config.legacy_backend_port is not None:
+        managed_restart_argv.extend(["--server-port", str(config.legacy_backend_port)])
     argv = [
         restart_argv[0],
         "-m",
@@ -3463,8 +3659,6 @@ def _build_restart_handoff_argv(
         str(config.frontend_host),
         "--frontend-port",
         str(config.frontend_port),
-        "--backend-pid-file",
-        str(paths.backend_pid),
         "--install-root",
         str(install_root),
         "--uv-path",
@@ -3490,7 +3684,9 @@ def _build_restart_handoff_argv(
         argv.extend(["--bundle-sha256", bundle_sha256])
     if cleanup_dir is not None:
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
-    argv.extend(["--", *restart_argv])
+    if prepare_handover:
+        argv.append("--prepare-handover")
+    argv.extend(["--", *managed_restart_argv])
     return argv
 
 
