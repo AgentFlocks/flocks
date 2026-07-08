@@ -1,0 +1,40 @@
+name: sangfor_atrust_api_readonly
+description: Sangfor aTrust OpenAPI V3 documented read-only REST caller.
+description_cn: 深信服 aTrust OpenAPI V3 文档内只读 REST 调用工具。使用 api_catalog 查看已收录 API，再用 rest_call_readonly 调用 kind=readonly 的 method/path。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_atrust
+version: "3"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_readonly
+        - online_users
+        - auth_server_list
+        - user_directory_list
+        - resource_list
+        - endpoint_list
+        - test
+    method:
+      type: string
+      description: HTTP 方法，必须和 catalog 中 kind=readonly 的 method/path 匹配。
+    path:
+      type: string
+      description: REST 路径，例如 /api/v3/resource/queryAll。
+    query:
+      type: object
+      description: Query string 参数。
+    body:
+      type: object
+      description: JSON body；部分只读查询接口使用 POST body。
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_atrust.handler.py
+  function: api_readonly

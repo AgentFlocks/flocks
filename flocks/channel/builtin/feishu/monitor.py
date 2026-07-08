@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import importlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -42,6 +43,7 @@ log = Log.create(service="channel.feishu.monitor")
 _CHAT_LOCKS_MAX = 2000
 _WS_ACCOUNT_RECONNECT_DELAY_S = 1.0
 _WS_ACCOUNT_RECONNECT_MAX_DELAY_S = 30.0
+_MENTION_KEY_EDGE_RE = r"[A-Za-z0-9_.+@-]"
 
 
 class _ObservedWSClient:
@@ -774,7 +776,7 @@ def _parse_event(
     for m in mentions:
         mention_key = m.get("key", "")
         if mention_key:
-            mention_text = mention_text.replace(mention_key, "").strip()
+            mention_text = _strip_mention_key(mention_text, mention_key)
 
     sender_id = sender.get("open_id", "")
     # Some mobile messages may only have user_id, not open_id
@@ -801,6 +803,15 @@ def _parse_event(
         reply_to_id=msg_data.get("parent_id") or None,
         raw=data,
     )
+
+
+def _strip_mention_key(text: str, mention_key: str) -> str:
+    """Remove a Feishu mention key without touching emails or identifiers."""
+    pattern = re.compile(
+        rf"(?<!{_MENTION_KEY_EDGE_RE}){re.escape(mention_key)}"
+        rf"(?!{_MENTION_KEY_EDGE_RE})"
+    )
+    return pattern.sub("", text).strip()
 
 
 # ---------------------------------------------------------------------------

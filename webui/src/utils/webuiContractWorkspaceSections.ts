@@ -1,4 +1,8 @@
-import type { WebUIContractPageListItem, WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+import type {
+  WebUIContractPageListItem,
+  WebUIContractWorkspaceListItem,
+  WebUIContractWorkspaceSection,
+} from '@/api/webuiContractPages';
 
 export type WebUIContractWorkspaceContentPadding = 'comfortable' | 'none';
 export type WebUIContractWorkspaceThemeOverride = 'light' | 'dark';
@@ -12,14 +16,39 @@ export interface WebUIContractWorkspaceSectionView {
   themeOverride: WebUIContractWorkspaceThemeOverride | null;
 }
 
-function sortWorkspacePages(pages: WebUIContractPageListItem[]): WebUIContractPageListItem[] {
-  return [...pages].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
+function isChineseLanguage(language?: string | null): boolean {
+  return (language ?? '').toLowerCase().replace('_', '-').startsWith('zh');
+}
+
+export function getLocalizedWebUIContractTitle(
+  item: Pick<WebUIContractPageListItem | WebUIContractWorkspaceListItem, 'title' | 'titleEn'>,
+  language?: string | null,
+): string {
+  return !isChineseLanguage(language) && item.titleEn?.trim() ? item.titleEn : item.title;
+}
+
+function getLocalizedSectionLabel(section: WebUIContractWorkspaceSection, language?: string | null): string {
+  return !isChineseLanguage(language) && section.labelEn?.trim() ? section.labelEn : section.label;
+}
+
+function localizePage(page: WebUIContractPageListItem, language?: string | null): WebUIContractPageListItem {
+  return {
+    ...page,
+    title: getLocalizedWebUIContractTitle(page, language),
+  };
+}
+
+function sortWorkspacePages(pages: WebUIContractPageListItem[], language?: string | null): WebUIContractPageListItem[] {
+  return [...pages].sort((a, b) => (
+    a.order - b.order || getLocalizedWebUIContractTitle(a, language).localeCompare(getLocalizedWebUIContractTitle(b, language))
+  ));
 }
 
 export function buildWebUIContractWorkspaceSections(
   workspace: WebUIContractWorkspaceListItem,
+  language?: string | null,
 ): WebUIContractWorkspaceSectionView[] {
-  const pages = sortWorkspacePages(workspace.pages);
+  const pages = sortWorkspacePages(workspace.pages, language);
   const pageById = new Map(pages.map((page) => [page.id, page]));
   const configuredSections = workspace.sections ?? [];
 
@@ -35,8 +64,8 @@ export function buildWebUIContractWorkspaceSections(
           : sectionPages[0].id;
         return {
           id: section.id,
-          label: section.label,
-          pages: sectionPages,
+          label: getLocalizedSectionLabel(section, language),
+          pages: sectionPages.map((page) => localizePage(page, language)),
           defaultPageId,
           contentPadding: section.contentPadding ?? 'comfortable',
           themeOverride: section.themeOverride ?? null,
@@ -53,8 +82,8 @@ export function buildWebUIContractWorkspaceSections(
   return [
     {
       id: 'pages',
-      label: '页面',
-      pages,
+      label: isChineseLanguage(language) ? '页面' : 'Pages',
+      pages: pages.map((page) => localizePage(page, language)),
       defaultPageId,
       contentPadding: 'comfortable',
       themeOverride: null,

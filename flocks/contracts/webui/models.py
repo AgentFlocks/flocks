@@ -12,6 +12,7 @@ class WebUIPageManifest(BaseModel):
 
     id: str = Field(..., description="Stable page identifier")
     title: str = Field(..., description="Navigation label")
+    titleEn: Optional[str] = Field(None, description="English navigation label", alias="titleEn")
     route: str = Field(..., description="WebUI route path")
     icon: str = Field("LayoutDashboard", description="Lucide icon name")
     order: int = Field(100, description="Sort order in navigation")
@@ -29,6 +30,7 @@ class WebUIWorkspaceManifest(BaseModel):
 
     id: str = Field(..., description="Stable workspace identifier")
     title: str = Field(..., description="Navigation label")
+    titleEn: Optional[str] = Field(None, description="English navigation label", alias="titleEn")
     icon: str = Field("LayoutDashboard", description="Lucide icon name")
     order: int = Field(100, description="Sort order in navigation")
     enabled: bool = Field(True, description="Whether workspace appears in navigation")
@@ -48,6 +50,7 @@ class WebUIWorkspaceSectionManifest(BaseModel):
 
     id: str = Field(..., description="Stable section identifier")
     label: str = Field(..., description="Section label")
+    labelEn: Optional[str] = Field(None, description="English section label", alias="labelEn")
     pageIds: list[str] = Field(
         default_factory=list,
         description="Page ids in this section",
@@ -96,6 +99,7 @@ class WebUIPageListItem(BaseModel):
 
     id: str
     title: str
+    titleEn: Optional[str] = Field(None, alias="titleEn")
     route: str
     icon: str
     order: int
@@ -105,6 +109,7 @@ class WebUIPageListItem(BaseModel):
     buildStatus: str = Field("idle", alias="buildStatus")
     workspaceId: Optional[str] = Field(None, alias="workspaceId")
     workspaceTitle: Optional[str] = Field(None, alias="workspaceTitle")
+    workspaceTitleEn: Optional[str] = Field(None, alias="workspaceTitleEn")
     workspaceRoute: Optional[str] = Field(None, alias="workspaceRoute")
 
 
@@ -113,6 +118,7 @@ class WebUIWorkspaceListItem(BaseModel):
 
     id: str
     title: str
+    titleEn: Optional[str] = Field(None, alias="titleEn")
     route: str
     icon: str
     order: int

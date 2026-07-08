@@ -28,6 +28,10 @@ def install_root(plugin_type: PluginType, scope: str = "global") -> Path:
         return root / "agents"
     if plugin_type == "workflow":
         return root / "workflows"
+    if plugin_type == "webui":
+        return root / "contracts" / "webui"
+    if plugin_type == "component":
+        return root / "components"
     if plugin_type == "device":
         # Device plugins live as a subdirectory of tools/ so the runtime
         # tool loader (which expects ``<plugins>/tools/<group>/<id>/``)
@@ -99,6 +103,15 @@ def has_install_payload(plugin_type: PluginType, path: Path) -> bool:
         return (path / "agent.yaml").is_file()
     if plugin_type == "workflow":
         return (path / "workflow.json").is_file() or (path / "workflow.md").is_file()
+    if plugin_type == "webui":
+        if path.is_file():
+            return False
+        return (path / "workspace.json").is_file() or any(
+            candidate.name == "manifest.json" and candidate.is_file()
+            for candidate in path.rglob("manifest.json")
+        )
+    if plugin_type == "component":
+        return path.is_dir() and (path / "component.json").is_file()
     if plugin_type in {"tool", "device"}:
         if path.is_file():
             return path.suffix in {".yaml", ".yml", ".py"}
@@ -122,12 +135,14 @@ def make_record(
     install_path: Path,
     enabled: bool = True,
     scope: str = "global",
+    installed_by: Optional[str] = None,
 ) -> InstalledPluginRecord:
     return InstalledPluginRecord(
         id=plugin_id,
         type=plugin_type,
         version=version,
         source=source,
+        installedBy=installed_by,
         installedAt=int(time.time() * 1000),
         enabled=enabled,
         scope="project" if scope == "project" else "global",
@@ -149,12 +164,16 @@ def infer_local_install(plugin_type: PluginType, plugin_id: str) -> Optional[Pat
                 base / "device" / plugin_id,
                 base / "mcp" / plugin_id,
                 base / "generated" / plugin_id,
+                base / "python" / plugin_id,
             ):
                 if has_install_payload(plugin_type, nested):
                     return nested
-            for candidate in base.rglob(f"{plugin_id}.yaml"):
-                if has_install_payload(plugin_type, candidate.parent):
-                    return candidate.parent
+            for suffix in (".yaml", ".yml", ".py"):
+                for candidate in base.rglob(f"{plugin_id}{suffix}"):
+                    if has_install_payload(plugin_type, candidate):
+                        return candidate
+                    if has_install_payload(plugin_type, candidate.parent):
+                        return candidate.parent
     if plugin_type == "device":
         # Device installs live under ``<tools>/device/<id>/``. We already
         # checked the canonical path above via ``install_dir``; the loop
@@ -172,7 +191,7 @@ def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
     """Scan installed plugin roots once and return plugin id -> install path."""
     result: dict[tuple[PluginType, str], Path] = {}
 
-    for plugin_type in ("skill", "agent", "workflow"):
+    for plugin_type in ("skill", "agent", "workflow", "webui", "component"):
         for scope in ("global", "project"):
             base = install_root(plugin_type, scope)
             if not base.is_dir():
@@ -194,7 +213,7 @@ def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
         # device`` in ``_provider.yaml``), so we surface those entries
         # keyed as ``("device", id)`` instead of ``("tool", id)`` to keep
         # the catalog state in sync with the runtime install path.
-        for group in ("api", "device", "mcp", "generated"):
+        for group in ("api", "device", "mcp", "generated", "python"):
             group_dir = base / group
             if not group_dir.is_dir():
                 continue
@@ -202,6 +221,12 @@ def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
             for child in group_dir.iterdir():
                 if child.is_dir() and has_install_payload("tool", child):
                     result.setdefault((entry_type, child.name), child)
+                elif (
+                    child.is_file()
+                    and child.suffix in {".yaml", ".yml", ".py"}
+                    and has_install_payload("tool", child)
+                ):
+                    result.setdefault(("tool", child.stem), child)
         for candidate in base.rglob("*"):
             if not candidate.is_file() or candidate.name == "__init__.py":
                 continue

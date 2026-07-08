@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "sangfor_atrust_v3",
+  "type": "device",
+  "name": "Sangfor aTrust Zero Trust",
+  "description": "Sangfor aTrust Zero Trust Access Control OpenAPI V3 integration.",
+  "descriptionCn": "深信服 aTrust 零信任访问控制系统 OpenAPI V3 接入。",
+  "version": "3.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "category": "integration",
+  "tags": [
+    "iam",
+    "network",
+    "integration"
+  ],
+  "useCases": [
+    "integration",
+    "incident-response",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "device-integration",
+    "rest-api",
+    "hmac-auth"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/tools/device/sangfor_atrust_v3"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": true,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "_provider.yaml",
+    "_test.yaml",
+    "sangfor_atrust.handler.py",
+    "sangfor_atrust_api_catalog.json",
+    "sangfor_atrust_monitor.yaml",
+    "sangfor_atrust_identity.yaml",
+    "sangfor_atrust_resource.yaml",
+    "sangfor_atrust_endpoint.yaml",
+    "sangfor_atrust_api_readonly.yaml",
+    "sangfor_atrust_api_mutation.yaml"
+  ],
+  "checksums": {}
+}

@@ -178,11 +178,16 @@ async def test_uninstall_missing_tool_record_clears_device_template_cache(isolat
         lambda plugin_type: calls.append(f"device:{plugin_type}"),
     )
 
+    async def fake_refresh_runtime(plugin_type):
+        calls.append(f"refresh:{plugin_type}")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fake_refresh_runtime)
+
     removed = await uninstall_plugin("tool", "ghost_tool")
 
-    assert removed is False
+    assert removed is True
     assert local.get_record("tool", "ghost_tool") is None
-    assert calls == ["catalog", "device:tool"]
+    assert calls == ["catalog", "device:tool", "refresh:tool"]
 
 
 class TestBundledToolRoots:
