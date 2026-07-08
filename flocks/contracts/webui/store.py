@@ -223,6 +223,7 @@ class WebUIPagesStore:
                     WebUIPageListItem(
                         id=manifest.id,
                         title=manifest.title,
+                        titleEn=manifest.titleEn,
                         route=manifest.route,
                         icon=manifest.icon,
                         order=manifest.order,
@@ -232,6 +233,7 @@ class WebUIPagesStore:
                         buildStatus=build.status,
                         workspaceId=workspace.id if workspace else None,
                         workspaceTitle=workspace.title if workspace else None,
+                        workspaceTitleEn=workspace.titleEn if workspace else None,
                         workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
                     )
                 )
@@ -268,6 +270,7 @@ class WebUIPagesStore:
                         WebUIPageListItem(
                             id=page_manifest.id,
                             title=page_manifest.title,
+                            titleEn=page_manifest.titleEn,
                             route=page_manifest.route,
                             icon=page_manifest.icon,
                             order=page_manifest.order,
@@ -277,6 +280,7 @@ class WebUIPagesStore:
                             buildStatus=build.status,
                             workspaceId=manifest.id,
                             workspaceTitle=manifest.title,
+                            workspaceTitleEn=manifest.titleEn,
                             workspaceRoute=webui_contract_workspace_route(manifest.id),
                         )
                     )
@@ -285,6 +289,7 @@ class WebUIPagesStore:
                     WebUIWorkspaceListItem(
                         id=manifest.id,
                         title=manifest.title,
+                        titleEn=manifest.titleEn,
                         route=webui_contract_workspace_route(manifest.id),
                         icon=manifest.icon,
                         order=manifest.order,

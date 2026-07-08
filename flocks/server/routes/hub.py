@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from flocks.hub.catalog import category_counts, legacy_removed_plugin_message, list_catalog, load_manifest
@@ -14,6 +16,7 @@ from flocks.hub.models import (
     HubCatalogEntry,
     HubFileContent,
     HubFileNode,
+    HubInstallProgressEvent,
     HubPluginManifest,
     InstalledPluginRecord,
     PluginType,
@@ -113,6 +116,55 @@ async def hub_install_plugin(plugin_type: PluginType, plugin_id: str, req: HubIn
     except Exception as exc:
         log.error("hub.install.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/install/stream")
+async def hub_install_plugin_stream(plugin_type: PluginType, plugin_id: str, req: HubInstallRequest = HubInstallRequest()):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    if plugin_type != "component":
+        raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
+    try:
+        manifest = load_manifest(plugin_type, plugin_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def generate():
+        queue: asyncio.Queue[HubInstallProgressEvent | None] = asyncio.Queue()
+
+        async def emit(event: HubInstallProgressEvent) -> None:
+            await queue.put(event)
+
+        async def run_install() -> None:
+            try:
+                await install_plugin(plugin_type, plugin_id, scope=req.scope, progress=emit)
+            except Exception as exc:
+                log.error("hub.install_stream.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
+                await queue.put(
+                    HubInstallProgressEvent(
+                        event="error",
+                        id=manifest.id,
+                        type=manifest.type,
+                        name=manifest.name,
+                        nameCn=manifest.nameCn,
+                        total=len(manifest.components),
+                        message=str(exc),
+                    )
+                )
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run_install())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {event.model_dump_json()}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/update", response_model=InstalledPluginRecord)

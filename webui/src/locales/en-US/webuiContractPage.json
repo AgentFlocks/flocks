@@ -26,6 +26,11 @@
     "pageNotFound": "Page not found",
     "sectionNavigation": "Workspace page sections",
     "collapseSidebar": "Collapse sidebar",
-    "expandSidebar": "Expand sidebar"
+    "expandSidebar": "Expand sidebar",
+    "customPage": "Custom Page",
+    "customPageSessionTitle": "{{workspace}} Custom Page",
+    "customPageCreateError": "Failed to create a custom page session. Please try again later.",
+    "socCustomPageDisplayLabel": "Create SOC Custom Page",
+    "socCustomPageInitialMessage": "I want to create a new custom page in {{workspaceTitle}}. Strictly limit this to adding pages for the SOC workspace only: the workspace ID is `{{workspaceId}}`, the workspace route is `{{workspaceRoute}}`, the page directory should be created under `~/.flocks/plugins/contracts/webui/{{workspaceId}}/<page_dir>/`, and the new page should be added to the appropriate section in `~/.flocks/plugins/contracts/webui/{{workspaceId}}/workspace.json`. Do not create a global home navigation page, do not write to the `~/.flocks/plugins/contracts/webui/` root, and do not write to `~/.flocks/plugins/user_defined_pages/`. First guide me to confirm the page ID, title, target section (Posture, Alert Operations, or a new sibling section), data contract, and display content. Then create the page scaffold, implement the React page, build it, and explain how to preview it from the SOC workspace sidebar."
   }
 }

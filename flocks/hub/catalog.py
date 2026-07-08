@@ -157,6 +157,7 @@ def _base_manifest(
     name: str,
     description: str,
     category: str,
+    name_cn: Optional[str] = None,
     version: str = "1.0.0",
     description_cn: Optional[str] = None,
     tags: Optional[list[str]] = None,
@@ -175,6 +176,7 @@ def _base_manifest(
         id=plugin_id,
         type=plugin_type,
         name=name or plugin_id,
+        nameCn=name_cn,
         description=description or "",
         descriptionCn=description_cn,
         version=version or "1.0.0",
@@ -260,6 +262,14 @@ def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest
     description_raw = str(data.get("description") or "")
     description_en = str(data.get("description_en") or "").strip()
     description_cn = str(data.get("description_cn") or data.get("descriptionCn") or "").strip()
+    name_cn = str(
+        data.get("nameCn")
+        or data.get("name_cn")
+        or data.get("nameZh")
+        or data.get("zhName")
+        or data.get("cnName")
+        or ""
+    ).strip()
     description = description_en or description_raw
     if not description_cn and _contains_cjk(description_raw):
         description_cn = description_raw
@@ -267,6 +277,7 @@ def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest
         plugin_type="workflow",
         plugin_id=plugin_id,
         name=str(data.get("name") or data.get("id") or plugin_id),
+        name_cn=name_cn or None,
         description=description,
         category="workflow-automation",
         description_cn=description_cn or None,
@@ -551,6 +562,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
         id=manifest.id,
         type=manifest.type,
         name=manifest.name,
+        nameCn=getattr(manifest, "nameCn", None),
         description=manifest.description,
         descriptionCn=getattr(manifest, "descriptionCn", None),
         version=manifest.version,
@@ -606,6 +618,7 @@ def _entry_from_index(
         id=item.id,
         type=item.type,
         name=item.name,
+        nameCn=item.nameCn,
         description=item.description,
         descriptionCn=item.descriptionCn,
         version=item.version,
@@ -628,6 +641,7 @@ def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubC
         id=manifest.id,
         type=manifest.type,
         name=manifest.name,
+        nameCn=getattr(manifest, "nameCn", None),
         description=manifest.description,
         descriptionCn=getattr(manifest, "descriptionCn", None),
         version=manifest.version,
@@ -692,6 +706,7 @@ def _entry_from_bundled_tool(
         id=manifest.id,
         type=manifest.type,
         name=manifest.name,
+        nameCn=getattr(manifest, "nameCn", None),
         description=manifest.description,
         descriptionCn=getattr(manifest, "descriptionCn", None),
         version=manifest.version,

@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-PluginType = Literal["skill", "agent", "tool", "device", "workflow"]
+PluginType = Literal["skill", "agent", "tool", "device", "workflow", "webui", "component"]
 PluginState = Literal[
     "available",
     "installed",
@@ -49,6 +49,12 @@ class HubRisk(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class HubComponentRef(BaseModel):
+    type: PluginType
+    id: str
+    optional: bool = False
+
+
 class HubPluginManifest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -56,6 +62,7 @@ class HubPluginManifest(BaseModel):
     id: str
     type: PluginType
     name: str
+    nameCn: Optional[str] = None
     description: str = ""
     version: str = "0.0.0"
     author: Optional[str] = None
@@ -73,6 +80,7 @@ class HubPluginManifest(BaseModel):
     permissions: HubPermissions = Field(default_factory=HubPermissions)
     risk: HubRisk = Field(default_factory=HubRisk)
     entrypoints: list[str] = Field(default_factory=list)
+    components: list[HubComponentRef] = Field(default_factory=list)
     checksums: dict[str, str] = Field(default_factory=dict)
 
 
@@ -80,6 +88,7 @@ class HubIndexEntry(BaseModel):
     id: str
     type: PluginType
     name: str
+    nameCn: Optional[str] = None
     description: str = ""
     descriptionCn: Optional[str] = None
     version: str = "0.0.0"
@@ -103,6 +112,7 @@ class InstalledPluginRecord(BaseModel):
     type: PluginType
     version: str = "0.0.0"
     source: str = ""
+    installedBy: Optional[str] = None
     installedAt: int
     enabled: bool = True
     scope: Literal["global", "project"] = "global"
@@ -110,10 +120,37 @@ class InstalledPluginRecord(BaseModel):
     installPath: Optional[str] = None
 
 
+HubInstallProgressStatus = Literal["pending", "installing", "installed", "skipped", "failed", "completed"]
+
+
+class HubInstallProgressItem(BaseModel):
+    type: PluginType
+    id: str
+    name: Optional[str] = None
+    nameCn: Optional[str] = None
+    optional: bool = False
+    status: HubInstallProgressStatus = "pending"
+    message: Optional[str] = None
+
+
+class HubInstallProgressEvent(BaseModel):
+    event: Literal["start", "item", "complete", "error"]
+    id: str
+    type: PluginType
+    name: str
+    nameCn: Optional[str] = None
+    total: int = 0
+    item: Optional[HubInstallProgressItem] = None
+    items: list[HubInstallProgressItem] = Field(default_factory=list)
+    record: Optional[InstalledPluginRecord] = None
+    message: Optional[str] = None
+
+
 class HubCatalogEntry(BaseModel):
     id: str
     type: PluginType
     name: str
+    nameCn: Optional[str] = None
     description: str = ""
     descriptionCn: Optional[str] = None
     version: str = "0.0.0"

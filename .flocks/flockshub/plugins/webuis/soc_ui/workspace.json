@@ -1,0 +1,34 @@
+{
+  "id": "soc_ui",
+  "title": "SOC 工作区",
+  "titleEn": "SOC Workspace",
+  "icon": "ShieldCheck",
+  "order": 10,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "soc-overview",
+  "sections": [
+    {
+      "id": "posture",
+      "label": "态势",
+      "labelEn": "Posture",
+      "pageIds": [
+        "soc-dashboard"
+      ],
+      "defaultPageId": "soc-dashboard",
+      "contentPadding": "none",
+      "themeOverride": "dark"
+    },
+    {
+      "id": "operations",
+      "label": "告警运营",
+      "labelEn": "Alert Operations",
+      "pageIds": [
+        "soc-overview",
+        "soc-alerts"
+      ],
+      "defaultPageId": "soc-overview",
+      "contentPadding": "none"
+    }
+  ]
+}

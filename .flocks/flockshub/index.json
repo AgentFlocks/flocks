@@ -14633,6 +14633,119 @@
       "riskLevel": "low",
       "manifestPath": "plugins/tools/device/sangfor_atrust_v3/manifest.json",
       "descriptionCn": "深信服 aTrust 零信任访问控制系统 OpenAPI V3 接入。"
+    },
+    {
+      "id": "soc_ui",
+      "type": "webui",
+      "name": "SOC Workspace WebUI",
+      "description": "SOC workspace pages for posture, overview, and alert investigation.",
+      "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "siem",
+        "ndr",
+        "integration"
+      ],
+      "useCases": [
+        "alert-triage",
+        "log-analysis",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/webuis/soc_ui/manifest.json"
+    },
+    {
+      "id": "soc_workspace_query",
+      "type": "tool",
+      "name": "Flocks SOC Workspace Query",
+      "description": "Query information from Flocks own SOC workspace pages, including dashboard, overview, alert lists, alert details, triage reports, and workflow status.",
+      "descriptionCn": "查询 Flocks 自身 SOC 工作区里的信息，包括 dashboard、overview、告警调查列表、告警详情、研判报告和工作流状态。",
+      "version": "1.0.0",
+      "category": "integration",
+      "tags": [
+        "siem",
+        "ndr",
+        "integration"
+      ],
+      "useCases": [
+        "alert-triage",
+        "log-analysis",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "low",
+      "manifestPath": "plugins/tools/python/soc_workspace_query/manifest.json"
+    },
+    {
+      "id": "stream_alert_denoise",
+      "type": "workflow",
+      "name": "Stream Alert Denoise",
+      "nameCn": "流式HTTP降噪工作流",
+      "description": "Streaming alert denoise and deduplication pipeline with Syslog/API input.",
+      "descriptionCn": "流式告警降噪与去重工作流，支持 Syslog 和 API 输入。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "siem",
+        "ndr",
+        "web-security"
+      ],
+      "useCases": [
+        "alert-triage",
+        "log-analysis",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/workflows/stream_alert_denoise/manifest.json"
+    },
+    {
+      "id": "stream_alert_triage",
+      "type": "workflow",
+      "name": "Stream Alert Triage",
+      "nameCn": "HTTP研判工作流",
+      "description": "Downstream alert triage workflow that writes triage results to SOC DB by default with optional JSONL output.",
+      "descriptionCn": "下游告警研判工作流，默认写入 SOC DB，并保留 JSONL 输出配置。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "siem",
+        "ndr",
+        "web-security"
+      ],
+      "useCases": [
+        "alert-triage",
+        "log-analysis",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/workflows/stream_alert_triage/manifest.json"
+    },
+    {
+      "id": "soc-workspace",
+      "type": "component",
+      "name": "SOC Workspace Component",
+      "nameCn": "SOC 工作区场景套件",
+      "description": "Composite installer for the Flocks SOC workspace: pages, tools, denoise workflow, and triage workflow.",
+      "descriptionCn": "Flocks SOC 工作区组件安装器：包含页面、工具、降噪工作流和研判工作流。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "siem",
+        "ndr",
+        "integration"
+      ],
+      "useCases": [
+        "alert-triage",
+        "log-analysis",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/components/soc-workspace/manifest.json"
     }
   ]
 }

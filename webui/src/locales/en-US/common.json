@@ -270,7 +270,7 @@
       "securityApis": { "title": "Configure Security Tool APIs", "tags": ["ThreatBook", "VirusTotal", "FOFA", "URLScan", "Shodan"] },
       "channels": { "title": "Connect IM Channels", "tags": ["Feishu", "WeCom", "DingTalk", "Discord", "Telegram"] },
       "devices": { "title": "Connect NDR Devices", "tags": ["SkyEye", "TDP"] },
-      "scenes": { "title": "Scenarios Demo", "tags": ["Daily Intel", "Alert Triage", "Phishing Detection"] }
+      "scenes": { "title": "Scenarios Demo", "tags": ["Daily Intel", "Alert Operations", "Phishing Detection"] }
     }
   },
   "hookStatus": {
