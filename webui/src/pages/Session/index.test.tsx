@@ -98,7 +98,7 @@ vi.mock('@/components/common/LoadingSpinner', () => ({
 vi.mock('@/components/common/SessionChat', () => ({
   __esModule: true,
   buildInstructionDisplayText: (label: string) => `@@flocks-instruction:${label}`,
-  default: ({
+  default: function MockSessionChat({
     sessionId,
     mentionAgents,
     toolbarSlot,
@@ -137,7 +137,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       modelOverride?: unknown,
       options?: { displayText?: string },
     ) => Promise<unknown> | unknown;
-  }) => {
+  }) {
     const [input, setInput] = React.useState('');
     return (
       <div
