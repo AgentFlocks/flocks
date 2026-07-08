@@ -423,6 +423,31 @@ async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_
     assert not triage_dir.exists()
 
 
+async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
+    webui_access_dir = home_plugins / "contracts" / "access" / "soc_ui"
+
+    await install_plugin("webui", "soc_ui")
+    local.remove_installed_record("webui", "soc_ui")
+    assert (webui_dir / "workspace.json").is_file()
+    assert local.get_record("webui", "soc_ui") is None
+
+    await install_plugin("component", "soc-workspace")
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert not (home_plugins / "components" / "soc-workspace").exists()
+    assert not webui_dir.exists()
+    assert not webui_access_dir.exists()
+
+
 async def test_hub_component_install_failure_rolls_back_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
     async def fail_tool_refresh(plugin_type):
         if plugin_type == "tool":
@@ -448,6 +473,40 @@ async def test_hub_component_install_failure_rolls_back_children(isolated_hub_en
     assert local.get_record("component", "soc-workspace") is None
     assert local.get_record("webui", "soc_ui") is None
     assert local.get_record("tool", "soc_workspace_query") is None
+
+
+async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    component_key = "component:soc-workspace"
+    await install_plugin("webui", "soc_ui", installed_by=component_key)
+    await install_plugin("tool", "soc_workspace_query", installed_by=component_key)
+    await install_plugin("workflow", "stream_alert_denoise", installed_by=component_key)
+    await install_plugin("workflow", "stream_alert_triage", installed_by=component_key)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    component_dir = home_plugins / "components" / "soc-workspace"
+
+    assert not component_dir.exists()
+    assert local.get_record("component", "soc-workspace") is None
+    assert local.get_record("webui", "soc_ui").installedBy == component_key
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert local.get_record("webui", "soc_ui") is None
+    assert local.get_record("tool", "soc_workspace_query") is None
+    assert local.get_record("workflow", "stream_alert_denoise") is None
+    assert local.get_record("workflow", "stream_alert_triage") is None
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert not (home_plugins / "tools" / "python" / "soc_workspace_query").exists()
+    assert not (home_plugins / "workflows" / "stream_alert_denoise").exists()
+    assert not (home_plugins / "workflows" / "stream_alert_triage").exists()
 
 
 async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):

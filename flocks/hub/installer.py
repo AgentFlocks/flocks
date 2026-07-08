@@ -340,6 +340,15 @@ def _rollback_install_path(plugin_type: PluginType, plugin_id: str, install_path
     local.remove_installed_record(plugin_type, plugin_id)
 
 
+def _is_project_install_path(plugin_type: PluginType, install_path: Path) -> bool:
+    try:
+        project_root = local.install_root(plugin_type, "project").resolve()
+        resolved_install_path = install_path.resolve()
+    except OSError:
+        return False
+    return resolved_install_path == project_root or project_root in resolved_install_path.parents
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
@@ -393,17 +402,23 @@ async def _install_component_refs(
     return rollback_refs
 
 
-async def _uninstall_component_refs(manifest: HubPluginManifest) -> None:
+async def _uninstall_component_refs(manifest: HubPluginManifest) -> bool:
     component_key = f"component:{manifest.id}"
     seen: set[tuple[PluginType, str]] = set()
+    removed = False
     for ref in reversed(manifest.components):
         key = (ref.type, ref.id)
         if key in seen or ref.type == "component":
             continue
         seen.add(key)
         record = local.get_record(ref.type, ref.id)
-        if record is None or record.installedBy != component_key:
+        if record is None:
+            install_path = local.infer_local_install(ref.type, ref.id)
+            if install_path is None or _is_project_install_path(ref.type, install_path):
+                continue
+        elif record.installedBy != component_key:
             continue
+        removed = True
         try:
             await uninstall_plugin(ref.type, ref.id)
         except FileNotFoundError:
@@ -412,6 +427,7 @@ async def _uninstall_component_refs(manifest: HubPluginManifest) -> None:
             if ref.optional:
                 continue
             raise
+    return removed
 
 
 async def install_plugin(
@@ -514,8 +530,12 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     record = local.get_record(plugin_type, plugin_id)
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)
     if install_path is None or not install_path.exists():
+        children_removed = await _uninstall_component_refs(manifest) if manifest is not None else False
+        had_record = record is not None
         local.remove_installed_record(plugin_type, plugin_id)
-        return False
+        if manifest is not None and (children_removed or had_record):
+            await _refresh_runtime(plugin_type)
+        return children_removed or had_record
     project_root = local.install_root(plugin_type, "project").resolve()
     resolved_install_path = install_path.resolve()
     if resolved_install_path == project_root or project_root in resolved_install_path.parents:
