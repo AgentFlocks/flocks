@@ -34,6 +34,26 @@ def clear_update_check_cache() -> None:
     _update_check_inflight.clear()
 
 
+async def _run_update_check_for_cache(
+    key: tuple[str, str],
+    *,
+    locale: str | None,
+    edition: Literal["flocks", "flockspro"],
+) -> VersionInfo:
+    current_task = asyncio.current_task()
+    try:
+        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+        ttl = _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS if info.error else _UPDATE_CHECK_CACHE_TTL_SECONDS
+        async with _update_check_lock:
+            if _update_check_inflight.get(key) is current_task:
+                _update_check_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
+        return info
+    finally:
+        async with _update_check_lock:
+            if _update_check_inflight.get(key) is current_task:
+                _update_check_inflight.pop(key, None)
+
+
 async def _check_update_cached(
     *,
     locale: str | None,
@@ -47,7 +67,6 @@ async def _check_update_cached(
         _update_check_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
         return info
 
-    owner = False
     now = time.monotonic()
     async with _update_check_lock:
         cached = _update_check_cache.get(key)
@@ -57,24 +76,11 @@ async def _check_update_cached(
         task = _update_check_inflight.get(key)
         if task is None:
             task = asyncio.create_task(
-                check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+                _run_update_check_for_cache(key, locale=locale, edition=edition)
             )
             _update_check_inflight[key] = task
-            owner = True
 
-    try:
-        info = await task
-    finally:
-        if owner:
-            async with _update_check_lock:
-                if _update_check_inflight.get(key) is task:
-                    _update_check_inflight.pop(key, None)
-
-    if owner:
-        ttl = _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS if info.error else _UPDATE_CHECK_CACHE_TTL_SECONDS
-        async with _update_check_lock:
-            _update_check_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
-
+    info = await asyncio.shield(task)
     return info.model_copy(deep=True)
 
 

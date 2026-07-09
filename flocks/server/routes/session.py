@@ -54,6 +54,33 @@ def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[st
     return session_id, int(getattr(session.time, "updated", 0) or 0)
 
 
+async def _build_context_usage_for_cache(
+    key: Tuple[str, int],
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    current_task = asyncio.current_task()
+    try:
+        snapshot = await build_context_usage_snapshot(session_id, session=session)
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is not current_task:
+                return snapshot
+            for cache_key in [item for item in _context_usage_cache if item[0] == session_id and item[1] < key[1]]:
+                _context_usage_cache.pop(cache_key, None)
+            has_newer_cache = any(item[0] == session_id and item[1] > key[1] for item in _context_usage_cache)
+            if not has_newer_cache:
+                _context_usage_cache[key] = (
+                    time.monotonic() + _CONTEXT_USAGE_CACHE_TTL_SECONDS,
+                    snapshot.model_copy(deep=True),
+                )
+        return snapshot
+    finally:
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is current_task:
+                _context_usage_inflight.pop(key, None)
+
+
 async def _cached_context_usage_snapshot(
     session_id: str,
     *,
@@ -61,7 +88,6 @@ async def _cached_context_usage_snapshot(
 ) -> ContextUsageSnapshot:
     key = _context_usage_cache_key(session_id, session)
     now = time.monotonic()
-    owner = False
 
     async with _context_usage_cache_lock:
         cached = _context_usage_cache.get(key)
@@ -70,27 +96,10 @@ async def _cached_context_usage_snapshot(
 
         task = _context_usage_inflight.get(key)
         if task is None:
-            task = asyncio.create_task(build_context_usage_snapshot(session_id, session=session))
+            task = asyncio.create_task(_build_context_usage_for_cache(key, session_id, session=session))
             _context_usage_inflight[key] = task
-            owner = True
 
-    try:
-        snapshot = await task
-    finally:
-        if owner:
-            async with _context_usage_cache_lock:
-                if _context_usage_inflight.get(key) is task:
-                    _context_usage_inflight.pop(key, None)
-
-    if owner:
-        async with _context_usage_cache_lock:
-            for cache_key in [item for item in _context_usage_cache if item[0] == session_id and item != key]:
-                _context_usage_cache.pop(cache_key, None)
-            _context_usage_cache[key] = (
-                time.monotonic() + _CONTEXT_USAGE_CACHE_TTL_SECONDS,
-                snapshot.model_copy(deep=True),
-            )
-
+    snapshot = await asyncio.shield(task)
     return snapshot.model_copy(deep=True)
 
 # =============================================================================

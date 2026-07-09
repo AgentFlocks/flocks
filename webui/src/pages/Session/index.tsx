@@ -574,6 +574,7 @@ export default function SessionPage() {
         setPendingInitialMessage(messageParam);
         setPendingInitialDisplayText(displayParam ? buildInstructionDisplayText(displayParam) : null);
       } else {
+        setPendingInitialMessage(null);
         setPendingInitialDisplayText(null);
       }
       setSearchParams({}, { replace: true });
@@ -626,6 +627,8 @@ export default function SessionPage() {
         if (statusCode === 403 || statusCode === 404) {
           setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
           setSelectedSessionFallback(null);
+          setPendingInitialMessage(null);
+          setPendingInitialDisplayText(null);
           writeLastSelectedSessionId(null);
         }
       });

@@ -183,6 +183,48 @@ async def test_check_version_deduplicates_inflight_requests(monkeypatch: pytest.
     assert [item.current_version for item in results] == ["v1"] * 5
 
 
+async def test_check_version_keeps_inflight_task_after_cancelled_request(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _fake_check_update(**kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return VersionInfo(current_version=f"v{calls}")
+
+    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
+
+    first = asyncio.create_task(update_routes.check_version(_request(), locale="zh-CN", edition="flocks"))
+    second = None
+    try:
+        await started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(update_routes.check_version(_request(), locale="zh-CN", edition="flocks"))
+        await asyncio.sleep(0)
+        assert calls == 1
+
+        release.set()
+        result = await asyncio.wait_for(second, timeout=1)
+        assert result.current_version == "v1"
+
+        cached = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
+        assert cached.current_version == "v1"
+        assert calls == 1
+    finally:
+        release.set()
+        if second is not None and not second.done():
+            await asyncio.wait_for(second, timeout=1)
+
+
 @pytest.mark.skipif(
     os.environ.get(_MANUAL_REAL_UPGRADE_ENV) != "1",
     reason=f"manual real upgrade test; set {_MANUAL_REAL_UPGRADE_ENV}=1 to enable",

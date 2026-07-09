@@ -855,6 +855,27 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
+  it('drops a URL initial message when the target session no longer exists', async () => {
+    const user = userEvent.setup();
+    const message = 'Do not send this to another session';
+    sessionApi.get.mockRejectedValue({ response: { status: 404 } });
+
+    renderSessionPage(`/sessions?session=session-deleted&message=${encodeURIComponent(message)}`);
+
+    await waitFor(() => {
+      expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+    });
+
+    await user.click(screen.getByText('Original Session'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
+    });
+  });
+
   it('lists the same visible agents as the Agent page selector logic', async () => {
     const user = userEvent.setup();
     useAgents.mockReturnValue({
