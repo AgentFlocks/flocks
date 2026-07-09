@@ -112,7 +112,7 @@ async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
     monkeypatch.setitem(
         sys.modules,
         "flocks.tool.registry",
-        types.SimpleNamespace(ToolRegistry=types.SimpleNamespace(start_watcher=lambda: None)),
+        types.SimpleNamespace(ToolRegistry=types.SimpleNamespace(init=lambda: None, start_watcher=lambda: None)),
     )
     monkeypatch.setitem(
         sys.modules,

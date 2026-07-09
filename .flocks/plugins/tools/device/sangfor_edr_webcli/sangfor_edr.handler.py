@@ -27,13 +27,28 @@ from flocks.browser import helpers
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
 
-SERVICE_ID = "sangfor_edr"
+SERVICE_ID = "sangfor_edr_v1_0_0"
+LEGACY_SERVICE_ID = "sangfor_edr"
 USERNAME_SECRET_ID = "sangfor_edr_username"
 PASSWORD_SECRET_ID = "sangfor_edr_password"
 DEFAULT_AUTH_STATE_PATH = "~/.flocks/browser/sangfor-edr/auth-state.json"
 DEFAULT_LOGIN_PATH = "/ui/login.php"
 DEFAULT_INDEX_PATH = "/ui/#/index"
 DEFAULT_TIMEOUT = 25
+MAX_LOCAL_STORAGE_VALUE_BYTES = 100 * 1024
+CONFIG_KEYS = (
+    "base_url",
+    "auth_state_path",
+    "auto_ocr_code",
+    "max_captcha_retry",
+    "login_path",
+    "index_path",
+    "username_selector",
+    "password_selector",
+    "captcha_selector",
+    "agreement_selector",
+    "submit_selector",
+)
 
 
 class RuntimeConfig:
@@ -122,45 +137,116 @@ def _normalise_base_url(value: str) -> str:
     return f"{parsed.scheme}://{host}{port}".rstrip("/")
 
 
-def _save_params_to_service(params: dict[str, Any]) -> dict[str, Any]:
-    raw = ConfigWriter.get_api_service_raw(SERVICE_ID)
-    service = dict(raw) if isinstance(raw, dict) else {}
+def _direct_api_service(service_id: str) -> dict[str, Any]:
+    services = ConfigWriter.list_api_services_raw()
+    service = services.get(service_id) if isinstance(services, dict) else None
+    return dict(service) if isinstance(service, dict) else {}
 
-    for key in (
-        "base_url",
-        "auth_state_path",
-        "auto_ocr_code",
-        "max_captcha_retry",
-        "login_path",
-        "index_path",
-        "username_selector",
-        "password_selector",
-        "captcha_selector",
-        "agreement_selector",
-        "submit_selector",
-    ):
+
+def _has_device_context() -> bool:
+    try:
+        from flocks.tool.credential_context import get_active_device_id
+
+        return bool(get_active_device_id())
+    except Exception:
+        return False
+
+
+def _merge_missing(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(primary)
+    for key, value in fallback.items():
+        # Keep versioned/device values first, but let legacy fill missing fields.
+        if merged.get(key) in (None, "") and value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _load_service_config() -> dict[str, Any]:
+    versioned_or_override = ConfigWriter.get_api_service_raw(SERVICE_ID)
+    primary = dict(versioned_or_override) if isinstance(versioned_or_override, dict) else {}
+    if _has_device_context():
+        # Device-scoped calls must not borrow global legacy fields from another EDR.
+        return primary
+    return _merge_missing(primary, _direct_api_service(LEGACY_SERVICE_ID))
+
+
+def _save_params_to_service(params: dict[str, Any]) -> dict[str, Any]:
+    service = _load_service_config()
+    persist_credentials = _coerce_bool(params.get("persist_credentials"), default=True)
+
+    for key in CONFIG_KEYS:
         value = params.get(key)
         if value not in (None, ""):
             service[key] = value
 
-    secrets = _get_secret_manager()
     username = params.get("username")
     if isinstance(username, str) and username:
-        secrets.set(USERNAME_SECRET_ID, username)
-        service["username"] = f"{{secret:{USERNAME_SECRET_ID}}}"
+        if persist_credentials:
+            _get_secret_manager().set(USERNAME_SECRET_ID, username)
+            service["username"] = f"{{secret:{USERNAME_SECRET_ID}}}"
+        else:
+            service["username"] = username
 
     password = params.get("password")
     if isinstance(password, str) and password:
-        secrets.set(PASSWORD_SECRET_ID, password)
-        service["password"] = f"{{secret:{PASSWORD_SECRET_ID}}}"
+        if persist_credentials:
+            _get_secret_manager().set(PASSWORD_SECRET_ID, password)
+            service["password"] = f"{{secret:{PASSWORD_SECRET_ID}}}"
+        else:
+            service["password"] = password
 
-    if _coerce_bool(params.get("persist_credentials"), default=True) and any(
+    if persist_credentials and any(
         params.get(key) not in (None, "")
         for key in ("base_url", "auth_state_path", "username", "password")
     ):
         ConfigWriter.set_api_service(SERVICE_ID, service)
 
     return service
+
+
+def _saved_auto_login_status(params: dict[str, Any]) -> dict[str, Any]:
+    """Return non-sensitive information about saved EDR auto-login inputs."""
+    service = _save_params_to_service({**params, "persist_credentials": False})
+    secrets = _get_secret_manager()
+
+    base_url = (
+        _resolve_ref(service.get("base_url"))
+        or _resolve_ref(service.get("host"))
+        or os.getenv("SANGFOR_EDR_BASE_URL")
+        or ""
+    )
+    auth_state_path = Path(
+        _resolve_ref(service.get("auth_state_path"))
+        or os.getenv("SANGFOR_EDR_AUTH_STATE")
+        or DEFAULT_AUTH_STATE_PATH
+    ).expanduser()
+    username = (
+        _resolve_ref(service.get("username"))
+        or secrets.get(USERNAME_SECRET_ID)
+        or secrets.get(f"{SERVICE_ID}_username")
+        or secrets.get(f"{LEGACY_SERVICE_ID}_username")
+        or os.getenv("SANGFOR_EDR_USERNAME")
+        or ""
+    )
+    password = (
+        _resolve_ref(service.get("password"))
+        or secrets.get(PASSWORD_SECRET_ID)
+        or secrets.get(f"{SERVICE_ID}_password")
+        or secrets.get(f"{LEGACY_SERVICE_ID}_password")
+        or os.getenv("SANGFOR_EDR_PASSWORD")
+        or ""
+    )
+    has_base_url = bool(str(base_url or "").strip())
+    has_username = bool(str(username or "").strip())
+    has_password = bool(str(password or "").strip())
+    return {
+        "auth_state_path": str(auth_state_path),
+        "auth_state_exists": auth_state_path.exists(),
+        "has_base_url": has_base_url,
+        "has_saved_username": has_username,
+        "has_saved_password": has_password,
+        "can_auto_refresh": has_base_url and has_username and has_password,
+    }
 
 
 def _resolve_runtime_config(params: dict[str, Any]) -> RuntimeConfig:
@@ -183,6 +269,7 @@ def _resolve_runtime_config(params: dict[str, Any]) -> RuntimeConfig:
         _resolve_ref(raw.get("username"))
         or secrets.get(USERNAME_SECRET_ID)
         or secrets.get(f"{SERVICE_ID}_username")
+        or secrets.get(f"{LEGACY_SERVICE_ID}_username")
         or os.getenv("SANGFOR_EDR_USERNAME")
         or ""
     ).strip()
@@ -190,6 +277,7 @@ def _resolve_runtime_config(params: dict[str, Any]) -> RuntimeConfig:
         _resolve_ref(raw.get("password"))
         or secrets.get(PASSWORD_SECRET_ID)
         or secrets.get(f"{SERVICE_ID}_password")
+        or secrets.get(f"{LEGACY_SERVICE_ID}_password")
         or os.getenv("SANGFOR_EDR_PASSWORD")
         or ""
     ).strip()
@@ -259,11 +347,32 @@ def _has_session_cookie(cfg: RuntimeConfig) -> bool:
     cookies = result.get("cookies", [])
     if not isinstance(cookies, list):
         return False
+    auth_cookie_names = {"sessionid", "jsessionid", "phpsessid", "ssid", "sid", "token"}
     return any(
-        str(cookie.get("name") or "").lower() == "sessionid" and cookie.get("value")
+        str(cookie.get("name") or "").lower() in auth_cookie_names and cookie.get("value")
         for cookie in cookies
         if isinstance(cookie, dict)
     )
+
+
+def _has_logged_in_dom_marker() -> bool:
+    script = """(() => {
+  const selectors = [
+    ".top-nav", ".navbar", ".header", ".main-header", ".layout-header",
+    ".sidebar", ".side-menu", ".left-menu", ".main-menu", ".nav-menu",
+    ".user-info", ".user-name", ".account-info", ".logout", "[href*='logout']",
+    "#app .router-view", "#app [class*='dashboard']", "[class*='dashboard']"
+  ];
+  if (selectors.some((selector) => document.querySelector(selector))) {
+    return true;
+  }
+  const text = (document.body && document.body.innerText || "").slice(0, 4000);
+  return /终端概况|受管控终端|威胁资产|已失陷|设备状态|安全概况|退出登录|系统管理/.test(text);
+})()"""
+    try:
+        return bool(helpers.js(script))
+    except Exception:
+        return False
 
 
 def _is_logged_in(cfg: RuntimeConfig) -> bool:
@@ -271,7 +380,10 @@ def _is_logged_in(cfg: RuntimeConfig) -> bool:
     current_url = str(info.get("url") or "")
     if _looks_like_login_page(_page_text(), current_url):
         return False
-    return _has_session_cookie(cfg) or cfg.base_url.rstrip("/") in current_url
+    if _has_session_cookie(cfg):
+        return True
+    # Avoid treating blank/loading/error pages on the same host as authenticated.
+    return cfg.base_url.rstrip("/") in current_url and _has_logged_in_dom_marker()
 
 
 def _validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
@@ -437,9 +549,65 @@ def _wait_for_login_form_ready(cfg: RuntimeConfig) -> dict[str, bool]:
     )
 
 
+def _captcha_image_data_url_from_dom() -> str:
+    script = """(async () => {
+  const srcAttrs = ["src", "currentSrc", "data-src", "data-url", "data-original"];
+  const images = Array.from(document.querySelectorAll("img"));
+  const candidates = images
+    .map((img) => {
+      const values = srcAttrs
+        .map((attr) => attr === "currentSrc" ? img.currentSrc : img.getAttribute(attr))
+        .filter(Boolean);
+      const hint = [
+        img.id || "",
+        String(img.className || ""),
+        img.alt || "",
+        img.title || "",
+        values.join(" ")
+      ].join(" ").toLowerCase();
+      return {values, hint};
+    })
+    .filter((item) => item.values.length)
+    .sort((a, b) => {
+      const score = (item) => /captcha|verify|vcode|randcode|code|验证码/.test(item.hint) ? 0 : 1;
+      return score(a) - score(b);
+    });
+
+  for (const item of candidates) {
+    for (const raw of item.values) {
+      const url = new URL(raw, window.location.href).href;
+      if (url.startsWith("data:image/")) {
+        return url;
+      }
+      try {
+        const response = await fetch(url, {credentials: "include", cache: "no-store"});
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        if (!String(blob.type || "").startsWith("image/")) continue;
+        return await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(reader.error || new Error("captcha image read failed"));
+          reader.onload = () => resolve(String(reader.result));
+          reader.readAsDataURL(blob);
+        });
+      } catch (_err) {
+      }
+    }
+  }
+  return "";
+})()"""
+    try:
+        return str(helpers.js(script) or "")
+    except Exception:
+        return ""
+
+
 def _captcha_image_from_browser(cfg: RuntimeConfig) -> bytes:
-    captcha_url = _url(cfg, f"/ui/randcode.php?{_now_ms()}")
-    script = f"""(async () => {{
+    # Prefer the live captcha image URL so versioned/customized EDR login pages work.
+    data_url = _captcha_image_data_url_from_dom()
+    if not data_url:
+        captcha_url = _url(cfg, f"/ui/randcode.php?{_now_ms()}")
+        script = f"""(async () => {{
   const response = await fetch({json.dumps(captcha_url)}, {{
     credentials: "include",
     cache: "no-store"
@@ -455,7 +623,7 @@ def _captcha_image_from_browser(cfg: RuntimeConfig) -> bytes:
     reader.readAsDataURL(blob);
   }});
 }})()"""
-    data_url = str(helpers.js(script) or "")
+        data_url = str(helpers.js(script) or "")
     if "," not in data_url:
         raise RuntimeError("EDR captcha fetch did not return a data URL.")
     return base64.b64decode(data_url.split(",", 1)[1])
@@ -469,6 +637,53 @@ def _ocr_verify_code(image_bytes: bytes) -> str:
             "ddddocr is required for automatic Sangfor EDR captcha recognition."
         ) from exc
     return str(ddddocr.DdddOcr(show_ad=False).classification(image_bytes)).strip()[:4]
+
+
+def _filter_large_local_storage_items(path: Path) -> dict[str, Any]:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"filtered": False, "reason": "state_json_unreadable", "error": str(exc)}
+    if not isinstance(state, dict):
+        return {"filtered": False, "reason": "state_not_object"}
+    origins = state.get("origins")
+    if not isinstance(origins, list):
+        return {"filtered": False, "reason": "origins_not_list"}
+
+    before = 0
+    after = 0
+    dropped = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        entries = origin.get("localStorage")
+        if not isinstance(entries, list):
+            continue
+        before += len(entries)
+        kept = []
+        for entry in entries:
+            value = entry.get("value") if isinstance(entry, dict) else ""
+            if len(str(value).encode("utf-8")) > MAX_LOCAL_STORAGE_VALUE_BYTES:
+                dropped += 1
+                continue
+            kept.append(entry)
+        after += len(kept)
+        origin["localStorage"] = kept
+
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "filtered": True,
+        "localStorageItemsBefore": before,
+        "localStorageItemsAfter": after,
+        "localStorageItemsDropped": dropped,
+        "maxValueBytes": MAX_LOCAL_STORAGE_VALUE_BYTES,
+    }
+
+
+def _save_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
+    saved = helpers.save_state(cfg.auth_state_path, url=_index_url(cfg))
+    # EDR does not currently need known huge localStorage values for auth.
+    return {**saved, "filter": _filter_large_local_storage_items(cfg.auth_state_path)}
 
 
 def _set_login_form_values(cfg: RuntimeConfig, code: str) -> dict[str, Any]:
@@ -593,7 +808,7 @@ def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "
 
             filled = _set_login_form_values(cfg, code)
             if _wait_for_login_success(cfg):
-                saved = helpers.save_state(cfg.auth_state_path, url=_index_url(cfg))
+                saved = _save_auth_state(cfg)
                 return {
                     "success": True,
                     "status": "browser_cdp_login_refreshed_auth_state",
@@ -639,6 +854,29 @@ async def handle(ctx: ToolContext) -> ToolResult:
     action = str(params.get("action") or "ensure_auth_state").strip()
 
     try:
+        if action == "status_auth_state":
+            status = _saved_auto_login_status(params)
+            validation: dict[str, Any] | None = None
+            if status.get("has_base_url"):
+                try:
+                    validation = _validate_auth_state(_resolve_runtime_config({**params, "persist_credentials": False}))
+                except Exception as exc:
+                    validation = {
+                        "valid": False,
+                        "reason": "auth_state_validate_failed",
+                        "error": str(exc),
+                        "auth_state_path": status["auth_state_path"],
+                    }
+            return ToolResult(
+                success=True,
+                output={
+                    "success": True,
+                    "status": "saved_auto_login_status",
+                    **status,
+                    "validation": validation,
+                },
+            )
+
         cfg = _resolve_runtime_config(params)
 
         if action == "validate_auth_state":
@@ -648,7 +886,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
         if action not in {"ensure_auth_state", "refresh_auth_state"}:
             return ToolResult(
                 success=False,
-                error="Unsupported Sangfor EDR auth action. Use ensure_auth_state, validate_auth_state, or refresh_auth_state.",
+                error="Unsupported Sangfor EDR auth action. Use status_auth_state, ensure_auth_state, validate_auth_state, or refresh_auth_state.",
             )
 
         force_refresh = action == "refresh_auth_state" or _coerce_bool(params.get("force_refresh"), default=False)

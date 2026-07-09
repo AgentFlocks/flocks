@@ -601,6 +601,8 @@ class ToolRegistry:
     _revision: int = 0
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
+    _init_lock = threading.Lock()
+    _initializing_thread_id: Optional[int] = None
 
     # Snapshot of every tool's factory-default ``enabled`` flag — captured
     # in :meth:`register` at the moment the tool object is handed to the
@@ -734,7 +736,7 @@ class ToolRegistry:
     @classmethod
     def _ensure_initialized(cls) -> None:
         """Initialize the registry on first public access."""
-        if not cls._initialized:
+        if not cls._initialized and cls._initializing_thread_id != threading.get_ident():
             cls.init()
 
     @classmethod
@@ -1015,13 +1017,26 @@ class ToolRegistry:
         if cls._initialized:
             return
 
-        # Import and register built-in tools
-        cls._register_builtin_tools()
-        cls._register_dynamic_tools()
-        cls._register_plugin_extension_point()
-        cls._load_plugin_tools()
-        cls._initialized = True
-        log.debug("tool_registry.initialized", {"count": len(cls._tools)})
+        with cls._init_lock:
+            if cls._initialized:
+                return
+
+            cls._initializing_thread_id = threading.get_ident()
+            try:
+                # Import and register built-in tools
+                cls._register_builtin_tools()
+                cls._register_dynamic_tools()
+                cls._register_plugin_extension_point()
+                cls._load_plugin_tools()
+                cls._initialized = True
+                log.debug("tool_registry.initialized", {"count": len(cls._tools)})
+            finally:
+                cls._initializing_thread_id = None
+
+    @classmethod
+    async def init_async(cls) -> None:
+        """Initialize the registry without blocking the event loop."""
+        await asyncio.to_thread(cls.init)
 
     @classmethod
     def _load_plugin_tools(cls) -> None:
@@ -1456,7 +1471,13 @@ class ToolRegistry:
             # agent/ — agent delegation/coordination
             ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["schedule_task_center", "todo", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", [
+                "schedule_task_center",
+                "todo",
+                "run_workflow",
+                "run_workflow_node",
+                "workflow_config_manage",
+            ]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
             # system/ — questions, model config, memory, MCP management, session management, slash commands

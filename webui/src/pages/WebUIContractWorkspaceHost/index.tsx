@@ -13,7 +13,7 @@ import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorksp
 
 export default function WebUIContractWorkspaceHost() {
   const { workspaceId, pageId } = useParams<{ workspaceId: string; pageId?: string }>();
-  const { t } = useTranslation('webuiContractPage');
+  const { t, i18n } = useTranslation('webuiContractPage');
   const [workspaces, setWorkspaces] = useState<WebUIContractWorkspaceListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,8 +56,8 @@ export default function WebUIContractWorkspaceHost() {
     [workspace?.pages],
   );
   const sections = useMemo(
-    () => (workspace ? buildWebUIContractWorkspaceSections(workspace) : []),
-    [workspace],
+    () => (workspace ? buildWebUIContractWorkspaceSections(workspace, i18n.language) : []),
+    [i18n.language, workspace],
   );
   const currentPage = pages.find((page) => page.id === pageId);
   const currentSection = currentPage

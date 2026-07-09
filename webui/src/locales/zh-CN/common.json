@@ -54,7 +54,7 @@
   "error": {
     "backendUnavailable": "无法连接到后端服务",
     "backendError": "后端服务异常",
-    "backendErrorHint": "请确保 Flocks 后端服务正在运行",
+    "backendErrorHint": "请确保后端服务正在运行",
     "processingFailed": "处理失败",
     "deleteFailed": "删除失败",
     "saveFailed": "保存失败"
@@ -270,7 +270,7 @@
       "securityApis": { "title": "配置安全工具 API", "tags": ["ThreatBook", "VirusTotal", "FOFA", "URLScan", "Shodan"] },
       "channels": { "title": "接入 IM 渠道", "tags": ["飞书", "企微", "钉钉", "Discord", "Telegram"] },
       "devices": { "title": "接入 NDR 设备", "tags": ["天眼", "TDP"] },
-      "scenes": { "title": "启用运营场景", "tags": ["每日情报", "告警研判", "钓鱼检测"] }
+      "scenes": { "title": "启用运营场景", "tags": ["每日情报", "告警运营", "钓鱼检测"] }
     }
   },
   "hookStatus": {

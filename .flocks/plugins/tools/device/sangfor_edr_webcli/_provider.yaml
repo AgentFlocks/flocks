@@ -70,6 +70,30 @@ credential_fields:
     input_type: text
     required: false
     default: "/ui/#/index"
+  - key: username_selector
+    label: Username Input Selector
+    storage: config
+    config_key: username_selector
+    input_type: text
+    required: false
+    default: "#user,input[name='user'],.username-input,#user_name,#username,input[name='user_name'],input[name='username'],input[type='text']"
+    description: Optional comma-separated selectors for the EDR username input.
+  - key: password_selector
+    label: Password Input Selector
+    storage: config
+    config_key: password_selector
+    input_type: text
+    required: false
+    default: "#password,input[name='password'],.input_text_password,input[name='pwd'],input[type='password']"
+    description: Optional comma-separated selectors for the EDR password input.
+  - key: captcha_selector
+    label: Captcha Input Selector
+    storage: config
+    config_key: captcha_selector
+    input_type: text
+    required: false
+    default: "#code,input[name='code'],.code_input_text,#randcode,#captcha,input[name='randcode'],input[name='captcha'],input[name='verify_code']"
+    description: Optional comma-separated selectors for the EDR captcha input.
   - key: agreement_selector
     label: Agreement Checkbox Selector
     storage: config
@@ -77,6 +101,14 @@ credential_fields:
     input_type: text
     required: false
     default: ".user-protocol-check input[type='checkbox']"
+  - key: submit_selector
+    label: Submit Button Selector
+    storage: config
+    config_key: submit_selector
+    input_type: text
+    required: false
+    default: "#button,input[name='button'],.login-opr-btn,#login,#submit,.login-btn,.btn-login,button[type='submit'],input[type='submit']"
+    description: Optional comma-separated selectors for the EDR login submit control.
 defaults:
   timeout: 20
   category: custom

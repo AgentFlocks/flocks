@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import require_user
 from flocks.server.routes.console_upgrade import _get_pro_capability_status, _is_pro_component_installed
 
@@ -50,6 +51,8 @@ async def refresh_flockspro_license_status(request: Request) -> dict[str, Any]:
         return _inactive_status("flockspro_not_installed")
 
     try:
+        await ConsoleLoginService.send_heartbeat()
+
         from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
 
         checker = get_license_checker()

@@ -98,10 +98,11 @@ async def _http_session_send(
             )
             body = resp.json()
             if resp.status_code == 200:
+                resolved_session_id = body.get("session_id") or session_id
                 return ToolResult(
                     success=True,
                     output=(
-                        f"Message sent to session '{session_id}' "
+                        f"Message sent to session '{resolved_session_id}' "
                         f"via channels {body.get('channels', [])}, "
                         f"ids: {body.get('message_ids', [])}"
                     ),
@@ -217,13 +218,26 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     svc = SessionBindingService()
     all_bindings = await svc.list_bindings()
     matched = [b for b in all_bindings if b.session_id == session_id]
+    resolved_session_id = session_id
+
+    if not matched and channel_type:
+        latest = await svc.latest_active_user_binding(
+            channel_id=channel_type,
+            account_id=account_id,
+            chat_id=chat_id,
+        )
+        if latest:
+            matched = [latest]
+            resolved_session_id = latest.session_id
 
     if not matched:
         return ToolResult(
             success=False,
             error=(
                 f"No channel binding found for session_id='{session_id}'. "
-                "Make sure the session was initiated via an IM channel."
+                "Resolve the current IM target again with "
+                "im_send_message(resolve_only=true), or ask the user to confirm "
+                "the target IM session."
             ),
         )
 
@@ -266,7 +280,7 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
             text=message,
             media_url=media,
         )
-        results = await OutboundDelivery.deliver(out_ctx, session_id=session_id)
+        results = await OutboundDelivery.deliver(out_ctx, session_id=resolved_session_id)
         all_results.extend(results)
 
         failed = [r for r in results if not r.success]
@@ -284,7 +298,7 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     return ToolResult(
         success=True,
         output=(
-            f"Message sent to session '{session_id}' "
+            f"Message sent to session '{resolved_session_id}' "
             f"via channels {channels_sent}, "
             f"{len(all_results)} chunk(s), ids: {msg_ids}"
         ),

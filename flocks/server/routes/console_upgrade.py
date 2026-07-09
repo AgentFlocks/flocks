@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import require_admin, require_user
 from flocks.storage.storage import Storage
-from flocks.updater import perform_pro_bundle_install
+from flocks.updater import perform_pro_bundle_downgrade, perform_pro_bundle_install
 
 router = APIRouter()
 _AUTO_UPGRADE_TASKS: set[asyncio.Task[None]] = set()
@@ -91,6 +91,10 @@ class UpgradeRequestStatus(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
+
+
+class ProPackageDowngradeRequest(BaseModel):
+    reason: Optional[str] = Field(default="user_requested", max_length=500)
 
 
 def _request_key(request_id: str) -> str:
@@ -317,8 +321,8 @@ def _enrich_record_from_install_marker(record: dict[str, Any]) -> dict[str, Any]
     marker = _read_pro_bundle_install_marker()
     if marker:
         details.setdefault("auto_install_release_id", marker.get("release_id") or marker.get("bundle_release_id"))
-        details.setdefault("auto_install_version", marker.get("installed_version"))
-        details.setdefault("auto_install_pro_version", marker.get("flockspro_component_version"))
+        details.setdefault("auto_install_bundle_version", marker.get("bundle_version"))
+        details.setdefault("auto_install_pro_component_version", marker.get("flockspro_component_version"))
         details.setdefault("flockspro_component_version", marker.get("flockspro_component_version"))
         details.setdefault("auto_install_build_id", marker.get("build_id"))
 
@@ -442,19 +446,16 @@ def _record_target_bundle(record: dict[str, Any]) -> dict[str, str]:
         "release_id": release_id,
         "bundle_release_id": _clean_bundle_value(details.get("bundle_release_id") or release_id),
         "build_id": _clean_bundle_value(details.get("target_build_id") or latest_bundle.get("build_id")),
-        "display_version": _clean_bundle_value(
-            details.get("target_display_version")
-            or details.get("auto_install_target")
-            or latest_bundle.get("display_version")
+        "bundle_version_update_to": _clean_bundle_value(
+            details.get("bundle_version_update_to")
+            or latest_bundle.get("bundle_version")
         ),
-        "core_version": _clean_bundle_value(
-            details.get("target_core_version")
-            or details.get("target_oss_version")
+        "core_version_update_to": _clean_bundle_value(
+            details.get("core_version_update_to")
             or latest_bundle.get("core_version")
-            or latest_bundle.get("oss_version")
         ),
-        "flockspro_component_version": _clean_bundle_value(
-            details.get("target_flockspro_component_version")
+        "flockspro_component_version_update_to": _clean_bundle_value(
+            details.get("flockspro_component_version_update_to")
             or latest_bundle.get("flockspro_component_version")
         ),
     }
@@ -467,18 +468,18 @@ def _target_bundle_fingerprint_matches(target: dict[str, str], marker: dict[str,
     if build_id and marker_build_id:
         return marker_build_id == build_id
 
-    pro_version = target.get("flockspro_component_version")
+    pro_version = target.get("flockspro_component_version_update_to")
     marker_pro_version = _clean_bundle_value(marker.get("flockspro_component_version"))
     if pro_version and marker_pro_version:
         return marker_pro_version == pro_version
 
-    display_version = target.get("display_version")
-    marker_display_version = _clean_bundle_value(marker.get("installed_version") or marker.get("display_version"))
-    if display_version and marker_display_version:
-        return _clean_version_value(marker_display_version) == _clean_version_value(display_version)
+    bundle_version = target.get("bundle_version_update_to")
+    marker_bundle_version = _clean_bundle_value(marker.get("bundle_version"))
+    if bundle_version and marker_bundle_version:
+        return _clean_version_value(marker_bundle_version) == _clean_version_value(bundle_version)
 
-    core_version = target.get("core_version") or target.get("oss_version")
-    marker_core_version = _clean_bundle_value(marker.get("core_version") or marker.get("oss_version"))
+    core_version = target.get("core_version_update_to")
+    marker_core_version = _clean_bundle_value(marker.get("core_version"))
     if core_version and marker_core_version:
         return _clean_version_value(marker_core_version) == _clean_version_value(core_version)
 
@@ -510,7 +511,7 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
     marker = _read_pro_bundle_install_marker()
     if _is_pro_component_installed() and _marker_matches_target_bundle(marker, record):
         details["auto_install_release_id"] = marker.get("release_id") or marker.get("bundle_release_id")
-        details["auto_install_version"] = marker.get("installed_version")
+        details["auto_install_bundle_version"] = marker.get("bundle_version")
         await _maybe_activate_pro_license(record, allow_fallback=False)
         await _maybe_refresh_pro_license(record)
         capability = _record_pro_capability(details)
@@ -538,8 +539,8 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
         "done" if final_stage == "done" and capability.get("pro_enabled") else "license_inactive"
     )
     details["auto_install_release_id"] = marker.get("release_id") or marker.get("bundle_release_id")
-    details["auto_install_version"] = marker.get("installed_version")
-    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+    details["auto_install_bundle_version"] = marker.get("bundle_version")
+    details["auto_install_pro_component_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = final_message
     _enrich_record_from_install_marker(record)
@@ -560,12 +561,16 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _pending_pro_bundle_downgrade_receipt_path() -> Path:
+    return Path(os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))) / "run" / "pro-bundle-downgrade-receipt-pending.json"
+
+
 def _marker_indicates_pro_bundle_installed(marker: dict[str, Any]) -> bool:
     if not marker:
         return False
     return any(
         str(marker.get(key) or "").strip()
-        for key in ("installed_at", "installed_version", "bundle_version", "flockspro_component_version", "build_id")
+        for key in ("installed_at", "bundle_version", "flockspro_component_version", "build_id")
     )
 
 
@@ -600,15 +605,12 @@ async def _report_pro_bundle_installation(
         "license_id": _record_license_id(record),
         "fingerprint": console_session.get("fingerprint"),
         "install_id": console_session.get("install_id"),
-        "installed_version": source.get("installed_version")
-        or source.get("display_version")
-        or target.get("display_version")
-        or details.get("auto_install_target")
-        or details.get("auto_install_version")
-        or "",
-        "core_version": source.get("core_version") or source.get("oss_version") or target.get("core_version"),
-        "oss_version": source.get("core_version") or source.get("oss_version") or target.get("core_version"),
-        "flockspro_component_version": source.get("flockspro_component_version") or target.get("flockspro_component_version"),
+        "bundle_version": source.get("bundle_version") or target.get("bundle_version_update_to") or "",
+        "core_version": source.get("core_version") or target.get("core_version_update_to"),
+        "flockspro_component_version": (
+            source.get("flockspro_component_version")
+            or target.get("flockspro_component_version_update_to")
+        ),
         "build_id": source.get("build_id") or target.get("build_id"),
         "install_result": install_result,
         "error_message": error_message,
@@ -630,6 +632,149 @@ async def _report_pro_bundle_installation(
             details["install_receipt_reported_at"] = datetime.now(UTC).isoformat()
     except Exception as exc:
         details["install_receipt_error"] = str(exc)
+
+
+async def _report_pro_bundle_downgrade(
+    record: dict[str, Any] | None,
+    *,
+    reason: str | None = None,
+    console_session: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    target_record = record or {}
+    details = target_record.setdefault("details", {})
+    if console_session is None:
+        try:
+            console_session = await ConsoleLoginService.require_console_session()
+        except Exception as exc:
+            details["local_downgrade_report_error"] = str(exc)
+            raise
+
+    console_base = _console_base_url()
+    if not console_base:
+        message = "FLOCKS_CONSOLE_BASE_URL 未配置，无法同步降级状态"
+        details["local_downgrade_report_error"] = message
+        raise ValueError(message)
+
+    payload = _build_pro_bundle_downgrade_payload(target_record, reason=reason, console_session=console_session)
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{console_base}/v1/pro-bundles/installations",
+            json=payload,
+            headers={"Authorization": f"Bearer {console_session['console_session_token']}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    reported_at = str(payload.get("reported_at") or datetime.now(UTC).isoformat())
+    details["local_downgrade_reported_at"] = reported_at
+    details["local_downgrade_reason"] = reason or "user_requested"
+    details["local_downgrade_previous_version"] = payload.get("bundle_version")
+    details["local_downgrade_previous_core_version"] = payload.get("core_version")
+    details["local_downgrade_previous_pro_version"] = payload.get("flockspro_component_version")
+    details["local_downgrade_installation_id"] = data.get("id")
+    details["local_downgrade_report_result"] = "reported"
+    details.pop("local_downgrade_report_error", None)
+    _pending_pro_bundle_downgrade_receipt_path().unlink(missing_ok=True)
+    target_record["updated_at"] = reported_at
+    return data if isinstance(data, dict) else {}
+
+
+def _build_pro_bundle_downgrade_payload(
+    record: dict[str, Any] | None,
+    *,
+    reason: str | None = None,
+    console_session: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    target_record = record or {}
+    details = target_record.get("details") if isinstance(target_record.get("details"), dict) else {}
+    marker = _read_pro_bundle_install_marker()
+    target = _record_target_bundle(target_record) if target_record else {}
+    capability = _get_pro_capability_status()
+    release_id = _clean_bundle_value(
+        marker.get("release_id")
+        or marker.get("bundle_release_id")
+        or target.get("release_id")
+        or target.get("bundle_release_id")
+    )
+    bundle_release_id = _clean_bundle_value(
+        marker.get("bundle_release_id")
+        or marker.get("release_id")
+        or target.get("bundle_release_id")
+        or target.get("release_id")
+        or release_id
+    )
+    license_id = _record_license_id(target_record) or _clean_bundle_value(capability.get("license_id"))
+    installed_version = _clean_bundle_value(
+        marker.get("installed_version")
+        or marker.get("display_version")
+        or marker.get("bundle_version")
+        or details.get("auto_install_bundle_version")
+        or target.get("bundle_version_update_to")
+        or details.get("auto_install_version")
+    )
+    core_version = _clean_bundle_value(
+        marker.get("core_version")
+        or marker.get("oss_version")
+        or target.get("core_version_update_to")
+    )
+    pro_version = _clean_bundle_value(
+        marker.get("flockspro_component_version")
+        or target.get("flockspro_component_version_update_to")
+        or details.get("auto_install_pro_version")
+        or details.get("flockspro_component_version")
+    )
+    reported_at = datetime.now(UTC).isoformat()
+    payload = {
+        "request_id": _clean_bundle_value(target_record.get("request_id")) or None,
+        "release_id": release_id or None,
+        "bundle_release_id": bundle_release_id or None,
+        "license_id": license_id or None,
+        "fingerprint": (console_session or {}).get("fingerprint"),
+        "install_id": (console_session or {}).get("install_id"),
+        "bundle_version": installed_version,
+        "core_version": core_version,
+        "flockspro_component_version": pro_version,
+        "build_id": marker.get("build_id") or target.get("build_id"),
+        "install_result": "downgraded",
+        "runtime_edition": "oss",
+        "reason": reason or "user_requested",
+        "reported_at": reported_at,
+    }
+    return payload
+
+
+def _write_pending_pro_bundle_downgrade_receipt(
+    record: dict[str, Any] | None,
+    *,
+    reason: str | None = None,
+    console_session: dict[str, Any] | None = None,
+    error_message: str | None = None,
+) -> None:
+    path = _pending_pro_bundle_downgrade_receipt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _build_pro_bundle_downgrade_payload(record, reason=reason, console_session=console_session)
+    payload["pending_report_created_at"] = datetime.now(UTC).isoformat()
+    if error_message:
+        payload["last_report_error"] = error_message
+    console_base = _console_base_url()
+    if console_base:
+        payload["console_base_url"] = console_base
+    path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _downgrade_report_error_message(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            data = exc.response.json()
+            if isinstance(data, dict):
+                return str(data.get("detail") or data.get("message") or "console 降级状态同步失败，请稍后重试")
+        except Exception:
+            pass
+    return str(exc) or "console 降级状态同步失败，请稍后重试"
 
 
 async def _mark_console_upgrade_activated(record: dict[str, Any]) -> None:
@@ -688,8 +833,8 @@ async def _finalize_restarting_upgrade_if_installed(record: dict[str, Any]) -> d
     await _maybe_refresh_pro_license(record)
     capability = _record_pro_capability(details)
     details["auto_install_result"] = "done" if capability.get("pro_enabled") else "license_inactive"
-    details["auto_install_version"] = marker.get("installed_version") or marker.get("display_version")
-    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+    details["auto_install_bundle_version"] = marker.get("bundle_version")
+    details["auto_install_pro_component_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = "Upgrade completed after service restart"
     _enrich_record_from_install_marker(record)
@@ -877,7 +1022,8 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
         "installed": installed,
         "runtime_importable": runtime_importable,
         "install_marker_present": install_marker_present,
-        "installed_version": marker.get("installed_version"),
+        "bundle_version": marker.get("bundle_version"),
+        "core_version": marker.get("core_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),
         "installed_at": marker.get("installed_at"),
@@ -885,6 +1031,107 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
         "license_status": capability.get("license_status"),
         "inactive_reason": capability.get("inactive_reason"),
     }
+
+
+@router.post("/pro-package/downgrade")
+async def downgrade_pro_package(payload: ProPackageDowngradeRequest, request: Request) -> StreamingResponse:
+    require_admin(request)
+
+    async def _stream():
+        marker = _read_pro_bundle_install_marker()
+        installed = _is_pro_component_installed() or _marker_indicates_pro_bundle_installed(marker)
+        if not installed:
+            yield f"data: {json.dumps({'stage': 'done', 'message': 'Already running the OSS edition.', 'success': True})}\n\n"
+            return
+
+        reason = (payload.reason or "user_requested").strip() or "user_requested"
+        record: dict[str, Any] | None = None
+        console_session: dict[str, Any] | None = None
+
+        async def _store_local_downgrade_failure(message: str) -> None:
+            if not record or not record.get("request_id"):
+                return
+            details = record.setdefault("details", {})
+            details["local_downgrade_result"] = "failed"
+            details["local_downgrade_error"] = message
+            record["updated_at"] = datetime.now(UTC).isoformat()
+            await Storage.set(_request_key(str(record["request_id"])), record, "json")
+
+        async def _store_pending_downgrade_report(message: str) -> None:
+            _write_pending_pro_bundle_downgrade_receipt(
+                record,
+                reason=reason,
+                console_session=console_session,
+                error_message=message,
+            )
+            if not record or not record.get("request_id"):
+                return
+            details = record.setdefault("details", {})
+            details["local_downgrade_report_result"] = "pending"
+            details["local_downgrade_report_error"] = message
+            record["updated_at"] = datetime.now(UTC).isoformat()
+            await Storage.set(_request_key(str(record["request_id"])), record, "json")
+
+        try:
+            yield f"data: {json.dumps({'stage': 'checking', 'message': 'Checking local Pro installation.', 'success': None})}\n\n"
+            console_session_error: str | None = None
+            try:
+                console_session = await ConsoleLoginService.require_console_session()
+            except Exception as exc:
+                console_session_error = str(exc)
+
+            account_key = _console_session_account_key(console_session) if console_session else ""
+            record = await _latest_usable_issued_record(set(), account_key=account_key)
+
+            async def _report_after_local_downgrade() -> None:
+                if console_session is None:
+                    await _store_pending_downgrade_report(console_session_error or "云账号未登录，降级状态将在下次登录后同步")
+                    return
+                try:
+                    await _report_pro_bundle_downgrade(record, reason=reason, console_session=console_session)
+                except Exception as exc:
+                    await _store_pending_downgrade_report(_downgrade_report_error_message(exc))
+                    return
+                if record and record.get("request_id"):
+                    details = record.setdefault("details", {})
+                    details["local_downgrade_report_result"] = "reported"
+                    await Storage.set(_request_key(str(record["request_id"])), record, "json")
+
+            async for progress in perform_pro_bundle_downgrade(
+                restart=True,
+                reason=reason,
+                after_uninstall=_report_after_local_downgrade,
+            ):
+                if progress.stage == "error" and record and record.get("request_id"):
+                    details = record.setdefault("details", {})
+                    details["local_downgrade_result"] = "failed"
+                    details["local_downgrade_error"] = progress.message
+                    record["updated_at"] = datetime.now(UTC).isoformat()
+                    await Storage.set(_request_key(str(record["request_id"])), record, "json")
+                elif progress.stage == "done" and record and record.get("request_id"):
+                    details = record.setdefault("details", {})
+                    details["local_downgrade_result"] = "done"
+                    details["local_downgraded_at"] = datetime.now(UTC).isoformat()
+                    record["updated_at"] = details["local_downgraded_at"]
+                    await Storage.set(_request_key(str(record["request_id"])), record, "json")
+                yield f"data: {progress.model_dump_json()}\n\n"
+                await asyncio.sleep(0)
+                if progress.stage == "error":
+                    return
+        except Exception as exc:
+            detail = str(exc)
+            await _store_local_downgrade_failure(detail)
+            yield f"data: {json.dumps({'stage': 'error', 'message': detail, 'success': False})}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/upgrade-requests/{request_id}", response_model=UpgradeRequestStatus)
@@ -996,8 +1243,8 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
                         details["auto_install_result"] = "done"
                     else:
                         details["auto_install_result"] = "license_inactive"
-                    details["auto_install_version"] = marker.get("installed_version")
-                    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
+                    details["auto_install_bundle_version"] = marker.get("bundle_version")
+                    details["auto_install_pro_component_version"] = marker.get("flockspro_component_version")
                     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
                     details["auto_install_message"] = progress.message
                     _enrich_record_from_install_marker(raw)

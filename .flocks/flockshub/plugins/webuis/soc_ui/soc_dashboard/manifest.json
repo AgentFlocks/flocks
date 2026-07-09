@@ -1,0 +1,12 @@
+{
+  "id": "soc-dashboard",
+  "title": "告警态势",
+  "titleEn": "Alert Posture",
+  "route": "/contracts/webui/soc-dashboard",
+  "icon": "ShieldCheck",
+  "order": 30,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1781509788949
+}

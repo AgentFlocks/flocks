@@ -497,7 +497,13 @@ def run_doctor() -> int:
             browser_running,
             "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
         )
-    row("daemon alive", daemon, "" if daemon else "not running; wait user open browser inspect page and run `flocks browser --setup` to attach")
+    row(
+        "daemon alive",
+        daemon,
+        ""
+        if daemon
+        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is disabled, follow its inspect-page prompt",
+    )
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:
         page = conn.get("page")

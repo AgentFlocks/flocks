@@ -23,11 +23,10 @@ API_TOKEN_SECRET_ID = "server_api_token"
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     "/favicon.ico",
     "/api/health",
+    "/api/config/ui-display",
+    "/api/config/ui-favicon",
     "/api/auth/login",
     "/api/auth/bootstrap-status",
     "/api/auth/bootstrap-admin",
@@ -65,6 +64,11 @@ PUBLIC_PREFIXES = (
 # downstream handler is fully responsible for its own authentication
 # (signature checks, IP allowlists, replay protection, …).  Do NOT add
 # entries that touch user data without a per-request integrity check.
+#
+# Workflow webhook paths also need to be reachable by external systems that
+# cannot present a browser session.  They are safe to exempt here only because
+# _authorize_webhook_trigger() fails closed unless the trigger config supplies
+# api_key or hmac authentication.  See: https://github.com/AgentFlocks/flocks/issues/454
 PUBLIC_PATH_REGEXES = (
     re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
     re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),

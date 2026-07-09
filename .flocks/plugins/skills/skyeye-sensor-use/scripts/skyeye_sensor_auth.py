@@ -34,6 +34,8 @@ PASSWORD_SECRET_ID = "skyeye_sensor_password"
 DEFAULT_LOGIN_PATH = "/login"
 DEFAULT_CAPTCHA_PATH = "/skyeye/admin/code"
 DEFAULT_TIMEOUT = 25
+ESSENTIAL_LOCAL_STORAGE_KEYS = {"csrf_token", "csrfToken", "system_type"}
+MAX_LOCAL_STORAGE_VALUE_BYTES = 4096
 
 
 def _get_secret_manager():
@@ -106,6 +108,32 @@ def _persist_inputs(args: argparse.Namespace, config: dict[str, Any]) -> dict[st
         if args.base_url or args.auth_state or args.username or args.password:
             _write_config(config)
     return config
+
+
+def saved_auto_login_status() -> dict[str, Any]:
+    """Return non-sensitive information about saved auto-login inputs."""
+    config = _read_config()
+    username = _resolve_ref(config.get("username")) or _get_secret_manager().get(USERNAME_SECRET_ID)
+    password = _resolve_ref(config.get("password")) or _get_secret_manager().get(PASSWORD_SECRET_ID)
+    base_url = _resolve_ref(config.get("base_url")) or os.getenv("SKYEYE_SENSOR_BASE_URL")
+    auth_state_path = Path(
+        _resolve_ref(config.get("auth_state_path"))
+        or os.getenv("SKYEYE_SENSOR_AUTH_STATE")
+        or DEFAULT_AUTH_STATE
+    ).expanduser()
+    has_username = bool(str(username or "").strip())
+    has_password = bool(str(password or "").strip())
+    has_base_url = bool(str(base_url or "").strip())
+    return {
+        "auth_state_path": str(auth_state_path),
+        "auth_state_exists": auth_state_path.exists(),
+        "auth_config_path": str(AUTH_CONFIG),
+        "auth_config_exists": AUTH_CONFIG.exists(),
+        "has_base_url": has_base_url,
+        "has_saved_username": has_username,
+        "has_saved_password": has_password,
+        "can_auto_refresh": has_base_url and has_username and has_password,
+    }
 
 
 class RuntimeConfig:
@@ -185,6 +213,52 @@ def _login_url(cfg: RuntimeConfig) -> str:
     return _url(cfg, cfg.login_path)
 
 
+def _storage_entry_keep(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    name = str(entry.get("name") or "")
+    value = str(entry.get("value") or "")
+    if name in ESSENTIAL_LOCAL_STORAGE_KEYS:
+        return True
+    lowered = name.lower()
+    if "token" in lowered or "csrf" in lowered:
+        return len(value.encode("utf-8", errors="ignore")) <= MAX_LOCAL_STORAGE_VALUE_BYTES
+    return False
+
+
+def _filter_auth_state_file(path: Path) -> dict[str, Any]:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"filtered": False}
+    if not isinstance(state, dict):
+        return {"filtered": False}
+    origins = state.get("origins")
+    if not isinstance(origins, list):
+        return {"filtered": False}
+
+    before = 0
+    after = 0
+    for origin in origins:
+        if not isinstance(origin, dict):
+            continue
+        entries = origin.get("localStorage")
+        if not isinstance(entries, list):
+            continue
+        before += len(entries)
+        kept = [entry for entry in entries if _storage_entry_keep(entry)]
+        after += len(kept)
+        origin["localStorage"] = kept
+
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"filtered": True, "localStorageItemsBefore": before, "localStorageItemsAfter": after}
+
+
+def _save_filtered_state(cfg: RuntimeConfig) -> dict[str, Any]:
+    saved = helpers.save_state(cfg.auth_state_path, url=cfg.base_url)
+    return {**saved, "filter": _filter_auth_state_file(cfg.auth_state_path)}
+
+
 def _open_page(url: str) -> None:
     try:
         helpers.open_or_attach_tab(url)
@@ -224,6 +298,23 @@ def _is_logged_in(cfg: RuntimeConfig) -> bool:
     return _has_auth_cookie(cfg) or cfg.base_url.rstrip("/") in current_url
 
 
+def _is_browser_daemon_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "bu.port" in message or "daemon" in message.lower()
+
+
+def _browser_daemon_result(exc: Exception, auth_state_path: Path) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_daemon_not_ready",
+        "reason": "browser_daemon_not_ready",
+        "error": str(exc),
+        "next_action": "run `flocks browser --setup`, then `flocks browser --doctor`, then retry",
+        "auth_state_path": str(auth_state_path),
+    }
+
+
 def validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
     if not cfg.auth_state_path.exists():
         return {
@@ -248,6 +339,10 @@ def validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
             "loaded": loaded,
         }
     except Exception as exc:
+        if _is_browser_daemon_error(exc):
+            result = _browser_daemon_result(exc, cfg.auth_state_path)
+            result["reason"] = "auth_state_load_failed_browser_daemon_not_ready"
+            return result
         return {
             "valid": False,
             "reason": "auth_state_load_failed",
@@ -304,9 +399,61 @@ def _wait_for_login_form_ready(cfg: RuntimeConfig) -> dict[str, bool]:
     )
 
 
+def _captcha_image_data_url_from_dom() -> str:
+    script = """(async () => {
+  const srcAttrs = ["src", "currentSrc", "data-src", "data-url", "data-original"];
+  const images = Array.from(document.querySelectorAll("img"));
+  const candidates = images
+    .map((img) => {
+      const values = srcAttrs
+        .map((attr) => attr === "currentSrc" ? img.currentSrc : img.getAttribute(attr))
+        .filter(Boolean);
+      const hint = [
+        img.id || "",
+        String(img.className || ""),
+        img.alt || "",
+        img.title || "",
+        values.join(" ")
+      ].join(" ").toLowerCase();
+      return {values, hint};
+    })
+    .filter((item) => item.values.length)
+    .sort((a, b) => {
+      const score = (item) => /captcha|verify|vcode|code|验证码/.test(item.hint) ? 0 : 1;
+      return score(a) - score(b);
+    });
+
+  for (const item of candidates) {
+    for (const raw of item.values) {
+      const url = new URL(raw, window.location.href).href;
+      if (url.startsWith("data:image/")) {
+        return url;
+      }
+      try {
+        const response = await fetch(url, {credentials: "include", cache: "no-store"});
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        if (!String(blob.type || "").startsWith("image/")) continue;
+        return await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(reader.error || new Error("captcha image read failed"));
+          reader.onload = () => resolve(String(reader.result));
+          reader.readAsDataURL(blob);
+        });
+      } catch (_err) {
+      }
+    }
+  }
+  return "";
+})()"""
+    return str(helpers.js(script) or "")
+
+
 def _captcha_image_from_browser(cfg: RuntimeConfig) -> bytes:
-    captcha_url = _url(cfg, f"{cfg.captcha_path}?r={random.random()}")
-    script = f"""(async () => {{
+    data_url = _captcha_image_data_url_from_dom()
+    if not data_url:
+        captcha_url = _url(cfg, f"{cfg.captcha_path}?r={random.random()}")
+        script = f"""(async () => {{
   const response = await fetch({json.dumps(captcha_url)}, {{
     credentials: "include",
     cache: "no-store"
@@ -322,7 +469,7 @@ def _captcha_image_from_browser(cfg: RuntimeConfig) -> bytes:
     reader.readAsDataURL(blob);
   }});
 }})()"""
-    data_url = str(helpers.js(script) or "")
+        data_url = str(helpers.js(script) or "")
     if "," not in data_url:
         raise RuntimeError("SkyEye Sensor captcha fetch did not return a data URL.")
     return base64.b64decode(data_url.split(",", 1)[1])
@@ -419,8 +566,13 @@ def refresh_auth_state(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, 
             "auth_state_path": str(cfg.auth_state_path),
         }
 
-    _open_page(_login_url(cfg))
-    form_state = _wait_for_login_form_ready(cfg)
+    try:
+        _open_page(_login_url(cfg))
+        form_state = _wait_for_login_form_ready(cfg)
+    except Exception as exc:
+        if _is_browser_daemon_error(exc):
+            return _browser_daemon_result(exc, cfg.auth_state_path)
+        raise
     last_error = ""
     for attempt in range(1, cfg.max_captcha_retry + 1):
         try:
@@ -436,7 +588,7 @@ def refresh_auth_state(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, 
                 code = _ocr_code(_captcha_image_from_browser(cfg))
             filled = _fill_and_submit(cfg, code)
             if _wait_for_login_success(cfg):
-                saved = helpers.save_state(cfg.auth_state_path, url=cfg.base_url)
+                saved = _save_filtered_state(cfg)
                 return {
                     "success": True,
                     "status": "browser_cdp_login_refreshed_auth_state",
@@ -478,18 +630,17 @@ def ensure_auth_state(cfg: RuntimeConfig, captcha_code: str = "", force_refresh:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ensure SkyEye Sensor browser auth-state")
-    parser.add_argument("action", nargs="?", choices=["ensure", "validate", "refresh"], default="ensure")
+    parser.add_argument("action", nargs="?", choices=["ensure", "validate", "refresh", "status"], default="ensure")
     parser.add_argument("--base-url", help="SkyEye Sensor base URL, for example https://sensor.example.com")
     parser.add_argument("--username", help="Username for CDP-assisted login")
     parser.add_argument("--password", help="Password for CDP-assisted login")
     parser.add_argument("--auth-state", help=f"Auth-state path, default: {DEFAULT_AUTH_STATE}")
     parser.add_argument("--login-path", default="", help=f"Login path, default: {DEFAULT_LOGIN_PATH}")
-    parser.add_argument("--captcha-path", default="", help=f"Captcha path, default: {DEFAULT_CAPTCHA_PATH}")
+    parser.add_argument("--captcha-path", default="", help="Captcha path override")
     parser.add_argument("--captcha-code", default="", help="Manual captcha code; OCR is used when omitted")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--max-captcha-retry", type=int, default=5)
     parser.add_argument("--no-ocr", action="store_true", help="Do not OCR captcha; require --captcha-code")
-    parser.add_argument("--no-save-credentials", dest="save_credentials", action="store_false")
     parser.set_defaults(save_credentials=True)
     return parser
 
@@ -497,6 +648,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_parser().parse_args()
     try:
+        if args.action == "status":
+            result = {"success": True, "status": "saved_auto_login_status", **saved_auto_login_status()}
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         cfg = _runtime_config(args)
         if args.action == "validate":
             result = validate_auth_state(cfg)

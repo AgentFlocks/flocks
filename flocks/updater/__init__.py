@@ -13,6 +13,7 @@ from flocks.updater.updater import (
     check_update,
     get_current_version,
     get_latest_release,
+    perform_pro_bundle_downgrade,
     perform_update,
     perform_pro_bundle_install,
 )
@@ -29,4 +30,5 @@ __all__ = [
     "get_latest_release",
     "perform_update",
     "perform_pro_bundle_install",
+    "perform_pro_bundle_downgrade",
 ]

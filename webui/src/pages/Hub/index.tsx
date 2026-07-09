@@ -19,11 +19,26 @@ import {
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
-import { hubAPI, HubCatalogEntry, HubFileContent, HubFileNode, HubManifest, HubPluginType } from '@/api/hub';
+import SuiteInstallProgressPanel, {
+  applySuiteInstallProgressEvent,
+  createSuiteInstallProgressState,
+  failSuiteInstallProgress,
+  type SuiteInstallProgressState,
+} from '@/components/hub/SuiteInstallProgressPanel';
+import {
+  hubAPI,
+  HubCatalogEntry,
+  HubFileContent,
+  HubFileNode,
+  HubInstallProgressEvent,
+  HubManifest,
+  HubPluginType,
+} from '@/api/hub';
 import FlowCanvas from '@/pages/WorkflowDetail/FlowCanvas';
 import type { WorkflowJSON } from '@/api/workflow';
 import { useTranslation } from 'react-i18next';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
+import { useProductName } from '@/contexts/ProductNameContext';
 
 type ViewMode = 'table' | 'tree';
 
@@ -60,6 +75,8 @@ const TYPE_LABEL: Record<HubPluginType, string> = {
   tool: 'Tool',
   device: 'Device',
   workflow: 'Workflow',
+  webui: 'WebUI',
+  component: 'Scenario Suite',
 };
 
 const TYPE_LABEL_CN: Record<HubPluginType, string> = {
@@ -68,11 +85,15 @@ const TYPE_LABEL_CN: Record<HubPluginType, string> = {
   tool: 'Tool',
   device: '设备',
   workflow: 'Workflow',
+  webui: 'WebUI',
+  component: '场景套件',
 };
 
+const HUB_PLUGIN_TYPES: HubPluginType[] = ['skill', 'agent', 'tool', 'device', 'workflow', 'webui', 'component'];
+
 function normalizePluginType(value: string | null): HubPluginType | '' {
-  if (value === 'skill' || value === 'agent' || value === 'tool' || value === 'device' || value === 'workflow') {
-    return value;
+  if (HUB_PLUGIN_TYPES.includes(value as HubPluginType)) {
+    return value as HubPluginType;
   }
   return '';
 }
@@ -86,7 +107,7 @@ function formatPluginTypeLabel(type: HubPluginType, language: string): string {
 
 const HUB_TEXT = {
   zh: {
-    description: '浏览随 Flocks 打包的本地插件广场，并安装到本机插件目录。',
+    description: '浏览打包的本地插件广场，并安装到本机插件目录。',
     treeView: '目录视图',
     tableView: '表格视图',
     refresh: '刷新',
@@ -111,6 +132,20 @@ const HUB_TEXT = {
     noMatches: '没有匹配的插件',
     parseWorkflowFailed: 'workflow.json 解析失败',
     readWorkflowFailed: '无法读取 workflow.json',
+    suiteInstallTitle: '场景套件安装进度',
+    suiteInstallRunning: '正在安装',
+    suiteInstallCompleted: '安装完成',
+    suiteInstallFailed: '安装失败',
+    suiteInstallProgress: '安装进度',
+    suiteInstallDismiss: '关闭',
+    suiteItemStatuses: {
+      pending: '等待中',
+      installing: '安装中',
+      installed: '已安装',
+      skipped: '已跳过',
+      failed: '失败',
+      completed: '已完成',
+    },
     tabs: { overview: '概览', flow: '流程图', files: '文件', deps: '依赖', permissions: '权限', versions: '版本' },
     id: 'ID',
     manifest: 'Manifest',
@@ -128,7 +163,7 @@ const HUB_TEXT = {
     },
   },
   en: {
-    description: 'Browse bundled Flocks Hub plugins and install them into the local plugin directory.',
+    description: 'Browse bundled Hub plugins and install them into the local plugin directory.',
     treeView: 'Directory View',
     tableView: 'Table View',
     refresh: 'Refresh',
@@ -153,6 +188,20 @@ const HUB_TEXT = {
     noMatches: 'No matching plugins',
     parseWorkflowFailed: 'Failed to parse workflow.json',
     readWorkflowFailed: 'Failed to read workflow.json',
+    suiteInstallTitle: 'Scenario suite install progress',
+    suiteInstallRunning: 'Installing',
+    suiteInstallCompleted: 'Installed',
+    suiteInstallFailed: 'Install failed',
+    suiteInstallProgress: 'Progress',
+    suiteInstallDismiss: 'Close',
+    suiteItemStatuses: {
+      pending: 'Pending',
+      installing: 'Installing',
+      installed: 'Installed',
+      skipped: 'Skipped',
+      failed: 'Failed',
+      completed: 'Completed',
+    },
     tabs: { overview: 'Overview', flow: 'Flow', files: 'Files', deps: 'Dependencies', permissions: 'Permissions', versions: 'Versions' },
     id: 'ID',
     manifest: 'Manifest',
@@ -186,6 +235,12 @@ function getHubDescription(entry: Pick<HubCatalogEntry, 'description' | 'descrip
     { description: entry.description, descriptionCn: entry.descriptionCn },
     language,
   );
+}
+
+function getHubName(entry: Pick<HubCatalogEntry, 'id' | 'name' | 'nameCn'>, language: string) {
+  const name = entry.name?.trim();
+  const nameCn = entry.nameCn?.trim();
+  return language.toLowerCase().startsWith('zh') ? (nameCn || name || entry.id) : (name || nameCn || entry.id);
 }
 
 interface HubFilterSnapshot {
@@ -251,8 +306,13 @@ function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot):
 
 export default function HubPage() {
   const { i18n } = useTranslation();
+  const { productName } = useProductName();
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
+  const hubTitle = `${productName} Hub`;
+  const hubDescription = i18n.language.toLowerCase().startsWith('zh')
+    ? `浏览随 ${productName} 打包的本地插件广场，并安装到本机插件目录。`
+    : `Browse bundled ${hubTitle} plugins and install them into the local plugin directory.`;
   const urlPluginId = searchParams.get('plugin') || searchParams.get('id') || '';
   const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
@@ -269,6 +329,7 @@ export default function HubPage() {
   const [pageSize, setPageSize] = useState(25);
   const [selected, setSelected] = useState<HubCatalogEntry | null>(null);
   const [actionId, setActionId] = useState<string | null>(null);
+  const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [taxonomy, setTaxonomy] = useState<HubTaxonomyResponse | null>(null);
 
   const fetchCatalog = async (silent = false) => {
@@ -353,17 +414,33 @@ export default function HubPage() {
     }
   };
 
+  const handleSuiteInstallProgress = (progress: HubInstallProgressEvent) => {
+    setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
+  };
+
   const runAction = async (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => {
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
-      if (action === 'install') await hubAPI.install(entry.type, entry.id);
+      if (action === 'install' && entry.type === 'component') {
+        setSuiteInstallProgress(createSuiteInstallProgressState(entry));
+        await hubAPI.installStream(entry.type, entry.id, handleSuiteInstallProgress);
+      } else if (action === 'install') {
+        await hubAPI.install(entry.type, entry.id);
+      }
       if (action === 'update') await hubAPI.update(entry.type, entry.id);
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
       const nextItems = await fetchCatalog(true);
       const updated = nextItems?.find(item => item.type === entry.type && item.id === entry.id);
       if (updated) {
         setSelected(current => (current?.type === entry.type && current?.id === entry.id ? updated : current));
+      }
+    } catch (error) {
+      if (action === 'install' && entry.type === 'component') {
+        const message = error instanceof Error ? error.message : text.suiteInstallFailed;
+        setSuiteInstallProgress(current => failSuiteInstallProgress(current, entry, message));
+      } else {
+        console.error(error);
       }
     } finally {
       setActionId(null);
@@ -384,8 +461,8 @@ export default function HubPage() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader
-        title="Flocks Hub"
-        description={text.description}
+        title={hubTitle}
+        description={hubDescription}
         icon={<Archive className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
@@ -426,7 +503,7 @@ export default function HubPage() {
               onChange={value => setTypeFilter(value as HubPluginType | '')}
               options={[
                 { value: '', label: text.all },
-                ...(['skill', 'agent', 'tool', 'device', 'workflow'] as HubPluginType[]).map(type => ({
+                ...HUB_PLUGIN_TYPES.map(type => ({
                   value: type,
                   label: formatPluginTypeLabel(type, i18n.language),
                   count: facetCounts.type[type] ?? 0,
@@ -531,6 +608,14 @@ export default function HubPage() {
           onAction={runAction}
           actionId={actionId}
           text={text}
+        />
+      )}
+
+      {suiteInstallProgress && (
+        <SuiteInstallProgressPanel
+          progress={suiteInstallProgress}
+          language={i18n.language}
+          onClose={() => setSuiteInstallProgress(null)}
         />
       )}
     </div>
@@ -668,7 +753,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
               <td className="px-3 py-2 text-gray-500">{formatPluginTypeLabel(item.type, language)}</td>
               <td className="max-w-0 px-3 py-2">
                 <button onClick={() => onSelect(item)} className="w-full text-left">
-                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{item.name}</div>
+                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{getHubName(item, language)}</div>
                   <div className="truncate text-[11px] text-gray-500">{getHubDescription(item, language)}</div>
                 </button>
               </td>
@@ -873,7 +958,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
       <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-gray-900">{entry.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
             <StateBadge state={entry.state} text={text} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
@@ -905,6 +990,24 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             <InfoBlock label={text.useCase} value={entry.useCases.join(', ') || '-'} />
             <InfoBlock label={text.trust} value={entry.trust} />
             <InfoBlock label={text.manifest} value={entry.manifestPath} />
+            {entry.type === 'component' && manifest?.components?.length ? (
+              <div>
+                <div className="text-xs text-gray-400 mb-2">
+                  {language.toLowerCase().startsWith('zh') ? '套件内容' : 'Suite items'}
+                </div>
+                <div className="space-y-2">
+                  {manifest.components.map((item) => (
+                    <div
+                      key={`${item.type}:${item.id}`}
+                      className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                    >
+                      <span className="font-mono text-gray-800">{item.id}</span>
+                      <span className="text-xs text-gray-500">{formatPluginTypeLabel(item.type, language)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
         {activeTab === 'flow' && (

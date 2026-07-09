@@ -43,10 +43,13 @@ chromium --remote-debugging-port=9222
 ```
 
 ### 3. 登录 EDR
-登录态来源有两种，必须先向用户确认是否愿意提供 EDR 访问地址、用户名和密码：
+登录态必须先检查再分流，不要一开始就要求用户提供账密：
 
-- 用户不提供账密：由用户在 Chrome 中手动登录 EDR（如需 MFA，完成认证），登录成功后保存浏览器 state。
-- 用户提供账密：调用 `sangfor_edr_auth` 保存账密，并通过 browser daemon / CDP 驱动真实 EDR 登录页自动登录。验证码图片在浏览器会话中获取，OCR 识别后填入页面；登录成功后保存浏览器 state。
+1. 调用 `sangfor_edr_auth`，`action=status_auth_state`，确认固定 state 是否存在、是否可用，以及是否已有可自动刷新的账密配置。
+2. 如果返回的 `validation.valid` 为 `true`，直接复用已保存 state。
+3. 如果 state 不存在或失效，但 `can_auto_refresh` 为 `true`，调用 `sangfor_edr_auth`，`action=ensure_auth_state`，通过 browser daemon / CDP 驱动真实 EDR 登录页自动登录。验证码图片在浏览器会话中获取，OCR 识别后填入页面；登录成功后保存浏览器 state。
+4. 如果没有可用 state，也没有保存账密配置，再询问用户：提供 EDR 地址、用户名、密码后自动登录并保存，或不提供账密改走手动登录。
+5. 用户不提供账密、自动登录失败、MFA/验证码/OCR/DOM 选择器异常时，由用户在 Chrome 中手动登录 EDR（如需 MFA，完成认证），登录成功后保存浏览器 state。
 
 ---
 
@@ -73,10 +76,13 @@ flocks browser --setup
 ~/.flocks/browser/sangfor-edr/auth-state.json
 ```
 
-如果 state 不存在或已失效：
+推荐先调用工具做状态检查：
 
-- 未保存账密：提示用户在 Chrome 中手动登录，登录成功后执行 `flocks browser state save ~/.flocks/browser/sangfor-edr/auth-state.json`。
-- 已保存账密：调用 `sangfor_edr_auth`，使用 `action=ensure_auth_state` 或 `action=refresh_auth_state` 自动打开真实登录页、识别验证码、填入账密并保存新的 state。
+- `action=status_auth_state`：返回 `auth_state_exists`、`validation.valid`、`can_auto_refresh` 等非敏感状态。
+- `validation.valid=true`：直接继续 Step 4。
+- `validation.valid=false` 且 `can_auto_refresh=true`：调用 `action=ensure_auth_state` 自动打开真实登录页、识别验证码、填入账密并保存新的 state。
+- `validation.valid=false` 且 `can_auto_refresh=false`：再询问用户是提供账密自动登录并保存，还是手动登录。
+- 用户拒绝提供账密或自动登录失败：提示用户在 Chrome 中手动登录，登录成功后执行 `flocks browser state save ~/.flocks/browser/sangfor-edr/auth-state.json`。
 
 ### Step 4：打开目标页面
 用户或工具在 Chrome 中打开：
