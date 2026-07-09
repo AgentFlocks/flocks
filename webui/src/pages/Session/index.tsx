@@ -479,6 +479,8 @@ export default function SessionPage() {
   );
   const selectedSession = listedSelectedSession
     ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
+  const activeChatSessionId = selectedSession ? selectedSessionId : null;
+  const resolvingSelectedSession = Boolean(selectedSessionId && !selectedSession);
   const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
     ? makeModelKey(selectedSession.provider, selectedSession.model)
     : null;
@@ -596,9 +598,9 @@ export default function SessionPage() {
   }, [loadingSessions, location.state, searchParams, selectedSessionId]);
 
   useEffect(() => {
-    if (!selectedSessionId) return;
+    if (!selectedSessionId || selectedSession?.id !== selectedSessionId) return;
     writeLastSelectedSessionId(selectedSessionId);
-  }, [selectedSessionId]);
+  }, [selectedSession?.id, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSessionId) {
@@ -609,6 +611,7 @@ export default function SessionPage() {
       setSelectedSessionFallback(null);
       return;
     }
+    if (selectedSessionFallback?.id === selectedSessionId) return;
     if (loadingSessions) return;
 
     let cancelled = false;
@@ -629,7 +632,7 @@ export default function SessionPage() {
     return () => {
       cancelled = true;
     };
-  }, [listedSelectedSession, loadingSessions, selectedSessionId]);
+  }, [listedSelectedSession, loadingSessions, selectedSessionFallback?.id, selectedSessionId]);
 
   // Close agent dropdown on outside click
   useEffect(() => {
@@ -722,6 +725,7 @@ export default function SessionPage() {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
       addSession(response.data);
+      setSelectedSessionFallback(response.data);
       setSelectedAgent('rex');
       setSelectedModelKey(null);
       setSelectedSessionId(response.data.id);
@@ -761,6 +765,7 @@ export default function SessionPage() {
       const newSessionId = response.data.id;
 
       addSession(response.data);
+      setSelectedSessionFallback(response.data);
       setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
 
@@ -1194,10 +1199,15 @@ export default function SessionPage() {
         </div>
 
         {/* Chat — powered by unified SessionChat */}
-        <SessionChat
-          key={selectedSessionId ?? 'empty-session'}
-          sessionId={selectedSessionId}
-          live={Boolean(selectedSessionId)}
+        {resolvingSelectedSession ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <LoadingSpinner delayMs={180} />
+          </div>
+        ) : (
+          <SessionChat
+            key={activeChatSessionId ?? 'empty-session'}
+            sessionId={activeChatSessionId}
+            live={Boolean(activeChatSessionId)}
           hideInput={selectedSession?.canWrite === false}
           display={{
             compact: false,
@@ -1216,7 +1226,7 @@ export default function SessionPage() {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
           }}
-          onSseStatusChange={selectedSessionId ? setSseStatus : undefined}
+          onSseStatusChange={activeChatSessionId ? setSseStatus : undefined}
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
@@ -1440,7 +1450,8 @@ export default function SessionPage() {
               )}
             </div>
           }
-        />
+          />
+        )}
       </div>
 
       {selectorTooltip && (

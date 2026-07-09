@@ -260,6 +260,16 @@ function renderSessionPage(
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('session sidebar grouping helpers', () => {
   it('groups sessions by updated date and applies search filtering', () => {
     const now = new Date(2026, 6, 9, 12, 0, 0);
@@ -786,6 +796,7 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('keeps a selected session that is valid but missing from the current list', async () => {
+    const request = deferred<typeof session & { canWrite: boolean }>();
     useSessions.mockReturnValue({
       sessions: [],
       loading: false,
@@ -796,17 +807,28 @@ describe('SessionPage session actions menu', () => {
       removeSessions,
       addSession,
     });
-    sessionApi.get.mockResolvedValue({
+    sessionApi.get.mockReturnValue(request.promise);
+    const fetchedSession = {
       ...session,
       id: 'session-missing-from-list',
       title: 'Fetched Session',
       canWrite: false,
-    });
+    };
 
     renderSessionPage('/sessions?session=session-missing-from-list');
 
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
+    });
+    expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
+    expect(screen.getByText('loading-spinner')).toBeInTheDocument();
+
+    await act(async () => {
+      request.resolve(fetchedSession);
+      await request.promise;
+    });
+
+    await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-missing-from-list');
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-hide-input', 'true');
     });
