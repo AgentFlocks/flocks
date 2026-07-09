@@ -16,6 +16,7 @@ import {
 const TOOL_LIST_STALE_TIME_MS = 5000;
 const TOOL_LIST_MIN_FETCH_INTERVAL_MS = 1000;
 const MAX_TOOL_PAGE_RESOURCES = 80;
+const DEFAULT_TOOL_PAGE_LIMIT = 25;
 
 const EMPTY_TOOL_FACETS: ToolListFacets = {
   category: {},
@@ -28,7 +29,7 @@ const EMPTY_TOOL_PAGE: ToolListPageResponse = {
   items: [],
   total: 0,
   offset: 0,
-  limit: 20,
+  limit: DEFAULT_TOOL_PAGE_LIMIT,
   facets: EMPTY_TOOL_FACETS,
 };
 
@@ -56,7 +57,7 @@ function normalizeToolPageParams(params: ToolListPageParams): Required<ToolListP
     sortBy: params.sortBy ?? 'source',
     sortDir: params.sortDir ?? 'asc',
     offset: params.offset ?? 0,
-    limit: params.limit ?? 20,
+    limit: params.limit ?? DEFAULT_TOOL_PAGE_LIMIT,
   };
 }
 

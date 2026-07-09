@@ -45,7 +45,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToolPage } from '@/hooks/useTools';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
-import { canDirectlyTestTool, toolAPI, Tool, ToolFixture, ToolSource } from '@/api/tool';
+import { canDirectlyTestTool, toolAPI, Tool, ToolFixture } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
@@ -58,18 +58,22 @@ import LocalTabContent from './components/LocalTabContent';
 import { getSourceLabel } from './constants';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
+import {
+  DEFAULT_TOOL_TAB,
+  TOOL_PAGE_SIZE,
+  getTabSourceFilter,
+  shouldLoadMcpCatalog,
+  type TabKey,
+} from './tabLoading';
 
 // ============================================================================
 // Constants & Config
 // ============================================================================
 
-type TabKey = 'all' | 'mcp' | 'api' | 'local';
-
 interface TabConfig {
   key: TabKey;
   label: string;
   icon: React.ReactNode;
-  sourceFilter?: ToolSource | ToolSource[];
 }
 
 /** 类别 badge (source) - preserve existing Tool page colors while fixing device label rendering */
@@ -105,7 +109,7 @@ const SOURCE_SORT_ORDER: Record<string, number> = {
   device: 6,
 };
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = TOOL_PAGE_SIZE;
 
 /** MCP/API 服务器详情抽屉宽度（px） */
 const DETAIL_DRAWER_WIDTH = 560;
@@ -156,12 +160,12 @@ export default function ToolPage() {
 
   const TABS: TabConfig[] = [
     { key: 'all', label: t('tabs.all'), icon: <Grid className="w-5 h-5" /> },
-    { key: 'mcp', label: t('tabs.mcp'), icon: <Database className="w-5 h-5" />, sourceFilter: 'mcp' },
-    { key: 'api', label: t('tabs.api'), icon: <Cloud className="w-5 h-5" />, sourceFilter: 'api' },
-    { key: 'local', label: t('tabs.local'), icon: <Code className="w-5 h-5" />, sourceFilter: 'plugin_py' },
+    { key: 'mcp', label: t('tabs.mcp'), icon: <Database className="w-5 h-5" /> },
+    { key: 'api', label: t('tabs.api'), icon: <Cloud className="w-5 h-5" /> },
+    { key: 'local', label: t('tabs.local'), icon: <Code className="w-5 h-5" /> },
   ];
 
-  const [activeTab, setActiveTab] = useState<TabKey>('all');
+  const [activeTab, setActiveTab] = useState<TabKey>(DEFAULT_TOOL_TAB);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTool, setSelectedTool] = useState<Tool | null>(null);
   const [testParams, setTestParams] = useState('{}');
@@ -182,8 +186,7 @@ export default function ToolPage() {
 
   const [apiEnabledServicesCount, setApiEnabledServicesCount] = useState(0);
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
-  const activeTabConfig = TABS.find((tab) => tab.key === activeTab);
-  const tabSourceFilter = activeTabConfig?.sourceFilter;
+  const tabSourceFilter = getTabSourceFilter(activeTab);
   const sourceFilterParam = useMemo(() => {
     const values = new Set(filters.source);
     if (tabSourceFilter) {
@@ -224,10 +227,14 @@ export default function ToolPage() {
   // Catalog data (fetched once at top level, shared with MCP & API tabs)
   const [catalogEntries, setCatalogEntries] = useState<MCPCatalogEntry[]>([]);
   const [catalogCategories, setCatalogCategories] = useState<Record<string, MCPCatalogCategory>>({});
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [configuredIds, setConfiguredIds] = useState<Set<string>>(new Set());
+  const catalogLoadedRef = useRef(false);
 
   useEffect(() => {
+    if (!shouldLoadMcpCatalog(activeTab) || catalogLoadedRef.current) return;
+    let cancelled = false;
+
     const loadCatalog = async () => {
       try {
         setCatalogLoading(true);
@@ -235,21 +242,35 @@ export default function ToolPage() {
           mcpAPI.catalogList(),
           mcpAPI.catalogCategories(),
         ]);
+        if (cancelled) return;
         setCatalogEntries(entriesRes.data);
         setCatalogCategories(catsRes.data);
         // Get currently configured IDs (no auto-setup to avoid re-adding removed entries)
         try {
           const confRes = await mcpAPI.catalogConfigured();
-          setConfiguredIds(new Set(confRes.data));
+          if (!cancelled) setConfiguredIds(new Set(confRes.data));
         } catch { /* ignore */ }
       } catch (err) {
         console.error('Failed to load catalog:', err);
       } finally {
-        setCatalogLoading(false);
+        if (!cancelled) {
+          catalogLoadedRef.current = true;
+          setCatalogLoading(false);
+        }
       }
     };
-    loadCatalog();
-  }, []);
+    void loadCatalog();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!shouldLoadMcpCatalog(activeTab)) {
+      setCatalogLoading(false);
+    }
+  }, [activeTab]);
 
   const onConfiguredChange = useCallback((id: string) => {
     setConfiguredIds(prev => new Set(prev).add(id));
@@ -296,6 +317,10 @@ export default function ToolPage() {
       local: toolFacets.source.plugin_py ?? 0,
     };
   }, [totalTools, toolFacets.source, apiEnabledServicesCount]);
+  const enabledSummary = useMemo(() => ({
+    active: toolFacets.enabled['true'] ?? tools.filter((tool) => tool.enabled).length,
+    inactive: toolFacets.enabled['false'] ?? 0,
+  }), [toolFacets.enabled, tools]);
 
   // Filter dropdown options come from server-side facets, plus active values
   // so a selected filter remains visible even when it narrows the result set.
@@ -435,9 +460,9 @@ export default function ToolPage() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
           <p className="mt-1 text-sm text-gray-500">
-            <span className="font-semibold text-gray-700">{tools.length}</span> {t('statusBadge.active')}
+            <span className="font-semibold text-gray-700">{enabledSummary.active}</span> {t('statusBadge.active')}
             <span className="mx-1.5 text-gray-300">·</span>
-            <span className="font-semibold text-gray-700">{catalogEntries.length}</span> {t('statusBadge.inactive')}
+            <span className="font-semibold text-gray-700">{enabledSummary.inactive}</span> {t('statusBadge.inactive')}
           </p>
           </div>
         </div>

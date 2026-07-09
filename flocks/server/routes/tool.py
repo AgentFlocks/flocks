@@ -3,9 +3,10 @@ Tool routes - API endpoints for tool management and execution
 """
 
 import asyncio
+from dataclasses import dataclass
 import threading
 import time
-from typing import Annotated, List, Optional, Dict, Any, Literal
+from typing import Annotated, List, Optional, Dict, Any, Literal, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
@@ -131,7 +132,7 @@ class ToolListPageResponse(BaseModel):
     items: List[ToolInfoResponse] = Field(default_factory=list)
     total: int = Field(0)
     offset: int = Field(0)
-    limit: int = Field(20)
+    limit: int = Field(25)
     facets: ToolListFacets = Field(default_factory=ToolListFacets)
 
 
@@ -150,11 +151,29 @@ _VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
     "Direct HTTP execution for local or permission-gated tools requires a verified "
     "session-backed request with both sessionID and messageID."
 )
+
+
+@dataclass(frozen=True)
+class ToolListIndexItem:
+    name: str
+    description: str
+    description_cn: Optional[str]
+    category: str
+    source: str
+    source_name: Optional[str]
+    vendor: Optional[str]
+    parameters_count: int
+    enabled: bool
+    enabled_default: bool
+    enabled_customized: bool
+    requires_confirmation: bool
+
+
 _TOOL_SUMMARY_CACHE_TTL_SECONDS = 5.0
 _tool_summary_cache_lock = threading.Lock()
 _tool_summary_cache_key: tuple[int, tuple[str, ...]] | None = None
 _tool_summary_cache_expires_at = 0.0
-_tool_summary_cache_items: tuple[ToolInfoResponse, ...] = ()
+_tool_summary_cache_items: tuple[ToolListIndexItem, ...] = ()
 
 
 def _invalidate_tool_summary_cache() -> None:
@@ -170,8 +189,8 @@ def _tool_summary_cache_current_key() -> tuple[int, tuple[str, ...]]:
     return ToolRegistry.revision(), tuple(ToolRegistry.all_tool_ids())
 
 
-def _get_tool_summary_items() -> List[ToolInfoResponse]:
-    """Return cached, parameter-free tool summaries for list filtering."""
+def _get_tool_summary_items() -> List[ToolListIndexItem]:
+    """Return cached, lightweight tool summaries for list filtering."""
     global _tool_summary_cache_key, _tool_summary_cache_expires_at, _tool_summary_cache_items
 
     now = time.monotonic()
@@ -184,10 +203,7 @@ def _get_tool_summary_items() -> List[ToolInfoResponse]:
         ):
             return list(_tool_summary_cache_items)
 
-        items = tuple(
-            _build_tool_response(t, include_parameters=False)
-            for t in ToolRegistry.list_tools()
-        )
+        items = tuple(_build_tool_index_item(t) for t in ToolRegistry.list_tools())
         _tool_summary_cache_key = cache_key
         _tool_summary_cache_expires_at = now + _TOOL_SUMMARY_CACHE_TTL_SECONDS
         _tool_summary_cache_items = items
@@ -253,10 +269,48 @@ def _build_tool_response(t: ToolInfo, *, include_parameters: bool = True) -> Too
         vendor=t.vendor,
         parameters=parameters,
         parameters_count=len(t.parameters),
-        enabled=_get_effective_tool_enabled(t),
+        enabled=_get_effective_tool_enabled(t, source=source, source_name=source_name),
         enabled_default=enabled_default,
         enabled_customized=customized,
         requires_confirmation=t.requires_confirmation,
+    )
+
+
+def _build_tool_index_item(t: ToolInfo) -> ToolListIndexItem:
+    """Build the lightweight index row used by the paged list endpoint."""
+    source, source_name = _get_tool_source(t)
+    setting = ConfigWriter.get_tool_setting(t.name) or {}
+    return ToolListIndexItem(
+        name=t.name,
+        description=t.description,
+        description_cn=t.description_cn,
+        category=t.category.value,
+        source=source,
+        source_name=source_name,
+        vendor=t.vendor,
+        parameters_count=len(t.parameters),
+        enabled=_get_effective_tool_enabled(t, source=source, source_name=source_name),
+        enabled_default=_get_default_enabled(t),
+        enabled_customized="enabled" in setting,
+        requires_confirmation=t.requires_confirmation,
+    )
+
+
+def _tool_index_item_to_response(item: ToolListIndexItem) -> ToolInfoResponse:
+    return ToolInfoResponse(
+        name=item.name,
+        description=item.description,
+        description_cn=item.description_cn,
+        category=item.category,
+        source=item.source,
+        source_name=item.source_name,
+        vendor=item.vendor,
+        parameters=[],
+        parameters_count=item.parameters_count,
+        enabled=item.enabled,
+        enabled_default=item.enabled_default,
+        enabled_customized=item.enabled_customized,
+        requires_confirmation=item.requires_confirmation,
     )
 
 
@@ -267,7 +321,7 @@ def _split_csv_filter(value: Optional[str]) -> Optional[set[str]]:
     return parts or None
 
 
-def _matches_tool_query(tool: ToolInfoResponse, query: str) -> bool:
+def _matches_tool_query(tool: ToolInfoResponse | ToolListIndexItem, query: str) -> bool:
     if not query:
         return True
     haystack = " ".join([
@@ -282,7 +336,7 @@ def _matches_tool_query(tool: ToolInfoResponse, query: str) -> bool:
     return query in haystack
 
 
-def _build_tool_facets(items: List[ToolInfoResponse]) -> ToolListFacets:
+def _build_tool_facets(items: Sequence[ToolInfoResponse | ToolListIndexItem]) -> ToolListFacets:
     facets = ToolListFacets()
     for item in items:
         facets.category[item.category] = facets.category.get(item.category, 0) + 1
@@ -295,10 +349,10 @@ def _build_tool_facets(items: List[ToolInfoResponse]) -> ToolListFacets:
 
 
 def _sort_tool_items(
-    items: List[ToolInfoResponse],
+    items: Sequence[ToolInfoResponse | ToolListIndexItem],
     sort_by: Literal["category", "source", "source_name", "enabled", "name"],
     sort_dir: Literal["asc", "desc"],
-) -> List[ToolInfoResponse]:
+) -> List[ToolInfoResponse | ToolListIndexItem]:
     reverse = sort_dir == "desc"
 
     def sort_key(item: ToolInfoResponse):
@@ -312,7 +366,7 @@ def _sort_tool_items(
 
 
 def _filter_tool_items(
-    items: List[ToolInfoResponse],
+    items: Sequence[ToolInfoResponse | ToolListIndexItem],
     *,
     category_filter: Optional[set[str]],
     source_filter: Optional[set[str]],
@@ -323,8 +377,8 @@ def _filter_tool_items(
     include_source: bool = True,
     include_source_name: bool = True,
     include_enabled: bool = True,
-) -> List[ToolInfoResponse]:
-    result = items
+) -> List[ToolInfoResponse | ToolListIndexItem]:
+    result = list(items)
     if include_category and category_filter:
         result = [tool for tool in result if tool.category in category_filter]
     if include_source and source_filter:
@@ -554,9 +608,15 @@ def _service_allows_enable(t: ToolInfo) -> bool:
     return bool(svc.get("enabled", False))
 
 
-def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
+def _get_effective_tool_enabled(
+    tool_info: ToolInfo,
+    *,
+    source: Optional[str] = None,
+    source_name: Optional[str] = None,
+) -> bool:
     """Compute tool enabled state without mutating the registry object."""
-    source, source_name = _get_tool_source(tool_info)
+    if source is None:
+        source, source_name = _get_tool_source(tool_info)
     if source not in ("api", "device") or not source_name:
         return tool_info.enabled
     from flocks.server.routes.provider import _get_api_service_enabled
@@ -660,7 +720,7 @@ async def list_tools_page(
     sort_by: Literal["category", "source", "source_name", "enabled", "name"] = "source",
     sort_dir: Literal["asc", "desc"] = "asc",
     offset: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=200),
+    limit: int = Query(25, ge=1, le=200),
 ):
     """
     List tools with server-side search/filter/sort/pagination.
@@ -727,7 +787,10 @@ async def list_tools_page(
     )
     result = _sort_tool_items(result, sort_by, sort_dir)
     total = len(result)
-    items = result[offset:offset + limit]
+    items = [
+        _tool_index_item_to_response(item) if isinstance(item, ToolListIndexItem) else item
+        for item in result[offset:offset + limit]
+    ]
 
     log_route_timing(log, "tools.list_page.complete", started_at=started_at, extra={
         "count": len(items),

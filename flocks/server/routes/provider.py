@@ -6,10 +6,12 @@ Model objects must include: id, name, providerID, attachment, reasoning,
 temperature, tool_call, limit, etc.
 """
 
-import time
+import json
 import re
+import threading
+import time
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -42,6 +44,8 @@ from flocks.tool.schema.api_service_schema import (
 
 router = APIRouter()
 log = Log.create(service="provider-routes")
+_api_service_summary_metadata_cache_lock = threading.Lock()
+_api_service_summary_metadata_cache: Dict[str, tuple[tuple[Any, ...], Optional[Dict[str, Any]]]] = {}
 
 
 def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
@@ -69,6 +73,118 @@ def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]
         merged = {**yaml_data, **merged}
 
     return merged or None
+
+
+def _clear_api_service_summary_metadata_cache(provider_id: Optional[str] = None) -> None:
+    with _api_service_summary_metadata_cache_lock:
+        if provider_id is None:
+            _api_service_summary_metadata_cache.clear()
+        else:
+            _api_service_summary_metadata_cache.pop(provider_id, None)
+
+
+def _provider_yaml_cache_key(provider_id: str) -> tuple[str, int]:
+    descriptor = _find_api_service_descriptor(provider_id)
+    if descriptor is None:
+        return "", 0
+    try:
+        return str(descriptor.provider_yaml), descriptor.provider_yaml.stat().st_mtime_ns
+    except OSError:
+        return str(descriptor.provider_yaml), 0
+
+
+def _legacy_metadata_cache_key(provider_id: str) -> tuple[str, int]:
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if not meta_file.is_file():
+        return "", 0
+    try:
+        return str(meta_file), meta_file.stat().st_mtime_ns
+    except OSError:
+        return str(meta_file), 0
+
+
+def _api_service_summary_metadata_cache_key(provider_id: str) -> tuple[Any, ...]:
+    config_data = ConfigWriter.get_api_service_raw(provider_id) or {}
+    return (
+        json.dumps(config_data, sort_keys=True, default=str),
+        _legacy_metadata_cache_key(provider_id),
+        _provider_yaml_cache_key(provider_id),
+    )
+
+
+def _find_api_service_descriptor(provider_id: str):
+    from flocks.config.api_versioning import discover_api_service_descriptors
+
+    return next(
+        (
+            d
+            for d in discover_api_service_descriptors()
+            if provider_id in (d.storage_key, d.service_id)
+        ),
+        None,
+    )
+
+
+def _load_provider_yaml_summary_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
+    descriptor = _find_api_service_descriptor(provider_id)
+    if descriptor is None:
+        return None
+    try:
+        prov = api_service_schema_helpers.yaml.safe_load(
+            descriptor.provider_yaml.read_text(encoding="utf-8")
+        )
+    except Exception as e:
+        log.debug("api_service.summary_metadata.provider_yaml_failed", {
+            "provider_id": provider_id,
+            "path": str(descriptor.provider_yaml),
+            "error": str(e),
+        })
+        return None
+    if not isinstance(prov, dict):
+        return None
+    return {
+        "name": prov.get("name", provider_id),
+        "service_id": prov.get("service_id", provider_id),
+        "version": extract_provider_version(prov),
+        "description": prov.get("description"),
+        "description_cn": prov.get("description_cn"),
+        "defaults": prov.get("defaults", {}),
+        "integration_type": prov.get("integration_type"),
+        "vendor": prov.get("vendor"),
+    }
+
+
+def _load_api_service_summary_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Load only metadata needed by the API service list endpoint."""
+    cache_key = _api_service_summary_metadata_cache_key(provider_id)
+    with _api_service_summary_metadata_cache_lock:
+        cached = _api_service_summary_metadata_cache.get(provider_id)
+        if cached and cached[0] == cache_key:
+            return dict(cached[1]) if isinstance(cached[1], dict) else cached[1]
+
+    merged: Dict[str, Any] = {}
+    config_data = ConfigWriter.get_api_service_raw(provider_id)
+    if isinstance(config_data, dict):
+        merged.update(config_data)
+
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if meta_file.is_file():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata_data = api_service_schema_helpers.json.load(f)
+        if isinstance(metadata_data, dict):
+            merged = {**metadata_data, **merged}
+
+    yaml_data = _load_provider_yaml_summary_metadata(provider_id)
+    if isinstance(yaml_data, dict):
+        merged = {**yaml_data, **merged}
+
+    result = merged or None
+    with _api_service_summary_metadata_cache_lock:
+        _api_service_summary_metadata_cache[provider_id] = (
+            cache_key,
+            dict(result) if isinstance(result, dict) else result,
+        )
+    return result
 
 
 _EMAIL_KEY_PAIR_PATTERN = re.compile(
@@ -1041,7 +1157,7 @@ def _build_api_service_summary(
     raw_statuses: Dict[str, Any],
 ) -> APIServiceSummary:
     """Build API service summary used by the Tool API page."""
-    meta = _load_api_service_metadata_data(provider_id) or {}
+    meta = _load_api_service_summary_metadata_data(provider_id) or {}
     enabled = _get_api_service_enabled(provider_id)
     cached_status = raw_statuses.get(provider_id) or {}
     matched_tools = _get_api_service_tool_infos(provider_id)
@@ -1187,6 +1303,7 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         if request.verify_ssl is not None:
             existing["verify_ssl"] = request.verify_ssl
         ConfigWriter.set_api_service(provider_id, existing)
+        _clear_api_service_summary_metadata_cache(provider_id)
 
         matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
 
@@ -1316,6 +1433,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
         backing_plugin = _find_user_installed_tool_plugin_for(provider_id)
 
         removed_config = ConfigWriter.remove_api_service(provider_id)
+        _clear_api_service_summary_metadata_cache(provider_id)
 
         secrets = get_secret_manager()
         deleted_secret = False
@@ -1945,6 +2063,7 @@ async def set_service_credentials(provider_id: str, request: ProviderCredentialR
                     if field.key == "base_url":
                         existing.pop("baseUrl", None)
         ConfigWriter.set_api_service(provider_id, existing)
+        _clear_api_service_summary_metadata_cache(provider_id)
 
         log.info(
             "service.credentials.set",

@@ -479,28 +479,27 @@ class TestToolListPageRoute:
             handler=handler,
         )
 
-        original_build_tool_response = tool_routes._build_tool_response
-        summary_builds = 0
+        original_build_tool_index_item = tool_routes._build_tool_index_item
+        index_builds = 0
 
-        def counted_build_tool_response(tool_info, *, include_parameters=True):
-            nonlocal summary_builds
-            if not include_parameters:
-                summary_builds += 1
-            return original_build_tool_response(tool_info, include_parameters=include_parameters)
+        def counted_build_tool_index_item(tool_info):
+            nonlocal index_builds
+            index_builds += 1
+            return original_build_tool_index_item(tool_info)
 
-        monkeypatch.setattr(tool_routes, "_build_tool_response", counted_build_tool_response)
+        monkeypatch.setattr(tool_routes, "_build_tool_index_item", counted_build_tool_index_item)
 
         with _temporary_tool(tool):
             first = await client.get(
                 "/api/tools/page",
                 params={"q": "needlepagesummarycacheunique", "limit": 25},
             )
-            first_builds = summary_builds
+            first_builds = index_builds
             second = await client.get(
                 "/api/tools/page",
                 params={"q": "needlepagesummarycacheunique", "source": "plugin_py", "limit": 25},
             )
-            second_builds = summary_builds
+            second_builds = index_builds
 
             tool_routes._invalidate_tool_summary_cache()
             third = await client.get(
@@ -516,4 +515,4 @@ class TestToolListPageRoute:
         assert third.json()["total"] == 1
         assert first_builds > 0
         assert second_builds == first_builds
-        assert summary_builds > second_builds
+        assert index_builds > second_builds

@@ -187,6 +187,37 @@ describe('useTools', () => {
     });
   });
 
+  it('defaults paged requests to 25 items', async () => {
+    listPageMock.mockResolvedValue({
+      data: {
+        items: [],
+        total: 0,
+        offset: 0,
+        limit: 25,
+        facets: emptyFacets,
+      },
+    });
+
+    const { result } = renderHook(() => useToolPage({ source: 'api' }));
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.limit).toBe(25);
+    expect(listPageMock).toHaveBeenCalledWith({
+      source: 'api',
+      category: '',
+      sourceName: '',
+      enabled: '',
+      q: '',
+      sortBy: 'source',
+      sortDir: 'asc',
+      offset: 0,
+      limit: 25,
+    });
+  });
+
   it('shares the same paged request across concurrent hook instances', async () => {
     let resolvePage: (value: { data: any }) => void = () => {};
     listPageMock.mockReturnValue(new Promise((resolve) => {
