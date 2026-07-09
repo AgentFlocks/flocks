@@ -343,7 +343,7 @@ class InboundDispatcher:
         visible_agents = _normalize_visible_agents(channel_config)
         scope_override = None
         if msg.channel_id == "feishu" and msg.chat_type == ChatType.GROUP:
-            scope_override, feishu_agent, feishu_permission_mode, feishu_visible_agents = _resolve_feishu_group_overrides(
+            scope_override, feishu_agent, feishu_permission_mode, feishu_visible_agents = _resolve_feishu_group_overrides_ext(
                 channel_config, msg.chat_id,
             )
             if feishu_agent:
@@ -1389,8 +1389,17 @@ async def _resolve_session_model(session_id: str) -> Optional[dict]:
 def _resolve_feishu_group_overrides(
     channel_config: ChannelConfig,
     chat_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Backward-compatible helper returning ``(scope_override, agent_override)``."""
+    scope, agent, _, _ = _resolve_feishu_group_overrides_ext(channel_config, chat_id)
+    return scope, agent
+
+
+def _resolve_feishu_group_overrides_ext(
+    channel_config: ChannelConfig,
+    chat_id: str,
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[list[str]]]:
-    """Read per-group ``groupSessionScope`` and ``defaultAgent`` from the feishu config.
+    """Read per-group ``groupSessionScope`` and ``defaultAgent`` from feishu config.
 
     Returns ``(scope_override, agent_override, permission_mode, visible_agents)``.
     Each item may be ``None`` if not

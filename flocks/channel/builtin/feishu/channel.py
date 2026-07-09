@@ -37,6 +37,7 @@ class FeishuChannel(ChannelPlugin):
         super().__init__()
         self._webhook_chat_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._webhook_dedup_flush_tasks: dict[str, asyncio.Task] = {}
+        self._webhook_dedup_warmed: set[str] = set()
 
     @property
     def requires_signature(self) -> bool:
@@ -62,7 +63,6 @@ class FeishuChannel(ChannelPlugin):
         if not resolved_config:
             return False
         return verify_webhook_timestamp(headers)
-        self._webhook_dedup_warmed: set[str] = set()
 
     def _get_webhook_chat_lock(self, chat_id: str) -> asyncio.Lock:
         if chat_id in self._webhook_chat_locks:
