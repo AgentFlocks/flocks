@@ -142,6 +142,7 @@ describe('applyMessagePartUpdate', () => {
 describe('updateMessagePart scheduling', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   it('keeps parentID from fetched messages for regenerate truncation', async () => {
@@ -213,6 +214,7 @@ describe('updateMessagePart scheduling', () => {
   });
 
   it('second call with same part ID accumulates delta content correctly', async () => {
+    vi.useFakeTimers();
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     // Wait for initial fetch to settle
     await act(async () => {});
@@ -228,12 +230,40 @@ describe('updateMessagePart scheduling', () => {
     // Second call — content delta on the same part
     await act(async () => {
       result.current.updateMessagePart(delta, ' world');
+      await vi.advanceTimersByTimeAsync(16);
     });
 
     const msgs = result.current.messages;
     const msg = msgs.find((m: any) => m.id === 'msg-2');
     expect(msg).toBeDefined();
     expect((msg!.parts as any[])[0].text).toBe('hello world');
+  });
+
+  it('coalesces repeated known part updates into the next animation frame', async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    const part = { id: 'part-batched', messageID: 'msg-batched', sessionID: 'sess-1', type: 'text', text: 'h' };
+
+    await act(async () => {
+      result.current.updateMessagePart(part);
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('h');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'he' }, 'e');
+      result.current.updateMessagePart({ ...part, text: 'hel' }, 'l');
+      result.current.updateMessagePart({ ...part, text: 'hello' }, 'lo');
+    });
+
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('h');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16);
+    });
+
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hello');
   });
 
   it('resets known part tracking when session changes', async () => {

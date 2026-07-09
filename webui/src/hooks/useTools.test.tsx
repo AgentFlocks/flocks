@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useTools } from './useTools';
+import { __resetToolsResourceForTesting, useTools } from './useTools';
 
 const { listMock, refreshMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
@@ -18,6 +18,7 @@ vi.mock('@/api/tool', () => ({
 describe('useTools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetToolsResourceForTesting();
   });
 
   it('renders the tool list without automatically refreshing plugins', async () => {
@@ -66,11 +67,14 @@ describe('useTools', () => {
     expect(result.current.tools).toHaveLength(1);
     expect(refreshMock).not.toHaveBeenCalled();
 
+    const futureNow = Date.now() + 6000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(futureNow);
     window.dispatchEvent(new Event('focus'));
 
     await waitFor(() => {
       expect(result.current.tools).toHaveLength(2);
     });
+    nowSpy.mockRestore();
 
     expect(refreshMock).not.toHaveBeenCalled();
     expect(listMock).toHaveBeenCalledTimes(2);
@@ -105,5 +109,31 @@ describe('useTools', () => {
 
     expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares the initial tool list request across concurrent hook instances', async () => {
+    let resolveList: (value: { data: any[] }) => void = () => {};
+    listMock.mockReturnValue(new Promise((resolve) => {
+      resolveList = resolve;
+    }));
+
+    const first = renderHook(() => useTools());
+    const second = renderHook(() => useTools());
+
+    expect(listMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveList({
+        data: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+      });
+    });
+
+    await waitFor(() => {
+      expect(first.result.current.loading).toBe(false);
+      expect(second.result.current.loading).toBe(false);
+    });
+
+    expect(first.result.current.tools).toHaveLength(1);
+    expect(second.result.current.tools).toHaveLength(1);
   });
 });

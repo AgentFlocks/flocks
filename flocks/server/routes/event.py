@@ -33,6 +33,11 @@ RUNTIME_EVENT_PREFIXES = (
     "context.",
     "permission.",
 )
+EVENT_QUEUE_MAXSIZE = max(100, int(os.getenv("FLOCKS_EVENT_QUEUE_MAXSIZE", "1000")))
+EVENT_QUEUE_DROP_TO = max(0, min(
+    EVENT_QUEUE_MAXSIZE - 1,
+    int(os.getenv("FLOCKS_EVENT_QUEUE_DROP_TO", str(EVENT_QUEUE_MAXSIZE // 2))),
+))
 
 
 # Current directory context for SSE events
@@ -56,9 +61,17 @@ class EventBroadcaster:
     
     _instance: Optional["EventBroadcaster"] = None
     
-    def __init__(self):
+    def __init__(self, queue_maxsize: int = EVENT_QUEUE_MAXSIZE, queue_drop_to: Optional[int] = None):
         self._clients: list[asyncio.Queue] = []
         self._lock = asyncio.Lock()
+        self._queue_maxsize = max(1, queue_maxsize)
+        self._queue_drop_to = max(
+            0,
+            min(
+                self._queue_maxsize - 1,
+                EVENT_QUEUE_DROP_TO if queue_drop_to is None else queue_drop_to,
+            ),
+        )
     
     @classmethod
     def get(cls) -> "EventBroadcaster":
@@ -69,7 +82,7 @@ class EventBroadcaster:
     
     async def subscribe(self) -> asyncio.Queue:
         """Subscribe a new client"""
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_maxsize)
         async with self._lock:
             self._clients.append(queue)
         return queue
@@ -83,11 +96,45 @@ class EventBroadcaster:
     async def publish(self, event: dict):
         """Publish event to all clients"""
         async with self._lock:
-            for queue in self._clients:
-                try:
-                    await queue.put(event)
-                except Exception:
-                    pass  # Ignore errors for disconnected clients
+            clients = list(self._clients)
+        for queue in clients:
+            self._publish_to_queue(queue, event)
+
+    def _publish_to_queue(self, queue: asyncio.Queue, event: dict):
+        try:
+            queue.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        dropped = 0
+        while queue.qsize() > self._queue_drop_to:
+            try:
+                queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+
+        try:
+            queue.put_nowait(create_event("server.events_dropped", {
+                "dropped": dropped,
+                "reason": "client_backpressure",
+            }))
+        except asyncio.QueueFull:
+            pass
+
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            dropped += 1
+
+        if dropped > 0:
+            log.debug("event.queue.overflow", {
+                "dropped": dropped,
+                "queue_size": queue.qsize(),
+                "queue_maxsize": self._queue_maxsize,
+                "event_type": event.get("type"),
+            })
     
     @property
     def client_count(self) -> int:
@@ -99,10 +146,7 @@ class EventBroadcaster:
         shutdown_event = create_event("server.shutting_down", {})
         async with self._lock:
             for queue in self._clients:
-                try:
-                    await queue.put(shutdown_event)
-                except Exception:
-                    pass
+                self._publish_to_queue(queue, shutdown_event)
             self._clients.clear()
         log.info("event.broadcaster.shutdown", {"clients_notified": True})
 

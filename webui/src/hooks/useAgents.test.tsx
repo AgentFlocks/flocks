@@ -1,7 +1,7 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useAgents } from './useAgents';
+import { __resetAgentsResourceForTesting, useAgents } from './useAgents';
 
 const { listMock, refreshMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
@@ -18,6 +18,7 @@ vi.mock('@/api/agent', () => ({
 describe('useAgents', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetAgentsResourceForTesting();
   });
 
   it('returns an empty array when the API payload is not an array', async () => {
@@ -64,5 +65,31 @@ describe('useAgents', () => {
 
     expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares the initial agent list request across concurrent hook instances', async () => {
+    let resolveList: (value: { data: any[] }) => void = () => {};
+    listMock.mockReturnValue(new Promise((resolve) => {
+      resolveList = resolve;
+    }));
+
+    const first = renderHook(() => useAgents());
+    const second = renderHook(() => useAgents());
+
+    expect(listMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveList({
+        data: [{ name: 'rex', mode: 'primary' }],
+      });
+    });
+
+    await waitFor(() => {
+      expect(first.result.current.loading).toBe(false);
+      expect(second.result.current.loading).toBe(false);
+    });
+
+    expect(first.result.current.agents).toHaveLength(1);
+    expect(second.result.current.agents).toHaveLength(1);
   });
 });

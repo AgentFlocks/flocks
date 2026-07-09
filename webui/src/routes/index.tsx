@@ -1,4 +1,5 @@
 import { Suspense, lazy } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import { Routes as RouterRoutes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
@@ -6,37 +7,50 @@ import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import AuthLayout from '@/components/layout/AuthLayout';
 import Home from '@/pages/Home';
 import { useAuth } from '@/contexts/AuthContext';
+import { preloadI18nNamespaces } from '@/i18nResources';
 
 // All non-Home pages are code-split. Home stays eager because it's the very
 // first frame after auth and we don't want a Suspense flash on initial paint.
 // In particular, Session/Agent and the auth screens are kept lazy so heavy
 // transitive deps (SessionChat ~2.7k LOC + react-markdown + rehype/remark +
 // highlight.js) are not pulled into the main entry chunk.
-const SessionPage = lazy(() => import('@/pages/Session'));
-const AgentPage = lazy(() => import('@/pages/Agent'));
-const LoginPage = lazy(() => import('@/pages/Login'));
-const SetupAdminPage = lazy(() => import('@/pages/SetupAdmin'));
-const ForceChangePasswordPage = lazy(() => import('@/pages/ForceChangePassword'));
-const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
-const WorkflowCreate = lazy(() => import('@/pages/WorkflowCreate'));
-const WorkflowEditor = lazy(() => import('@/pages/WorkflowEditor'));
-const WorkflowDetail = lazy(() => import('@/pages/WorkflowDetail'));
-const TaskPage = lazy(() => import('@/pages/Task'));
-const ToolPage = lazy(() => import('@/pages/Tool'));
-const HubPage = lazy(() => import('@/pages/Hub'));
-const SkillPage = lazy(() => import('@/pages/Skill'));
-const ModelPage = lazy(() => import('@/pages/Model'));
-const ChannelPage = lazy(() => import('@/pages/Channel'));
-const PermissionPage = lazy(() => import('@/pages/Permission'));
-const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
-const WorkspacePage = lazy(() => import('@/pages/Workspace'));
-const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
-const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
-const SettingsPage = lazy(() => import('@/pages/Settings'));
-const WebUIContractPageHost = lazy(() => import('@/pages/WebUIContractPageHost'));
-const WebUIContractWorkspaceHost = lazy(() => import('@/pages/WebUIContractWorkspaceHost'));
+type LazyPageModule = { default: ComponentType<any> };
 
-function LazyRoute({ children }: { children: React.ReactNode }) {
+function lazyPage<T extends LazyPageModule>(
+  loader: () => Promise<T>,
+  namespaces: readonly string[] = [],
+) {
+  return lazy(() => Promise.all([
+    loader(),
+    preloadI18nNamespaces(namespaces),
+  ]).then(([module]) => module));
+}
+
+const SessionPage = lazyPage(() => import('@/pages/Session'), ['session']);
+const AgentPage = lazyPage(() => import('@/pages/Agent'), ['agent']);
+const LoginPage = lazyPage(() => import('@/pages/Login'));
+const SetupAdminPage = lazyPage(() => import('@/pages/SetupAdmin'));
+const ForceChangePasswordPage = lazyPage(() => import('@/pages/ForceChangePassword'));
+const WorkflowListPage = lazyPage(() => import('@/pages/Workflow'), ['workflow']);
+const WorkflowCreate = lazyPage(() => import('@/pages/WorkflowCreate'), ['workflow']);
+const WorkflowEditor = lazyPage(() => import('@/pages/WorkflowEditor'), ['workflow']);
+const WorkflowDetail = lazyPage(() => import('@/pages/WorkflowDetail'), ['workflow']);
+const TaskPage = lazyPage(() => import('@/pages/Task'), ['task']);
+const ToolPage = lazyPage(() => import('@/pages/Tool'), ['tool']);
+const HubPage = lazyPage(() => import('@/pages/Hub'));
+const SkillPage = lazyPage(() => import('@/pages/Skill'), ['skill']);
+const ModelPage = lazyPage(() => import('@/pages/Model'), ['model']);
+const ChannelPage = lazyPage(() => import('@/pages/Channel'), ['channel']);
+const PermissionPage = lazyPage(() => import('@/pages/Permission'), ['permission']);
+const MonitoringPage = lazyPage(() => import('@/pages/Monitoring'), ['monitoring']);
+const WorkspacePage = lazyPage(() => import('@/pages/Workspace'), ['workspace']);
+const DeviceIntegrationPage = lazyPage(() => import('@/pages/DeviceIntegration'), ['device']);
+const FlocksproUpgradeCallbackPage = lazyPage(() => import('@/pages/FlocksproUpgrade/Callback'), ['flockspro']);
+const SettingsPage = lazyPage(() => import('@/pages/Settings'));
+const WebUIContractPageHost = lazyPage(() => import('@/pages/WebUIContractPageHost'));
+const WebUIContractWorkspaceHost = lazyPage(() => import('@/pages/WebUIContractWorkspaceHost'));
+
+function LazyRoute({ children }: { children: ReactNode }) {
   return (
     <Suspense fallback={<RoutePageSkeleton />}>
       {children}

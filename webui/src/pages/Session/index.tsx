@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   MessageSquare, Plus, Trash2,
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
@@ -24,8 +24,8 @@ import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
+import { useEnabledChatModelDefinitions, useResolvedDefaultModel } from '@/hooks/useChatModelResources';
 import client from '@/api/client';
-import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
@@ -45,6 +45,7 @@ const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
+const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ChatModelOption = {
   key: string;
@@ -122,6 +123,219 @@ function makeModelKey(providerID: string, modelID: string): string {
   return `${providerID}::${modelID}`;
 }
 
+export type SessionGroupKey = 'today' | 'yesterday' | 'thisWeek' | 'lastWeek' | 'earlier';
+
+export interface SessionGroup {
+  key: SessionGroupKey;
+  labelKey: string;
+  items: Session[];
+}
+
+const SESSION_GROUP_DEFAULT_LIMIT: Record<SessionGroupKey, number> = {
+  today: Infinity,
+  yesterday: Infinity,
+  thisWeek: 5,
+  lastWeek: 5,
+  earlier: 5,
+};
+
+const SESSION_GROUP_DEFS: Array<Pick<SessionGroup, 'key' | 'labelKey'>> = [
+  { key: 'today', labelKey: 'groupToday' },
+  { key: 'yesterday', labelKey: 'groupYesterday' },
+  { key: 'thisWeek', labelKey: 'groupThisWeek' },
+  { key: 'lastWeek', labelKey: 'groupLastWeek' },
+  { key: 'earlier', labelKey: 'groupEarlier' },
+];
+
+export function groupSessionsByDate(
+  sessions: Session[],
+  searchQuery: string,
+  now = new Date(),
+): SessionGroup[] {
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+  const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
+  const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
+  const lastWeekStart = thisWeekStart - 7 * 86400000;
+
+  const q = searchQuery.toLowerCase().trim();
+  const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
+  const buckets: SessionGroup[] = SESSION_GROUP_DEFS.map((group) => ({
+    ...group,
+    items: [],
+  }));
+
+  for (const session of filtered) {
+    const ts = session.time?.updated ?? 0;
+    if (ts >= todayStart) buckets[0].items.push(session);
+    else if (ts >= yesterdayStart) buckets[1].items.push(session);
+    else if (ts >= thisWeekStart) buckets[2].items.push(session);
+    else if (ts >= lastWeekStart) buckets[3].items.push(session);
+    else buckets[4].items.push(session);
+  }
+
+  return buckets.filter(group => group.items.length > 0);
+}
+
+export function getVisibleSessionGroupItems({
+  group,
+  expanded,
+  searching,
+}: {
+  group: SessionGroup;
+  expanded: boolean;
+  searching: boolean;
+}): { visibleItems: Session[]; hiddenCount: number; limit: number } {
+  const limit = searching ? Infinity : SESSION_GROUP_DEFAULT_LIMIT[group.key];
+  const visibleItems = (searching || expanded || group.items.length <= limit)
+    ? group.items
+    : group.items.slice(0, limit);
+  return {
+    visibleItems,
+    hiddenCount: group.items.length - visibleItems.length,
+    limit,
+  };
+}
+
+interface SessionSidebarItemProps {
+  session: Session;
+  selected: boolean;
+  selectMode: boolean;
+  checked: boolean;
+  menuOpen: boolean;
+  renaming: boolean;
+  renameValue: string;
+  renameSubmitting: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
+  renameInputRef: RefObject<HTMLInputElement | null>;
+  onSelect: (sessionId: string) => void;
+  onToggleCheck: (sessionId: string) => void;
+  onRenameValueChange: (value: string) => void;
+  onSubmitRename: (sessionId: string) => void | Promise<void>;
+  onCancelRename: () => void;
+  onToggleMenu: (sessionId: string, trigger: HTMLElement) => void;
+}
+
+function SessionSidebarItemInner({
+  session,
+  selected,
+  selectMode,
+  checked,
+  menuOpen,
+  renaming,
+  renameValue,
+  renameSubmitting,
+  t,
+  renameInputRef,
+  onSelect,
+  onToggleCheck,
+  onRenameValueChange,
+  onSubmitRename,
+  onCancelRename,
+  onToggleMenu,
+}: SessionSidebarItemProps) {
+  return (
+    <div
+      onClick={() => onSelect(session.id)}
+      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+        !selectMode && selected
+          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          : selectMode && checked
+          ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
+          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+      }`}
+    >
+      <div className="flex items-center gap-1.5 min-w-0 pr-7">
+        {selectMode && (
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={() => onToggleCheck(session.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+          />
+        )}
+        {session.category === 'workflow' && (
+          <span title={t('workflowSession')} className="flex-shrink-0">
+            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+          </span>
+        )}
+        {session.category === 'entity-config' && (
+          <span title={t('configSession')} className="flex-shrink-0">
+            <Settings2 className="w-3 h-3 text-purple-400" />
+          </span>
+        )}
+        {renaming ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => onRenameValueChange(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => void onSubmitRename(session.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void onSubmitRename(session.id); }
+              if (e.key === 'Escape') { e.preventDefault(); onCancelRename(); }
+            }}
+            placeholder={t('renamePlaceholder')}
+            disabled={renameSubmitting}
+            className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+            aria-label={t('rename')}
+            data-session-rename-input
+          />
+        ) : (
+          <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+            <span className="truncate">{session.title}</span>
+            {session.isShared && (
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                {t('sharedTag')}
+              </span>
+            )}
+          </h3>
+        )}
+      </div>
+      {session.time?.updated && !renaming && (
+        <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
+          {formatSessionDate(session.time.updated)}
+        </p>
+      )}
+      {!selectMode && (
+        <div className="absolute right-1.5 top-2" data-session-actions>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleMenu(session.id, e.currentTarget);
+            }}
+            title={t('moreActions')}
+            aria-label={t('moreActions')}
+            aria-expanded={menuOpen}
+            className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
+              menuOpen ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <MoreHorizontal className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
+  prev.session.id === next.session.id &&
+  prev.session.title === next.session.title &&
+  prev.session.category === next.session.category &&
+  prev.session.isShared === next.session.isShared &&
+  prev.session.time?.updated === next.session.time?.updated &&
+  prev.selected === next.selected &&
+  prev.selectMode === next.selectMode &&
+  prev.checked === next.checked &&
+  prev.menuOpen === next.menuOpen &&
+  prev.renaming === next.renaming &&
+  prev.renameValue === next.renameValue &&
+  prev.renameSubmitting === next.renameSubmitting &&
+  prev.t === next.t
+));
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const location = useLocation();
@@ -133,8 +347,6 @@ export default function SessionPage() {
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
-  const [enabledModelDefinitions, setEnabledModelDefinitions] = useState<ModelDefinitionV2[]>([]);
-  const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
@@ -157,6 +369,7 @@ export default function SessionPage() {
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
+  const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const toast = useToast();
 
   const {
@@ -173,6 +386,10 @@ export default function SessionPage() {
   } = useSessions(searchQuery);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
+  const {
+    data: enabledModelDefinitions,
+    loading: loadingEnabledModels,
+  } = useEnabledChatModelDefinitions();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
   const subAgents = useMemo(
     () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
@@ -256,6 +473,16 @@ export default function SessionPage() {
       .filter((group) => group.models.length > 0)
       .sort((a, b) => a.providerName.localeCompare(b.providerName));
   }, [chatModelOptions, providers]);
+  const listedSelectedSession = useMemo(
+    () => sessions.find(s => s.id === selectedSessionId) ?? null,
+    [sessions, selectedSessionId],
+  );
+  const selectedSession = listedSelectedSession
+    ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
+  const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
+    ? makeModelKey(selectedSession.provider, selectedSession.model)
+    : null;
+  const hasPinnedModelOption = !!pinnedModelKey && chatModelOptions.some((option) => option.key === pinnedModelKey);
   const selectedModelOption = useMemo(
     () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? (selectedModelKey ? null : chatModelOptions[0] ?? null),
     [chatModelOptions, selectedModelKey],
@@ -263,22 +490,11 @@ export default function SessionPage() {
   const selectedPromptModel = selectedModelOption
     ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
     : null;
+  const {
+    data: resolvedDefaultModel,
+    initialized: resolvedDefaultModelInitialized,
+  } = useResolvedDefaultModel(chatModelOptions.length > 0 && !hasPinnedModelOption);
   const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
-  const listedSelectedSession = useMemo(
-    () => sessions.find(s => s.id === selectedSessionId) ?? null,
-    [sessions, selectedSessionId],
-  );
-  const selectedSession = listedSelectedSession
-    ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
-
-  // 今天/昨天不限制；本周/上周/更早默认只显示 5 条
-  const GROUP_DEFAULT_LIMIT: Record<string, number> = {
-    today: Infinity,
-    yesterday: Infinity,
-    thisWeek: 5,
-    lastWeek: 5,
-    earlier: 5,
-  };
 
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const toggleGroupExpand = useCallback((key: string) => {
@@ -290,41 +506,41 @@ export default function SessionPage() {
   }, []);
 
   const groupedSessions = useMemo(() => {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const yesterdayStart = todayStart - 86400000;
-    // Week starts on Monday
-    const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
-    const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
-    const lastWeekStart = thisWeekStart - 7 * 86400000;
-
-    const q = searchQuery.toLowerCase().trim();
-    const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
-
-    const buckets: { key: string; labelKey: string; items: typeof sessions }[] = [
-      { key: 'today', labelKey: 'groupToday', items: [] },
-      { key: 'yesterday', labelKey: 'groupYesterday', items: [] },
-      { key: 'thisWeek', labelKey: 'groupThisWeek', items: [] },
-      { key: 'lastWeek', labelKey: 'groupLastWeek', items: [] },
-      { key: 'earlier', labelKey: 'groupEarlier', items: [] },
-    ];
-
-    for (const s of filtered) {
-      const ts = s.time?.updated ?? 0;
-      if (ts >= todayStart) buckets[0].items.push(s);
-      else if (ts >= yesterdayStart) buckets[1].items.push(s);
-      else if (ts >= thisWeekStart) buckets[2].items.push(s);
-      else if (ts >= lastWeekStart) buckets[3].items.push(s);
-      else buckets[4].items.push(s);
-    }
-
-    return buckets.filter(b => b.items.length > 0);
+    return groupSessionsByDate(sessions, searchQuery);
   }, [sessions, searchQuery]);
+  const visibleSessionGroups = useMemo(() => {
+    const searching = searchQuery.trim().length > 0;
+    return groupedSessions.map((group) => ({
+      ...group,
+      ...getVisibleSessionGroupItems({
+        group,
+        expanded: expandedGroups.has(group.key),
+        searching,
+      }),
+      expanded: expandedGroups.has(group.key),
+      searching,
+    }));
+  }, [expandedGroups, groupedSessions, searchQuery]);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
     toast.error(t('chat.error', 'Error'), msg);
   }, [toast, t]);
+
+  const scheduleSessionListRefetch = useCallback(() => {
+    if (sessionUpdateRefetchTimerRef.current !== null) return;
+    sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
+      sessionUpdateRefetchTimerRef.current = null;
+      void refetchSessions();
+    }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
+  }, [refetchSessions]);
+
+  useEffect(() => () => {
+    if (sessionUpdateRefetchTimerRef.current !== null) {
+      window.clearTimeout(sessionUpdateRefetchTimerRef.current);
+      sessionUpdateRefetchTimerRef.current = null;
+    }
+  }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
     if (event.type === 'session.updated' && event.properties?.id) {
@@ -332,13 +548,12 @@ export default function SessionPage() {
         // Instant local title update so the sidebar reflects the change immediately.
         updateSessionTitle(event.properties.id, event.properties.title);
       }
-      // Always do a silent background sync: session.updated also changes
-      // time.updated (affects ordering) and potentially other metadata.
-      // refetchSessions() is safe here — it never shows a loading spinner
-      // after the initial load (see initializedRef in useSessions).
-      refetchSessions();
+      // Session/title updates can arrive in bursts when several sessions or
+      // background tasks finish together. Coalesce the full sidebar refresh so
+      // those bursts don't turn into a request/re-render storm.
+      scheduleSessionListRefetch();
     }
-  }, [updateSessionTitle, refetchSessions]);
+  }, [scheduleSessionListRefetch, updateSessionTitle]);
 
   // Keep the selected session in sync with URL query params (e.g. onboarding
   // or other in-app navigation to `/sessions?session=...`). Clear the params
@@ -416,24 +631,6 @@ export default function SessionPage() {
     };
   }, [listedSelectedSession, loadingSessions, selectedSessionId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingEnabledModels(true);
-    modelV2API.listDefinitions({ enabled_only: true })
-      .then((response) => {
-        if (!cancelled) setEnabledModelDefinitions(response.data.models ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setEnabledModelDefinitions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingEnabledModels(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   // Close agent dropdown on outside click
   useEffect(() => {
     if (!showAgentOptions) return;
@@ -461,35 +658,24 @@ export default function SessionPage() {
       return;
     }
 
-    const pinnedKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
-      ? makeModelKey(selectedSession.provider, selectedSession.model)
-      : null;
-    if (pinnedKey && chatModelOptions.some((option) => option.key === pinnedKey)) {
-      setSelectedModelKey(pinnedKey);
+    if (hasPinnedModelOption && pinnedModelKey) {
+      setSelectedModelKey(pinnedModelKey);
       return;
     }
 
-    let cancelled = false;
     setSelectedModelKey(null);
-    defaultModelAPI.getResolved()
-      .then((response) => {
-        if (cancelled) return;
-        const { provider_id: providerID, model_id: modelID } = response.data;
-        const defaultKey = makeModelKey(providerID, modelID);
-        const fallbackKey = chatModelOptions[0]?.key ?? null;
-        setSelectedModelKey(chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedModelKey(chatModelOptions[0]?.key ?? null);
-      });
-    return () => {
-      cancelled = true;
-    };
+    if (!resolvedDefaultModelInitialized) return;
+    const defaultKey = resolvedDefaultModel
+      ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
+      : null;
+    const fallbackKey = chatModelOptions[0]?.key ?? null;
+    setSelectedModelKey(defaultKey && chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
   }, [
     chatModelOptions,
-    selectedSession?.model,
-    selectedSession?.model_pinned,
-    selectedSession?.provider,
+    hasPinnedModelOption,
+    pinnedModelKey,
+    resolvedDefaultModel,
+    resolvedDefaultModelInitialized,
     selectedSessionId,
   ]);
 
@@ -773,6 +959,24 @@ export default function SessionPage() {
       return next;
     });
   }, []);
+  const handleSelectSessionRow = useCallback((sessionId: string) => {
+    if (selectMode) {
+      handleToggleCheck(sessionId);
+    } else {
+      setSelectedSessionId(sessionId);
+    }
+  }, [handleToggleCheck, selectMode]);
+  const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
+    setOpenMenuSessionId((current) => {
+      if (current === sessionId) {
+        setMenuAnchor(null);
+        return null;
+      }
+      const rect = trigger.getBoundingClientRect();
+      setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+      return sessionId;
+    });
+  }, []);
 
   const handleSelectAll = useCallback(() => {
     if (checkedIds.size === sessions.length) {
@@ -866,118 +1070,34 @@ export default function SessionPage() {
               <p className="text-sm">{t('noResults', 'No conversations found')}</p>
             </div>
           ) : (
-            groupedSessions.map(({ key, labelKey, items }) => {
-              const isSearching = searchQuery.trim().length > 0;
-              const limit = isSearching ? Infinity : (GROUP_DEFAULT_LIMIT[key] ?? 5);
-              const isExpanded = expandedGroups.has(key);
-              const visibleItems = (isSearching || isExpanded || items.length <= limit)
-                ? items
-                : items.slice(0, limit);
-              const hiddenCount = items.length - visibleItems.length;
-
-              return (
+            visibleSessionGroups.map(({ key, labelKey, items, visibleItems, hiddenCount, limit, expanded, searching }) => (
               <div key={key}>
                 <div className="px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
                   {t(labelKey, labelKey)}
                 </div>
                 {visibleItems.map((session) => (
-                  <div
+                  <SessionSidebarItem
                     key={session.id}
-                    onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
-                    className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
-                      !selectMode && selectedSessionId === session.id
-                        ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
-                        : selectMode && checkedIds.has(session.id)
-                        ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-                        : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
-                    }`}
-                  >
-                    {/* Title row */}
-                    <div className="flex items-center gap-1.5 min-w-0 pr-7">
-                      {selectMode && (
-                        <input
-                          type="checkbox"
-                          checked={checkedIds.has(session.id)}
-                          onChange={() => handleToggleCheck(session.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
-                        />
-                      )}
-                      {session.category === 'workflow' && (
-                        <span title={t('workflowSession')} className="flex-shrink-0">
-                          <WorkflowIcon className="w-3 h-3 text-orange-400" />
-                        </span>
-                      )}
-                      {session.category === 'entity-config' && (
-                        <span title={t('configSession')} className="flex-shrink-0">
-                          <Settings2 className="w-3 h-3 text-purple-400" />
-                        </span>
-                      )}
-                      {renamingSessionId === session.id ? (
-                        <input
-                          ref={renameInputRef}
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          onClick={(e) => e.stopPropagation()}
-                          onBlur={() => void handleSubmitRename(session.id)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') { e.preventDefault(); void handleSubmitRename(session.id); }
-                            if (e.key === 'Escape') { e.preventDefault(); handleCancelRename(); }
-                          }}
-                          placeholder={t('renamePlaceholder')}
-                          disabled={renameSubmitting}
-                          className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
-                          aria-label={t('rename')}
-                          data-session-rename-input
-                        />
-                      ) : (
-                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
-                          <span className="truncate">{session.title}</span>
-                          {session.isShared && (
-                            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
-                              {t('sharedTag')}
-                            </span>
-                          )}
-                        </h3>
-                      )}
-                    </div>
-                    {/* Timestamp row */}
-                    {session.time?.updated && renamingSessionId !== session.id && (
-                      <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
-                        {formatSessionDate(session.time.updated)}
-                      </p>
-                    )}
-
-                    {/* Three-dot menu trigger */}
-                    {!selectMode && (
-                      <div className="absolute right-1.5 top-2" data-session-actions>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (openMenuSessionId === session.id) {
-                              setOpenMenuSessionId(null);
-                              setMenuAnchor(null);
-                            } else {
-                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                              setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-                              setOpenMenuSessionId(session.id);
-                            }
-                          }}
-                          title={t('moreActions')}
-                          aria-label={t('moreActions')}
-                          aria-expanded={openMenuSessionId === session.id}
-                          className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
-                            openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
-                          }`}
-                        >
-                          <MoreHorizontal className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                    session={session}
+                    selected={selectedSessionId === session.id}
+                    selectMode={selectMode}
+                    checked={checkedIds.has(session.id)}
+                    menuOpen={openMenuSessionId === session.id}
+                    renaming={renamingSessionId === session.id}
+                    renameValue={renameValue}
+                    renameSubmitting={renameSubmitting}
+                    t={t}
+                    renameInputRef={renameInputRef}
+                    onSelect={handleSelectSessionRow}
+                    onToggleCheck={handleToggleCheck}
+                    onRenameValueChange={setRenameValue}
+                    onSubmitRename={handleSubmitRename}
+                    onCancelRename={handleCancelRename}
+                    onToggleMenu={handleToggleSessionMenu}
+                  />
                 ))}
                 {/* 展开/收起按钮 */}
-                {!isSearching && hiddenCount > 0 && (
+                {!searching && hiddenCount > 0 && (
                   <button
                     onClick={() => toggleGroupExpand(key)}
                     className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
@@ -986,7 +1106,7 @@ export default function SessionPage() {
                     <span>{t('showMore', { count: hiddenCount })}</span>
                   </button>
                 )}
-                {!isSearching && isExpanded && items.length > (GROUP_DEFAULT_LIMIT[key] ?? 5) && (
+                {!searching && expanded && items.length > limit && (
                   <button
                     onClick={() => toggleGroupExpand(key)}
                     className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
@@ -996,8 +1116,7 @@ export default function SessionPage() {
                   </button>
                 )}
               </div>
-              );
-            })
+            ))
           )}
           {hasMoreSessions && (
             <div className="px-4 py-3">

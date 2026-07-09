@@ -1,64 +1,65 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback } from 'react';
 import { toolAPI, Tool } from '@/api/tool';
+import { createSharedResource, useRefreshOnResume, useSharedResource } from './useSharedResource';
+
+const TOOL_LIST_STALE_TIME_MS = 5000;
+const TOOL_LIST_MIN_FETCH_INTERVAL_MS = 1000;
+
+const toolsResource = createSharedResource<Tool[]>({
+  initialData: [],
+  staleTimeMs: TOOL_LIST_STALE_TIME_MS,
+  minFetchIntervalMs: TOOL_LIST_MIN_FETCH_INTERVAL_MS,
+  fetcher: async () => {
+    const response = await toolAPI.list();
+    return Array.isArray(response.data) ? response.data : [];
+  },
+  getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch tools'),
+});
+
+let toolRefreshInFlight: Promise<void> | null = null;
+
+function refreshToolsResource(): Promise<void> {
+  if (toolRefreshInFlight) {
+    return toolRefreshInFlight;
+  }
+
+  toolRefreshInFlight = toolAPI.refresh()
+    .catch(() => {
+      // Best-effort refresh; still update the visible list afterwards.
+    })
+    .then(() => toolsResource.fetch({ force: true, silent: true }))
+    .then(() => undefined)
+    .finally(() => {
+      toolRefreshInFlight = null;
+    });
+
+  return toolRefreshInFlight;
+}
+
+export function __resetToolsResourceForTesting(): void {
+  toolsResource.resetForTesting();
+  toolRefreshInFlight = null;
+}
 
 export function useTools() {
-  const [tools, setTools] = useState<Tool[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const initializedRef = useRef(false);
+  const {
+    data: tools,
+    loading,
+    error,
+  } = useSharedResource(toolsResource);
 
-  const fetchTools = useCallback(async (showLoading = false) => {
-    try {
-      if (showLoading && !initializedRef.current) setLoading(true);
-      setError(null);
-      const response = await toolAPI.list();
-      setTools(Array.isArray(response.data) ? response.data : []);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch tools');
-    } finally {
-      if (showLoading && !initializedRef.current) setLoading(false);
-      initializedRef.current = true;
-    }
-  }, []);
+  const refreshVisibleList = useCallback(
+    () => toolsResource.fetch({ silent: true }),
+    [],
+  );
+  useRefreshOnResume(refreshVisibleList);
 
-  const refreshAndFetch = useCallback(async () => {
-    try {
-      await toolAPI.refresh();
-    } catch { /* ignore */ }
-    await fetchTools(false);
-  }, [fetchTools]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const init = async () => {
-      await fetchTools(true);
-      if (cancelled) return;
-    };
-
-    void init();
-
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void fetchTools(false);
-      }
-    };
-    const onFocus = () => {
-      void fetchTools(false);
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      cancelled = true;
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [fetchTools]);
+  const refetch = useCallback(() => refreshToolsResource(), []);
 
   return {
     tools,
     loading,
     error,
-    refetch: refreshAndFetch,
+    refetch,
   };
 }

@@ -8,6 +8,11 @@ const ABORTED_TOOL_ERROR = 'Tool execution was interrupted';
 const SESSION_LIST_PAGE_SIZE = 100;
 const MESSAGE_PAGE_SIZE = 50;
 
+interface PendingPartUpdate {
+  partInfo: any;
+  delta?: string;
+}
+
 function finalizeStoppedMessageParts(parts: Message['parts'], stoppedAt = Date.now()): Message['parts'] {
   return parts.map((part) => {
     if (
@@ -353,6 +358,8 @@ export function useSessionMessages(sessionId?: string) {
   // Tracks part IDs seen in this session to distinguish first-time creation
   // (structural change → immediate update) from content deltas (low-priority).
   const knownPartIdsRef = useRef<Set<string>>(new Set());
+  const pendingKnownPartUpdatesRef = useRef<Map<string, PendingPartUpdate>>(new Map());
+  const pendingKnownPartFrameRef = useRef<number | null>(null);
 
   const fetchMessages = useCallback(async () => {
     if (!sessionId) return;
@@ -405,9 +412,32 @@ export function useSessionMessages(sessionId?: string) {
     }
   }, [hasMore, loadingOlder, nextBefore, sessionId]);
 
+  const flushPendingKnownPartUpdates = useCallback(() => {
+    pendingKnownPartFrameRef.current = null;
+    const updates = Array.from(pendingKnownPartUpdatesRef.current.values());
+    pendingKnownPartUpdatesRef.current.clear();
+    if (updates.length === 0) return;
+
+    startTransition(() => {
+      setMessages(prev => updates.reduce(
+        (next, update) => applyMessagePartUpdate(next, update.partInfo, update.delta),
+        prev,
+      ));
+    });
+  }, []);
+
+  const cancelPendingKnownPartUpdates = useCallback(() => {
+    if (pendingKnownPartFrameRef.current !== null) {
+      cancelAnimationFrame(pendingKnownPartFrameRef.current);
+      pendingKnownPartFrameRef.current = null;
+    }
+    pendingKnownPartUpdatesRef.current.clear();
+  }, []);
+
   // Reset state synchronously before paint when session changes
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
+    cancelPendingKnownPartUpdates();
     setMessages([]);
     setError(null);
     setHasMore(false);
@@ -418,7 +448,9 @@ export function useSessionMessages(sessionId?: string) {
     } else {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [cancelPendingKnownPartUpdates, sessionId]);
+
+  useEffect(() => cancelPendingKnownPartUpdates, [cancelPendingKnownPartUpdates]);
 
   useEffect(() => {
     fetchMessages();
@@ -522,21 +554,22 @@ export function useSessionMessages(sessionId?: string) {
      * @param delta - Optional text delta for this update.
      *
      * New parts are structural changes and update synchronously so thinking or
-     * streaming indicators appear immediately. Deltas for known parts are
-     * lowered with startTransition so React can batch high-frequency SSE chunks.
+     * streaming indicators appear immediately. Known parts are folded into the
+     * next animation frame so high-frequency text deltas trigger fewer renders.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
-      const isNewPart = !knownPartIdsRef.current.has(partInfo.id);
+      const partId = partInfo?.id;
+      const isNewPart = !partId || !knownPartIdsRef.current.has(partId);
       if (isNewPart) {
         // Structural change: first appearance of this part — must render immediately
         // so that "thinking" / "streaming" indicators show without delay.
-        knownPartIdsRef.current.add(partInfo.id);
+        if (partId) knownPartIdsRef.current.add(partId);
         setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
       } else {
-        // Content delta on an existing part — low priority, allow React to batch.
-        startTransition(() => {
-          setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
-        });
+        pendingKnownPartUpdatesRef.current.set(partId, { partInfo, delta });
+        if (pendingKnownPartFrameRef.current === null) {
+          pendingKnownPartFrameRef.current = requestAnimationFrame(flushPendingKnownPartUpdates);
+        }
       }
     },
     replaceMessageText: (messageId: string, partId: string, text: string) => {

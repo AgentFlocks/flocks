@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ListTodo, Play, RotateCcw, XCircle, Trash2,
@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
-import SessionChat from '@/components/common/SessionChat';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { useTaskExecutions } from '@/hooks/useTasks';
@@ -16,6 +15,15 @@ import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
+const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
+
+function SessionChatFallback() {
+  return (
+    <div className="flex flex-1 min-h-0 items-center justify-center text-gray-400">
+      <LoadingSpinner />
+    </div>
+  );
+}
 
 export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
@@ -454,18 +462,20 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
         {isWorkflowExecution ? (
           <QueuedWorkflowDetail task={task} emptyText={emptyText} />
         ) : (
-          <SessionChat
-            sessionId={sessionId}
-            live={shouldStreamSession}
-            hideInput
-            emptyText={emptyText}
-            className="flex-1 min-h-0"
-            onSSEEvent={(event) => {
-              if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
-                onRefresh?.();
-              }
-            }}
-          />
+          <Suspense fallback={<SessionChatFallback />}>
+            <LazySessionChat
+              sessionId={sessionId}
+              live={shouldStreamSession}
+              hideInput
+              emptyText={emptyText}
+              className="flex-1 min-h-0"
+              onSSEEvent={(event) => {
+                if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
+                  onRefresh?.();
+                }
+              }}
+            />
+          </Suspense>
         )}
       </div>
     </>

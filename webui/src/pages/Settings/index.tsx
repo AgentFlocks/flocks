@@ -1,5 +1,5 @@
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, ReactNode } from 'react';
+import type { ChangeEvent, ComponentType, ReactNode } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -26,11 +26,24 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
+import { preloadI18nNamespaces } from '@/i18nResources';
 
-const ConfigPage = lazy(() => import('@/pages/Config'));
-const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
-const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
-const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
+type LazySettingsModule = { default: ComponentType<any> };
+
+function lazySettingsPage<T extends LazySettingsModule>(
+  loader: () => Promise<T>,
+  namespaces: readonly string[] = [],
+) {
+  return lazy(() => Promise.all([
+    loader(),
+    preloadI18nNamespaces(namespaces),
+  ]).then(([module]) => module));
+}
+
+const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
+const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
+const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpgrade'), ['flockspro']);
+const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
 
 type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
 

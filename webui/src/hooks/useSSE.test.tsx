@@ -5,6 +5,7 @@ import { useSSE } from './useSSE';
 
 describe('useSSE', () => {
   const eventSourceCtor = vi.fn();
+  const eventSources: FakeEventSource[] = [];
 
   class FakeEventSource {
     url: string;
@@ -21,6 +22,7 @@ describe('useSSE', () => {
     constructor(url: string, init?: EventSourceInit) {
       this.url = url;
       this.withCredentials = Boolean(init?.withCredentials);
+      eventSources.push(this);
       eventSourceCtor(url, init);
     }
 
@@ -35,6 +37,7 @@ describe('useSSE', () => {
 
   beforeEach(() => {
     eventSourceCtor.mockClear();
+    eventSources.length = 0;
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
   });
 
@@ -69,5 +72,64 @@ describe('useSSE', () => {
     );
 
     unmount();
+  });
+
+  it('shares one EventSource across subscribers with the same URL and credentials', () => {
+    const firstHandler = vi.fn();
+    const secondHandler = vi.fn();
+
+    const first = renderHook(() => useSSE({
+      url: '/api/event',
+      onEvent: firstHandler,
+    }));
+    const second = renderHook(() => useSSE({
+      url: '/api/event',
+      onEvent: secondHandler,
+    }));
+
+    expect(eventSourceCtor).toHaveBeenCalledTimes(1);
+
+    eventSources[0].onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({ type: 'ping', properties: { ok: true } }),
+      }),
+    );
+
+    expect(firstHandler).toHaveBeenCalledWith({ type: 'ping', properties: { ok: true } });
+    expect(secondHandler).toHaveBeenCalledWith({ type: 'ping', properties: { ok: true } });
+
+    first.unmount();
+    second.unmount();
+  });
+
+  it('keeps the shared EventSource open while another subscriber is still mounted', () => {
+    const firstHandler = vi.fn();
+    const secondHandler = vi.fn();
+
+    const first = renderHook(() => useSSE({
+      url: '/api/event',
+      onEvent: firstHandler,
+    }));
+    const second = renderHook(() => useSSE({
+      url: '/api/event',
+      onEvent: secondHandler,
+    }));
+
+    const shared = eventSources[0];
+    first.unmount();
+
+    expect(shared.readyState).not.toBe(FakeEventSource.CLOSED);
+
+    shared.onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({ type: 'pong', properties: {} }),
+      }),
+    );
+
+    expect(firstHandler).not.toHaveBeenCalled();
+    expect(secondHandler).toHaveBeenCalledWith({ type: 'pong', properties: {} });
+
+    second.unmount();
+    expect(shared.readyState).toBe(FakeEventSource.CLOSED);
   });
 });

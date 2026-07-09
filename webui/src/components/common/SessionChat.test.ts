@@ -7,7 +7,9 @@ import type { Message } from '@/types';
 
 import {
   areChatMessagePartsRenderEqual,
+  areChatTimelineItemsRenderEqual,
   buildInstructionDisplayText,
+  buildChatTimelineItems,
   buildContextUsageBreakdown,
   buildTodoSummary,
   ChatMessageBubble,
@@ -29,6 +31,7 @@ import {
   isActiveSessionStatus,
   listUploadedDocumentPaths,
   shouldRenderMessage,
+  shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
@@ -163,9 +166,13 @@ vi.mock('@/hooks/useReasoningToggle', () => ({
   }),
 }));
 
-vi.mock('@/hooks/usePendingQuestions', () => ({
-  usePendingQuestions: () => pendingQuestionsHookMock,
-}));
+vi.mock('@/features/session-chat', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/session-chat')>();
+  return {
+    ...actual,
+    usePendingQuestions: () => pendingQuestionsHookMock,
+  };
+});
 
 vi.mock('./Toast', () => ({
   useToast: () => toastMock,
@@ -1025,6 +1032,146 @@ describe('getMessageErrorText', () => {
       id: 'assistant-error',
       error: { code: 'SessionError' } as any,
     }))).toBe('SessionError');
+  });
+});
+
+describe('shouldForwardSSEEventToParent', () => {
+  it('forwards global workflow, task, and session update events', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'workflow.updated',
+      properties: { id: 'workflow-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'task.updated',
+      properties: { executionID: 'task-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'session.updated',
+      properties: { id: 'other-session' },
+    }, 'sess-1')).toBe(true);
+  });
+
+  it('forwards chat events only for the current session', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'sess-1' } },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'other-session' } },
+    }, 'sess-1')).toBe(false);
+    expect(shouldForwardSSEEventToParent({
+      type: 'context.usage.updated',
+      properties: { sessionID: 'other-session' },
+    }, 'sess-1')).toBe(false);
+  });
+
+  it('skips heartbeat-style events without payloads', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'server.heartbeat',
+    }, 'sess-1')).toBe(false);
+  });
+});
+
+describe('buildChatTimelineItems', () => {
+  it('filters skipped and non-renderable messages while marking the active assistant', () => {
+    const messages = [
+      makeMessage({
+        id: 'user-1',
+        role: 'user',
+        parts: [{ id: 'user-part', type: 'text', text: 'hello' }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'synthetic-1',
+        role: 'assistant',
+        parts: [{ id: 'synthetic-part', type: 'text', text: '', synthetic: true }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-active',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set([1]),
+      isStreaming: true,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['user-1', 'assistant-active']);
+    expect(items.map((item) => item.isActive)).toEqual([false, true]);
+  });
+
+  it('keeps the same visible set when not streaming', () => {
+    const messages = [
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-text',
+        role: 'assistant',
+        parts: [{ id: 'text-part', type: 'text', text: 'done' }] as Message['parts'],
+        finish: 'stop',
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set(),
+      isStreaming: false,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['assistant-text']);
+    expect(items[0].isActive).toBe(false);
+  });
+});
+
+describe('areChatTimelineItemsRenderEqual', () => {
+  it('treats cloned assistant messages with identical visible parts as equal', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      agent: 'rex',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+      finish: 'stop',
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(true);
+  });
+
+  it('detects visible text changes in otherwise stable timeline items', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello world' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(false);
   });
 });
 
