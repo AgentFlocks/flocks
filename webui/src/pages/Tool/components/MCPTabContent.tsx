@@ -437,7 +437,9 @@ export default function MCPTabContent({
       </div>
 
       {serversLoading && catalogLoading ? (
-        <div className="flex justify-center py-12"><LoadingSpinner /></div>
+        <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+          <LoadingSpinner delayMs={180} />
+        </div>
       ) : unifiedCards.length === 0 ? (
         <EmptyState icon={<Server className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (

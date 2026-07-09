@@ -161,6 +161,7 @@ export function useToolPage(params: ToolListPageParams) {
     data,
     loading,
     error,
+    initialized,
   } = useSharedResource(resource);
 
   const refreshVisiblePage = useCallback(
@@ -194,6 +195,7 @@ export function useToolPage(params: ToolListPageParams) {
     limit: data.limit,
     loading,
     error,
+    initialized,
     refetch,
   };
 }

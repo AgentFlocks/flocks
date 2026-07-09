@@ -8,6 +8,7 @@ import { providerAPI } from '@/api/provider';
 import type { Tool } from '@/api/tool';
 import type { APIServiceSummary, MCPCatalogCategory, MCPCatalogEntry } from '@/types';
 import EmptyState from '@/components/common/EmptyState';
+import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
@@ -301,7 +302,11 @@ export default function APITabContent({
         )}
       </div>
 
-      {services.length === 0 && filteredCatalog.length === 0 && !catalogLoading && !servicesLoading ? (
+      {servicesLoading && services.length === 0 && filteredCatalog.length === 0 ? (
+        <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+          <LoadingSpinner delayMs={180} />
+        </div>
+      ) : services.length === 0 && filteredCatalog.length === 0 && !catalogLoading ? (
         <EmptyState icon={<Cloud className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
