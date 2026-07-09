@@ -75,6 +75,30 @@ def test_bundled_hub_catalog_loads():
     assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "device", "workflow", "webui", "component"}
 
 
+def test_hub_catalog_snapshot_reuses_manifest_parse_for_counts(monkeypatch: pytest.MonkeyPatch):
+    from flocks.hub import catalog as catalog_module
+
+    catalog_module.clear_catalog_caches()
+    original_read_yaml = catalog_module._read_yaml
+    calls = 0
+
+    def counted_read_yaml(path: Path):
+        nonlocal calls
+        calls += 1
+        return original_read_yaml(path)
+
+    monkeypatch.setattr(catalog_module, "_read_yaml", counted_read_yaml)
+
+    assert catalog_module.list_catalog()
+    initial_calls = calls
+    assert initial_calls > 0
+
+    catalog_module.category_counts()
+    catalog_module.list_catalog(plugin_type="device")
+
+    assert calls == initial_calls
+
+
 def test_workflow_catalog_exposes_chinese_names():
     entries = {entry.id: entry for entry in list_catalog(plugin_type="workflow")}
 
@@ -598,6 +622,18 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
 
     catalog = client.get("/api/hub/catalog").json()
     assert any(item["id"] == "ndr-alert-analysis" for item in catalog)
+
+    catalog_page = client.get("/api/hub/catalog", params={"limit": 1, "offset": 0}).json()
+    assert isinstance(catalog_page, dict)
+    assert len(catalog_page["items"]) == 1
+    assert catalog_page["total"] == len(catalog)
+    assert catalog_page["limit"] == 1
+    assert catalog_page["facets"]["type"]
+    assert catalog_page["facets"]["state"]
+
+    taxonomy = client.get("/api/hub/categories", params={"include_counts": False}).json()
+    assert taxonomy["tags"]
+    assert "counts" not in taxonomy
 
     detail = client.get("/api/hub/plugins/skill/ndr-alert-analysis").json()
     assert detail["id"] == "ndr-alert-analysis"

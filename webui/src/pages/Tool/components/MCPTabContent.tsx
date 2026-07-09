@@ -170,6 +170,19 @@ export default function MCPTabContent({
     setSelectedServerData(name ? (servers.find((server) => server.name === name) ?? null) : null);
   }, [servers]);
 
+  const selectMcpTool = useCallback((tool: Tool) => {
+    setSelectedToolFromMCP(tool);
+    toolAPI.get(tool.name)
+      .then((response) => {
+        setSelectedToolFromMCP((current) => (
+          current?.name === tool.name ? response.data : current
+        ));
+      })
+      .catch(() => {
+        // Keep the summary row visible; reopening retries the detail request.
+      });
+  }, []);
+
   const selectedServerObj = useMemo(() => {
     if (!selectedServer) return undefined;
     const fromServers = servers.find((server) => server.name === selectedServer);
@@ -702,7 +715,7 @@ export default function MCPTabContent({
                   onRefresh={async () => { await mcpAPI.refresh(selectedServer); await fetchServers(); await onRefreshTools(); }}
                   onStatusChange={async () => { await fetchServers(); await onRefreshTools(); }}
                   onRemove={() => handleRemove(selectedServer)}
-                  onSelectTool={setSelectedToolFromMCP}
+                  onSelectTool={selectMcpTool}
                 />
               </div>
             </div>

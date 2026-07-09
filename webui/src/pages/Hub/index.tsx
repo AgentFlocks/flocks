@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Archive,
@@ -28,19 +28,22 @@ import SuiteInstallProgressPanel, {
 import {
   hubAPI,
   HubCatalogEntry,
+  type HubCatalogFacets,
   HubFileContent,
   HubFileNode,
   HubInstallProgressEvent,
   HubManifest,
   HubPluginType,
 } from '@/api/hub';
-import FlowCanvas from '@/pages/WorkflowDetail/FlowCanvas';
 import type { WorkflowJSON } from '@/api/workflow';
 import { useTranslation } from 'react-i18next';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useProductName } from '@/contexts/ProductNameContext';
 
 type ViewMode = 'table' | 'tree';
+
+const FlowCanvas = lazy(() => import('@/pages/WorkflowDetail/FlowCanvas'));
 
 interface HubTaxonomyCategory {
   id: string;
@@ -243,66 +246,15 @@ function getHubName(entry: Pick<HubCatalogEntry, 'id' | 'name' | 'nameCn'>, lang
   return language.toLowerCase().startsWith('zh') ? (nameCn || name || entry.id) : (name || nameCn || entry.id);
 }
 
-interface HubFilterSnapshot {
-  query?: string;
-  type?: HubPluginType | '';
-  useCase?: string;
-  tag?: string;
-  state?: string;
-}
-
-interface HubFacetCounts {
-  type: Record<string, number>;
-  useCases: Record<string, number>;
-  tags: Record<string, number>;
-  state: Record<string, number>;
-}
-
-function matchesCatalogEntry(entry: HubCatalogEntry, filters: HubFilterSnapshot) {
-  if (filters.type && entry.type !== filters.type) return false;
-  if (filters.useCase && !entry.useCases.includes(filters.useCase)) return false;
-  if (filters.tag && !entry.tags.includes(filters.tag)) return false;
-  if (filters.state && entry.state !== filters.state) return false;
-  const query = filters.query?.trim().toLowerCase();
-  if (query) {
-    const haystack = [
-      entry.id,
-      entry.name,
-      entry.description,
-      entry.descriptionCn ?? '',
-      entry.category,
-      ...entry.tags,
-      ...entry.useCases,
-    ].join(' ').toLowerCase();
-    if (!haystack.includes(query)) return false;
-  }
-  return true;
-}
-
-function addFacetCount(counts: Record<string, number>, key: string) {
-  counts[key] = (counts[key] ?? 0) + 1;
-}
-
-function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot): HubFacetCounts {
-  const counts: HubFacetCounts = { type: {}, useCases: {}, tags: {}, state: {} };
-
-  items.forEach(item => {
-    if (matchesCatalogEntry(item, { query: filters.query })) {
-      addFacetCount(counts.type, item.type);
-    }
-    if (matchesCatalogEntry(item, { query: filters.query, type: filters.type })) {
-      item.useCases.forEach(useCase => addFacetCount(counts.useCases, useCase));
-    }
-    if (matchesCatalogEntry(item, { query: filters.query, type: filters.type, useCase: filters.useCase })) {
-      item.tags.forEach(tag => addFacetCount(counts.tags, tag));
-    }
-    if (matchesCatalogEntry(item, { query: filters.query, type: filters.type, useCase: filters.useCase, tag: filters.tag })) {
-      addFacetCount(counts.state, item.state);
-    }
-  });
-
-  return counts;
-}
+const EMPTY_HUB_FACETS: HubCatalogFacets = {
+  type: {},
+  category: {},
+  tags: {},
+  useCases: {},
+  state: {},
+  trust: {},
+  riskLevel: {},
+};
 
 export default function HubPage() {
   const { i18n } = useTranslation();
@@ -331,13 +283,26 @@ export default function HubPage() {
   const [actionId, setActionId] = useState<string | null>(null);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [taxonomy, setTaxonomy] = useState<HubTaxonomyResponse | null>(null);
+  const [totalItems, setTotalItems] = useState(0);
+  const [facetCounts, setFacetCounts] = useState<HubCatalogFacets>(EMPTY_HUB_FACETS);
+  const debouncedQuery = useDebouncedValue(query, 250);
 
-  const fetchCatalog = async (silent = false) => {
+  const fetchCatalog = useCallback(async (silent = false) => {
     try {
       if (!silent) setLoading(true);
-      const res = await hubAPI.catalog();
-      const nextItems = Array.isArray(res.data) ? res.data : [];
+      const res = await hubAPI.catalogPage({
+        q: debouncedQuery.trim() || undefined,
+        type: typeFilter || undefined,
+        useCases: useCaseFilter || undefined,
+        tags: tagFilter || undefined,
+        state: stateFilter || undefined,
+        offset: (page - 1) * pageSize,
+        limit: pageSize,
+      });
+      const nextItems = Array.isArray(res.data.items) ? res.data.items : [];
       setCatalogItems(nextItems);
+      setTotalItems(res.data.total ?? nextItems.length);
+      setFacetCounts(res.data.facets ?? EMPTY_HUB_FACETS);
       setSelected(current => {
         if (!current) return current;
         return nextItems.find(item => item.type === current.type && item.id === current.id) ?? current;
@@ -346,11 +311,14 @@ export default function HubPage() {
     } finally {
       if (!silent) setLoading(false);
     }
-  };
+  }, [debouncedQuery, page, pageSize, stateFilter, tagFilter, typeFilter, useCaseFilter]);
 
   useEffect(() => {
     fetchCatalog();
-    hubAPI.categories().then(res => setTaxonomy(res.data as HubTaxonomyResponse)).catch(() => setTaxonomy(null));
+  }, [fetchCatalog]);
+
+  useEffect(() => {
+    hubAPI.categories({ includeCounts: false }).then(res => setTaxonomy(res.data as HubTaxonomyResponse)).catch(() => setTaxonomy(null));
   }, []);
 
   useEffect(() => {
@@ -363,31 +331,7 @@ export default function HubPage() {
     }
   }, [catalogItems, urlPluginId, urlType]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [query, typeFilter, stateFilter, tagFilter, useCaseFilter, viewMode, pageSize]);
-
-  const items = useMemo(
-    () => catalogItems.filter(item => matchesCatalogEntry(item, {
-      query,
-      type: typeFilter,
-      useCase: useCaseFilter,
-      tag: tagFilter,
-      state: stateFilter,
-    })),
-    [catalogItems, query, typeFilter, useCaseFilter, tagFilter, stateFilter],
-  );
-
-  const facetCounts = useMemo(
-    () => buildFacetCounts(catalogItems, {
-      query,
-      type: typeFilter,
-      useCase: useCaseFilter,
-      tag: tagFilter,
-      state: stateFilter,
-    }),
-    [catalogItems, query, typeFilter, useCaseFilter, tagFilter, stateFilter],
-  );
+  const items = catalogItems;
 
   const useCases = useMemo(
     () => taxonomy?.useCases ?? Array.from(new Set(catalogItems.flatMap(item => item.useCases))).sort(),
@@ -398,12 +342,13 @@ export default function HubPage() {
     [catalogItems, taxonomy],
   );
   const activeFilterCount = [typeFilter, useCaseFilter, tagFilter, stateFilter].filter(Boolean).length;
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pagedItems = useMemo(
-    () => items.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [items, currentPage, pageSize],
-  );
+  const pagedItems = items;
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
@@ -452,6 +397,7 @@ export default function HubPage() {
     setUseCaseFilter('');
     setTagFilter('');
     setStateFilter('');
+    setPage(1);
   };
 
   if (loading) {
@@ -470,7 +416,10 @@ export default function HubPage() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 value={query}
-                onChange={e => setQuery(e.target.value)}
+                onChange={e => {
+                  setQuery(e.target.value);
+                  setPage(1);
+                }}
                 placeholder={text.searchPlaceholder}
                 className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white/90 focus:ring-2 focus:ring-slate-200 focus:border-slate-400"
               />
@@ -500,7 +449,10 @@ export default function HubPage() {
             <FilterRow
               label={text.type}
               value={typeFilter}
-              onChange={value => setTypeFilter(value as HubPluginType | '')}
+              onChange={value => {
+                setTypeFilter(value as HubPluginType | '');
+                setPage(1);
+              }}
               options={[
                 { value: '', label: text.all },
                 ...HUB_PLUGIN_TYPES.map(type => ({
@@ -517,7 +469,10 @@ export default function HubPage() {
               <FilterRow
                 label={text.useCase}
                 value={useCaseFilter}
-                onChange={setUseCaseFilter}
+                onChange={value => {
+                  setUseCaseFilter(value);
+                  setPage(1);
+                }}
                 options={[
                   { value: '', label: text.all },
                   ...useCases.map(useCase => ({
@@ -531,7 +486,10 @@ export default function HubPage() {
               <FilterRow
                 label="Tag"
                 value={tagFilter}
-                onChange={setTagFilter}
+                onChange={value => {
+                  setTagFilter(value);
+                  setPage(1);
+                }}
                 options={[
                   { value: '', label: text.all },
                   ...tags.map(tag => ({
@@ -545,7 +503,10 @@ export default function HubPage() {
               <FilterRow
                 label={text.status}
                 value={stateFilter}
-                onChange={setStateFilter}
+                onChange={value => {
+                  setStateFilter(value);
+                  setPage(1);
+                }}
                 options={[
                   { value: '', label: text.all },
                   ...(['available', 'installed', 'updateAvailable', 'incompatible'] as const).map(state => ({
@@ -590,13 +551,16 @@ export default function HubPage() {
 
       {viewMode === 'table' && (
         <PaginationBar
-          total={items.length}
+          total={totalItems}
           page={currentPage}
           pageSize={pageSize}
           totalPages={totalPages}
           text={text}
           onPageChange={setPage}
-          onPageSizeChange={setPageSize}
+          onPageSizeChange={nextPageSize => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
         />
       )}
 
@@ -1019,7 +983,9 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
                   <span>{text.workflowDiagram}</span>
                 </div>
                 <div className="h-[calc(100%-2.5rem)]">
-                  <FlowCanvas workflowJson={workflowJson} editable={false} />
+                  <Suspense fallback={<div className="h-full flex items-center justify-center"><LoadingSpinner /></div>}>
+                    <FlowCanvas workflowJson={workflowJson} editable={false} />
+                  </Suspense>
                 </div>
               </div>
             ) : workflowError ? (

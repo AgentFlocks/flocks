@@ -203,6 +203,7 @@ export interface Tool {
   source: ToolSource;
   source_name?: string;
   parameters: ToolParameter[];
+  parameters_count?: number;
   enabled: boolean;
   /** Factory default from the YAML/registration source (no overlay applied). */
   enabled_default?: boolean;

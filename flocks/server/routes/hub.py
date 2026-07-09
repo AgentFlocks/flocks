@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from flocks.hub.catalog import category_counts, clear_catalog_caches, legacy_removed_plugin_message, list_catalog, load_manifest
+from flocks.hub.catalog import (
+    category_counts,
+    clear_catalog_caches,
+    legacy_removed_plugin_message,
+    list_catalog,
+    load_manifest,
+    load_taxonomy,
+)
 from flocks.hub.files import file_tree, read_file_content
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.hub.models import (
@@ -30,6 +37,24 @@ log = Log.create(service="hub-routes")
 
 class HubInstallRequest(BaseModel):
     scope: str = Field(default="global", description="'global' only")
+
+
+class HubCatalogFacets(BaseModel):
+    type: dict[str, int] = Field(default_factory=dict)
+    category: dict[str, int] = Field(default_factory=dict)
+    tags: dict[str, int] = Field(default_factory=dict)
+    useCases: dict[str, int] = Field(default_factory=dict)
+    state: dict[str, int] = Field(default_factory=dict)
+    trust: dict[str, int] = Field(default_factory=dict)
+    riskLevel: dict[str, int] = Field(default_factory=dict)
+
+
+class HubCatalogPageResponse(BaseModel):
+    items: list[HubCatalogEntry] = Field(default_factory=list)
+    total: int = Field(0)
+    offset: int = Field(0)
+    limit: int = Field(25)
+    facets: HubCatalogFacets = Field(default_factory=HubCatalogFacets)
 
 
 def _split_csv(value: Optional[str | list[str]]) -> Optional[list[str]]:
@@ -59,7 +84,22 @@ def _clear_hub_runtime_caches() -> None:
         pass
 
 
-@router.get("/hub/catalog", response_model=list[HubCatalogEntry])
+def _build_hub_catalog_facets(items: list[HubCatalogEntry]) -> HubCatalogFacets:
+    facets = HubCatalogFacets()
+    for item in items:
+        facets.type[item.type] = facets.type.get(item.type, 0) + 1
+        facets.category[item.category] = facets.category.get(item.category, 0) + 1
+        facets.state[item.state] = facets.state.get(item.state, 0) + 1
+        facets.trust[item.trust] = facets.trust.get(item.trust, 0) + 1
+        facets.riskLevel[item.riskLevel] = facets.riskLevel.get(item.riskLevel, 0) + 1
+        for tag in item.tags:
+            facets.tags[tag] = facets.tags.get(tag, 0) + 1
+        for use_case in item.useCases:
+            facets.useCases[use_case] = facets.useCases.get(use_case, 0) + 1
+    return facets
+
+
+@router.get("/hub/catalog", response_model=Union[list[HubCatalogEntry], HubCatalogPageResponse])
 async def hub_catalog(
     type: Optional[PluginType] = Query(default=None),  # noqa: A002 - API field name
     category: Optional[str] = None,
@@ -69,8 +109,10 @@ async def hub_catalog(
     trust: Optional[str] = None,
     risk: Optional[str] = None,
     q: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
 ):
-    return await asyncio.to_thread(
+    entries = await asyncio.to_thread(
         list_catalog,
         plugin_type=type,
         category=_split_csv(category),
@@ -81,10 +123,24 @@ async def hub_catalog(
         risk=_split_csv(risk),
         q=q,
     )
+    if limit is None and offset == 0:
+        return entries
+
+    page_limit = limit or 25
+    total = len(entries)
+    return HubCatalogPageResponse(
+        items=entries[offset:offset + page_limit],
+        total=total,
+        offset=offset,
+        limit=page_limit,
+        facets=_build_hub_catalog_facets(entries),
+    )
 
 
 @router.get("/hub/categories")
-async def hub_categories():
+async def hub_categories(include_counts: bool = Query(True)):
+    if not include_counts:
+        return load_taxonomy().model_dump(mode="json")
     return await asyncio.to_thread(category_counts)
 
 

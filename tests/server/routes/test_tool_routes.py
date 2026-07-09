@@ -11,7 +11,15 @@ from httpx import AsyncClient
 from flocks.auth.context import AuthUser
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
-from flocks.tool.registry import Tool, ToolCategory, ToolInfo, ToolRegistry, ToolResult
+from flocks.tool.registry import (
+    ParameterType,
+    Tool,
+    ToolCategory,
+    ToolInfo,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
+)
 
 
 @contextmanager
@@ -386,3 +394,58 @@ class TestToolRouteSecurity:
         assert kwargs["session_id"] == session_id
         assert kwargs["metadata"]["messageID"] == message_id
         assert kwargs["tool"] == {"name": "http_batch_named_tool"}
+
+
+class TestToolListPageRoute:
+    @pytest.mark.asyncio
+    async def test_list_page_searches_server_side_and_omits_parameter_payload(self, client: AsyncClient):
+        async def handler(ctx, text: str) -> ToolResult:
+            return ToolResult(success=True, output=f"{text}:{ctx.session_id}")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="page_unique_alpha_tool",
+                description="Needle Alpha paginated search tool",
+                category=ToolCategory.CUSTOM,
+                source="plugin_py",
+                parameters=[
+                    ToolParameter(
+                        name="text",
+                        type=ParameterType.STRING,
+                        description="Text to echo",
+                    )
+                ],
+            ),
+            handler=handler,
+        )
+        api_tool = Tool(
+            info=ToolInfo(
+                name="page_unique_alpha_api_tool",
+                description="Needle Alpha paginated API tool",
+                category=ToolCategory.CUSTOM,
+                source="api",
+                provider="page-api-provider",
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool), _temporary_tool(api_tool):
+            response = await client.get(
+                "/api/tools/page",
+                params={"q": "needle alpha", "source": "plugin_py", "offset": 0, "limit": 20},
+            )
+            detail = await client.get("/api/tools/page_unique_alpha_tool")
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["total"] == 1
+        assert payload["offset"] == 0
+        assert payload["limit"] == 20
+        assert payload["facets"]["source"]["plugin_py"] == 1
+        assert payload["facets"]["source"]["api"] == 1
+        assert payload["items"][0]["name"] == "page_unique_alpha_tool"
+        assert payload["items"][0]["parameters"] == []
+        assert payload["items"][0]["parameters_count"] == 1
+
+        assert detail.status_code == 200, detail.text
+        assert len(detail.json()["parameters"]) == 1

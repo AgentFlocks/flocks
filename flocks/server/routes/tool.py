@@ -4,7 +4,7 @@ Tool routes - API endpoints for tool management and execution
 
 import asyncio
 import time
-from typing import Annotated, List, Optional, Dict, Any
+from typing import Annotated, List, Optional, Dict, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,7 @@ class ToolInfoResponse(BaseModel):
     source_name: Optional[str] = Field(None, description="Source detail, e.g. MCP server name or API module name")
     vendor: Optional[str] = Field(None, description="Manufacturer key for device tools (e.g. threatbook, qianxin, sangfor, qingteng)")
     parameters: List[Dict[str, Any]] = Field(default_factory=list, description="Tool parameters")
+    parameters_count: int = Field(0, description="Number of tool parameters")
     enabled: bool = Field(True, description="Effective enabled state (overlay applied, ANDed with API service flag)")
     enabled_default: bool = Field(True, description="Factory default from the YAML/registration source (no overlay)")
     enabled_customized: bool = Field(False, description="True if a user setting is recorded in flocks.json tool_settings")
@@ -116,6 +117,23 @@ class BatchExecuteResponse(BaseModel):
     results: List[ToolExecuteResponse] = Field(..., description="Execution results")
 
 
+class ToolListFacets(BaseModel):
+    """Facet counts for server-side tool list filtering."""
+    category: Dict[str, int] = Field(default_factory=dict)
+    source: Dict[str, int] = Field(default_factory=dict)
+    source_name: Dict[str, int] = Field(default_factory=dict)
+    enabled: Dict[str, int] = Field(default_factory=dict)
+
+
+class ToolListPageResponse(BaseModel):
+    """Paginated tool list response."""
+    items: List[ToolInfoResponse] = Field(default_factory=list)
+    total: int = Field(0)
+    offset: int = Field(0)
+    limit: int = Field(20)
+    facets: ToolListFacets = Field(default_factory=ToolListFacets)
+
+
 # Helper: determine tool source
 
 _BUILTIN_CATEGORIES = {
@@ -175,12 +193,13 @@ def _get_tool_source(tool_info: ToolInfo) -> tuple:
     return "custom", None
 
 
-def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
+def _build_tool_response(t: ToolInfo, *, include_parameters: bool = True) -> ToolInfoResponse:
     """Build ToolInfoResponse with source info and overlay metadata."""
     source, source_name = _get_tool_source(t)
     setting = ConfigWriter.get_tool_setting(t.name) or {}
     customized = "enabled" in setting
     enabled_default = _get_default_enabled(t)
+    parameters = [p.model_dump() for p in t.parameters] if include_parameters else []
     return ToolInfoResponse(
         name=t.name,
         description=t.description,
@@ -189,12 +208,91 @@ def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
         source=source,
         source_name=source_name,
         vendor=t.vendor,
-        parameters=[p.model_dump() for p in t.parameters],
+        parameters=parameters,
+        parameters_count=len(t.parameters),
         enabled=_get_effective_tool_enabled(t),
         enabled_default=enabled_default,
         enabled_customized=customized,
         requires_confirmation=t.requires_confirmation,
     )
+
+
+def _split_csv_filter(value: Optional[str]) -> Optional[set[str]]:
+    if value is None:
+        return None
+    parts = {part.strip() for part in value.split(",") if part and part.strip()}
+    return parts or None
+
+
+def _matches_tool_query(tool: ToolInfoResponse, query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join([
+        tool.name,
+        tool.description,
+        tool.description_cn or "",
+        tool.category,
+        tool.source,
+        tool.source_name or "",
+        tool.vendor or "",
+    ]).lower()
+    return query in haystack
+
+
+def _build_tool_facets(items: List[ToolInfoResponse]) -> ToolListFacets:
+    facets = ToolListFacets()
+    for item in items:
+        facets.category[item.category] = facets.category.get(item.category, 0) + 1
+        facets.source[item.source] = facets.source.get(item.source, 0) + 1
+        source_name = item.source_name or "Flocks"
+        facets.source_name[source_name] = facets.source_name.get(source_name, 0) + 1
+        enabled_key = str(item.enabled).lower()
+        facets.enabled[enabled_key] = facets.enabled.get(enabled_key, 0) + 1
+    return facets
+
+
+def _sort_tool_items(
+    items: List[ToolInfoResponse],
+    sort_by: Literal["category", "source", "source_name", "enabled", "name"],
+    sort_dir: Literal["asc", "desc"],
+) -> List[ToolInfoResponse]:
+    reverse = sort_dir == "desc"
+
+    def sort_key(item: ToolInfoResponse):
+        if sort_by == "enabled":
+            return 0 if item.enabled else 1
+        if sort_by == "source_name":
+            return (item.source_name or "Flocks").lower()
+        return getattr(item, sort_by)
+
+    return sorted(items, key=sort_key, reverse=reverse)
+
+
+def _filter_tool_items(
+    items: List[ToolInfoResponse],
+    *,
+    category_filter: Optional[set[str]],
+    source_filter: Optional[set[str]],
+    source_name_filter: Optional[set[str]],
+    enabled_filter: Optional[set[str]],
+    query: str,
+    include_category: bool = True,
+    include_source: bool = True,
+    include_source_name: bool = True,
+    include_enabled: bool = True,
+) -> List[ToolInfoResponse]:
+    result = items
+    if include_category and category_filter:
+        result = [tool for tool in result if tool.category in category_filter]
+    if include_source and source_filter:
+        result = [tool for tool in result if tool.source in source_filter]
+    if include_source_name and source_name_filter:
+        result = [tool for tool in result if (tool.source_name or "Flocks") in source_name_filter]
+    if include_enabled and enabled_filter:
+        result = [tool for tool in result if str(tool.enabled).lower() in enabled_filter]
+    if query:
+        result = [tool for tool in result if _matches_tool_query(tool, query)]
+    return result
 
 
 def _requires_session_backed_context(tool_info: ToolInfo) -> bool:
@@ -503,6 +601,110 @@ async def list_tools(
         "source": source,
     })
     return result
+
+
+@router.get(
+    "/page",
+    response_model=ToolListPageResponse,
+    summary="List tools with server-side pagination",
+)
+async def list_tools_page(
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    source_name: Optional[str] = None,
+    enabled: Optional[str] = None,
+    q: Optional[str] = None,
+    sort_by: Literal["category", "source", "source_name", "enabled", "name"] = "source",
+    sort_dir: Literal["asc", "desc"] = "asc",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=200),
+):
+    """
+    List tools with server-side search/filter/sort/pagination.
+
+    The paged list omits full parameter definitions and exposes
+    `parameters_count`; call `GET /api/tools/{tool_name}` for details.
+    """
+    started_at = time.perf_counter()
+    await ToolRegistry.init_async()
+
+    category_filter = _split_csv_filter(category)
+    source_filter = _split_csv_filter(source)
+    source_name_filter = _split_csv_filter(source_name)
+    enabled_filter = _split_csv_filter(enabled)
+    query = (q or "").strip().lower()
+
+    all_items = [
+        _build_tool_response(t, include_parameters=False)
+        for t in ToolRegistry.list_tools()
+    ]
+
+    result = _filter_tool_items(
+        all_items,
+        category_filter=category_filter,
+        source_filter=source_filter,
+        source_name_filter=source_name_filter,
+        enabled_filter=enabled_filter,
+        query=query,
+    )
+    facets = ToolListFacets(
+        category=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_category=False,
+        )).category,
+        source=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_source=False,
+        )).source,
+        source_name=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_source_name=False,
+        )).source_name,
+        enabled=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_enabled=False,
+        )).enabled,
+    )
+    result = _sort_tool_items(result, sort_by, sort_dir)
+    total = len(result)
+    items = result[offset:offset + limit]
+
+    log_route_timing(log, "tools.list_page.complete", started_at=started_at, extra={
+        "count": len(items),
+        "total": total,
+        "category": category,
+        "source": source,
+        "q": q,
+        "offset": offset,
+        "limit": limit,
+    })
+    return ToolListPageResponse(
+        items=items,
+        total=total,
+        offset=offset,
+        limit=limit,
+        facets=facets,
+    )
 
 
 @router.get(

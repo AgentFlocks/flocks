@@ -43,7 +43,8 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
-import { useTools } from '@/hooks/useTools';
+import { useToolPage } from '@/hooks/useTools';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { canDirectlyTestTool, toolAPI, Tool, ToolFixture, ToolSource } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
@@ -54,7 +55,6 @@ import type { MCPFormData, ConnStatus as MCPConnStatus } from './ToolSheets';
 import MCPTabContent from './components/MCPTabContent';
 import APITabContent from './components/APITabContent';
 import LocalTabContent from './components/LocalTabContent';
-import { getToolTabCounts } from './tabCounts';
 import { getSourceLabel } from './constants';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
@@ -138,6 +138,15 @@ const EMPTY_FILTERS: ColumnFilters = {
   enabled: new Set(),
 };
 
+function joinFilterValues(values: Set<string>): string | undefined {
+  if (values.size === 0) return undefined;
+  return Array.from(values).sort().join(',');
+}
+
+function mergeFacetKeys(facets: Record<string, number>, activeValues: Set<string> = new Set()): string[] {
+  return Array.from(new Set([...Object.keys(facets), ...Array.from(activeValues)])).sort();
+}
+
 // ============================================================================
 // Main Page
 // ============================================================================
@@ -171,8 +180,46 @@ export default function ToolPage() {
   const [sort, setSort] = useState<SortState>({ field: 'source', dir: 'asc' });
   const [filters, setFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
 
-  const { tools, loading, error, refetch } = useTools();
   const [apiEnabledServicesCount, setApiEnabledServicesCount] = useState(0);
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
+  const activeTabConfig = TABS.find((tab) => tab.key === activeTab);
+  const tabSourceFilter = activeTabConfig?.sourceFilter;
+  const sourceFilterParam = useMemo(() => {
+    const values = new Set(filters.source);
+    if (tabSourceFilter) {
+      const tabSources = Array.isArray(tabSourceFilter) ? tabSourceFilter : [tabSourceFilter];
+      tabSources.forEach((source) => values.add(source));
+    }
+    return joinFilterValues(values);
+  }, [filters.source, tabSourceFilter]);
+  const toolPageParams = useMemo(() => ({
+    source: sourceFilterParam,
+    category: joinFilterValues(filters.category),
+    sourceName: joinFilterValues(filters.source_name),
+    enabled: joinFilterValues(filters.enabled),
+    q: debouncedSearchQuery.trim() || undefined,
+    sortBy: sort.field,
+    sortDir: sort.dir,
+    offset: (currentPage - 1) * PAGE_SIZE,
+    limit: PAGE_SIZE,
+  }), [
+    sourceFilterParam,
+    filters.category,
+    filters.source_name,
+    filters.enabled,
+    debouncedSearchQuery,
+    sort.field,
+    sort.dir,
+    currentPage,
+  ]);
+  const {
+    tools,
+    total: totalTools,
+    facets: toolFacets,
+    loading,
+    error,
+    refetch,
+  } = useToolPage(toolPageParams);
 
   // Catalog data (fetched once at top level, shared with MCP & API tabs)
   const [catalogEntries, setCatalogEntries] = useState<MCPCatalogEntry[]>([]);
@@ -239,100 +286,37 @@ export default function ToolPage() {
   // API catalog not yet implemented — keep this empty so entries are not duplicated across tabs.
   const apiCatalogEntries = useMemo(() => [] as MCPCatalogEntry[], []);
 
-  // Compute tab counts: all = active tools; mcp/api = unique active servers/modules
-  const tabCounts = useMemo(
-    () => getToolTabCounts(tools, apiEnabledServicesCount),
-    [tools, apiEnabledServicesCount],
-  );
-
-  // Get unique values for filter options (active tools only)
-  const filterOptions = useMemo(() => {
-    const cats = new Set<string>();
-    const sources = new Set<string>();
-    const sourceNames = new Set<string>();
-    tools.forEach((tool) => {
-      cats.add(tool.category);
-      sources.add(tool.source);
-      sourceNames.add(tool.source_name || 'Flocks');
-    });
+  // Compute tab counts from server-side facets for the current query/filter set.
+  const tabCounts = useMemo(() => {
+    const allFromSourceFacets = Object.values(toolFacets.source).reduce((sum, count) => sum + count, 0);
     return {
-      category: Array.from(cats).sort(),
-      source: Array.from(sources).sort((a, b) => (SOURCE_SORT_ORDER[a] ?? 99) - (SOURCE_SORT_ORDER[b] ?? 99)),
-      source_name: Array.from(sourceNames).sort(),
+      all: allFromSourceFacets || totalTools,
+      mcp: toolFacets.source.mcp ?? 0,
+      api: Math.max(toolFacets.source.api ?? 0, apiEnabledServicesCount),
+      local: toolFacets.source.plugin_py ?? 0,
+    };
+  }, [totalTools, toolFacets.source, apiEnabledServicesCount]);
+
+  // Filter dropdown options come from server-side facets, plus active values
+  // so a selected filter remains visible even when it narrows the result set.
+  const filterOptions = useMemo(() => {
+    return {
+      category: mergeFacetKeys(toolFacets.category, filters.category),
+      source: mergeFacetKeys(toolFacets.source, filters.source)
+        .sort((a, b) => (SOURCE_SORT_ORDER[a] ?? 99) - (SOURCE_SORT_ORDER[b] ?? 99)),
+      source_name: mergeFacetKeys(toolFacets.source_name, filters.source_name),
       enabled: ['true', 'false'],
     };
-  }, [tools]);
-
-  // Apply tab filter + search + column filters + sort (All tab shows active tools only)
-  const processedTools = useMemo(() => {
-    let result = [...tools];
-
-    // Tab filter
-    const tabConfig = TABS.find((tab) => tab.key === activeTab);
-    if (tabConfig?.sourceFilter) {
-      const sf = tabConfig.sourceFilter;
-      const allowed = Array.isArray(sf) ? sf : [sf];
-      result = result.filter((tool) => allowed.includes(tool.source));
-    }
-
-    // Search
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter(
-        (tool) =>
-          tool.name.toLowerCase().includes(q) ||
-          tool.description.toLowerCase().includes(q) ||
-          (tool.description_cn || '').toLowerCase().includes(q) ||
-          (tool.source_name || '').toLowerCase().includes(q)
-      );
-    }
-
-    // Column filters
-    if (filters.category.size > 0) {
-      result = result.filter((tool) => filters.category.has(tool.category));
-    }
-    if (filters.source.size > 0) {
-      result = result.filter((tool) => filters.source.has(tool.source));
-    }
-    if (filters.source_name.size > 0) {
-      result = result.filter((tool) => filters.source_name.has(tool.source_name || 'Flocks'));
-    }
-    if (filters.enabled.size > 0) {
-      result = result.filter((tool) => filters.enabled.has(String(tool.enabled)));
-    }
-
-    // Sort
-    result.sort((a, b) => {
-      let cmp = 0;
-      switch (sort.field) {
-        case 'category': {
-          const la = a.category;
-          const lb = b.category;
-          cmp = la.localeCompare(lb);
-          break;
-        }
-        case 'source':
-          cmp = (SOURCE_SORT_ORDER[a.source] ?? 99) - (SOURCE_SORT_ORDER[b.source] ?? 99);
-          break;
-        case 'source_name':
-          cmp = (a.source_name || 'Flocks').localeCompare(b.source_name || 'Flocks', 'zh');
-          break;
-        case 'enabled':
-          cmp = (a.enabled === b.enabled ? 0 : a.enabled ? -1 : 1);
-          break;
-      }
-      return sort.dir === 'desc' ? -cmp : cmp;
-    });
-
-    return result;
-  }, [tools, activeTab, searchQuery, filters, sort]);
+  }, [toolFacets, filters.category, filters.source, filters.source_name]);
 
   // Pagination
-  const totalPages = Math.ceil(processedTools.length / PAGE_SIZE);
-  const paginatedTools = useMemo(() => {
-    const start = (currentPage - 1) * PAGE_SIZE;
-    return processedTools.slice(start, start + PAGE_SIZE);
-  }, [processedTools, currentPage]);
+  const processedTools = tools;
+  const totalPages = Math.max(1, Math.ceil(totalTools / PAGE_SIZE));
+  const paginatedTools = tools;
+
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+  }, [currentPage, totalPages]);
 
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
@@ -384,6 +368,15 @@ export default function ToolPage() {
     setSelectedTool(tool);
     setTestParams('{}');
     setTestResult(null);
+    toolAPI.get(tool.name)
+      .then((response) => {
+        setSelectedTool((current) => (
+          current?.name === tool.name ? response.data : current
+        ));
+      })
+      .catch(() => {
+        // Keep the lightweight row data visible; retry happens when reopened.
+      });
   };
 
   const toggleSort = (field: SortField) => {
@@ -589,7 +582,7 @@ export default function ToolPage() {
               </div>
             </div>
           )}
-          {processedTools.length === 0 ? (
+          {totalTools === 0 ? (
             <EmptyState
               icon={<Wrench className="w-16 h-16" />}
               title={t('empty.noTools')}
@@ -603,7 +596,7 @@ export default function ToolPage() {
               filterOptions={filterOptions}
               currentPage={currentPage}
               totalPages={totalPages}
-              totalCount={processedTools.length}
+              totalCount={totalTools}
               pageSize={PAGE_SIZE}
               onSort={toggleSort}
               onToggleFilter={toggleFilter}
@@ -3814,4 +3807,3 @@ const LANG_COLORS: Record<string, string> = {
 // CatalogBrowser removed — catalog UI is now inline in MCPTabContent / APITabContent
 
 // (CatalogBrowser component removed — catalog UI is inline in MCPTabContent / APITabContent)
-
