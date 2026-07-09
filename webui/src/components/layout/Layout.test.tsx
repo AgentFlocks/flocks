@@ -370,10 +370,13 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_599_999);
+      await vi.advanceTimersByTimeAsync(3_599_749);
     });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
@@ -680,6 +683,9 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {

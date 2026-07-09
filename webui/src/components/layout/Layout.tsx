@@ -105,6 +105,7 @@ import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
 
 interface LayoutNavItem {
   name: string;
@@ -301,7 +302,9 @@ export default function Layout() {
   useEffect(() => {
     if (!flocksproStatusReady) return undefined;
 
-    refreshUpdateStatus(true);
+    const initialCheckTimerId = window.setTimeout(() => {
+      refreshUpdateStatus(true);
+    }, UPDATE_CHECK_INITIAL_DELAY_MS);
 
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -323,6 +326,7 @@ export default function Layout() {
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
+      window.clearTimeout(initialCheckTimerId);
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);

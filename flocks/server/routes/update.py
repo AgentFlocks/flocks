@@ -4,7 +4,8 @@ Update routes — check version and apply self-upgrade via SSE stream
 
 import asyncio
 import json
-from typing import Literal
+import time
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,65 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="update-routes")
+
+_UPDATE_CHECK_CACHE_TTL_SECONDS = 600.0
+_UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS = 60.0
+_update_check_cache: dict[tuple[str, str], tuple[float, VersionInfo]] = {}
+_update_check_inflight: dict[tuple[str, str], asyncio.Task[VersionInfo]] = {}
+_update_check_lock = asyncio.Lock()
+
+
+def _update_cache_key(locale: str | None, edition: str) -> tuple[str, str]:
+    return (locale or "", edition)
+
+
+def clear_update_check_cache() -> None:
+    _update_check_cache.clear()
+    _update_check_inflight.clear()
+
+
+async def _check_update_cached(
+    *,
+    locale: str | None,
+    edition: Literal["flocks", "flockspro"],
+    force: bool,
+) -> VersionInfo:
+    key = _update_cache_key(locale, edition)
+    if force:
+        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+        ttl = _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS if info.error else _UPDATE_CHECK_CACHE_TTL_SECONDS
+        _update_check_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
+        return info
+
+    owner = False
+    now = time.monotonic()
+    async with _update_check_lock:
+        cached = _update_check_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
+        task = _update_check_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(
+                check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+            )
+            _update_check_inflight[key] = task
+            owner = True
+
+    try:
+        info = await task
+    finally:
+        if owner:
+            async with _update_check_lock:
+                if _update_check_inflight.get(key) is task:
+                    _update_check_inflight.pop(key, None)
+
+    if owner:
+        ttl = _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS if info.error else _UPDATE_CHECK_CACHE_TTL_SECONDS
+        async with _update_check_lock:
+            _update_check_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
+
+    return info.model_copy(deep=True)
 
 
 @router.get(
@@ -33,10 +93,13 @@ async def check_version(
         default="flocks",
         description="Version channel to check. flockspro checks the Console Pro bundle manifest.",
     ),
+    force: Annotated[bool, Query(
+        description="Bypass the short server-side cache for an explicit manual check.",
+    )] = False,
 ) -> VersionInfo:
     if edition == "flockspro":
         require_admin(request)
-    return await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+    return await _check_update_cached(locale=locale, edition=edition, force=force)
 
 
 @router.post(
