@@ -989,6 +989,16 @@ def _set_api_service_tools_enabled(provider_id: str, enabled: bool) -> int:
     matched_tools = _get_api_service_tool_infos(provider_id)
     for tool_info in matched_tools:
         tool_info.enabled = enabled
+    if matched_tools:
+        try:
+            from flocks.server.routes.tool import _invalidate_tool_summary_cache
+
+            _invalidate_tool_summary_cache()
+        except Exception as e:
+            log.debug("tool.summary_cache.invalidate_failed", {
+                "provider_id": provider_id,
+                "error": str(e),
+            })
     return len(matched_tools)
 
 

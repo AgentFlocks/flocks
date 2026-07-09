@@ -3,6 +3,7 @@ Tool routes - API endpoints for tool management and execution
 """
 
 import asyncio
+import threading
 import time
 from typing import Annotated, List, Optional, Dict, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -149,6 +150,48 @@ _VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
     "Direct HTTP execution for local or permission-gated tools requires a verified "
     "session-backed request with both sessionID and messageID."
 )
+_TOOL_SUMMARY_CACHE_TTL_SECONDS = 5.0
+_tool_summary_cache_lock = threading.Lock()
+_tool_summary_cache_key: tuple[int, tuple[str, ...]] | None = None
+_tool_summary_cache_expires_at = 0.0
+_tool_summary_cache_items: tuple[ToolInfoResponse, ...] = ()
+
+
+def _invalidate_tool_summary_cache() -> None:
+    """Clear the lightweight list snapshot used by ``GET /api/tools/page``."""
+    global _tool_summary_cache_key, _tool_summary_cache_expires_at, _tool_summary_cache_items
+    with _tool_summary_cache_lock:
+        _tool_summary_cache_key = None
+        _tool_summary_cache_expires_at = 0.0
+        _tool_summary_cache_items = ()
+
+
+def _tool_summary_cache_current_key() -> tuple[int, tuple[str, ...]]:
+    return ToolRegistry.revision(), tuple(ToolRegistry.all_tool_ids())
+
+
+def _get_tool_summary_items() -> List[ToolInfoResponse]:
+    """Return cached, parameter-free tool summaries for list filtering."""
+    global _tool_summary_cache_key, _tool_summary_cache_expires_at, _tool_summary_cache_items
+
+    now = time.monotonic()
+    cache_key = _tool_summary_cache_current_key()
+    with _tool_summary_cache_lock:
+        if (
+            _tool_summary_cache_items
+            and _tool_summary_cache_key == cache_key
+            and now < _tool_summary_cache_expires_at
+        ):
+            return list(_tool_summary_cache_items)
+
+        items = tuple(
+            _build_tool_response(t, include_parameters=False)
+            for t in ToolRegistry.list_tools()
+        )
+        _tool_summary_cache_key = cache_key
+        _tool_summary_cache_expires_at = now + _TOOL_SUMMARY_CACHE_TTL_SECONDS
+        _tool_summary_cache_items = items
+        return list(items)
 
 
 def _get_tool_source(tool_info: ToolInfo) -> tuple:
@@ -634,10 +677,7 @@ async def list_tools_page(
     enabled_filter = _split_csv_filter(enabled)
     query = (q or "").strip().lower()
 
-    all_items = [
-        _build_tool_response(t, include_parameters=False)
-        for t in ToolRegistry.list_tools()
-    ]
+    all_items = _get_tool_summary_items()
 
     result = _filter_tool_items(
         all_items,
@@ -819,10 +859,12 @@ async def update_tool(
         # The in-memory ToolInfo.enabled reflects global state. Per-device
         # enabled=True is not a supported override; switch-on means clear the
         # per-device disable and follow the global tool setting.
+        _invalidate_tool_summary_cache()
         return _build_tool_response(tool.info)
 
     # --- Global mode (original behaviour) ---
     _set_global_tool_enabled(tool, desired)
+    _invalidate_tool_summary_cache()
     return _build_tool_response(tool.info)
 
 
@@ -853,6 +895,7 @@ async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_ad
     default = _get_default_enabled(tool.info)
     new_enabled = default and _service_allows_enable(tool.info)
     tool.info.enabled = new_enabled
+    _invalidate_tool_summary_cache()
 
     log.info("tool.setting.reset", {
         "name": tool_name,
@@ -1054,6 +1097,7 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
         log.error("tools.refresh.plugin_error", {"error": str(e)})
         errors.append(f"plugin: {e}")
 
+    _invalidate_tool_summary_cache()
     tool_count = len(ToolRegistry.all_tool_ids())
     log_route_timing(log, "tools.refresh.done", started_at=started_at, extra={
         "tool_count": tool_count,
@@ -1284,6 +1328,7 @@ async def create_tool(request: CreateToolRequest, _admin: object = Depends(requi
         ToolRegistry.register(tool)
         if tool.info.name not in ToolRegistry._plugin_tool_names:
             ToolRegistry._plugin_tool_names.append(tool.info.name)
+        _invalidate_tool_summary_cache()
     except Exception as e:
         log.error("tool.create.register_error", {"error": str(e), "name": request.name})
         raise HTTPException(
@@ -1357,12 +1402,14 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: obje
             if not tool.info.source:
                 tool.info.source = "plugin_yaml"
             ToolRegistry.register(tool)
+            _invalidate_tool_summary_cache()
             return _build_tool_response(tool.info)
     except Exception as e:
         log.error("tool.update.reload_error", {"error": str(e), "name": name})
 
     existing = ToolRegistry.get(name)
     if existing:
+        _invalidate_tool_summary_cache()
         return _build_tool_response(existing.info)
     raise HTTPException(status_code=500, detail="Tool updated but reload failed")
 
@@ -1404,6 +1451,7 @@ async def delete_tool(name: str, _admin: object = Depends(require_admin)):
 
     # Refresh plugin tools so stale decorator-registered python tools are removed too.
     ToolRegistry.refresh_plugin_tools()
+    _invalidate_tool_summary_cache()
 
     from flocks.hub import local as hub_local
 
@@ -1441,6 +1489,7 @@ async def reload_tool(name: str, _admin: object = Depends(require_admin)):
         if not tool.info.source:
             tool.info.source = "plugin_yaml"
         ToolRegistry.register(tool)
+        _invalidate_tool_summary_cache()
         log.info("tool.reloaded", {"name": name})
         return _build_tool_response(tool.info)
     except Exception as e:

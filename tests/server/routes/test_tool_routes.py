@@ -27,6 +27,7 @@ def _temporary_tool(tool: Tool) -> Iterator[None]:
     ToolRegistry.init()
     existing = ToolRegistry._tools.get(tool.info.name)
     ToolRegistry.register(tool)
+    _clear_tool_summary_cache()
     try:
         yield
     finally:
@@ -35,6 +36,13 @@ def _temporary_tool(tool: Tool) -> Iterator[None]:
             ToolRegistry._tools[tool.info.name] = existing
         else:
             ToolRegistry._tools.pop(tool.info.name, None)
+        _clear_tool_summary_cache()
+
+
+def _clear_tool_summary_cache() -> None:
+    from flocks.server.routes import tool as tool_routes
+
+    tool_routes._invalidate_tool_summary_cache()
 
 
 class _FakeSessionUser:
@@ -449,3 +457,63 @@ class TestToolListPageRoute:
 
         assert detail.status_code == 200, detail.text
         assert len(detail.json()["parameters"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_list_page_reuses_lightweight_summary_cache(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import tool as tool_routes
+
+        async def handler(ctx) -> ToolResult:
+            return ToolResult(success=True, output=ctx.session_id)
+
+        tool = Tool(
+            info=ToolInfo(
+                name="page_summary_cache_unique_tool",
+                description="NeedlePageSummaryCacheUnique",
+                category=ToolCategory.CUSTOM,
+                source="plugin_py",
+            ),
+            handler=handler,
+        )
+
+        original_build_tool_response = tool_routes._build_tool_response
+        summary_builds = 0
+
+        def counted_build_tool_response(tool_info, *, include_parameters=True):
+            nonlocal summary_builds
+            if not include_parameters:
+                summary_builds += 1
+            return original_build_tool_response(tool_info, include_parameters=include_parameters)
+
+        monkeypatch.setattr(tool_routes, "_build_tool_response", counted_build_tool_response)
+
+        with _temporary_tool(tool):
+            first = await client.get(
+                "/api/tools/page",
+                params={"q": "needlepagesummarycacheunique", "limit": 25},
+            )
+            first_builds = summary_builds
+            second = await client.get(
+                "/api/tools/page",
+                params={"q": "needlepagesummarycacheunique", "source": "plugin_py", "limit": 25},
+            )
+            second_builds = summary_builds
+
+            tool_routes._invalidate_tool_summary_cache()
+            third = await client.get(
+                "/api/tools/page",
+                params={"q": "needlepagesummarycacheunique", "limit": 25},
+            )
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert third.status_code == 200, third.text
+        assert first.json()["total"] == 1
+        assert second.json()["total"] == 1
+        assert third.json()["total"] == 1
+        assert first_builds > 0
+        assert second_builds == first_builds
+        assert summary_builds > second_builds
