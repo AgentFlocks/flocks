@@ -44,6 +44,7 @@ import { useProductName } from '@/contexts/ProductNameContext';
 type ViewMode = 'table' | 'tree';
 
 const FlowCanvas = lazy(() => import('@/pages/WorkflowDetail/FlowCanvas'));
+const HUB_LOADING_DELAY_MS = 180;
 
 interface HubTaxonomyCategory {
   id: string;
@@ -269,6 +270,7 @@ export default function HubPage() {
   const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedCatalog, setHasLoadedCatalog] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState(searchParams.get('q') || urlPluginId);
   const [typeFilter, setTypeFilter] = useState<HubPluginType | ''>(urlType);
@@ -309,6 +311,7 @@ export default function HubPage() {
       });
       return nextItems;
     } finally {
+      setHasLoadedCatalog(true);
       if (!silent) setLoading(false);
     }
   }, [debouncedQuery, page, pageSize, stateFilter, tagFilter, typeFilter, useCaseFilter]);
@@ -345,6 +348,7 @@ export default function HubPage() {
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pagedItems = items;
+  const isInitialLoading = loading && !hasLoadedCatalog;
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -400,12 +404,12 @@ export default function HubPage() {
     setPage(1);
   };
 
-  if (loading) {
-    return <div className="h-full flex items-center justify-center"><LoadingSpinner /></div>;
+  if (isInitialLoading) {
+    return <div className="h-full flex items-center justify-center"><LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} /></div>;
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 flex flex-col" aria-busy={loading}>
       <PageHeader
         title={hubTitle}
         description={hubDescription}
@@ -443,7 +447,7 @@ export default function HubPage() {
         }
       />
 
-      <div className="px-4 pb-3">
+      <div className="shrink-0 px-4 pb-3">
         <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-slate-50 via-white to-white shadow-sm overflow-hidden">
           <div className="p-3">
             <FilterRow
@@ -541,7 +545,7 @@ export default function HubPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4 [scrollbar-gutter:stable]">
         {viewMode === 'table' ? (
           <HubTable items={pagedItems} actionId={actionId} tagLabels={taxonomy?.tagLabels} language={i18n.language} text={text} onSelect={setSelected} onAction={runAction} />
         ) : (
@@ -606,15 +610,15 @@ function FilterRow({ label, value, options, onChange }: {
         key={option.value || 'all'}
         title={option.title}
         onClick={() => onChange(option.value)}
-        className={`px-2 py-1 rounded-md transition-colors ${
+        className={`inline-flex h-8 items-center whitespace-nowrap rounded-md px-2 py-1 font-medium tabular-nums transition-colors ${
           active
-            ? 'bg-slate-800 text-white font-medium'
+            ? 'bg-slate-800 text-white'
             : 'text-gray-600 hover:bg-white hover:text-gray-900'
         }`}
       >
         {option.label}
         {option.count !== undefined && option.value && (
-          <span className={active ? 'ml-1 text-slate-200' : 'ml-1 text-gray-400'}>{option.count}</span>
+          <span className={active ? 'ml-1 inline-block min-w-3 text-right text-slate-200' : 'ml-1 inline-block min-w-3 text-right text-gray-400'}>{option.count}</span>
         )}
       </button>
     );
@@ -622,8 +626,8 @@ function FilterRow({ label, value, options, onChange }: {
   const [allOption, ...facetOptions] = options;
 
   return (
-    <div className="flex items-start gap-3 text-sm">
-      <div className="w-20 shrink-0 pt-1">
+    <div className="flex min-h-8 items-start gap-3 text-sm">
+      <div className="w-20 shrink-0 pt-1.5">
         <span className="inline-flex px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-xs font-medium">
           {label}
         </span>
@@ -650,7 +654,7 @@ function PaginationBar({ total, page, pageSize, totalPages, text, onPageChange, 
   const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const end = Math.min(total, page * pageSize);
   return (
-    <div className="px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
+    <div className="h-12 shrink-0 px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
       <div>
         {text.showing} {start}-{end} / {text.of} {total} {text.plugins}
       </div>
@@ -693,7 +697,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl overflow-hidden">
       <table className="min-w-full table-fixed text-xs">
         <colgroup>
           <col style={{ width: '7%' }} />
@@ -786,7 +790,7 @@ function HubTree({ items, actionId, text, onSelect, onAction }: {
   }, [items]);
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-3">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl p-3">
       <HubTreeNodeView node={root} depth={0} actionId={actionId} text={text} onSelect={onSelect} onAction={onAction} root />
     </div>
   );

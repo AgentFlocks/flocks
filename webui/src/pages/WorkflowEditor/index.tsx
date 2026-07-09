@@ -32,6 +32,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { extractErrorMessage } from '@/utils/error';
 import {
@@ -779,7 +780,7 @@ export default function WorkflowEditor() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600" />
+        <LoadingSpinner size="lg" delayMs={180} />
       </div>
     );
   }

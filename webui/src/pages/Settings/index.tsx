@@ -380,7 +380,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   if (sectionId === 'preferences') return <PreferencesPanel />;
 
   return (
-    <Suspense fallback={<RoutePageSkeleton />}>
+    <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
       {sectionId === 'account' && <ConfigPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}

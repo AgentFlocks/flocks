@@ -196,7 +196,7 @@ export default function Home() {
       {/* Stats */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
-          <LoadingSpinner size="lg" />
+          <LoadingSpinner size="lg" delayMs={180} />
         </div>
       ) : (
         <>

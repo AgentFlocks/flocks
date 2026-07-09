@@ -49,10 +49,11 @@ const FlocksproUpgradeCallbackPage = lazyPage(() => import('@/pages/FlocksproUpg
 const SettingsPage = lazyPage(() => import('@/pages/Settings'));
 const WebUIContractPageHost = lazyPage(() => import('@/pages/WebUIContractPageHost'));
 const WebUIContractWorkspaceHost = lazyPage(() => import('@/pages/WebUIContractWorkspaceHost'));
+const ROUTE_FALLBACK_DELAY_MS = 180;
 
 function LazyRoute({ children }: { children: ReactNode }) {
   return (
-    <Suspense fallback={<RoutePageSkeleton />}>
+    <Suspense fallback={<RoutePageSkeleton delayMs={ROUTE_FALLBACK_DELAY_MS} />}>
       {children}
     </Suspense>
   );

@@ -241,7 +241,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(new Set());
   };
 
-  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner /></div>;
+  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
   if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
 
   return (
