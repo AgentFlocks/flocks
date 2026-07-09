@@ -37,6 +37,31 @@ class FeishuChannel(ChannelPlugin):
         super().__init__()
         self._webhook_chat_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._webhook_dedup_flush_tasks: dict[str, asyncio.Task] = {}
+
+    @property
+    def requires_signature(self) -> bool:
+        return True
+
+    async def verify_inbound(self, body: bytes, headers: dict) -> bool:
+        from flocks.channel.builtin.feishu.config import (
+            resolve_webhook_account_config,
+            verify_webhook_timestamp,
+        )
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return False
+
+        resolved_config = resolve_webhook_account_config(
+            self._config,
+            body=body,
+            headers=headers,
+            data=data,
+        )
+        if not resolved_config:
+            return False
+        return verify_webhook_timestamp(headers)
         self._webhook_dedup_warmed: set[str] = set()
 
     def _get_webhook_chat_lock(self, chat_id: str) -> asyncio.Lock:

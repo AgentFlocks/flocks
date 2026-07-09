@@ -14,6 +14,9 @@ from starlette.requests import HTTPConnection
 
 from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.auth.service import AuthService
+from flocks.identity.entry import Entry
+from flocks.identity.resolver import IdentityResolver, RequestIdentityContext
+from flocks.identity.subject import reset_current_subject, set_current_subject
 from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
@@ -236,6 +239,57 @@ def _build_api_token_user() -> AuthUser:
     )
 
 
+def _api_key_subjects_enabled() -> bool:
+    raw = (os.getenv("FLOCKS_APIKEY_SUBJECTS", "1") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _build_api_key_user(record) -> AuthUser:
+    return record.to_auth_user()
+
+
+async def _resolve_api_token_user(token: Optional[str]) -> Optional[AuthUser]:
+    if not token:
+        return None
+    if _api_key_subjects_enabled():
+        try:
+            api_key = await AuthService.verify_api_key(token)
+        except Exception:
+            api_key = None
+        if api_key is not None:
+            return _build_api_key_user(api_key)
+    if _is_valid_api_token(token):
+        return _build_api_token_user()
+    return None
+
+
+def _subject_shadow_enabled() -> bool:
+    raw = (os.getenv("FLOCKS_IDENTITY_SUBJECT", "1") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _bind_auth_context(
+    request: HTTPConnection,
+    auth_user: Optional[AuthUser],
+    *,
+    entry: Entry = Entry.UNKNOWN,
+    auth_source: str = "none",
+):
+    auth_token = set_current_auth_user(auth_user)
+    if not _subject_shadow_enabled():
+        return auth_token, None
+    subject = IdentityResolver.resolve(
+        RequestIdentityContext(
+            entry=entry,
+            auth_source=auth_source,
+            auth_user=auth_user,
+        )
+    )
+    setattr(request.state, "subject", subject)
+    subject_token = set_current_subject(subject)
+    return auth_token, subject_token
+
+
 async def apply_auth_for_request(request: HTTPConnection):
     """
     Resolve user from cookie and bind context var.
@@ -245,7 +299,7 @@ async def apply_auth_for_request(request: HTTPConnection):
     (see `PUBLIC_PATHS` / `PUBLIC_PREFIXES`) bypass auth.
     """
     if auth_middleware_exempt(request.url.path):
-        token = set_current_auth_user(None)
+        token = _bind_auth_context(request, None)
         return None, token, None
 
     if _has_session_cookie(request):
@@ -266,7 +320,12 @@ async def apply_auth_for_request(request: HTTPConnection):
 
         auth_user = user.to_auth_user()
         request.state.auth_user = auth_user
-        token = set_current_auth_user(auth_user)
+        token = _bind_auth_context(
+            request,
+            auth_user,
+            entry=Entry.WEBUI,
+            auth_source="cookie_session",
+        )
         if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -279,14 +338,19 @@ async def apply_auth_for_request(request: HTTPConnection):
     if not _is_browser_like_request(request):
         provided = _read_api_token_from_request(request)
         if provided:
-            if not _is_valid_api_token(provided):
+            token_user = await _resolve_api_token_user(provided)
+            if not token_user:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="非浏览器请求鉴权失败，请在 Authorization 中携带有效 Bearer API Token",
                 )
-            token_user = _build_api_token_user()
             request.state.auth_user = token_user
-            token = set_current_auth_user(token_user)
+            token = _bind_auth_context(
+                request,
+                token_user,
+                entry=Entry.API,
+                auth_source="api_token",
+            )
             return None, token, token_user
 
         expected = _get_expected_api_token()
@@ -317,7 +381,12 @@ async def apply_auth_for_request(request: HTTPConnection):
 
     auth_user = user.to_auth_user()
     request.state.auth_user = auth_user
-    token = set_current_auth_user(auth_user)
+    token = _bind_auth_context(
+        request,
+        auth_user,
+        entry=Entry.WEBUI,
+        auth_source="cookie_session",
+    )
     if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -327,4 +396,10 @@ async def apply_auth_for_request(request: HTTPConnection):
 
 
 def clear_auth_context(token) -> None:
+    if isinstance(token, tuple):
+        auth_token, subject_token = token
+        reset_current_auth_user(auth_token)
+        if subject_token is not None:
+            reset_current_subject(subject_token)
+        return
     reset_current_auth_user(token)

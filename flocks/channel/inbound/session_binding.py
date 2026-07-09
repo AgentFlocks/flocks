@@ -24,6 +24,9 @@ from typing import Literal, Optional
 import aiosqlite
 
 from flocks.channel.base import ChatType, InboundMessage
+from flocks.identity.entry import Entry
+from flocks.identity.resolver import IdentityResolver, RequestIdentityContext
+from flocks.identity.subject import Subject
 from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
@@ -44,6 +47,8 @@ class SessionBinding:
     agent_id: Optional[str]
     created_at: float
     last_message_at: float
+    owner_subject_id: Optional[str] = None
+    permission_mode: Optional[str] = None
 
 
 _DDL = """
@@ -56,6 +61,8 @@ CREATE TABLE IF NOT EXISTS channel_bindings (
     thread_id TEXT,
     session_id TEXT NOT NULL,
     agent_id TEXT,
+    owner_subject_id TEXT,
+    permission_mode TEXT NOT NULL DEFAULT 'readonly',
     created_at REAL NOT NULL,
     last_message_at REAL NOT NULL
 );
@@ -65,6 +72,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_bindings_unique
 
 CREATE INDEX IF NOT EXISTS idx_channel_bindings_session
     ON channel_bindings(session_id);
+
+CREATE TABLE IF NOT EXISTS channel_identity_map (
+    channel_id TEXT NOT NULL,
+    account_id TEXT NOT NULL DEFAULT 'default',
+    platform_user_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    owner_username TEXT NOT NULL DEFAULT '',
+    tenant_id TEXT NOT NULL DEFAULT '',
+    department TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at REAL NOT NULL,
+    PRIMARY KEY (channel_id, account_id, platform_user_id)
+);
 """
 
 _init_lock = asyncio.Lock()
@@ -79,7 +99,110 @@ _db_ready = False
 _db_owner_pid: Optional[int] = None
 
 
-async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str, str]:
+def _channel_least_priv_enabled() -> bool:
+    raw = (os.getenv("FLOCKS_CHANNEL_LEAST_PRIV", "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+async def _resolve_identity_mapping(msg: InboundMessage) -> Optional[dict[str, str]]:
+    db = await _get_db()
+    async with db.execute(
+        """
+        SELECT owner_user_id, owner_username, tenant_id, department, role
+        FROM channel_identity_map
+        WHERE channel_id = ? AND account_id = ? AND platform_user_id = ?
+        """,
+        (msg.channel_id, msg.account_id or "default", msg.sender_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "owner_user_id": str(row[0]),
+        "owner_username": str(row[1] or ""),
+        "tenant_id": str(row[2] or ""),
+        "department": str(row[3] or ""),
+        "role": str(row[4] or "member"),
+    }
+
+
+def _build_channel_principal_subject(msg: InboundMessage, *, permission_mode: str) -> Subject:
+    auth_user = Subject(
+        subject_id=f"channel:{msg.channel_id}:{msg.account_id or 'default'}:{msg.sender_id}",
+        subject_type="channel_user",
+        display_name=msg.sender_name or msg.sender_id,
+        role="member",
+        status="active",
+        entry=Entry.CHANNEL.value,
+        auth_source=f"channel:{msg.channel_id}",
+        permission_mode=permission_mode or "readonly",
+        verified=True,
+    ).as_auth_user()
+    return IdentityResolver.resolve(
+        RequestIdentityContext(
+            entry=Entry.CHANNEL,
+            auth_source=f"channel:{msg.channel_id}",
+            auth_user=auth_user,
+            subject_type="channel_user",
+            verified=True,
+        )
+    ) or Subject(
+        subject_id=auth_user.id,
+        subject_type="channel_user",
+        display_name=auth_user.username,
+        role=auth_user.role,
+        status=auth_user.status,
+        tenant_ids=auth_user.tenant_ids,
+        department=auth_user.department,
+        asset_groups=auth_user.asset_groups,
+        entry=Entry.CHANNEL.value,
+        auth_source=f"channel:{msg.channel_id}",
+        permission_mode=permission_mode or "readonly",
+        verified=True,
+    )
+
+
+async def resolve_channel_subject(
+    msg: InboundMessage,
+    *,
+    permission_mode: str = "readonly",
+) -> Subject:
+    if not _channel_least_priv_enabled():
+        return _build_channel_principal_subject(msg, permission_mode=permission_mode)
+
+    mapped = await _resolve_identity_mapping(msg)
+    if not mapped:
+        return _build_channel_principal_subject(msg, permission_mode=permission_mode)
+    auth_user = Subject(
+        subject_id=mapped["owner_user_id"],
+        subject_type="human",
+        display_name=mapped["owner_username"] or mapped["owner_user_id"],
+        role=mapped["role"],
+        status="active",
+        tenant_ids=((mapped["tenant_id"],) if mapped["tenant_id"] else ()),
+        department=mapped["department"],
+        entry=Entry.CHANNEL.value,
+        auth_source=f"channel_map:{msg.channel_id}",
+        permission_mode=permission_mode or "readonly",
+        verified=True,
+    ).as_auth_user()
+    return IdentityResolver.resolve(
+        RequestIdentityContext(
+            entry=Entry.CHANNEL,
+            auth_source=f"channel_map:{msg.channel_id}",
+            auth_user=auth_user,
+            subject_type="human",
+            verified=True,
+        )
+    ) or _build_channel_principal_subject(msg, permission_mode=permission_mode)
+
+
+async def resolve_channel_session_owner_kwargs(
+    source_session=None,
+    *,
+    msg: Optional[InboundMessage] = None,
+    permission_mode: str = "readonly",
+) -> dict[str, str]:
     """Return ownership kwargs for a channel-created session.
 
     Channel dispatch runs outside the HTTP auth middleware, so
@@ -91,13 +214,35 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     """
     owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
     owner_username = getattr(source_session, "owner_username", None) if source_session else None
+    owner_subject_id = getattr(source_session, "owner_subject_id", None) if source_session else None
     if owner_user_id or owner_username:
         owner_kwargs: dict[str, str] = {}
         if owner_user_id:
             owner_kwargs["owner_user_id"] = str(owner_user_id)
         if owner_username:
             owner_kwargs["owner_username"] = str(owner_username)
+        if owner_subject_id:
+            owner_kwargs["owner_subject_id"] = str(owner_subject_id)
+        existing_permission_mode = getattr(source_session, "permission_mode", None)
+        if existing_permission_mode:
+            owner_kwargs["permission_mode"] = str(existing_permission_mode)
         return owner_kwargs
+
+    if _channel_least_priv_enabled():
+        if msg is None:
+            return {"permission_mode": permission_mode or "readonly"}
+        mapped = await _resolve_identity_mapping(msg)
+        if mapped:
+            return {
+                "owner_user_id": mapped["owner_user_id"],
+                "owner_username": mapped["owner_username"],
+                "owner_subject_id": f"user:{mapped['owner_user_id']}",
+                "permission_mode": permission_mode or "readonly",
+            }
+        return {
+            "owner_subject_id": f"channel:{msg.channel_id}:{msg.account_id or 'default'}:{msg.sender_id}",
+            "permission_mode": permission_mode or "readonly",
+        }
 
     try:
         from flocks.auth.service import AuthService
@@ -115,6 +260,8 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     return {
         "owner_user_id": str(admin.id),
         "owner_username": str(admin.username),
+        "owner_subject_id": f"user:{admin.id}",
+        "permission_mode": permission_mode or "default_interactive",
     }
 
 
@@ -180,10 +327,23 @@ async def _get_db() -> aiosqlite.Connection:
         _db_conn.row_factory = aiosqlite.Row
         await Storage.configure_connection(_db_conn)
         await _db_conn.executescript(_DDL)
+        await _migrate_binding_columns(_db_conn)
         await _migrate_legacy_binding_agent_ids(_db_conn)
         _db_ready = True
         _db_owner_pid = current_pid
         return _db_conn
+
+
+async def _migrate_binding_columns(db: aiosqlite.Connection) -> None:
+    async with db.execute("PRAGMA table_info(channel_bindings)") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+    if "owner_subject_id" not in columns:
+        await db.execute("ALTER TABLE channel_bindings ADD COLUMN owner_subject_id TEXT")
+    if "permission_mode" not in columns:
+        await db.execute(
+            "ALTER TABLE channel_bindings ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'readonly'"
+        )
+    await db.commit()
 
 
 async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
@@ -252,6 +412,7 @@ class SessionBindingService:
         default_agent: Optional[str] = None,
         scope_override: Optional[GroupSessionScope] = None,
         directory: Optional[str] = None,
+        permission_mode: str = "readonly",
     ) -> SessionBinding:
         """Find or create a binding for *msg*.
 
@@ -291,9 +452,16 @@ class SessionBindingService:
             await self.unbind(existing.session_id)
 
         session_id = await self._create_session(
-            msg, default_agent=default_agent, directory=directory,
+            msg,
+            default_agent=default_agent,
+            directory=directory,
+            permission_mode=permission_mode,
         )
         now = time.time()
+        owner_kwargs = await resolve_channel_session_owner_kwargs(
+            msg=msg,
+            permission_mode=permission_mode,
+        )
         binding = SessionBinding(
             channel_id=msg.channel_id,
             account_id=msg.account_id,
@@ -302,6 +470,8 @@ class SessionBindingService:
             thread_id=thread_id,
             session_id=session_id,
             agent_id=default_agent,
+            owner_subject_id=owner_kwargs.get("owner_subject_id"),
+            permission_mode=permission_mode,
             created_at=now,
             last_message_at=now,
         )
@@ -363,6 +533,8 @@ class SessionBindingService:
             thread_id=thread_id,
             session_id=session_id,
             agent_id=agent_id,
+            owner_subject_id=None,
+            permission_mode="readonly",
             created_at=now,
             last_message_at=now,
         )
@@ -409,6 +581,8 @@ class SessionBindingService:
             thread_id=thread_id,
             session_id=session_id,
             agent_id=agent_id,
+            owner_subject_id=existing.owner_subject_id if existing else None,
+            permission_mode=existing.permission_mode if existing else "readonly",
             created_at=existing.created_at if existing else now,
             last_message_at=now,
         )
@@ -503,13 +677,14 @@ class SessionBindingService:
         await db.execute(
             "INSERT OR REPLACE INTO channel_bindings "
             "(id, channel_id, account_id, chat_id, chat_type, thread_id, "
-            " session_id, agent_id, created_at, last_message_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " session_id, agent_id, owner_subject_id, permission_mode, created_at, last_message_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 binding_id,
                 b.channel_id, b.account_id, b.chat_id,
                 b.chat_type.value, b.thread_id,
                 b.session_id, b.agent_id,
+                b.owner_subject_id, b.permission_mode or "readonly",
                 b.created_at, b.last_message_at,
             ),
         )
@@ -534,6 +709,8 @@ class SessionBindingService:
             thread_id=row["thread_id"],
             session_id=row["session_id"],
             agent_id=row["agent_id"],
+            owner_subject_id=row["owner_subject_id"] if "owner_subject_id" in row.keys() else None,
+            permission_mode=row["permission_mode"] if "permission_mode" in row.keys() else "readonly",
             created_at=row["created_at"],
             last_message_at=row["last_message_at"],
         )
@@ -543,6 +720,7 @@ class SessionBindingService:
         msg: InboundMessage,
         default_agent: Optional[str] = None,
         directory: Optional[str] = None,
+        permission_mode: str = "readonly",
     ) -> str:
         """Create a new Flocks Session and return its ID.
 
@@ -555,7 +733,10 @@ class SessionBindingService:
         from flocks.session.session import Session
 
         title = _build_title(msg)
-        owner_kwargs = await resolve_channel_session_owner_kwargs()
+        owner_kwargs = await resolve_channel_session_owner_kwargs(
+            msg=msg,
+            permission_mode=permission_mode,
+        )
         session = await Session.create(
             project_id="channel",
             directory=_resolve_session_directory(directory),

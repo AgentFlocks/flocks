@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
-from flocks.channel.inbound.session_binding import SessionBindingService
+from flocks.channel.inbound.session_binding import SessionBindingService, resolve_channel_subject
 from flocks.config.config import ChannelConfig
 from flocks.utils.log import Log
 
@@ -170,6 +170,25 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
     return True
 
 
+def _normalize_visible_agents(channel_config: ChannelConfig) -> list[str]:
+    visible: list[str] = []
+    for candidate in channel_config.visible_agents or []:
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.strip()
+        if normalized and normalized not in visible:
+            visible.append(normalized)
+    return visible
+
+
+def _enforce_visible_agent(agent_id: Optional[str], visible_agents: list[str]) -> Optional[str]:
+    if not visible_agents:
+        return agent_id
+    if agent_id and agent_id in visible_agents:
+        return agent_id
+    return visible_agents[0]
+
+
 # =====================================================================
 # ChannelDeliveryCallbacks — bridges SessionLoop output → IM delivery
 # =====================================================================
@@ -320,13 +339,19 @@ class InboundDispatcher:
         # ``rex`` only via ``Agent.get(name) or Agent.get("rex")``, hiding the
         # real default and making behaviour diverge between WebUI and channel.
         default_agent = channel_config.default_agent
+        permission_mode = (channel_config.permission_mode or "readonly").strip() or "readonly"
+        visible_agents = _normalize_visible_agents(channel_config)
         scope_override = None
         if msg.channel_id == "feishu" and msg.chat_type == ChatType.GROUP:
-            scope_override, feishu_agent = _resolve_feishu_group_overrides(
+            scope_override, feishu_agent, feishu_permission_mode, feishu_visible_agents = _resolve_feishu_group_overrides(
                 channel_config, msg.chat_id,
             )
             if feishu_agent:
                 default_agent = feishu_agent
+            if feishu_permission_mode:
+                permission_mode = feishu_permission_mode
+            if feishu_visible_agents:
+                visible_agents = feishu_visible_agents
         if not default_agent:
             try:
                 from flocks.agent.registry import Agent as _Agent
@@ -336,12 +361,19 @@ class InboundDispatcher:
                     "error": str(exc),
                 })
                 default_agent = "rex"
+        default_agent = _enforce_visible_agent(default_agent, visible_agents)
+
+        msg.resolved_subject = await resolve_channel_subject(
+            msg,
+            permission_mode=permission_mode,
+        )
 
         binding = await self.binding_service.resolve_or_create(
             msg,
             default_agent=default_agent,
             scope_override=scope_override,
             directory=channel_config.workspace_dir,
+            permission_mode=permission_mode,
         )
 
         user_text = msg.mention_text if msg.mention_text else msg.text
@@ -857,7 +889,11 @@ class InboundDispatcher:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
-        owner_kwargs = await resolve_channel_session_owner_kwargs(session)
+        owner_kwargs = await resolve_channel_session_owner_kwargs(
+            session,
+            msg=msg,
+            permission_mode=binding.permission_mode or "readonly",
+        )
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
@@ -1353,10 +1389,11 @@ async def _resolve_session_model(session_id: str) -> Optional[dict]:
 def _resolve_feishu_group_overrides(
     channel_config: ChannelConfig,
     chat_id: str,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[list[str]]]:
     """Read per-group ``groupSessionScope`` and ``defaultAgent`` from the feishu config.
 
-    Returns ``(scope_override, agent_override)``.  Either may be ``None`` if not
+    Returns ``(scope_override, agent_override, permission_mode, visible_agents)``.
+    Each item may be ``None`` if not
     configured for the given *chat_id*.
 
     Resolution order (highest priority first):
@@ -1366,7 +1403,7 @@ def _resolve_feishu_group_overrides(
 
     merged = merge_group_overrides(channel_config.get_extra("groups"), chat_id)
     if not merged:
-        return None, None
+        return None, None, None, None
 
     scope = (
         merged.get("groupSessionScope")
@@ -1374,7 +1411,18 @@ def _resolve_feishu_group_overrides(
         or None
     )
     agent = merged.get("defaultAgent") or None
-    return scope, agent
+    permission_mode = merged.get("permissionMode") or None
+    visible = merged.get("visibleAgents")
+    visible_agents = None
+    if isinstance(visible, list):
+        cleaned: list[str] = []
+        for item in visible:
+            if isinstance(item, str):
+                normalized = item.strip()
+                if normalized and normalized not in cleaned:
+                    cleaned.append(normalized)
+        visible_agents = cleaned or None
+    return scope, agent, permission_mode, visible_agents
 
 
 async def _expand_merge_forward(

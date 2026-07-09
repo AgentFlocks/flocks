@@ -19,7 +19,17 @@ class AuthUser(BaseModel):
     status: str = Field("active", description="active or disabled")
     must_reset_password: bool = False
     tenant_ids: tuple[str, ...] = Field(default_factory=tuple)
+    department: str = ""
     asset_groups: tuple[str, ...] = Field(default_factory=tuple)
+
+    def to_subject(self, *, entry: str, auth_source: str):
+        from flocks.identity.subject import Subject
+
+        return Subject.from_auth_user(
+            self,
+            entry=entry,
+            auth_source=auth_source,
+        )
 
 
 _current_auth_user: contextvars.ContextVar[Optional[AuthUser]] = contextvars.ContextVar(

@@ -4,8 +4,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from flocks.channel.base import DeliveryResult
-from flocks.server.routes.channel import SessionSendRequest, channel_session_send
+from flocks.server.routes.channel import SessionSendRequest, channel_session_send, channel_webhook
 from fastapi import HTTPException
+from starlette.requests import Request
 
 
 @pytest.mark.asyncio
@@ -84,3 +85,35 @@ async def test_channel_session_send_returns_404_when_channel_binding_is_ambiguou
         chat_id=None,
     )
     deliver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_channel_webhook_rejects_when_signature_verification_fails() -> None:
+    class _Plugin:
+        requires_signature = True
+
+        async def verify_inbound(self, body, headers):
+            return False
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/channel/feishu/webhook",
+        "raw_path": b"/api/channel/feishu/webhook",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+    }
+    async def _receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    request = Request(scope, _receive)
+
+    with patch("flocks.server.routes.channel.default_registry.get", return_value=_Plugin()):
+        with pytest.raises(HTTPException) as exc_info:
+            await channel_webhook("feishu", request)
+    assert exc_info.value.status_code == 403

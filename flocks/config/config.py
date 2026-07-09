@@ -522,6 +522,8 @@ class FeishuGroupConfig(BaseModel):
     allow_from: Optional[List[str]] = Field(None, alias="allowFrom")
     system_prompt: Optional[str] = Field(None, alias="systemPrompt")
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
+    visible_agents: Optional[List[str]] = Field(None, alias="visibleAgents")
+    permission_mode: Optional[str] = Field(None, alias="permissionMode")
     group_session_scope: Optional[Literal[
         "group",
         "group_sender",
@@ -549,6 +551,8 @@ class ChannelConfig(BaseModel):
 
     enabled: bool = False
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
+    visible_agents: Optional[List[str]] = Field(None, alias="visibleAgents")
+    permission_mode: Optional[str] = Field("readonly", alias="permissionMode")
     dm_policy: Optional[str] = Field(None, alias="dmPolicy")
     group_trigger: Optional[str] = Field("mention", alias="groupTrigger")
     allow_from: Optional[List[str]] = Field(None, alias="allowFrom")

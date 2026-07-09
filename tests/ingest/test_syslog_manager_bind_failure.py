@@ -44,12 +44,13 @@ async def test_restart_workflow_reports_failure_on_port_conflict(
             "port": busy_port,
             "format": "auto",
             "inputKey": "syslog_message",
+            "serviceAccount": {"subjectId": "svc_syslog"},
         }
 
-        async def _fake_storage_read(key: str):  # noqa: ANN001
-            if key == syslog_manager.SyslogManager._config_key(workflow_id):
-                return config
-            return None
+        async def _fake_get_config(workflow_id_value: str, *, kind: str):  # noqa: ANN001
+            assert workflow_id_value == workflow_id
+            assert kind == "workflow_syslog_config"
+            return config
 
         def _fake_read_workflow_from_fs(wid: str):  # noqa: ANN001
             return {
@@ -62,7 +63,7 @@ async def test_restart_workflow_reports_failure_on_port_conflict(
             }
 
         # Patch the *module-level* names ``manager.py`` looks up at call time.
-        monkeypatch.setattr(syslog_manager.Storage, "read", _fake_storage_read)
+        monkeypatch.setattr(syslog_manager.WorkflowStore, "get_config", _fake_get_config)
         monkeypatch.setattr(syslog_manager, "read_workflow_from_fs", _fake_read_workflow_from_fs)
 
         manager = syslog_manager.SyslogManager()
@@ -93,14 +94,44 @@ async def test_restart_workflow_returns_stopped_when_disabled(
         "port": 9999,
         "format": "auto",
         "inputKey": "syslog_message",
+        "serviceAccount": {"subjectId": "svc_syslog"},
     }
 
-    async def _fake_storage_read(key: str):  # noqa: ANN001
+    async def _fake_get_config(workflow_id_value: str, *, kind: str):  # noqa: ANN001
+        assert workflow_id_value == workflow_id
+        assert kind == "workflow_syslog_config"
         return config
 
-    monkeypatch.setattr(syslog_manager.Storage, "read", _fake_storage_read)
+    monkeypatch.setattr(syslog_manager.WorkflowStore, "get_config", _fake_get_config)
 
     manager = syslog_manager.SyslogManager()
     status = await manager.restart_workflow(workflow_id)
     assert status == {"state": "stopped", "error": None}
     assert manager.get_listener_status(workflow_id) == {"state": "stopped", "error": None}
+
+
+@pytest.mark.asyncio
+async def test_restart_workflow_requires_service_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "wf-no-service-account"
+    config = {
+        "workflowId": workflow_id,
+        "enabled": True,
+        "protocol": "udp",
+        "host": "127.0.0.1",
+        "port": 5514,
+        "format": "auto",
+        "inputKey": "syslog_message",
+    }
+
+    async def _fake_get_config(workflow_id_value: str, *, kind: str) -> dict:
+        assert workflow_id_value == workflow_id
+        assert kind == "workflow_syslog_config"
+        return config
+
+    monkeypatch.setattr(syslog_manager.WorkflowStore, "get_config", _fake_get_config)
+    manager = syslog_manager.SyslogManager()
+    status = await manager.restart_workflow(workflow_id)
+    assert status["state"] == "failed"
+    assert status["error"] == "service_account_required"

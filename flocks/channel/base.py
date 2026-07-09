@@ -12,7 +12,10 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+
+if TYPE_CHECKING:
+    from flocks.identity.subject import Subject
 
 
 class ChatType(str, Enum):
@@ -58,6 +61,7 @@ class InboundMessage:
     thread_id: Optional[str] = None
     mentioned: bool = False
     mention_text: str = ""
+    resolved_subject: Optional["Subject"] = None
     raw: Any = None
 
 
@@ -237,6 +241,19 @@ class ChannelPlugin(ABC):
         raise NotImplementedError(
             f"Channel '{self.meta().id}' does not support webhook mode"
         )
+
+    @property
+    def requires_signature(self) -> bool:
+        """Whether webhook route must verify inbound signature before handling."""
+        return False
+
+    async def verify_inbound(
+        self,
+        body: bytes,
+        headers: dict,
+    ) -> bool:
+        """Verify inbound webhook authenticity. Default is permissive."""
+        return True
 
     async def stop(self) -> None:
         """Stop listening and release resources."""

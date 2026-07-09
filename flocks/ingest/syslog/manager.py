@@ -139,6 +139,28 @@ class SyslogManager:
         # save endpoint can report bind failures synchronously.
         self._listener_ready: dict[str, asyncio.Event] = {}
         self._dispatcher = EventDispatcher()
+        self._service_accounts: dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _resolve_service_account(data: Dict[str, Any]) -> Dict[str, Any] | None:
+        account = data.get("serviceAccount")
+        if not isinstance(account, dict):
+            return None
+        subject_id = str(account.get("subjectId") or "").strip()
+        if not subject_id:
+            return None
+        return {
+            "subject_id": subject_id,
+            "subject_type": str(account.get("subjectType") or "service_account"),
+            "role": str(account.get("role") or "member"),
+            "tenant_id": str(account.get("tenantId") or ""),
+            "department": str(account.get("department") or ""),
+            "scopes": account.get("scopes") if isinstance(account.get("scopes"), list) else [],
+            "entry": "syslog",
+            "auth_source": "service_account",
+            "permission_mode": "headless_fail_closed",
+            "verified": True,
+        }
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -242,6 +264,7 @@ class SyslogManager:
                 pass
         self._queues.pop(workflow_id, None)
         self._listener_ready.pop(workflow_id, None)
+        self._service_accounts.pop(workflow_id, None)
         if workflow_id in self._listener_status:
             self._listener_status[workflow_id] = {"state": "stopped", "error": None}
 
@@ -263,6 +286,14 @@ class SyslogManager:
         if not isinstance(data, dict) or not data.get("enabled"):
             self._listener_status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
+
+        service_account = self._resolve_service_account(data)
+        if service_account is None:
+            err = "service_account_required"
+            self._listener_status[workflow_id] = {"state": "failed", "error": err}
+            log.warning("syslog.service_account_missing", {"workflow_id": workflow_id})
+            return {"state": "failed", "error": err}
+        self._service_accounts[workflow_id] = service_account
 
         # Load and cache the workflow JSON once; avoids a disk read per message
         wf_data = read_workflow_from_fs(workflow_id)
@@ -313,7 +344,14 @@ class SyslogManager:
         for i in range(_MAX_CONCURRENT_EXECUTIONS):
             workers.append(
                 asyncio.create_task(
-                    self._worker_loop(workflow_id, workflow_plan, trigger, queue, abort),
+                    self._worker_loop(
+                        workflow_id,
+                        workflow_plan,
+                        trigger,
+                        queue,
+                        abort,
+                        service_account=service_account,
+                    ),
                     name=f"syslog-worker-{workflow_id}-{i}",
                 )
             )
@@ -462,6 +500,7 @@ class SyslogManager:
         trigger: TriggerDefinition,
         queue: asyncio.Queue,
         abort: asyncio.Event,
+        service_account: Dict[str, Any] | None = None,
     ) -> None:
         """One worker drains the queue serially.
 
@@ -484,6 +523,7 @@ class SyslogManager:
                     next(iter(trigger.mapping or {}), "syslog_message"),
                     trigger=trigger,
                     source=f"{(trigger.source or {}).get('protocol', 'udp')}://{(trigger.source or {}).get('host', '0.0.0.0')}:{(trigger.source or {}).get('port', 5140)}",
+                    service_account=service_account,
                 )
             except asyncio.CancelledError:
                 return
@@ -502,6 +542,7 @@ class SyslogManager:
         *,
         trigger: Optional[TriggerDefinition] = None,
         source: Optional[str] = None,
+        service_account: Dict[str, Any] | None = None,
     ) -> None:
         trigger = trigger or TriggerDefinition.model_validate(
             {
@@ -521,6 +562,13 @@ class SyslogManager:
         )
 
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
+            if service_account:
+                mapped_inputs = dict(mapped_inputs)
+                flocks_meta = mapped_inputs.get("_flocks")
+                if not isinstance(flocks_meta, dict):
+                    flocks_meta = {}
+                flocks_meta["subject"] = service_account
+                mapped_inputs["_flocks"] = flocks_meta
             summarized_inputs = {"_trigger": trigger.type}
             summarized_inputs.update(mapped_inputs)
 

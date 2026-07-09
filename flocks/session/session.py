@@ -98,6 +98,8 @@ class SessionInfo(BaseModel):
     # admins can see all sessions; there is no cross-user sharing).
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID", description="Owner local user id")
     owner_username: Optional[str] = Field(None, alias="ownerUsername", description="Owner local username")
+    owner_subject_id: Optional[str] = Field(None, alias="ownerSubjectID", description="Owner subject id")
+    permission_mode: str = Field("default_interactive", alias="permissionMode")
 
     # File change summary
     summary: Optional[SessionChangeStats] = Field(None, description="File change summary")

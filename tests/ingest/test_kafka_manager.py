@@ -197,6 +197,25 @@ async def test_restart_missing_broker_reports_failed(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_restart_requires_service_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = kafka_manager.KafkaManager()
+
+    async def _fake_get_config(workflow_id: str, *, kind: str) -> dict:
+        assert workflow_id == "wf-no-service-account"
+        assert kind == "workflow_kafka_config"
+        return {
+            "enabled": True,
+            "inputBroker": "localhost:9092",
+            "inputTopic": "workflow-input",
+        }
+
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
+    status = await manager.restart_workflow("wf-no-service-account")
+    assert status["state"] == "failed"
+    assert status["error"] == "service_account_required"
+
+
+@pytest.mark.asyncio
 async def test_restart_workflow_cleans_resources_after_connect_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,6 +233,9 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
             "inputTopic": "workflow-input",
             "inputGroupId": "wf-group",
             "inputKey": "kafka_message",
+            "serviceAccount": {
+                "subjectId": "svc_kafka",
+            },
         }
 
     class _Consumer:

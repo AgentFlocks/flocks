@@ -4,9 +4,6 @@ Feishu-specific configuration constants and helpers.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import time
 from collections.abc import Mapping
 from typing import Any, Optional
 
@@ -14,6 +11,13 @@ try:
     from pydantic import BaseModel
 except Exception:  # pragma: no cover - defensive import for runtime environments
     BaseModel = object  # type: ignore[misc,assignment]
+
+from flocks.channel.security.webhook_verify import (
+    build_replay_key,
+    normalize_headers,
+    verify_signature,
+    verify_timestamp,
+)
 
 # Domain endpoints
 _FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
@@ -56,10 +60,7 @@ def resolve_token_url(config: dict) -> str:
 
 def normalize_webhook_headers(headers: Mapping[str, Any]) -> dict[str, str]:
     """Return a lowercase string-keyed headers mapping."""
-    return {
-        str(key).lower(): str(value)
-        for key, value in headers.items()
-    }
+    return normalize_headers(headers)
 
 
 def verify_webhook_timestamp(
@@ -67,15 +68,11 @@ def verify_webhook_timestamp(
     max_skew_seconds: int = _DEFAULT_WEBHOOK_MAX_SKEW_SECONDS,
 ) -> bool:
     """Check whether the webhook request timestamp is recent enough."""
-    normalized = normalize_webhook_headers(headers)
-    timestamp_raw = normalized.get("x-lark-request-timestamp", "").strip()
-    if not timestamp_raw:
-        return True
-    try:
-        timestamp = int(timestamp_raw)
-    except ValueError:
-        return False
-    return abs(time.time() - timestamp) <= max_skew_seconds
+    return verify_timestamp(
+        headers,
+        timestamp_header="x-lark-request-timestamp",
+        max_skew_seconds=max_skew_seconds,
+    )
 
 
 def verify_webhook_signature(
@@ -88,17 +85,14 @@ def verify_webhook_signature(
     The signature is ``sha256(timestamp + nonce + encrypt_key + body)``.
     Returns True if valid, or if no encrypt_key is configured (skip check).
     """
-    if not encrypt_key:
-        return True
-    normalized = normalize_webhook_headers(headers)
-    timestamp = normalized.get("x-lark-request-timestamp", "")
-    nonce = normalized.get("x-lark-request-nonce", "")
-    signature = normalized.get("x-lark-signature", "")
-    if not signature:
-        return False
-    payload = f"{timestamp}{nonce}{encrypt_key}".encode() + body
-    expected = hashlib.sha256(payload).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    return verify_signature(
+        body,
+        headers,
+        timestamp_header="x-lark-request-timestamp",
+        nonce_header="x-lark-request-nonce",
+        signature_header="x-lark-signature",
+        secret=encrypt_key,
+    )
 
 
 def verify_verification_token(data: dict, token: str) -> bool:
@@ -238,18 +232,14 @@ def resolve_webhook_account_config(
 
 def build_webhook_replay_key(headers: Mapping[str, Any], data: dict) -> Optional[str]:
     """Build a stable dedup key for webhook replay protection."""
-    normalized = normalize_webhook_headers(headers)
-    event_id = ((data.get("header") or {}).get("event_id") or "").strip()
-    if event_id:
-        return f"replay:event:{event_id}"
-    request_id = (normalized.get("x-lark-request-id", "") or "").strip()
-    if request_id:
-        return f"replay:req:{request_id}"
-    nonce = (normalized.get("x-lark-request-nonce", "") or "").strip()
-    timestamp = (normalized.get("x-lark-request-timestamp", "") or "").strip()
-    if nonce and timestamp:
-        return f"replay:nonce:{timestamp}:{nonce}"
-    return None
+    return build_replay_key(
+        headers,
+        data,
+        event_id_path=("header", "event_id"),
+        request_id_header="x-lark-request-id",
+        nonce_header="x-lark-request-nonce",
+        timestamp_header="x-lark-request-timestamp",
+    )
 
 
 def normalize_group_entry(entry: Any) -> dict[str, Any]:

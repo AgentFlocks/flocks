@@ -160,6 +160,17 @@ async def channel_webhook(channel_id: str, request: Request):
     body = await request.body()
     headers = dict(request.headers)
 
+    if getattr(plugin, "requires_signature", False):
+        verifier = getattr(plugin, "verify_inbound", None)
+        if verifier is None:
+            raise HTTPException(status_code=403, detail="Webhook 签名校验未实现")
+        try:
+            verified = await verifier(body, headers)
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=403, detail="Webhook 签名校验未实现") from exc
+        if not verified:
+            raise HTTPException(status_code=403, detail="Webhook 签名校验失败")
+
     result = await plugin.handle_webhook(body, headers)
     if isinstance(result, dict) and isinstance(result.get("status_code"), int):
         status_code = int(result["status_code"])
