@@ -851,8 +851,7 @@ class TestExecuteSubtask:
             model=None,
         )
 
-        task_tool = MagicMock()
-        task_tool.execute = AsyncMock(return_value=SimpleNamespace(
+        execute_task = AsyncMock(return_value=SimpleNamespace(
             output="done",
             title="task complete",
             metadata={"sessionId": "child-session"},
@@ -862,18 +861,19 @@ class TestExecuteSubtask:
         synthetic_msg = SimpleNamespace(id="msg_synthetic")
 
         with patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=SimpleNamespace(name="helper"))), \
-             patch("flocks.tool.registry.ToolRegistry.get", return_value=task_tool), \
+             patch("flocks.tool.registry.ToolRegistry.execute", execute_task), \
              patch("flocks.session.session_loop.Message.create", AsyncMock(side_effect=[assistant_msg, synthetic_msg])), \
              patch("flocks.session.session_loop.Message.add_part", AsyncMock()), \
              patch("flocks.session.session_loop.Message.update", AsyncMock()), \
              patch("flocks.session.session_loop.Message.update_part", AsyncMock()):
             await SessionLoop._execute_subtask(ctx, last_user, task_part)
 
-        task_tool.execute.assert_awaited_once()
-        tool_ctx = task_tool.execute.await_args.args[0]
+        execute_task.assert_awaited_once()
+        assert execute_task.await_args.args[0] == "task"
+        tool_ctx = execute_task.await_args.kwargs["ctx"]
         assert tool_ctx.session_id == session_info.id
         assert tool_ctx.message_id == assistant_msg.id
-        assert task_tool.execute.await_args.kwargs == {
+        assert {k: v for k, v in execute_task.await_args.kwargs.items() if k != "ctx"} == {
             "prompt": "do the thing",
             "description": "test task",
             "subagent_type": "helper",

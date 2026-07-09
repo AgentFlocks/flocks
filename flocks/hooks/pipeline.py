@@ -16,13 +16,56 @@ import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Literal
 
 from flocks.extensions import FailPolicy, normalize_fail_policy, normalize_timeout
 from flocks.utils.log import Log
 
 
 log = Log.create(service="hooks.pipeline")
+
+ToolDecisionAction = Literal["allow", "deny", "ask", "constrain"]
+_VALID_TOOL_DECISION_ACTIONS: set[str] = {"allow", "deny", "ask", "constrain"}
+
+
+@dataclass
+class ToolDecision:
+    action: ToolDecisionAction = "allow"
+    reason: str = ""
+    updated_input: Optional[Dict[str, Any]] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": self.action,
+            "reason": self.reason,
+            "updated_input": self.updated_input,
+        }
+        return payload
+
+
+def normalize_tool_decision(output: Optional[Dict[str, Any]]) -> ToolDecision:
+    if not isinstance(output, dict):
+        return ToolDecision()
+
+    raw_decision = output.get("decision")
+    if not isinstance(raw_decision, dict):
+        raw_decision = {}
+
+    if output.get("skip") is True:
+        raw_decision = {**raw_decision, "action": "deny"}
+        raw_decision.setdefault("reason", "blocked_by_hook_skip")
+
+    raw_action = str(raw_decision.get("action") or "allow").strip().lower()
+    action: ToolDecisionAction = "allow"
+    if raw_action in _VALID_TOOL_DECISION_ACTIONS:
+        action = raw_action  # type: ignore[assignment]
+
+    reason = str(raw_decision.get("reason") or "").strip()
+    updated_input = raw_decision.get("updated_input")
+    if not isinstance(updated_input, dict):
+        updated_input = None
+
+    return ToolDecision(action=action, reason=reason, updated_input=updated_input)
 
 
 class HookStage:
@@ -361,6 +404,16 @@ class HookPipeline:
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
+            if stage == HookStage.TOOL_BEFORE:
+                decision = normalize_tool_decision(ctx.output)
+                ctx.output["decision"] = decision.as_dict()
+                if decision.action == "deny":
+                    log.debug("hook.stage_short_circuit", {
+                        "stage": stage,
+                        "hook": entry.name,
+                        "action": decision.action,
+                    })
+                    break
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,

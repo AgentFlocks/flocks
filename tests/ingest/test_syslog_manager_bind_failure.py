@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -114,7 +115,35 @@ async def test_restart_workflow_returns_stopped_when_disabled(
 async def test_restart_workflow_requires_service_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workflow_id = "wf-no-service-account"
+    workflow_id = "wf-invalid-service-account"
+    config = {
+        "workflowId": workflow_id,
+        "enabled": True,
+        "protocol": "udp",
+        "host": "127.0.0.1",
+        "port": 5514,
+        "format": "auto",
+        "inputKey": "syslog_message",
+        "serviceAccount": {},
+    }
+
+    async def _fake_get_config(workflow_id_value: str, *, kind: str) -> dict:
+        assert workflow_id_value == workflow_id
+        assert kind == "workflow_syslog_config"
+        return config
+
+    monkeypatch.setattr(syslog_manager.WorkflowStore, "get_config", _fake_get_config)
+    manager = syslog_manager.SyslogManager()
+    status = await manager.restart_workflow(workflow_id)
+    assert status["state"] == "failed"
+    assert status["error"] == "service_account_required"
+
+
+@pytest.mark.asyncio
+async def test_restart_workflow_without_service_account_keeps_legacy_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "wf-legacy-no-service-account"
     config = {
         "workflowId": workflow_id,
         "enabled": True,
@@ -131,7 +160,18 @@ async def test_restart_workflow_requires_service_account(
         return config
 
     monkeypatch.setattr(syslog_manager.WorkflowStore, "get_config", _fake_get_config)
+    monkeypatch.setattr(
+        syslog_manager,
+        "read_workflow_from_fs",
+        lambda _workflow_id: {
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+            }
+        },
+    )
     manager = syslog_manager.SyslogManager()
+    monkeypatch.setattr(manager, "_listener_loop", AsyncMock(return_value=None))
     status = await manager.restart_workflow(workflow_id)
-    assert status["state"] == "failed"
-    assert status["error"] == "service_account_required"
+    assert status["state"] in {"binding", "listening", "stopped"}

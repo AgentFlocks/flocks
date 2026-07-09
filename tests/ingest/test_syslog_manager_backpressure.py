@@ -241,6 +241,9 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["run_id"] == "exec-syslog"
     assert captured_run_kwargs["execution_profile"] == "high_frequency"
     assert callable(captured_run_kwargs["on_step_complete"])
+    workflow_ctx = captured_run_kwargs["tool_context"]
+    assert workflow_ctx.extra["entry"] == "headless"
+    assert workflow_ctx.extra["subject"] == {}
     assert recorded_steps[0][0] == "exec-syslog"
     assert recorded_steps[0][1] == 1
     assert recorded_steps[0][2]["node_id"] == "receive_alert"
@@ -259,3 +262,54 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         source="udp://0.0.0.0:5514",
     )
     assert captured_run_kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_passes_service_account_subject_into_tool_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = syslog_manager.SyslogManager()
+    captured_run_kwargs: dict = {}
+
+    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
+        return {"id": "exec-syslog-sa", "workflowId": workflow_id, "inputParams": input_params}
+
+    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+        return None
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        captured_run_kwargs.update(kwargs)
+        return type(
+            "RunResult",
+            (),
+            {
+                "status": "SUCCEEDED",
+                "error": None,
+                "outputs": {"ok": True},
+                "history": [],
+                "last_node_id": "done",
+                "steps": 1,
+            },
+        )()
+
+    monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
+
+    service_account = {
+        "subject_id": "svc.syslog",
+        "subject_type": "service_account",
+        "entry": "syslog",
+        "permission_mode": "headless_fail_closed",
+    }
+    await manager._trigger_workflow(
+        "wf-syslog-sa",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"message": "demo", "hostname": "router-a"},
+        "syslog_message",
+        service_account=service_account,
+    )
+
+    workflow_ctx = captured_run_kwargs["tool_context"]
+    assert workflow_ctx.extra["entry"] == "headless"
+    assert workflow_ctx.extra["subject"]["subject_id"] == "svc.syslog"

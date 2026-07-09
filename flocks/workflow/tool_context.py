@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from fastapi import HTTPException
 
+from flocks.identity.subject import get_current_subject
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.tool import ToolContext
@@ -85,6 +86,21 @@ async def build_workflow_tool_context(
         )
         effective_message_id = message.id
 
+    subject_payload: dict[str, Any] = {}
+    current_subject = get_current_subject()
+    if current_subject is not None:
+        try:
+            subject_payload = current_subject.model_dump()
+        except Exception:
+            subject_payload = {}
+    if not subject_payload and parent_session and getattr(parent_session, "owner_subject_id", None):
+        subject_payload = {
+            "subject_id": str(parent_session.owner_subject_id),
+            "subject_type": "human",
+            "entry": "unknown",
+            "permission_mode": str(getattr(parent_session, "permission_mode", "default_interactive") or "default_interactive"),
+        }
+
     return ToolContext(
         session_id=effective_session_id,
         message_id=effective_message_id,
@@ -93,5 +109,7 @@ async def build_workflow_tool_context(
         extra={
             "workspace_dir": workspace_dir,
             "main_session_key": effective_session_id,
+            "entry": str(subject_payload.get("entry") or "unknown"),
+            "subject": subject_payload,
         },
     )

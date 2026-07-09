@@ -6,11 +6,14 @@ Compatible with Flocks's TypeScript Tool system.
 """
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
 import sys
 import threading
+import time
+import uuid
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -23,6 +26,104 @@ from pydantic import BaseModel, Field
 from flocks.utils.log import Log
 
 log = Log.create(service="tool-registry")
+
+
+def _resolve_subject_payload(ctx: "ToolContext") -> Dict[str, Any]:
+    from flocks.identity.subject import get_current_subject
+
+    subject_payload: Dict[str, Any] = {}
+    current_subject = get_current_subject()
+    if current_subject is not None:
+        try:
+            subject_payload = current_subject.model_dump()
+        except Exception:
+            subject_payload = {}
+
+    if not subject_payload:
+        extra_subject = (ctx.extra or {}).get("subject")
+        if isinstance(extra_subject, dict):
+            subject_payload = dict(extra_subject)
+    return subject_payload
+
+
+def _build_tool_hook_payload(
+    *,
+    phase: str,
+    ctx: "ToolContext",
+    tool: "Tool",
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    trace_id: str,
+    decision: Optional[Dict[str, Any]] = None,
+    result: Optional["ToolResult"] = None,
+    duration_ms: Optional[int] = None,
+    permission_checked: Optional[bool] = None,
+    include_content: bool = True,
+) -> Dict[str, Any]:
+    subject_payload = _resolve_subject_payload(ctx)
+    entry = (
+        str(subject_payload.get("entry") or "").strip()
+        or str((ctx.extra or {}).get("entry") or "").strip()
+        or "unknown"
+    )
+    payload: Dict[str, Any] = {
+        "phase": phase,
+        "trace_id": trace_id,
+        "entry": entry,
+        "sessionID": ctx.session_id,
+        "messageID": ctx.message_id,
+        "agent": ctx.agent,
+        "subject": subject_payload,
+        "tool": {
+            "name": tool_name,
+            "callID": ctx.call_id,
+            "provider": tool.info.provider,
+            "source": tool.info.source,
+            "category": tool.info.category.value,
+            "enabled": tool.info.enabled,
+        },
+        "resource": {
+            "type": "tool",
+            "id": tool_name,
+        },
+    }
+    if decision is not None:
+        payload["decision"] = dict(decision)
+    if permission_checked is not None:
+        payload["permission_checked"] = bool(permission_checked)
+    if include_content:
+        payload["tool"]["input"] = dict(tool_input)
+    else:
+        payload["tool"]["input_hash"] = _payload_sha256(tool_input)
+    if result is not None:
+        payload["result_status"] = "success" if result.success else "failed"
+        if include_content:
+            payload["result"] = result.model_dump()
+        else:
+            payload["output_hash"] = _payload_sha256(result.output)
+            payload["error_hash"] = _payload_sha256(result.error)
+    if duration_ms is not None:
+        payload["duration_ms"] = int(duration_ms)
+    return payload
+
+
+async def _emit_tool_audit(event_type: str, payload: Dict[str, Any]) -> None:
+    try:
+        from flocks.audit import emit_audit_event
+
+        await emit_audit_event(event_type=event_type, payload=payload)
+    except Exception as exc:
+        log.debug("tool.audit.emit_failed", {"event_type": event_type, "error": str(exc)})
+
+
+def _payload_sha256(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    except Exception:
+        return None
+    return hashlib.sha256(raw).hexdigest()
 
 
 class ToolCategory(str, Enum):
@@ -790,6 +891,11 @@ class ToolRegistry:
             "name": tool_name,
             "params": list(kwargs.keys()),
         })
+        trace_id = (
+            str(ctx.call_id or "").strip()
+            or str((ctx.extra or {}).get("trace_id") or "").strip()
+            or str(uuid.uuid4())
+        )
 
         device_id = None
         per_device_enabled = None
@@ -847,6 +953,50 @@ class ToolRegistry:
                     "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
                 })
 
+        from flocks.hooks.pipeline import HookPipeline, normalize_tool_decision
+
+        current_tool_input = dict(kwargs)
+        before_payload = _build_tool_hook_payload(
+            phase="before_execute",
+            ctx=ctx,
+            tool=tool,
+            tool_name=tool_name,
+            tool_input=current_tool_input,
+            trace_id=trace_id,
+            include_content=True,
+        )
+        before_ctx = await HookPipeline.run_tool_before(before_payload)
+        decision = normalize_tool_decision(before_ctx.output if before_ctx else None).as_dict()
+
+        if decision.get("action") == "constrain" and isinstance(decision.get("updated_input"), dict):
+            current_tool_input = dict(decision["updated_input"])
+            before_payload["tool"]["input"] = dict(current_tool_input)
+
+        before_audit_payload = _build_tool_hook_payload(
+            phase="before_execute",
+            ctx=ctx,
+            tool=tool,
+            tool_name=tool_name,
+            tool_input=current_tool_input,
+            trace_id=trace_id,
+            decision=decision,
+            permission_checked=True,
+            include_content=False,
+        )
+        await _emit_tool_audit("tool.before_execute", before_audit_payload)
+
+        if decision.get("action") in {"deny", "ask"}:
+            return ToolResult(
+                success=False,
+                error=decision.get("reason") or "Tool execution blocked by hook decision",
+                metadata={
+                    "decision": decision,
+                    "trace_id": trace_id,
+                    "blocked_by_policy": True,
+                },
+            )
+
+        tool_started_at = time.perf_counter()
         if device_id:
             from flocks.tool.credential_context import activate_device_credentials
             async with activate_device_credentials(device_id) as activated:
@@ -855,14 +1005,60 @@ class ToolRegistry:
                         success=False,
                         error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
-                result = await tool.execute(ctx, **kwargs)
+                result = await tool.execute(ctx, **current_tool_input)
         else:
-            result = await tool.execute(ctx, **kwargs)
+            result = await tool.execute(ctx, **current_tool_input)
+
+        after_payload = _build_tool_hook_payload(
+            phase="after_execute",
+            ctx=ctx,
+            tool=tool,
+            tool_name=tool_name,
+            tool_input=current_tool_input,
+            trace_id=trace_id,
+            decision=decision,
+            result=result,
+            duration_ms=int((time.perf_counter() - tool_started_at) * 1000),
+            permission_checked=True,
+            include_content=True,
+        )
+        after_ctx = await HookPipeline.run_tool_after(after_payload)
+        if after_ctx and isinstance(after_ctx.output, dict):
+            override = after_ctx.output.get("result")
+            if isinstance(override, dict):
+                result = ToolResult(**override)
+                after_payload = _build_tool_hook_payload(
+                    phase="after_execute",
+                    ctx=ctx,
+                    tool=tool,
+                    tool_name=tool_name,
+                    tool_input=current_tool_input,
+                    trace_id=trace_id,
+                    decision=decision,
+                    result=result,
+                    duration_ms=after_payload.get("duration_ms"),
+                    permission_checked=True,
+                    include_content=True,
+                )
+        after_audit_payload = _build_tool_hook_payload(
+            phase="after_execute",
+            ctx=ctx,
+            tool=tool,
+            tool_name=tool_name,
+            tool_input=current_tool_input,
+            trace_id=trace_id,
+            decision=decision,
+            result=result,
+            duration_ms=after_payload.get("duration_ms"),
+            permission_checked=True,
+            include_content=False,
+        )
+        await _emit_tool_audit("tool.after_execute", after_audit_payload)
 
         if result.success:
             cls._reset_failure_state(tool_name)
         else:
-            disabled = cls._record_failure(tool, kwargs, result.error)
+            disabled = cls._record_failure(tool, current_tool_input, result.error)
             if disabled:
                 result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
                 suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"

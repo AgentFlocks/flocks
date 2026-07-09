@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Any, Dict, List
 
+from flocks.tool import ToolContext
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
@@ -163,6 +164,11 @@ class SyslogManager:
         }
 
     @staticmethod
+    def _should_enforce_service_account(data: Dict[str, Any]) -> bool:
+        # Keep old configs working: only enforce when serviceAccount is explicitly configured.
+        return "serviceAccount" in data
+
+    @staticmethod
     def _config_key(workflow_id: str) -> str:
         return f"{WORKFLOW_SYSLOG_CONFIG_PREFIX}{workflow_id}"
 
@@ -289,11 +295,14 @@ class SyslogManager:
 
         service_account = self._resolve_service_account(data)
         if service_account is None:
-            err = "service_account_required"
-            self._listener_status[workflow_id] = {"state": "failed", "error": err}
-            log.warning("syslog.service_account_missing", {"workflow_id": workflow_id})
-            return {"state": "failed", "error": err}
-        self._service_accounts[workflow_id] = service_account
+            if self._should_enforce_service_account(data):
+                err = "service_account_required"
+                self._listener_status[workflow_id] = {"state": "failed", "error": err}
+                log.warning("syslog.service_account_missing", {"workflow_id": workflow_id})
+                return {"state": "failed", "error": err}
+            log.warning("syslog.service_account_legacy_mode", {"workflow_id": workflow_id})
+        else:
+            self._service_accounts[workflow_id] = service_account
 
         # Load and cache the workflow JSON once; avoids a disk read per message
         wf_data = read_workflow_from_fs(workflow_id)
@@ -587,6 +596,22 @@ class SyslogManager:
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             try:
+                flocks_meta = mapped_inputs.get("_flocks", {})
+                workflow_subject = None
+                if isinstance(flocks_meta, dict):
+                    maybe_subject = flocks_meta.get("subject")
+                    if isinstance(maybe_subject, dict):
+                        workflow_subject = dict(maybe_subject)
+                workflow_ctx = ToolContext(
+                    session_id=f"workflow:{workflow_id}",
+                    message_id=f"workflow:{exec_id}",
+                    agent="workflow",
+                    extra={
+                        "entry": "headless",
+                        "trace_id": str(exec_id),
+                        "subject": workflow_subject or {},
+                    },
+                )
                 result = await asyncio.to_thread(
                     run_workflow,
                     workflow=workflow_plan,
@@ -595,6 +620,7 @@ class SyslogManager:
                     trace=False,
                     execution_profile="high_frequency",
                     on_step_complete=step_recorder.on_step_complete,
+                    tool_context=workflow_ctx,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time

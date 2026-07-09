@@ -1605,12 +1605,6 @@ class SessionLoop:
         # Add part to message
         await Message.add_part(ctx.session.id, assistant_msg.id, tool_part)
         
-        # Get Task tool
-        task_tool = ToolRegistry.get("task")
-        if not task_tool:
-            log.error("loop.subtask.task_tool_not_found", {"session_id": ctx.session.id})
-            return
-        
         # Execute Task tool
         task_args = {
             "prompt": prompt,
@@ -1633,7 +1627,7 @@ class SessionLoop:
         result = None
         
         try:
-            result = await task_tool.execute(tool_ctx, **task_args)
+            result = await ToolRegistry.execute("task", ctx=tool_ctx, **task_args)
         except Exception as e:
             execution_error = e
             log.error("loop.subtask.execution_failed", {

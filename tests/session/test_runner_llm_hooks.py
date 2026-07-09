@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import flocks.session.runner as runner_mod
-from flocks.hooks.pipeline import HookBase, HookPipeline
+from flocks.hooks.pipeline import HookBase, HookPipeline, normalize_tool_decision
 from flocks.provider.provider import ChatMessage
 from flocks.session.runner import SessionRunner
 from flocks.session.session import SessionInfo
@@ -58,6 +58,9 @@ class _FakeProcessor:
 
     def get_finish_reason(self):
         return self.finish_reason
+
+    async def drain_parallel_tool_calls(self) -> None:
+        return None
 
 
 class _FakeToolAccumulator:
@@ -138,6 +141,55 @@ async def test_hook_pipeline_timeout_can_propagate():
         HookPipeline.unregister("test-critical-slow-hook")
 
 
+def test_normalize_tool_decision_compat_skip():
+    decision = normalize_tool_decision({"skip": True})
+    assert decision.action == "deny"
+    assert decision.reason == "blocked_by_hook_skip"
+
+
+@pytest.mark.asyncio
+async def test_hook_pipeline_tool_before_deny_short_circuits():
+    seen: list[str] = []
+
+    class _DenyHook(HookBase):
+        async def tool_before(self, ctx) -> None:
+            seen.append("deny")
+            ctx.output["decision"] = {"action": "deny", "reason": "blocked"}
+
+    class _LaterHook(HookBase):
+        async def tool_before(self, ctx) -> None:
+            seen.append("later")
+            ctx.output["decision"] = {"action": "allow"}
+
+    HookPipeline.register("test-tool-before-deny", _DenyHook(), order=1)
+    HookPipeline.register("test-tool-before-later", _LaterHook(), order=2)
+    try:
+        hook_ctx = await HookPipeline.run_tool_before({"tool": {"name": "read"}})
+    finally:
+        HookPipeline.unregister("test-tool-before-deny")
+        HookPipeline.unregister("test-tool-before-later")
+
+    assert seen == ["deny"]
+    assert hook_ctx.output["decision"]["action"] == "deny"
+    assert hook_ctx.output["decision"]["reason"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_hook_pipeline_tool_before_skip_is_denied_decision():
+    class _SkipHook(HookBase):
+        async def tool_before(self, ctx) -> None:
+            ctx.output["skip"] = True
+
+    HookPipeline.register("test-tool-before-skip", _SkipHook())
+    try:
+        hook_ctx = await HookPipeline.run_tool_before({"tool": {"name": "write"}})
+    finally:
+        HookPipeline.unregister("test-tool-before-skip")
+
+    assert hook_ctx.output["decision"]["action"] == "deny"
+    assert hook_ctx.output["decision"]["reason"] == "blocked_by_hook_skip"
+
+
 @pytest.mark.asyncio
 async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_success")
@@ -172,6 +224,11 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
         runner_mod.HookPipeline,
         "run_llm_after",
         AsyncMock(side_effect=_after),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         runner_mod.SessionRunner,
@@ -267,6 +324,11 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         runner_mod.HookPipeline,
         "run_llm_after",
         AsyncMock(side_effect=_after),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         runner_mod.SessionRunner,

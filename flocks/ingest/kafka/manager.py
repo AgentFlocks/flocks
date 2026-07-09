@@ -27,6 +27,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
+from flocks.tool import ToolContext
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     DEFAULT_LARGE_LIST_KEYS,
@@ -346,6 +347,12 @@ class KafkaManager:
             "verified": True,
         }
 
+    @staticmethod
+    def _should_enforce_service_account(data: Dict[str, Any]) -> bool:
+        # Backward compatibility: legacy configs without this field continue to run.
+        # New configs should provide serviceAccount; when the field is present we enforce it.
+        return "serviceAccount" in data
+
     def get_consumer_status(self, workflow_id: str) -> Dict[str, Any]:
         """Return a snapshot of the consumer runtime state for ``workflow_id``.
 
@@ -410,11 +417,14 @@ class KafkaManager:
 
         service_account = self._resolve_service_account(data)
         if service_account is None:
-            err = "service_account_required"
-            self._status[workflow_id] = {"state": "failed", "error": err}
-            log.warning("kafka.service_account_missing", {"workflow_id": workflow_id})
-            return {"state": "failed", "error": err}
-        self._service_accounts[workflow_id] = service_account
+            if self._should_enforce_service_account(data):
+                err = "service_account_required"
+                self._status[workflow_id] = {"state": "failed", "error": err}
+                log.warning("kafka.service_account_missing", {"workflow_id": workflow_id})
+                return {"state": "failed", "error": err}
+            log.warning("kafka.service_account_legacy_mode", {"workflow_id": workflow_id})
+        else:
+            self._service_accounts[workflow_id] = service_account
 
         # Load and cache the workflow JSON once; avoids a disk read per message.
         wf_data = read_workflow_from_fs(workflow_id)
@@ -741,6 +751,22 @@ class KafkaManager:
                 ),
             )
             try:
+                flocks_meta = mapped_inputs.get("_flocks", {})
+                workflow_subject = None
+                if isinstance(flocks_meta, dict):
+                    maybe_subject = flocks_meta.get("subject")
+                    if isinstance(maybe_subject, dict):
+                        workflow_subject = dict(maybe_subject)
+                workflow_ctx = ToolContext(
+                    session_id=f"workflow:{workflow_id}",
+                    message_id=f"workflow:{exec_id}",
+                    agent="workflow",
+                    extra={
+                        "entry": "headless",
+                        "trace_id": str(exec_id),
+                        "subject": workflow_subject or {},
+                    },
+                )
                 result = await asyncio.to_thread(
                     run_workflow,
                     workflow=workflow_plan,
@@ -749,6 +775,7 @@ class KafkaManager:
                     trace=False,
                     execution_profile="high_frequency",
                     on_step_complete=step_recorder.on_step_complete,
+                    tool_context=workflow_ctx,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time
