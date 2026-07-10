@@ -40,6 +40,7 @@ export interface ToolListPageParams {
 export interface ToolListFacets {
   category: Record<string, number>;
   source: Record<string, number>;
+  source_groups: Record<string, number>;
   source_name: Record<string, number>;
   enabled: Record<string, number>;
 }
@@ -103,6 +104,26 @@ export const toolAPI = {
   delete: (name: string) =>
     client.delete<{ status: string; message: string }>(`/api/tools/${name}`),
 };
+
+export async function listAllToolPages(params: ToolListPageParams): Promise<Tool[]> {
+  const pageSize = 200;
+  const items: Tool[] = [];
+  let offset = 0;
+
+  while (true) {
+    const response = await toolAPI.listPage({
+      ...params,
+      offset,
+      limit: pageSize,
+    });
+    const pageItems = Array.isArray(response.data.items) ? response.data.items : [];
+    items.push(...pageItems);
+    offset += pageItems.length;
+    if (pageItems.length === 0 || offset >= response.data.total) break;
+  }
+
+  return items;
+}
 
 export const canDirectlyTestTool = (tool: Pick<Tool, 'source'>) =>
   tool.source !== 'builtin';

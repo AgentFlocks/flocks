@@ -25,7 +25,9 @@ function requestApiServicesList() {
 type APIServiceListResponse = Awaited<ReturnType<typeof requestApiServicesList>>;
 
 let apiServicesListInFlight: Promise<APIServiceListResponse> | null = null;
+let apiServicesListInFlightGeneration: number | null = null;
 let apiServicesListCache: { response: APIServiceListResponse; updatedAt: number } | null = null;
+let apiServicesListGeneration = 0;
 
 function cloneApiServicesResponse(response: APIServiceListResponse): APIServiceListResponse {
   const services = Array.isArray(response.data) ? response.data : [];
@@ -36,6 +38,7 @@ function cloneApiServicesResponse(response: APIServiceListResponse): APIServiceL
 }
 
 function invalidateApiServicesListCache(): void {
+  apiServicesListGeneration += 1;
   apiServicesListCache = null;
 }
 
@@ -44,23 +47,38 @@ function listApiServicesCached(options: { force?: boolean } = {}) {
   if (useCache && apiServicesListCache && Date.now() - apiServicesListCache.updatedAt < API_SERVICES_LIST_CACHE_TTL_MS) {
     return Promise.resolve(cloneApiServicesResponse(apiServicesListCache.response));
   }
-  if (useCache && apiServicesListInFlight) {
+  if (
+    useCache
+    && apiServicesListInFlight
+    && apiServicesListInFlightGeneration === apiServicesListGeneration
+  ) {
     return apiServicesListInFlight.then(cloneApiServicesResponse);
   }
 
-  apiServicesListInFlight = requestApiServicesList()
+  if (options.force) {
+    invalidateApiServicesListCache();
+  }
+  const requestGeneration = apiServicesListGeneration;
+  const request = requestApiServicesList()
     .then((response) => {
-      apiServicesListCache = {
-        response: cloneApiServicesResponse(response),
-        updatedAt: Date.now(),
-      };
+      if (requestGeneration === apiServicesListGeneration) {
+        apiServicesListCache = {
+          response: cloneApiServicesResponse(response),
+          updatedAt: Date.now(),
+        };
+      }
       return response;
     })
     .finally(() => {
-      apiServicesListInFlight = null;
+      if (apiServicesListInFlight === request) {
+        apiServicesListInFlight = null;
+        apiServicesListInFlightGeneration = null;
+      }
     });
+  apiServicesListInFlight = request;
+  apiServicesListInFlightGeneration = requestGeneration;
 
-  return apiServicesListInFlight.then(cloneApiServicesResponse);
+  return request.then(cloneApiServicesResponse);
 }
 
 // ==================== Provider API (Legacy + Enhanced) ====================

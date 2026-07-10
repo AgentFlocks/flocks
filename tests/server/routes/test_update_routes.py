@@ -225,6 +225,47 @@ async def test_check_version_keeps_inflight_task_after_cancelled_request(monkeyp
             await asyncio.wait_for(second, timeout=1)
 
 
+async def test_forced_check_cannot_be_overwritten_by_older_inflight_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    older_started = asyncio.Event()
+    release_older = asyncio.Event()
+    calls = 0
+
+    async def _fake_check_update(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            older_started.set()
+            await release_older.wait()
+            return VersionInfo(current_version="v1")
+        return VersionInfo(current_version="v2")
+
+    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
+
+    older = asyncio.create_task(
+        update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
+    )
+    await older_started.wait()
+
+    forced = await update_routes.check_version(
+        _request(), locale="zh-CN", edition="flocks", force=True
+    )
+    assert forced.current_version == "v2"
+
+    release_older.set()
+    assert (await older).current_version == "v1"
+
+    cached = await update_routes.check_version(
+        _request(), locale="zh-CN", edition="flocks"
+    )
+    assert cached.current_version == "v2"
+    assert calls == 2
+
+
 @pytest.mark.skipif(
     os.environ.get(_MANUAL_REAL_UPGRADE_ENV) != "1",
     reason=f"manual real upgrade test; set {_MANUAL_REAL_UPGRADE_ENV}=1 to enable",

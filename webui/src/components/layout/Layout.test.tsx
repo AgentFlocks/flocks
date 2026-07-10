@@ -627,7 +627,11 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
     expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
-    expect(updateModalMock).toHaveBeenCalled();
+    expect(updateModalMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        forceInitialCheck: true,
+      }),
+    );
     expect(screen.queryByRole('button', { name: 'logout' })).not.toBeInTheDocument();
   });
 

@@ -4,7 +4,7 @@ import {
   type SharedResourceFetchOptions,
 } from '@/hooks/useSharedResource';
 
-const SESSION_CHAT_COMMANDS_STALE_TIME_MS = 10 * 60 * 1000;
+const SESSION_CHAT_COMMANDS_STALE_TIME_MS = 5_000;
 
 const newSessionCommand = {
   name: 'new',

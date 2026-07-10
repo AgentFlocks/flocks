@@ -5,7 +5,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { mcpAPI } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
-import type { Tool } from '@/api/tool';
+import { listAllToolPages, type Tool } from '@/api/tool';
 import type { APIServiceSummary, MCPCatalogCategory, MCPCatalogEntry } from '@/types';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -65,6 +65,7 @@ export default function APITabContent({
   const [installing, setInstalling] = useState<string | null>(null);
   const [credModalEntry, setCredModalEntry] = useState<MCPCatalogEntry | null>(null);
   const [credValues, setCredValues] = useState<Record<string, string>>({});
+  const [serviceToolCache, setServiceToolCache] = useState<Record<string, Tool[]>>({});
 
   const fetchServices = useCallback(async () => {
     try {
@@ -87,9 +88,35 @@ export default function APITabContent({
     () => (selectedServiceId ? services.find((service) => service.id === selectedServiceId) ?? null : null),
     [selectedServiceId, services],
   );
-  const selectedModuleTools = selectedServiceId ? (toolsByModule[selectedServiceId] || []) : [];
+  const selectedModuleTools = selectedServiceId
+    ? (serviceToolCache[selectedServiceId] ?? toolsByModule[selectedServiceId] ?? [])
+    : [];
   const isConfigured = useCallback((entryId: string) => configuredIds.has(entryId), [configuredIds]);
   const PRIORITY_IDS = useMemo(() => new Set(['virustotal_mcp', 'urlhaus']), []);
+
+  useEffect(() => {
+    setServiceToolCache({});
+  }, [tools]);
+
+  useEffect(() => {
+    if (!selectedServiceId || serviceToolCache[selectedServiceId]) return;
+    let cancelled = false;
+    void listAllToolPages({
+      source: 'api',
+      sourceName: selectedServiceId,
+      sortBy: 'name',
+      sortDir: 'asc',
+    }).then((serviceTools) => {
+      if (!cancelled) {
+        setServiceToolCache((current) => ({ ...current, [selectedServiceId]: serviceTools }));
+      }
+    }).catch(() => {
+      // Keep the current page slice visible; reopening retries the complete service list.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedServiceId, serviceToolCache]);
 
   const inactiveCatalogEntries = useMemo(() => {
     const activeModuleIds = new Set(services.map((service) => service.id));
@@ -311,7 +338,6 @@ export default function APITabContent({
       ) : (
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
           {services.map((service) => {
-            const serviceTools = toolsByModule[service.id] || [];
             const isSelected = selectedServiceId === service.id;
             const rowDescription = getServiceDescription(service) || `${service.name} API service`;
 
@@ -361,7 +387,7 @@ export default function APITabContent({
 
                 {/* Stats column */}
                 <div className="flex items-center justify-end gap-3 text-xs text-gray-400">
-                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{serviceTools.length}</span>
+                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{service.tool_count}</span>
                   {service.latency_ms != null && <span>{service.latency_ms}ms</span>}
                 </div>
 

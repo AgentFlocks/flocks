@@ -9,6 +9,7 @@ import {
 
 const WORKFLOW_LIST_STALE_TIME_MS = 5000;
 const WORKFLOW_LIST_MIN_FETCH_INTERVAL_MS = 1000;
+const MAX_WORKFLOW_LIST_RESOURCES = 80;
 
 const workflowListResources = new Map<string, SharedResource<Workflow[]>>();
 
@@ -22,7 +23,11 @@ function makeWorkflowListKey(category?: string, status?: string): string {
 function getWorkflowListResource(category?: string, status?: string): SharedResource<Workflow[]> {
   const key = makeWorkflowListKey(category, status);
   const existing = workflowListResources.get(key);
-  if (existing) return existing;
+  if (existing) {
+    workflowListResources.delete(key);
+    workflowListResources.set(key, existing);
+    return existing;
+  }
 
   const resource = createSharedResource<Workflow[]>({
     initialData: [],
@@ -37,12 +42,20 @@ function getWorkflowListResource(category?: string, status?: string): SharedReso
   });
 
   workflowListResources.set(key, resource);
+  if (workflowListResources.size > MAX_WORKFLOW_LIST_RESOURCES) {
+    const oldestKey = workflowListResources.keys().next().value;
+    if (oldestKey) workflowListResources.delete(oldestKey);
+  }
   return resource;
 }
 
 export function __resetWorkflowResourcesForTesting(): void {
   workflowListResources.forEach((resource) => resource.resetForTesting());
   workflowListResources.clear();
+}
+
+export function __getWorkflowResourceCacheSizeForTesting(): number {
+  return workflowListResources.size;
 }
 
 export function useWorkflows(category?: string, status?: string) {

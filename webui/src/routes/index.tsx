@@ -3,11 +3,15 @@ import type { ComponentType, ReactNode } from 'react';
 import { Routes as RouterRoutes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
+import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import AuthLayout from '@/components/layout/AuthLayout';
 import Home from '@/pages/Home';
 import { useAuth } from '@/contexts/AuthContext';
 import { preloadI18nNamespaces } from '@/i18nResources';
+import { installVitePreloadErrorRecovery, recoverLazyLoad } from '@/utils/chunkLoadRecovery';
+
+installVitePreloadErrorRecovery();
 
 // All non-Home pages are code-split. Home stays eager because it's the very
 // first frame after auth and we don't want a Suspense flash on initial paint.
@@ -20,10 +24,12 @@ function lazyPage<T extends LazyPageModule>(
   loader: () => Promise<T>,
   namespaces: readonly string[] = [],
 ) {
-  return lazy(() => Promise.all([
-    loader(),
-    preloadI18nNamespaces(namespaces),
-  ]).then(([module]) => module));
+  return lazy(() => recoverLazyLoad(
+    Promise.all([
+      loader(),
+      preloadI18nNamespaces(namespaces),
+    ]).then(([module]) => module),
+  ));
 }
 
 const SessionPage = lazyPage(() => import('@/pages/Session'), ['session']);
@@ -53,9 +59,11 @@ const ROUTE_FALLBACK_DELAY_MS = 180;
 
 function LazyRoute({ children }: { children: ReactNode }) {
   return (
-    <Suspense fallback={<RoutePageSkeleton delayMs={ROUTE_FALLBACK_DELAY_MS} />}>
-      {children}
-    </Suspense>
+    <LazyLoadErrorBoundary>
+      <Suspense fallback={<RoutePageSkeleton delayMs={ROUTE_FALLBACK_DELAY_MS} />}>
+        {children}
+      </Suspense>
+    </LazyLoadErrorBoundary>
   );
 }
 
@@ -111,31 +119,37 @@ export function Routes() {
 
   if (!bootstrapped) {
     return (
-      <Suspense fallback={<RoutePageSkeleton />}>
-        <RouterRoutes>
-          <Route path="/setup-admin" element={<SetupAdminPage />} />
-          <Route path="*" element={<Navigate to="/setup-admin" replace />} />
-        </RouterRoutes>
-      </Suspense>
+      <LazyLoadErrorBoundary>
+        <Suspense fallback={<RoutePageSkeleton />}>
+          <RouterRoutes>
+            <Route path="/setup-admin" element={<SetupAdminPage />} />
+            <Route path="*" element={<Navigate to="/setup-admin" replace />} />
+          </RouterRoutes>
+        </Suspense>
+      </LazyLoadErrorBoundary>
     );
   }
 
   if (!user) {
     return (
-      <Suspense fallback={<RoutePageSkeleton />}>
-        <RouterRoutes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        </RouterRoutes>
-      </Suspense>
+      <LazyLoadErrorBoundary>
+        <Suspense fallback={<RoutePageSkeleton />}>
+          <RouterRoutes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="*" element={<Navigate to="/login" replace />} />
+          </RouterRoutes>
+        </Suspense>
+      </LazyLoadErrorBoundary>
     );
   }
 
   if (user.must_reset_password) {
     return (
-      <Suspense fallback={<RoutePageSkeleton />}>
-        <ForceChangePasswordPage />
-      </Suspense>
+      <LazyLoadErrorBoundary>
+        <Suspense fallback={<RoutePageSkeleton />}>
+          <ForceChangePasswordPage />
+        </Suspense>
+      </LazyLoadErrorBoundary>
     );
   }
 

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Archive,
@@ -40,6 +40,7 @@ import { useTranslation } from 'react-i18next';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useProductName } from '@/contexts/ProductNameContext';
+import { useAuth } from '@/contexts/AuthContext';
 
 type ViewMode = 'table' | 'tree';
 
@@ -259,6 +260,7 @@ const EMPTY_HUB_FACETS: HubCatalogFacets = {
 
 export default function HubPage() {
   const { i18n } = useTranslation();
+  const { user } = useAuth();
   const { productName } = useProductName();
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
@@ -269,7 +271,11 @@ export default function HubPage() {
   const urlPluginId = searchParams.get('plugin') || searchParams.get('id') || '';
   const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
+  const [treeItems, setTreeItems] = useState<HubCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [treeError, setTreeError] = useState<string | null>(null);
   const [hasLoadedCatalog, setHasLoadedCatalog] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState(searchParams.get('q') || urlPluginId);
@@ -287,11 +293,44 @@ export default function HubPage() {
   const [taxonomy, setTaxonomy] = useState<HubTaxonomyResponse | null>(null);
   const [totalItems, setTotalItems] = useState(0);
   const [facetCounts, setFacetCounts] = useState<HubCatalogFacets>(EMPTY_HUB_FACETS);
+  const catalogRequestIdRef = useRef(0);
+  const treeRequestIdRef = useRef(0);
   const debouncedQuery = useDebouncedValue(query, 250);
+  const catalogRequestKey = JSON.stringify([
+    query,
+    debouncedQuery,
+    typeFilter,
+    useCaseFilter,
+    tagFilter,
+    stateFilter,
+    page,
+    pageSize,
+  ]);
+  const treeRequestKey = JSON.stringify([
+    query,
+    debouncedQuery,
+    typeFilter,
+    useCaseFilter,
+    tagFilter,
+    stateFilter,
+  ]);
+  const currentCatalogRequestKeyRef = useRef(catalogRequestKey);
+  const currentTreeRequestKeyRef = useRef(treeRequestKey);
+  currentCatalogRequestKeyRef.current = catalogRequestKey;
+  currentTreeRequestKeyRef.current = treeRequestKey;
+  const canManageHub = user?.role === 'admin';
 
   const fetchCatalog = useCallback(async (silent = false) => {
+    const requestKey = catalogRequestKey;
+    if (requestKey !== currentCatalogRequestKeyRef.current) return null;
+    const requestId = ++catalogRequestIdRef.current;
+    const isCurrentRequest = () => (
+      requestId === catalogRequestIdRef.current
+      && requestKey === currentCatalogRequestKeyRef.current
+    );
     try {
       if (!silent) setLoading(true);
+      setCatalogError(null);
       const res = await hubAPI.catalogPage({
         q: debouncedQuery.trim() || undefined,
         type: typeFilter || undefined,
@@ -301,24 +340,66 @@ export default function HubPage() {
         offset: (page - 1) * pageSize,
         limit: pageSize,
       });
+      if (!isCurrentRequest()) return null;
       const nextItems = Array.isArray(res.data.items) ? res.data.items : [];
       setCatalogItems(nextItems);
       setTotalItems(res.data.total ?? nextItems.length);
       setFacetCounts(res.data.facets ?? EMPTY_HUB_FACETS);
-      setSelected(current => {
-        if (!current) return current;
-        return nextItems.find(item => item.type === current.type && item.id === current.id) ?? current;
-      });
       return nextItems;
+    } catch (error) {
+      if (isCurrentRequest()) {
+        setCatalogError(error instanceof Error ? error.message : 'Failed to load Hub catalog');
+      }
+      return null;
     } finally {
-      setHasLoadedCatalog(true);
-      if (!silent) setLoading(false);
+      if (isCurrentRequest()) {
+        setHasLoadedCatalog(true);
+        if (!silent) setLoading(false);
+      }
     }
-  }, [debouncedQuery, page, pageSize, stateFilter, tagFilter, typeFilter, useCaseFilter]);
+  }, [catalogRequestKey, debouncedQuery, page, pageSize, stateFilter, tagFilter, typeFilter, useCaseFilter]);
+
+  const fetchTreeCatalog = useCallback(async (silent = false) => {
+    const requestKey = treeRequestKey;
+    if (requestKey !== currentTreeRequestKeyRef.current) return;
+    const requestId = ++treeRequestIdRef.current;
+    const isCurrentRequest = () => (
+      requestId === treeRequestIdRef.current
+      && requestKey === currentTreeRequestKeyRef.current
+    );
+    try {
+      if (!silent) setTreeLoading(true);
+      setTreeError(null);
+      const res = await hubAPI.catalog({
+        q: debouncedQuery.trim() || undefined,
+        type: typeFilter || undefined,
+        useCases: useCaseFilter || undefined,
+        tags: tagFilter || undefined,
+        state: stateFilter || undefined,
+      });
+      if (!isCurrentRequest()) return;
+      setTreeItems(Array.isArray(res.data) ? res.data : []);
+    } catch (error) {
+      if (isCurrentRequest()) {
+        setTreeError(error instanceof Error ? error.message : 'Failed to load Hub tree');
+      }
+    } finally {
+      if (isCurrentRequest() && !silent) {
+        setTreeLoading(false);
+      }
+    }
+  }, [debouncedQuery, stateFilter, tagFilter, treeRequestKey, typeFilter, useCaseFilter]);
 
   useEffect(() => {
-    fetchCatalog();
-  }, [fetchCatalog]);
+    if (query !== debouncedQuery) return;
+    void fetchCatalog();
+  }, [debouncedQuery, fetchCatalog, query]);
+
+  useEffect(() => {
+    if (viewMode === 'tree' && query === debouncedQuery) {
+      void fetchTreeCatalog();
+    }
+  }, [debouncedQuery, fetchTreeCatalog, query, viewMode]);
 
   useEffect(() => {
     hubAPI.categories({ includeCounts: false }).then(res => setTaxonomy(res.data as HubTaxonomyResponse)).catch(() => setTaxonomy(null));
@@ -349,6 +430,7 @@ export default function HubPage() {
   const currentPage = Math.min(page, totalPages);
   const pagedItems = items;
   const isInitialLoading = loading && !hasLoadedCatalog;
+  const visibleCatalogError = viewMode === 'tree' ? (treeError || catalogError) : catalogError;
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -357,7 +439,10 @@ export default function HubPage() {
     setRefreshing(true);
     try {
       await hubAPI.refresh();
-      await fetchCatalog(true);
+      await Promise.all([
+        fetchCatalog(true),
+        viewMode === 'tree' ? fetchTreeCatalog(true) : Promise.resolve(),
+      ]);
     } finally {
       setRefreshing(false);
     }
@@ -368,6 +453,7 @@ export default function HubPage() {
   };
 
   const runAction = async (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => {
+    if (!canManageHub) return;
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
@@ -379,11 +465,18 @@ export default function HubPage() {
       }
       if (action === 'update') await hubAPI.update(entry.type, entry.id);
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
-      const nextItems = await fetchCatalog(true);
-      const updated = nextItems?.find(item => item.type === entry.type && item.id === entry.id);
-      if (updated) {
-        setSelected(current => (current?.type === entry.type && current?.id === entry.id ? updated : current));
-      }
+      const [, , refreshedEntry] = await Promise.all([
+        fetchCatalog(true),
+        viewMode === 'tree' ? fetchTreeCatalog(true) : Promise.resolve(),
+        hubAPI.catalog({ q: entry.id, type: entry.type }).then(res => (
+          (Array.isArray(res.data) ? res.data : []).find(item => (
+            item.type === entry.type && item.id === entry.id
+          )) ?? null
+        )),
+      ]);
+      setSelected(current => (
+        current?.type === entry.type && current?.id === entry.id ? refreshedEntry : current
+      ));
     } catch (error) {
       if (action === 'install' && entry.type === 'component') {
         const message = error instanceof Error ? error.message : text.suiteInstallFailed;
@@ -406,6 +499,23 @@ export default function HubPage() {
 
   if (isInitialLoading) {
     return <div className="h-full flex items-center justify-center"><LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} /></div>;
+  }
+
+  if (catalogError && catalogItems.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <p className="mb-4 text-red-600">{catalogError}</p>
+          <button
+            type="button"
+            onClick={() => void fetchCatalog()}
+            className="rounded-lg bg-slate-700 px-4 py-2 text-white hover:bg-slate-800"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -435,14 +545,16 @@ export default function HubPage() {
               {viewMode === 'table' ? <Folder className="w-4 h-4" /> : <Table2 className="w-4 h-4" />}
               {viewMode === 'table' ? text.treeView : text.tableView}
             </button>
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-              {text.refresh}
-            </button>
+            {canManageHub && (
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                {text.refresh}
+              </button>
+            )}
           </div>
         }
       />
@@ -546,10 +658,19 @@ export default function HubPage() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4 [scrollbar-gutter:stable]">
+        {visibleCatalogError && (
+          <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {visibleCatalogError}
+          </div>
+        )}
         {viewMode === 'table' ? (
           <HubTable items={pagedItems} actionId={actionId} tagLabels={taxonomy?.tagLabels} language={i18n.language} text={text} onSelect={setSelected} onAction={runAction} />
+        ) : treeLoading && treeItems.length === 0 ? (
+          <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+            <LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} />
+          </div>
         ) : (
-          <HubTree items={items} actionId={actionId} text={text} onSelect={setSelected} onAction={runAction} />
+          <HubTree items={treeItems} actionId={actionId} text={text} onSelect={setSelected} onAction={runAction} />
         )}
       </div>
 
@@ -1063,11 +1184,13 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
   compact?: boolean;
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
+  const { user } = useAuth();
   const busy = actionId?.startsWith(`${item.type}:${item.id}:`);
   const buttonClass = compact
     ? 'p-1.5 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-50'
     : 'inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 rounded-md border border-gray-200 text-xs hover:bg-gray-50 disabled:opacity-50';
   if (busy) return <Loader2 className="w-4 h-4 animate-spin text-gray-400" />;
+  if (user?.role !== 'admin') return null;
   if (item.native && item.state === 'installed') return null;
   if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
   if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;

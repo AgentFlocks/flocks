@@ -79,6 +79,10 @@ export default function MonitoringPage() {
     return `${minutes}m`;
   };
 
+  const formatRate = (value: number | null | undefined) => (
+    value == null ? t('unavailable') : `${value.toFixed(1)}/min`
+  );
+
   return (
     <div className="h-full flex flex-col overflow-y-auto">
       <PageHeader
@@ -117,7 +121,7 @@ export default function MonitoringPage() {
             <Activity className="w-8 h-8 text-red-600" />
           </div>
           <div className="text-xl font-bold text-gray-900">
-            {status?.activeSessions || 0}
+            {status?.activeSessions ?? t('unavailable')}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('activeSessions')}</div>
         </div>
@@ -127,7 +131,7 @@ export default function MonitoringPage() {
             <Zap className="w-8 h-8 text-purple-600" />
           </div>
           <div className="text-xl font-bold text-gray-900">
-            {status?.activeAgents || 0}
+            {status?.activeAgents ?? t('unavailable')}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('activeAgents')}</div>
         </div>
@@ -137,7 +141,7 @@ export default function MonitoringPage() {
             <TrendingUp className="w-8 h-8 text-orange-600" />
           </div>
           <div className="text-xl font-bold text-gray-900">
-            {metrics?.messageRate.toFixed(1) || '0'}
+            {metrics?.messageRate == null ? t('unavailable') : metrics.messageRate.toFixed(1)}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('messagesPerMin')}</div>
         </div>
@@ -151,31 +155,31 @@ export default function MonitoringPage() {
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.messageRate')}</div>
               <div className="text-xl font-bold text-gray-900">
-                {metrics.messageRate.toFixed(1)}/min
+                {formatRate(metrics.messageRate)}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.toolCallRate')}</div>
               <div className="text-xl font-bold text-gray-900">
-                {metrics.toolCallRate.toFixed(1)}/min
+                {formatRate(metrics.toolCallRate)}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.errorRate')}</div>
               <div className="text-xl font-bold text-red-600">
-                {metrics.errorRate.toFixed(1)}/min
+                {formatRate(metrics.errorRate)}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.avgResponse')}</div>
               <div className="text-xl font-bold text-gray-900">
-                {metrics.avgResponseTime.toFixed(0)}ms
+                {metrics.avgResponseTime == null ? t('unavailable') : `${metrics.avgResponseTime.toFixed(0)}ms`}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.activeRequests')}</div>
               <div className="text-xl font-bold text-gray-900">
-                {metrics.activeRequests}
+                {metrics.activeRequests ?? t('unavailable')}
               </div>
             </div>
           </div>

@@ -2,7 +2,11 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Workflow } from '@/api/workflow';
-import { __resetWorkflowResourcesForTesting, useWorkflows } from './useWorkflow';
+import {
+  __getWorkflowResourceCacheSizeForTesting,
+  __resetWorkflowResourcesForTesting,
+  useWorkflows,
+} from './useWorkflow';
 
 const { listMock, getMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
@@ -131,5 +135,15 @@ describe('useWorkflows', () => {
 
     expect(first.result.current.workflows).toHaveLength(1);
     expect(second.result.current.workflows).toHaveLength(1);
+  });
+
+  it('bounds parameterized workflow resources for long-lived sessions', () => {
+    listMock.mockResolvedValue({ data: [] });
+    for (let index = 0; index < 100; index += 1) {
+      const hook = renderHook(() => useWorkflows(`category-${index}`, 'active'));
+      hook.unmount();
+    }
+
+    expect(__getWorkflowResourceCacheSizeForTesting()).toBe(80);
   });
 });

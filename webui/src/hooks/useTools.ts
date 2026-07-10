@@ -21,6 +21,7 @@ const DEFAULT_TOOL_PAGE_LIMIT = 25;
 const EMPTY_TOOL_FACETS: ToolListFacets = {
   category: {},
   source: {},
+  source_groups: {},
   source_name: {},
   enabled: {},
 };
@@ -103,7 +104,11 @@ function refreshToolsResource(): Promise<void> {
     .catch(() => {
       // Best-effort refresh; still update the visible list afterwards.
     })
-    .then(() => toolsResource.fetch({ force: true, silent: true }))
+    .then(() => {
+      toolsResource.invalidate();
+      toolPageResources.forEach((resource) => resource.invalidate());
+      return toolsResource.fetch({ force: true, silent: true });
+    })
     .then(() => undefined)
     .finally(() => {
       toolRefreshInFlight = null;
@@ -184,6 +189,8 @@ export function useToolPage(params: ToolListPageParams) {
         });
       await toolRefreshInFlight;
     }
+    toolPageResources.forEach((pageResource) => pageResource.invalidate());
+    toolsResource.invalidate();
     await resource.fetch({ force: true, silent: true });
   }, [resource]);
 

@@ -951,7 +951,8 @@ def _contains_any(values: Iterable[str], selected: Optional[list[str]]) -> bool:
     return any(item.lower() in value_set for item in selected)
 
 
-def list_catalog(
+def filter_catalog_entries(
+    entries: Iterable[HubCatalogEntry],
     *,
     plugin_type: Optional[PluginType] = None,
     category: Optional[list[str]] = None,
@@ -962,7 +963,6 @@ def list_catalog(
     risk: Optional[list[str]] = None,
     q: Optional[str] = None,
 ) -> list[HubCatalogEntry]:
-    entries = _catalog_entries_snapshot()
     query = (q or "").strip().lower()
 
     def keep(entry: HubCatalogEntry) -> bool:
@@ -997,6 +997,30 @@ def list_catalog(
         return True
 
     return [entry for entry in entries if keep(entry)]
+
+
+def list_catalog(
+    *,
+    plugin_type: Optional[PluginType] = None,
+    category: Optional[list[str]] = None,
+    tags: Optional[list[str]] = None,
+    use_cases: Optional[list[str]] = None,
+    state: Optional[list[str]] = None,
+    trust: Optional[list[str]] = None,
+    risk: Optional[list[str]] = None,
+    q: Optional[str] = None,
+) -> list[HubCatalogEntry]:
+    return filter_catalog_entries(
+        _catalog_entries_snapshot(),
+        plugin_type=plugin_type,
+        category=category,
+        tags=tags,
+        use_cases=use_cases,
+        state=state,
+        trust=trust,
+        risk=risk,
+        q=q,
+    )
 
 
 def category_counts() -> dict:

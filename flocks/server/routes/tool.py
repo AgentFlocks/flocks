@@ -123,6 +123,7 @@ class ToolListFacets(BaseModel):
     """Facet counts for server-side tool list filtering."""
     category: Dict[str, int] = Field(default_factory=dict)
     source: Dict[str, int] = Field(default_factory=dict)
+    source_groups: Dict[str, int] = Field(default_factory=dict)
     source_name: Dict[str, int] = Field(default_factory=dict)
     enabled: Dict[str, int] = Field(default_factory=dict)
 
@@ -346,6 +347,17 @@ def _build_tool_facets(items: Sequence[ToolInfoResponse | ToolListIndexItem]) ->
         enabled_key = str(item.enabled).lower()
         facets.enabled[enabled_key] = facets.enabled.get(enabled_key, 0) + 1
     return facets
+
+
+def _build_source_group_counts(
+    items: Sequence[ToolInfoResponse | ToolListIndexItem],
+) -> Dict[str, int]:
+    groups: Dict[str, set[str]] = {}
+    for item in items:
+        if not item.source_name:
+            continue
+        groups.setdefault(item.source, set()).add(item.source_name)
+    return {source: len(source_names) for source, source_names in groups.items()}
 
 
 def _sort_tool_items(
@@ -747,6 +759,15 @@ async def list_tools_page(
         enabled_filter=enabled_filter,
         query=query,
     )
+    source_facet_items = _filter_tool_items(
+        all_items,
+        category_filter=category_filter,
+        source_filter=source_filter,
+        source_name_filter=source_name_filter,
+        enabled_filter=enabled_filter,
+        query=query,
+        include_source=False,
+    )
     facets = ToolListFacets(
         category=_build_tool_facets(_filter_tool_items(
             all_items,
@@ -757,15 +778,8 @@ async def list_tools_page(
             query=query,
             include_category=False,
         )).category,
-        source=_build_tool_facets(_filter_tool_items(
-            all_items,
-            category_filter=category_filter,
-            source_filter=source_filter,
-            source_name_filter=source_name_filter,
-            enabled_filter=enabled_filter,
-            query=query,
-            include_source=False,
-        )).source,
+        source=_build_tool_facets(source_facet_items).source,
+        source_groups=_build_source_group_counts(source_facet_items),
         source_name=_build_tool_facets(_filter_tool_items(
             all_items,
             category_filter=category_filter,

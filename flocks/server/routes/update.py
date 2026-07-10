@@ -61,24 +61,31 @@ async def _check_update_cached(
     force: bool,
 ) -> VersionInfo:
     key = _update_cache_key(locale, edition)
-    if force:
-        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
-        ttl = _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS if info.error else _UPDATE_CHECK_CACHE_TTL_SECONDS
-        _update_check_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
-        return info
-
     now = time.monotonic()
+    task: asyncio.Task[VersionInfo]
     async with _update_check_lock:
-        cached = _update_check_cache.get(key)
-        if cached and cached[0] > now:
-            return cached[1].model_copy(deep=True)
-
-        task = _update_check_inflight.get(key)
-        if task is None:
+        if force:
+            # Make the forced check the authoritative in-flight request. An
+            # older non-forced task may still finish for its original caller,
+            # but its identity guard in _run_update_check_for_cache prevents
+            # it from overwriting this newer result.
             task = asyncio.create_task(
                 _run_update_check_for_cache(key, locale=locale, edition=edition)
             )
             _update_check_inflight[key] = task
+        else:
+            cached = _update_check_cache.get(key)
+            if cached and cached[0] > now:
+                return cached[1].model_copy(deep=True)
+
+            existing_task = _update_check_inflight.get(key)
+            if existing_task is None:
+                task = asyncio.create_task(
+                    _run_update_check_for_cache(key, locale=locale, edition=edition)
+                )
+                _update_check_inflight[key] = task
+            else:
+                task = existing_task
 
     info = await asyncio.shield(task)
     return info.model_copy(deep=True)

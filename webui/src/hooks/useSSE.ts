@@ -48,6 +48,7 @@ interface SharedSSEConnection {
   eventSource: EventSource | null;
   reconnectTimeout: number | null;
   retryCount: number;
+  recoveryPending: boolean;
   status: SSEConnectionStatus;
   subscribers: Map<number, SharedSSESubscriber>;
 }
@@ -69,9 +70,15 @@ function hasActiveSubscribers(connection: SharedSSEConnection): boolean {
 function forEachActiveSubscriber(
   connection: SharedSSEConnection,
   callback: (subscriber: SharedSSESubscriber) => void,
+  callbackName = 'callback',
 ) {
   for (const subscriber of connection.subscribers.values()) {
-    if (!subscriber.paused) callback(subscriber);
+    if (subscriber.paused) continue;
+    try {
+      callback(subscriber);
+    } catch (error) {
+      console.error(`[SSE] Subscriber ${callbackName} failed:`, error);
+    }
   }
 }
 
@@ -162,20 +169,38 @@ function connectShared(connection: SharedSSEConnection) {
     if (import.meta.env.DEV) {
       console.log('[SSE] Shared connection opened successfully');
     }
+    const shouldRecover = connection.recoveryPending;
+    connection.recoveryPending = false;
     connection.retryCount = 0;
     notifyRetryCount(connection);
     notifyStatus(connection, 'connected');
+    if (shouldRecover) {
+      forEachActiveSubscriber(connection, (subscriber) => {
+        subscriber.onReconnectRef.current?.();
+      }, 'onReconnect');
+    }
   };
 
   eventSource.onmessage = (event) => {
     if (connection.eventSource !== eventSource) return;
+    let data: SSEEvent;
     try {
-      const data = JSON.parse(event.data);
-      forEachActiveSubscriber(connection, (subscriber) => {
-        subscriber.onEventRef.current(data);
-      });
+      data = JSON.parse(event.data);
     } catch (err) {
       console.error('Failed to parse SSE event:', err);
+      return;
+    }
+
+    forEachActiveSubscriber(connection, (subscriber) => {
+      subscriber.onEventRef.current(data);
+    }, 'onEvent');
+
+    if (
+      data.type === 'server.events_dropped'
+      && connection.eventSource === eventSource
+    ) {
+      connection.recoveryPending = true;
+      connectShared(connection);
     }
   };
 
@@ -185,12 +210,13 @@ function connectShared(connection: SharedSSEConnection) {
     if (import.meta.env.DEV) {
       console.warn('[SSE] Shared connection error, will attempt to reconnect');
     }
-    forEachActiveSubscriber(connection, (subscriber) => {
-      subscriber.onErrorRef.current?.(error);
-    });
-
     eventSource.close();
     connection.eventSource = null;
+    connection.recoveryPending = true;
+
+    forEachActiveSubscriber(connection, (subscriber) => {
+      subscriber.onErrorRef.current?.(error);
+    }, 'onError');
 
     const reconnectConfig = mergedReconnectConfig(connection);
     if (!reconnectConfig.enabled) {
@@ -213,9 +239,6 @@ function connectShared(connection: SharedSSEConnection) {
         }
         connection.retryCount++;
         notifyRetryCount(connection);
-        forEachActiveSubscriber(connection, (subscriber) => {
-          subscriber.onReconnectRef.current?.();
-        });
         connectShared(connection);
       }, delay);
       return;
@@ -251,6 +274,7 @@ function getOrCreateSharedConnection(url: string, withCredentials: boolean): Sha
     eventSource: null,
     reconnectTimeout: null,
     retryCount: 0,
+    recoveryPending: false,
     status: 'disconnected',
     subscribers: new Map(),
   };
@@ -358,6 +382,7 @@ export function useSSE({
     if (!connection || !subscriber || !enabled) return;
     subscriber.paused = false;
     connection.retryCount = 0;
+    connection.recoveryPending = true;
     notifyRetryCount(connection);
     connectShared(connection);
   }, [enabled]);

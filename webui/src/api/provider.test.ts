@@ -87,4 +87,52 @@ describe('providerAPI.listApiServices', () => {
     expect(mockGet).toHaveBeenCalledTimes(2);
     expect(response.data[0].name).toBe('Service A Updated');
   });
+
+  it('does not let an older list request repopulate the cache after a mutation', async () => {
+    let resolveOldList: (value: { data: ReturnType<typeof serviceSummary>[] }) => void = () => undefined;
+    mockGet
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOldList = resolve;
+      }))
+      .mockResolvedValueOnce({ data: [serviceSummary('svc-a', 'Fresh Service')] });
+    mockPatch.mockResolvedValue({ data: serviceSummary('svc-a', 'Fresh Service') });
+
+    const { providerAPI } = await import('./provider');
+    const oldRequest = providerAPI.listApiServices();
+    await providerAPI.updateApiService('svc-a', { enabled: false });
+    const freshRequest = providerAPI.listApiServices();
+    resolveOldList({ data: [serviceSummary('svc-a', 'Stale Service')] });
+    await Promise.all([oldRequest, freshRequest]);
+
+    const response = await providerAPI.listApiServices();
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(response.data[0].name).toBe('Fresh Service');
+  });
+
+  it('keeps a forced request authoritative when an older request finishes later', async () => {
+    let resolveOldList: (value: { data: ReturnType<typeof serviceSummary>[] }) => void = () => undefined;
+    let resolveForcedList: (value: { data: ReturnType<typeof serviceSummary>[] }) => void = () => undefined;
+    mockGet
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOldList = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveForcedList = resolve;
+      }));
+
+    const { providerAPI } = await import('./provider');
+    const oldRequest = providerAPI.listApiServices();
+    const forcedRequest = providerAPI.listApiServices({ force: true });
+
+    resolveForcedList({ data: [serviceSummary('svc-a', 'Forced Service')] });
+    await forcedRequest;
+    resolveOldList({ data: [serviceSummary('svc-a', 'Stale Service')] });
+    await oldRequest;
+
+    const response = await providerAPI.listApiServices();
+
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(response.data[0].name).toBe('Forced Service');
+  });
 });

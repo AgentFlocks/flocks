@@ -5,7 +5,7 @@ import {
   Download, ExternalLink, Star, TestTube, Play, Info, CheckCircle, XCircle, AlertTriangle, Power,
 } from 'lucide-react';
 import { mcpAPI } from '@/api/mcp';
-import { toolAPI } from '@/api/tool';
+import { listAllToolPages, toolAPI } from '@/api/tool';
 import type { Tool } from '@/api/tool';
 import type { MCPCatalogCategory, MCPCatalogEntry, MCPServer } from '@/types';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -73,6 +73,7 @@ export default function MCPTabContent({
   const [setupEntry, setSetupEntry] = useState<MCPCatalogEntry | null>(null);
   const [setupCredentials, setSetupCredentials] = useState<Record<string, string>>({});
   const [setupEnvOverrides, setSetupEnvOverrides] = useState<Record<string, string>>({});
+  const [serverToolCache, setServerToolCache] = useState<Record<string, Tool[]>>({});
 
   const fetchServers = useCallback(async () => {
     try {
@@ -164,6 +165,30 @@ export default function MCPTabContent({
     });
     return map;
   }, [tools]);
+
+  useEffect(() => {
+    setServerToolCache({});
+  }, [tools]);
+
+  useEffect(() => {
+    if (!selectedServer || serverToolCache[selectedServer]) return;
+    let cancelled = false;
+    void listAllToolPages({
+      source: 'mcp',
+      sourceName: selectedServer,
+      sortBy: 'name',
+      sortDir: 'asc',
+    }).then((serverTools) => {
+      if (!cancelled) {
+        setServerToolCache((current) => ({ ...current, [selectedServer]: serverTools }));
+      }
+    }).catch(() => {
+      // Keep the current page slice visible; reopening retries the complete server list.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedServer, serverToolCache]);
 
   const setSelectedCard = useCallback((name: string | null) => {
     setSelectedServer(name);
@@ -512,7 +537,7 @@ export default function MCPTabContent({
 
                 {/* Stats column */}
                 <div className="flex items-center justify-end gap-3 text-xs text-gray-400">
-                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{serverTools.length}</span>
+                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{server.tools_count ?? serverTools.length}</span>
                   {server.connected_at ? (
                     <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDuration(server.connected_at, t)}</span>
                   ) : entry ? (
@@ -711,7 +736,7 @@ export default function MCPTabContent({
                 )}
                 <MCPServerDetailPanel
                   server={drawerServer}
-                  serverTools={toolsByServer[selectedServer] || []}
+                  serverTools={serverToolCache[selectedServer] ?? toolsByServer[selectedServer] ?? []}
                   onConnect={() => handleConnect(selectedServer)}
                   onDisconnect={() => handleDisconnect(selectedServer)}
                   onRefresh={async () => { await mcpAPI.refresh(selectedServer); await fetchServers(); await onRefreshTools(); }}

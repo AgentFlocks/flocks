@@ -20,6 +20,7 @@ vi.mock('@/api/tool', () => ({
 const emptyFacets = {
   category: {},
   source: {},
+  source_groups: {},
   source_name: {},
   enabled: {},
 };
@@ -295,5 +296,48 @@ describe('useTools', () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(listMock).not.toHaveBeenCalled();
     expect(listPageMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks other cached queries stale and refreshes them when revisited', async () => {
+    const callsBySource = new Map<string, number>();
+    listPageMock.mockImplementation(async (params: { source?: string; offset?: number; limit?: number }) => {
+      const source = params.source || 'all';
+      const call = (callsBySource.get(source) || 0) + 1;
+      callsBySource.set(source, call);
+      return {
+        data: {
+          items: [{
+            name: `${source}-${call}`,
+            description: `${source} tool`,
+            category: 'custom',
+            source,
+            enabled: true,
+          }],
+          total: 1,
+          offset: params.offset ?? 0,
+          limit: params.limit ?? 20,
+          facets: emptyFacets,
+        },
+      };
+    });
+    refreshMock.mockResolvedValue({ data: { status: 'success' } });
+
+    const { result, rerender } = renderHook(
+      ({ source }) => useToolPage({ source, offset: 0, limit: 20 }),
+      { initialProps: { source: 'mcp' } },
+    );
+    await waitFor(() => expect(result.current.tools[0]?.name).toBe('mcp-1'));
+
+    rerender({ source: 'api' });
+    await waitFor(() => expect(result.current.tools[0]?.name).toBe('api-1'));
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.tools[0]?.name).toBe('api-2');
+    expect(callsBySource.get('mcp')).toBe(1);
+
+    rerender({ source: 'mcp' });
+    await waitFor(() => expect(result.current.tools[0]?.name).toBe('mcp-2'));
   });
 });

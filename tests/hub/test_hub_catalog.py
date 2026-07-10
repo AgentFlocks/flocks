@@ -614,9 +614,18 @@ async def test_catalog_clears_stale_skill_record_after_external_delete(isolated_
 
 
 def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
+    from flocks.auth.context import AuthUser
+    from flocks.server.auth import require_admin
     from flocks.server.routes.hub import router
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="hub-test-admin",
+        username="hub-test-admin",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api")
     client = TestClient(app, raise_server_exceptions=True)
 
@@ -667,6 +676,68 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
 
 
+def test_hub_paginated_facets_exclude_their_own_filter():
+    from flocks.hub.models import HubCatalogEntry
+    from flocks.server.routes import hub as hub_routes
+
+    entries = [
+        HubCatalogEntry(
+            id="skill-installed",
+            type="skill",
+            name="Installed skill",
+            category="security",
+            tags=["triage"],
+            useCases=["incident-response"],
+            trust="official",
+            riskLevel="low",
+            state="installed",
+            manifestPath="skills/installed.json",
+        ),
+        HubCatalogEntry(
+            id="agent-installed",
+            type="agent",
+            name="Installed agent",
+            category="security",
+            tags=["triage"],
+            useCases=["incident-response"],
+            trust="official",
+            riskLevel="low",
+            state="installed",
+            manifestPath="agents/installed.json",
+        ),
+        HubCatalogEntry(
+            id="skill-available",
+            type="skill",
+            name="Available skill",
+            category="productivity",
+            tags=["automation"],
+            useCases=["operations"],
+            trust="community",
+            riskLevel="medium",
+            state="available",
+            manifestPath="skills/available.json",
+        ),
+    ]
+
+    facets = hub_routes._build_hub_catalog_facets_for_filters(
+        entries,
+        {
+            "plugin_type": "skill",
+            "category": None,
+            "tags": None,
+            "use_cases": None,
+            "state": ["installed"],
+            "trust": None,
+            "risk": None,
+            "q": None,
+        },
+    )
+
+    assert facets.type == {"skill": 1, "agent": 1}
+    assert facets.state == {"installed": 1, "available": 1}
+    assert facets.category == {"security": 1}
+
+
 def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
     from flocks.server.routes import hub as hub_routes
 
@@ -683,6 +754,8 @@ def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
 
 
 def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    from flocks.auth.context import AuthUser
+    from flocks.server.auth import require_admin
     from flocks.server.routes.hub import router
 
     async def noop_refresh(_plugin_type):
@@ -692,6 +765,13 @@ def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, m
     _patch_webui_bundle_build(monkeypatch)
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="hub-test-admin",
+        username="hub-test-admin",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api")
     client = TestClient(app, raise_server_exceptions=True)
 

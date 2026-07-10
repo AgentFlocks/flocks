@@ -14,14 +14,20 @@ Flocks expects GlobalEvent format:
 import asyncio
 import json
 import os
-from typing import AsyncGenerator, Optional
+from collections import deque
+from typing import AsyncGenerator, Optional, TYPE_CHECKING, cast
 from datetime import datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from flocks.server.auth import require_user
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
+
+if TYPE_CHECKING:
+    from flocks.auth.context import AuthUser
+    from flocks.session.session import SessionInfo
 
 
 router = APIRouter()
@@ -44,6 +50,167 @@ EVENT_QUEUE_DROP_TO = max(0, min(
 _current_directory: str = os.getcwd()
 
 
+def _event_session_id(event: dict) -> Optional[str]:
+    """Extract the session id from the event shapes emitted by the runtime."""
+    properties = event.get("properties")
+    if not isinstance(properties, dict):
+        return None
+
+    for key in ("sessionID", "session_id"):
+        value = properties.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    for container_name in ("part", "info"):
+        container = properties.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for key in ("sessionID", "session_id"):
+            value = container.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    event_type = event.get("type")
+    runtime_type = properties.get("runtimeType")
+    semantic_type = runtime_type if event_type == "runtime.event" else event_type
+    if isinstance(semantic_type, str) and semantic_type.startswith("session."):
+        value = properties.get("id")
+        if isinstance(value, str) and value:
+            return value
+        info = properties.get("info")
+        if isinstance(info, dict):
+            value = info.get("id")
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+async def _get_event_session(session_id: str) -> Optional["SessionInfo"]:
+    """Load a session without inheriting the publisher's auth context."""
+    from flocks.auth.context import reset_current_auth_user, set_current_auth_user
+    from flocks.session.session import Session, SessionInfo
+    from flocks.storage.storage import Storage
+
+    token = set_current_auth_user(None)
+    try:
+        session = await Session.get_by_id(session_id)
+        if session is not None:
+            return session
+
+        cached_sessions = getattr(Session, "_all_sessions_cache", None) or []
+        cached = next((item for item in cached_sessions if item.id == session_id), None)
+        if cached is not None:
+            return cached
+
+        for key in await Storage.list_keys(prefix="session:"):
+            if key.endswith(f":{session_id}"):
+                return await Storage.get(key, SessionInfo)
+        return None
+    finally:
+        reset_current_auth_user(token)
+
+
+def _snapshot_key(event: dict) -> Optional[tuple[str, str, str]]:
+    """Return the identity of a coalescible accumulated-text snapshot."""
+    if event.get("type") != "message.part.updated":
+        return None
+    properties = event.get("properties")
+    part = properties.get("part") if isinstance(properties, dict) else None
+    if not isinstance(part, dict) or part.get("type") not in {"text", "reasoning", "thinking"}:
+        return None
+    session_id = part.get("sessionID")
+    message_id = part.get("messageID")
+    part_id = part.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if not isinstance(part_id, str) or not part_id:
+        return None
+    return session_id, message_id, part_id
+
+
+def _merge_snapshots(previous: dict, current: dict) -> dict:
+    """Keep the latest full part while preserving all unconsumed deltas."""
+    previous_properties = previous.get("properties")
+    current_properties = current.get("properties")
+    if not isinstance(previous_properties, dict) or not isinstance(current_properties, dict):
+        return current
+
+    previous_delta = previous_properties.get("delta")
+    current_delta = current_properties.get("delta")
+    if not isinstance(previous_delta, str):
+        return current
+
+    merged_properties = dict(current_properties)
+    merged_properties["delta"] = previous_delta + (current_delta if isinstance(current_delta, str) else "")
+    return {**current, "properties": merged_properties}
+
+
+class EventQueue(asyncio.Queue[dict]):
+    """Queue with slow-client compaction for accumulated part snapshots."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize=maxsize)
+        self._pending_drop_count = 0
+
+    def _pending_events(self) -> deque[dict]:
+        return cast(deque[dict], self.__dict__["_queue"])
+
+    def coalesce_snapshot(self, event: dict) -> bool:
+        key = _snapshot_key(event)
+        pending = self._pending_events()
+        if key is None or not pending:
+            return False
+        for index in range(len(pending) - 1, -1, -1):
+            queued = pending[index]
+            if _snapshot_key(queued) != key:
+                continue
+            del pending[index]
+            pending.append(_merge_snapshots(queued, event))
+            return True
+        return False
+
+    def drop_snapshots_until(self, target_size: int) -> int:
+        pending = self._pending_events()
+        dropped = 0
+        while len(pending) > target_size:
+            snapshot_index = next(
+                (index for index, queued in enumerate(pending) if _snapshot_key(queued) is not None),
+                None,
+            )
+            if snapshot_index is None:
+                break
+            del pending[snapshot_index]
+            dropped += 1
+        return dropped
+
+    def report_dropped(self, count: int) -> None:
+        """Emit a recovery marker now or defer it until capacity is freed."""
+        if count <= 0:
+            return
+        self._pending_drop_count += count
+        self._flush_drop_marker()
+
+    def _flush_drop_marker(self) -> None:
+        if self._pending_drop_count <= 0 or self.full():
+            return
+        dropped = self._pending_drop_count
+        self._pending_drop_count = 0
+        super().put_nowait(create_event("server.events_dropped", {
+            "dropped": dropped,
+            "reason": "client_backpressure",
+        }))
+
+    async def get(self) -> dict:
+        event = await super().get()
+        # A queue containing only control events has no safe item to evict for
+        # a marker. Once the client consumes one, append the deferred marker
+        # without sacrificing those control events.
+        self._flush_drop_marker()
+        return event
+
+
 def set_event_directory(directory: str):
     """Set the current directory for SSE events"""
     global _current_directory
@@ -61,8 +228,8 @@ class EventBroadcaster:
     
     _instance: Optional["EventBroadcaster"] = None
     
-    def __init__(self, queue_maxsize: int = EVENT_QUEUE_MAXSIZE, queue_drop_to: Optional[int] = None):
-        self._clients: list[asyncio.Queue] = []
+    def __init__(self, queue_maxsize: int = EVENT_QUEUE_MAXSIZE, queue_drop_to: Optional[int] = None) -> None:
+        self._clients: dict[EventQueue, Optional["AuthUser"]] = {}
         self._lock = asyncio.Lock()
         self._queue_maxsize = max(1, queue_maxsize)
         self._queue_drop_to = max(
@@ -80,53 +247,100 @@ class EventBroadcaster:
             cls._instance = EventBroadcaster()
         return cls._instance
     
-    async def subscribe(self) -> asyncio.Queue:
+    async def subscribe(self, user: Optional["AuthUser"] = None) -> EventQueue:
         """Subscribe a new client"""
-        queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_maxsize)
+        queue = EventQueue(maxsize=self._queue_maxsize)
         async with self._lock:
-            self._clients.append(queue)
+            self._clients[queue] = user
         return queue
     
-    async def unsubscribe(self, queue: asyncio.Queue):
+    async def unsubscribe(self, queue: EventQueue) -> None:
         """Unsubscribe a client"""
         async with self._lock:
-            if queue in self._clients:
-                self._clients.remove(queue)
+            self._clients.pop(queue, None)
     
-    async def publish(self, event: dict):
+    async def publish(self, event: dict) -> None:
         """Publish event to all clients"""
         async with self._lock:
-            clients = list(self._clients)
-        for queue in clients:
+            clients = list(self._clients.items())
+
+        session = None
+        session_id = _event_session_id(event)
+        if session_id:
+            try:
+                session = await _get_event_session(session_id)
+            except Exception as exc:
+                log.warning("event.session_access_lookup_failed", {
+                    "session_id": session_id,
+                    "event_type": event.get("type"),
+                    "error": str(exc),
+                })
+                return
+            if session is None:
+                log.debug("event.session_access_missing", {
+                    "session_id": session_id,
+                    "event_type": event.get("type"),
+                })
+                return
+
+        if session is not None:
+            from flocks.session.policy import SessionPolicy
+
+        for queue, user in clients:
+            if session is not None and user is not None and not SessionPolicy.can_read(session, user):
+                continue
             self._publish_to_queue(queue, event)
 
-    def _publish_to_queue(self, queue: asyncio.Queue, event: dict):
+    def _publish_to_queue(self, queue: EventQueue, event: dict) -> None:
+        if queue.coalesce_snapshot(event):
+            return
+
         try:
             queue.put_nowait(event)
             return
         except asyncio.QueueFull:
             pass
 
-        dropped = 0
-        while queue.qsize() > self._queue_drop_to:
-            try:
-                queue.get_nowait()
-                dropped += 1
-            except asyncio.QueueEmpty:
-                break
+        is_snapshot = _snapshot_key(event) is not None
+        marker_target = min(self._queue_drop_to, max(0, self._queue_maxsize - 2))
+        dropped = queue.drop_snapshots_until(marker_target)
 
-        try:
-            queue.put_nowait(create_event("server.events_dropped", {
-                "dropped": dropped,
-                "reason": "client_backpressure",
-            }))
-        except asyncio.QueueFull:
-            pass
+        if is_snapshot and queue.qsize() > marker_target:
+            # A text snapshot must never evict permission/question/session
+            # control events. If removing older snapshots only leaves room for
+            # the recovery marker, keep that marker and discard this ordinary
+            # snapshot so the client knows it must reconcile over REST.
+            # Include the incoming snapshot itself. If the queue consists only
+            # of control events, defer the marker until the client frees one
+            # slot rather than evicting a permission/question/session event.
+            dropped += 1
+            queue.report_dropped(dropped)
+            log.debug("event.queue.snapshot_dropped", {
+                "queue_size": queue.qsize(),
+                "queue_maxsize": self._queue_maxsize,
+                "event_type": event.get("type"),
+            })
+            return
+        else:
+            while queue.qsize() > marker_target:
+                try:
+                    queue.get_nowait()
+                    dropped += 1
+                except asyncio.QueueEmpty:
+                    break
+
+        reported_drops = 0
+        if dropped > 0 and queue.qsize() <= self._queue_maxsize - 2:
+            queue.report_dropped(dropped)
+            reported_drops = dropped
 
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
             dropped += 1
+
+        if dropped > reported_drops:
+            queue.report_dropped(dropped - reported_drops)
 
         if dropped > 0:
             log.debug("event.queue.overflow", {
@@ -141,7 +355,7 @@ class EventBroadcaster:
         """Number of connected clients"""
         return len(self._clients)
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """Notify all clients that the server is shutting down, then clear."""
         shutdown_event = create_event("server.shutting_down", {})
         async with self._lock:
@@ -230,7 +444,7 @@ async def publish_runtime_event(runtime_type: str, properties: dict = None, dire
 
 
 async def sse_generator(
-    queue: asyncio.Queue, 
+    queue: EventQueue,
     request: Request,
     directory: str = None,
 ) -> AsyncGenerator[str, None]:
@@ -282,7 +496,8 @@ async def subscribe_events(request: Request):
     Returns:
         StreamingResponse with SSE events
     """
-    queue = await EventBroadcaster.get().subscribe()
+    user = require_user(request)
+    queue = await EventBroadcaster.get().subscribe(user)
     
     log.info("event.subscribe", {
         "clients": EventBroadcaster.get().client_count,

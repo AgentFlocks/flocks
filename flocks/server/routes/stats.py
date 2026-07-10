@@ -15,6 +15,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from flocks.agent.registry import Agent
+from flocks.provider.provider import Provider
 from flocks.server.routes.provider import list_providers
 from flocks.server.routes.workflow import _list_workflows_from_fs, _migrate_storage_to_filesystem
 from flocks.skill.skill import Skill
@@ -88,12 +89,16 @@ async def _count_agents() -> int:
 
 async def _count_workflows() -> int:
     await _migrate_storage_to_filesystem()
-    return len(_list_workflows_from_fs())
+    return await asyncio.to_thread(lambda: len(_list_workflows_from_fs()))
 
 
 async def _count_skills() -> int:
     skills = await Skill.all()
-    return sum(1 for skill in skills if getattr(skill, "category", None) != "system")
+    return sum(
+        1
+        for skill in skills
+        if getattr(skill, "category", None) != "system"
+    )
 
 
 async def _count_tools() -> int:
@@ -102,6 +107,7 @@ async def _count_tools() -> int:
 
 
 async def _count_models() -> int:
+    await asyncio.to_thread(Provider._ensure_initialized)
     providers = await list_providers()
     connected = set(providers.connected or [])
     return sum(
@@ -114,6 +120,10 @@ async def _count_models() -> int:
 @router.get("/summary", response_model=SystemStatsResponse)
 async def get_system_stats_summary() -> SystemStatsResponse:
     failures: list[str] = []
+
+    # Agent and Skill cold loading now wait on their registries without
+    # blocking the event loop, so all independent summary sources can stay
+    # concurrent instead of paying a separate registry warm-up phase.
     dashboard, agents, workflows, skills, tools, models = await asyncio.gather(
         _safe_dashboard(failures),
         _safe_count("agents", _count_agents, failures),

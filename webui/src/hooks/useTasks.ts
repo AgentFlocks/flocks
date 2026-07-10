@@ -16,6 +16,7 @@ const ACTIVE_EXECUTION_STATUSES = new Set(['pending', 'queued', 'running']);
 const ACTIVE_SCHEDULER_STATUSES = new Set(['active']);
 const TASK_LIST_STALE_TIME_MS = 1000;
 const TASK_LIST_MIN_FETCH_INTERVAL_MS = 1000;
+const MAX_TASK_LIST_RESOURCES = 80;
 
 type TaskPageData<T> = Pick<PaginatedResponse<T>, 'items' | 'total'>;
 
@@ -88,10 +89,34 @@ function makeResourceKey(params: object): string {
   return JSON.stringify(params);
 }
 
+function getCachedResource<T>(
+  resources: Map<string, SharedResource<T>>,
+  key: string,
+): SharedResource<T> | undefined {
+  const existing = resources.get(key);
+  if (existing) {
+    resources.delete(key);
+    resources.set(key, existing);
+  }
+  return existing;
+}
+
+function cacheResource<T>(
+  resources: Map<string, SharedResource<T>>,
+  key: string,
+  resource: SharedResource<T>,
+): void {
+  resources.set(key, resource);
+  if (resources.size > MAX_TASK_LIST_RESOURCES) {
+    const oldestKey = resources.keys().next().value;
+    if (oldestKey) resources.delete(oldestKey);
+  }
+}
+
 function getSchedulerListResource(filters?: SchedulerListParams): SharedResource<TaskPageData<TaskScheduler>> {
   const params = normalizeSchedulerFilters(filters);
   const key = makeResourceKey(params);
-  const existing = schedulerListResources.get(key);
+  const existing = getCachedResource(schedulerListResources, key);
   if (existing) return existing;
 
   const resource = createSharedResource<TaskPageData<TaskScheduler>>({
@@ -109,14 +134,14 @@ function getSchedulerListResource(filters?: SchedulerListParams): SharedResource
     getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch tasks'),
   });
 
-  schedulerListResources.set(key, resource);
+  cacheResource(schedulerListResources, key, resource);
   return resource;
 }
 
 function getExecutionListResource(filters?: TaskListParams & { schedulerID?: string }): SharedResource<TaskPageData<TaskExecution>> {
   const params = normalizeExecutionFilters(filters);
   const key = makeResourceKey(params);
-  const existing = executionListResources.get(key);
+  const existing = getCachedResource(executionListResources, key);
   if (existing) return existing;
 
   const resource = createSharedResource<TaskPageData<TaskExecution>>({
@@ -134,7 +159,7 @@ function getExecutionListResource(filters?: TaskListParams & { schedulerID?: str
     getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch task executions'),
   });
 
-  executionListResources.set(key, resource);
+  cacheResource(executionListResources, key, resource);
   return resource;
 }
 
@@ -148,7 +173,7 @@ function getSchedulerExecutionResource(
     limit: params?.limit,
   };
   const key = makeResourceKey(normalizedParams);
-  const existing = schedulerExecutionResources.get(key);
+  const existing = getCachedResource(schedulerExecutionResources, key);
   if (existing) return existing;
 
   const resource = createSharedResource<TaskPageData<TaskExecution>>({
@@ -169,7 +194,7 @@ function getSchedulerExecutionResource(
     getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch executions'),
   });
 
-  schedulerExecutionResources.set(key, resource);
+  cacheResource(schedulerExecutionResources, key, resource);
   return resource;
 }
 
@@ -227,6 +252,14 @@ export function __resetTaskResourcesForTesting(): void {
   taskDashboardResource.resetForTesting();
   queueStatusResource.resetForTesting();
   taskSystemNoticeResource.resetForTesting();
+}
+
+export function __getTaskResourceCacheSizesForTesting() {
+  return {
+    schedulers: schedulerListResources.size,
+    executions: executionListResources.size,
+    schedulerExecutions: schedulerExecutionResources.size,
+  };
 }
 
 export function useTaskSchedulers(

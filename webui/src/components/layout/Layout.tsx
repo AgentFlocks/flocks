@@ -42,10 +42,12 @@ function lazyLayoutComponent<T extends LazyLayoutModule>(
   loader: () => Promise<T>,
   namespaces: readonly string[] = [],
 ) {
-  return lazy(() => Promise.all([
-    loader(),
-    preloadI18nNamespaces(namespaces),
-  ]).then(([module]) => module));
+  return lazy(() => recoverLazyLoad(
+    Promise.all([
+      loader(),
+      preloadI18nNamespaces(namespaces),
+    ]).then(([module]) => module),
+  ));
 }
 
 function isOnboardingDismissed(): boolean {
@@ -101,7 +103,9 @@ import {
 } from '@/utils/webuiContractWorkspaceSections';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
+import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -248,12 +252,12 @@ export default function Layout() {
     return () => window.removeEventListener('flocks:open-onboarding', handleOpenOnboarding);
   }, [handleOpenOnboarding]);
 
-  const refreshUpdateStatus = useCallback(async (force = false) => {
+  const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
     if (!flocksproStatusReady) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
-    if (!force && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
+    if (!bypassMinGap && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
 
     checkingUpdateRef.current = true;
     lastUpdateCheckAtRef.current = now;
@@ -709,31 +713,34 @@ export default function Layout() {
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Modals render lazily — fallback={null} keeps the chunk download
           invisible to the user (they're already triggering an async UI). */}
-      <Suspense fallback={null}>
-        {showOnboarding && (
-          <OnboardingModal
-            onClose={() => setShowOnboarding(false)}
-          />
-        )}
-        {showUpdate && (
-          <UpdateModal
-            initialInfo={updateInfo}
-            edition={isFlocksproActive ? 'flockspro' : 'flocks'}
-            canUpgrade={canManageUpdates}
-            onClose={() => setShowUpdate(false)}
-            onDismiss={() => setShowUpdate(false)}
-          />
-        )}
-        {visibleNotifications.length > 0 && (
-          <NotificationModal
-            notifications={visibleNotifications}
-            acknowledgingIds={acknowledgingNotificationIds}
-            onAcknowledge={closeVisibleNotification}
-            onClose={closeVisibleNotification}
-            onDismissForever={dismissVisibleNotificationForever}
-          />
-        )}
-      </Suspense>
+      <LazyLoadErrorBoundary mode="overlay">
+        <Suspense fallback={null}>
+          {showOnboarding && (
+            <OnboardingModal
+              onClose={() => setShowOnboarding(false)}
+            />
+          )}
+          {showUpdate && (
+            <UpdateModal
+              initialInfo={updateInfo}
+              forceInitialCheck={updateInfo === null}
+              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+              canUpgrade={canManageUpdates}
+              onClose={() => setShowUpdate(false)}
+              onDismiss={() => setShowUpdate(false)}
+            />
+          )}
+          {visibleNotifications.length > 0 && (
+            <NotificationModal
+              notifications={visibleNotifications}
+              acknowledgingIds={acknowledgingNotificationIds}
+              onAcknowledge={closeVisibleNotification}
+              onClose={closeVisibleNotification}
+              onDismissForever={dismissVisibleNotificationForever}
+            />
+          )}
+        </Suspense>
+      </LazyLoadErrorBoundary>
 
       {sidebarOpen && (
         <div

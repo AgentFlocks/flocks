@@ -65,6 +65,7 @@ import {
   shouldLoadMcpCatalog,
   type TabKey,
 } from './tabLoading';
+import { getToolTabCounts } from './tabCounts';
 
 // ============================================================================
 // Constants & Config
@@ -230,6 +231,8 @@ export default function ToolPage() {
   const [catalogEntries, setCatalogEntries] = useState<MCPCatalogEntry[]>([]);
   const [catalogCategories, setCatalogCategories] = useState<Record<string, MCPCatalogCategory>>({});
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogRetryKey, setCatalogRetryKey] = useState(0);
   const [configuredIds, setConfiguredIds] = useState<Set<string>>(new Set());
   const catalogLoadedRef = useRef(false);
 
@@ -238,8 +241,10 @@ export default function ToolPage() {
     let cancelled = false;
 
     const loadCatalog = async () => {
+      let loaded = false;
       try {
         setCatalogLoading(true);
+        setCatalogError(null);
         const [entriesRes, catsRes] = await Promise.all([
           mcpAPI.catalogList(),
           mcpAPI.catalogCategories(),
@@ -247,6 +252,7 @@ export default function ToolPage() {
         if (cancelled) return;
         setCatalogEntries(entriesRes.data);
         setCatalogCategories(catsRes.data);
+        loaded = true;
         // Get currently configured IDs (no auto-setup to avoid re-adding removed entries)
         try {
           const confRes = await mcpAPI.catalogConfigured();
@@ -254,9 +260,12 @@ export default function ToolPage() {
         } catch { /* ignore */ }
       } catch (err) {
         console.error('Failed to load catalog:', err);
+        if (!cancelled) {
+          setCatalogError(err instanceof Error ? err.message : 'Failed to load MCP catalog');
+        }
       } finally {
         if (!cancelled) {
-          catalogLoadedRef.current = true;
+          catalogLoadedRef.current = loaded;
           setCatalogLoading(false);
         }
       }
@@ -266,7 +275,7 @@ export default function ToolPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab]);
+  }, [activeTab, catalogRetryKey]);
 
   useEffect(() => {
     if (!shouldLoadMcpCatalog(activeTab)) {
@@ -309,16 +318,10 @@ export default function ToolPage() {
   // API catalog not yet implemented — keep this empty so entries are not duplicated across tabs.
   const apiCatalogEntries = useMemo(() => [] as MCPCatalogEntry[], []);
 
-  // Compute tab counts from server-side facets for the current query/filter set.
-  const tabCounts = useMemo(() => {
-    const allFromSourceFacets = Object.values(toolFacets.source).reduce((sum, count) => sum + count, 0);
-    return {
-      all: allFromSourceFacets || totalTools,
-      mcp: toolFacets.source.mcp ?? 0,
-      api: Math.max(toolFacets.source.api ?? 0, apiEnabledServicesCount),
-      local: toolFacets.source.plugin_py ?? 0,
-    };
-  }, [totalTools, toolFacets.source, apiEnabledServicesCount]);
+  const tabCounts = useMemo(
+    () => getToolTabCounts(totalTools, toolFacets, apiEnabledServicesCount),
+    [totalTools, toolFacets, apiEnabledServicesCount],
+  );
   const enabledSummary = useMemo(() => ({
     active: toolFacets.enabled['true'] ?? tools.filter((tool) => tool.enabled).length,
     inactive: toolFacets.enabled['false'] ?? 0,
@@ -561,6 +564,19 @@ export default function ToolPage() {
         </div>
       )}
 
+      {activeTab === 'mcp' && catalogError && (
+        <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span>{catalogError}</span>
+          <button
+            type="button"
+            onClick={() => setCatalogRetryKey((value) => value + 1)}
+            className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-medium hover:bg-amber-100"
+          >
+            {t('button.retry')}
+          </button>
+        </div>
+      )}
+
       {/* Tab Content */}
       <div className="min-h-[420px] [scrollbar-gutter:stable]">
         {isTabPageLoading ? (
@@ -593,13 +609,22 @@ export default function ToolPage() {
             onConfiguredChange={onConfiguredChange}
           />
         ) : activeTab === 'local' ? (
-          <LocalTabContent
-            tools={processedTools}
-            searchQuery={searchQuery}
-            selectedToolName={selectedTool?.name}
-            onSelectTool={openDetail}
-            onRefreshTools={refreshToolData}
-          />
+          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+            <LocalTabContent
+              tools={processedTools}
+              searchQuery={searchQuery}
+              selectedToolName={selectedTool?.name}
+              onSelectTool={openDetail}
+              onRefreshTools={refreshToolData}
+            />
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalCount={totalTools}
+              pageSize={PAGE_SIZE}
+              onPageChange={setCurrentPage}
+            />
+          </div>
         ) : (
           /* All tab: active tools only */
           <div className="space-y-4">

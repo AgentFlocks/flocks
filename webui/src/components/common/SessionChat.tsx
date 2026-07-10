@@ -1673,7 +1673,8 @@ export default function SessionChat({
   const [showCommandDropdown, setShowCommandDropdown] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const commandsLoadedRef = useRef(false);
+  const commandsLoadedAtRef = useRef(0);
+  const commandsLoadingRef = useRef(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
@@ -2214,14 +2215,17 @@ export default function SessionChat({
     return () => { if (timer) clearTimeout(timer); };
   }, [isCompacting, sessionId, refetch]);
 
-  /** Lazily load slash commands on first use (for autocomplete dropdown). */
+  /** Lazily load slash commands and periodically revalidate while autocomplete is used. */
   const loadCommandsIfNeeded = useCallback(async (): Promise<void> => {
-    if (commandsLoadedRef.current) return;
-    commandsLoadedRef.current = true; // Optimistic: prevent concurrent fetches
+    if (commandsLoadingRef.current || Date.now() - commandsLoadedAtRef.current < 5_000) return;
+    commandsLoadingRef.current = true;
     try {
       setCommands(await fetchSessionChatCommands());
+      commandsLoadedAtRef.current = Date.now();
     } catch {
-      commandsLoadedRef.current = false; // Allow retry on failure
+      commandsLoadedAtRef.current = 0;
+    } finally {
+      commandsLoadingRef.current = false;
     }
   }, []);
 

@@ -451,6 +451,7 @@ class TestToolListPageRoute:
         assert payload["limit"] == 20
         assert payload["facets"]["source"]["plugin_py"] == 1
         assert payload["facets"]["source"]["api"] == 1
+        assert payload["facets"]["source_groups"]["api"] == 1
         assert payload["items"][0]["name"] == "page_unique_alpha_tool"
         assert payload["items"][0]["parameters"] == []
         assert payload["items"][0]["parameters_count"] == 1

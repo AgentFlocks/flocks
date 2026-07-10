@@ -34,6 +34,7 @@ function makeCommand(name: string) {
 describe('session chat commands resource', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.restoreAllMocks();
     __resetSessionChatCommandsResourceForTesting();
   });
 
@@ -73,6 +74,21 @@ describe('session chat commands resource', () => {
     const commands = await fetchSessionChatCommands();
 
     expect(commands.map((command) => command.name)).toEqual(['new', 'summarize']);
+    expect(listCommandsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes commands after the short autocomplete stale window', async () => {
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    listCommandsMock
+      .mockResolvedValueOnce({ data: [makeCommand('first')] })
+      .mockResolvedValueOnce({ data: [makeCommand('second')] });
+
+    await fetchSessionChatCommands();
+    now += 5_001;
+    const commands = await fetchSessionChatCommands();
+
+    expect(commands.map((command) => command.name)).toEqual(['new', 'second']);
     expect(listCommandsMock).toHaveBeenCalledTimes(2);
   });
 });

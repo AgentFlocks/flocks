@@ -12,12 +12,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Body, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, ConfigDict
 
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
+from flocks.server.auth import require_admin
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
@@ -661,7 +662,8 @@ async def get_all_provider_auth() -> Dict[str, List[Any]]:
 )
 async def oauth_authorize(
     provider_id: str,
-    method: int = 0
+    method: int = 0,
+    _admin: object = Depends(require_admin),
 ) -> Optional[Dict[str, Any]]:
     """
     Initiate OAuth authorization
@@ -684,7 +686,8 @@ async def oauth_authorize(
 async def oauth_callback(
     provider_id: str,
     method: int,
-    code: Optional[str] = None
+    code: Optional[str] = None,
+    _admin: object = Depends(require_admin),
 ) -> bool:
     """
     Handle OAuth callback
@@ -714,6 +717,7 @@ async def list_api_services_route():
 async def update_api_service_route(
     provider_id: str,
     request: Dict[str, Any] = Body(...),
+    _admin: object = Depends(require_admin),
 ):
     return await update_api_service(provider_id, APIServiceUpdateRequest.model_validate(request))
 
@@ -724,7 +728,10 @@ async def update_api_service_route(
     summary="Delete API service",
     description="Delete an API service configuration and its stored credential."
 )
-async def delete_api_service_route(provider_id: str):
+async def delete_api_service_route(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     return await delete_api_service(provider_id)
 
 
@@ -835,7 +842,11 @@ class ProviderConfigRequest(BaseModel):
     summary="Configure provider",
     description="Configure provider with API key and settings"
 )
-async def configure_provider(provider_id: str, config: ProviderConfigRequest) -> ProviderInfo:
+async def configure_provider(
+    provider_id: str,
+    config: ProviderConfigRequest,
+    _admin: object = Depends(require_admin),
+) -> ProviderInfo:
     """
     Configure provider
     
@@ -886,7 +897,10 @@ async def configure_provider(provider_id: str, config: ProviderConfigRequest) ->
     summary="Test provider",
     description="Test provider connection"
 )
-async def test_provider(provider_id: str) -> Dict[str, Any]:
+async def test_provider(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+) -> Dict[str, Any]:
     """
     Test provider connection
     
@@ -941,7 +955,11 @@ async def test_provider(provider_id: str) -> Dict[str, Any]:
     summary="Update provider",
     description="Update provider configuration"
 )
-async def update_provider(provider_id: str, config: ProviderConfigRequest) -> ProviderInfo:
+async def update_provider(
+    provider_id: str,
+    config: ProviderConfigRequest,
+    _admin: object = Depends(require_admin),
+) -> ProviderInfo:
     """
     Update provider configuration
     
@@ -973,7 +991,6 @@ async def update_provider(provider_id: str, config: ProviderConfigRequest) -> Pr
         config_key = f"provider_config/{provider_id}"
         await Storage.write(config_key, {
             "provider_id": provider_id,
-            "api_key": config.api_key,
             "base_url": config.base_url,
             "custom_settings": config.custom_settings,
         })
@@ -1589,7 +1606,10 @@ class ProviderCredentialResponse(BaseModel):
     summary="Get provider credentials (masked)",
     description="Get masked credential information for a registered LLM provider."
 )
-async def get_provider_credentials(provider_id: str):
+async def get_provider_credentials(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     """Get credential info for an LLM provider (_llm_key convention).
 
     - api_key: from .secret.json  (_llm_key first, legacy _api_key fallback)
@@ -1631,10 +1651,10 @@ async def get_provider_credentials(provider_id: str):
 
         return ProviderCredentialResponse(
             secret_id=secret_id if api_key else None,
-            api_key=ui_api_key,
+            api_key=None,
             api_key_masked=(
-                SecretManager.mask(api_key)
-                if api_key and not is_placeholder
+                SecretManager.mask(ui_api_key)
+                if ui_api_key
                 else None
             ),
             base_url=base_url,
@@ -1651,7 +1671,11 @@ async def get_provider_credentials(provider_id: str):
     summary="Set provider credentials",
     description="Set authentication credentials for a provider or API service."
 )
-async def set_provider_credentials(provider_id: str, request: ProviderCredentialRequest):
+async def set_provider_credentials(
+    provider_id: str,
+    request: ProviderCredentialRequest,
+    _admin: object = Depends(require_admin),
+):
     """Set credentials for a provider.
 
     - api_key → .secret.json
@@ -1665,37 +1689,66 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
     try:
         # OpenAI-compatible endpoints (e.g. internal LLM gateways without auth)
         # and user-defined custom-* providers may legitimately have no API key.
-        # For other providers (OpenAI, Anthropic, etc.) the key is still required.
+        # For an already configured provider, an omitted/blank key means "keep
+        # the existing secret" so callers can safely update only the base URL
+        # or model selection without receiving the original key back first.
         api_key_optional = (
             provider_id == "openai-compatible" or provider_id.startswith("custom-")
         )
-        effective_api_key = (request.api_key or "").strip()
-        if not effective_api_key:
-            if not api_key_optional:
-                raise HTTPException(status_code=400, detail="API key required")
-            # Persist a sentinel value so downstream OpenAI SDK clients (which
-            # require a non-empty key argument) keep working transparently.
-            # The GET endpoint masks this back to ``None`` for the UI.
-            effective_api_key = _NO_API_KEY_PLACEHOLDER
-
         secrets = get_secret_manager()
+        secret_id = request.secret_id or f"{provider_id}_llm_key"
+        effective_api_key = (request.api_key or "").strip()
+        preserve_existing_secret = False
+
+        if not effective_api_key:
+            existing_secret_ids = [secret_id]
+            legacy_secret_id = f"{provider_id}_api_key"
+            if request.secret_id is None and legacy_secret_id not in existing_secret_ids:
+                existing_secret_ids.append(legacy_secret_id)
+
+            for candidate in existing_secret_ids:
+                existing_value = secrets.get(candidate)
+                if isinstance(existing_value, str) and existing_value.strip():
+                    secret_id = candidate
+                    effective_api_key = existing_value.strip()
+                    preserve_existing_secret = True
+                    break
+
+            if not effective_api_key:
+                inline_api_key = _get_inline_provider_api_key(provider_id)
+                if inline_api_key:
+                    effective_api_key = inline_api_key
+                    preserve_existing_secret = True
+
+            if not effective_api_key:
+                if not api_key_optional:
+                    raise HTTPException(status_code=400, detail="API key required")
+                # Persist a sentinel value so downstream OpenAI SDK clients
+                # (which require a non-empty key argument) keep working.
+                effective_api_key = _NO_API_KEY_PLACEHOLDER
 
         # 1. Save API key to .secret.json using _llm_key convention for LLM providers
-        secret_id = request.secret_id or f"{provider_id}_llm_key"
-        secrets.set(secret_id, effective_api_key)
-        if _is_placeholder_api_key(effective_api_key):
-            masked = _NO_API_KEY_LOG_MARKER
-        elif len(effective_api_key) > 8:
-            masked = f"{effective_api_key[:4]}***{effective_api_key[-4:]}"
+        if preserve_existing_secret:
+            log.info("provider.credentials.preserved", {
+                "provider_id": provider_id,
+                "secret_id": secret_id,
+                "base_url": request.base_url,
+            })
         else:
-            masked = "***"
-        log.info("provider.credentials.saving", {
-            "provider_id": provider_id,
-            "secret_id": secret_id,
-            "api_key_masked": masked,
-            "api_key_optional": api_key_optional,
-            "base_url": request.base_url,
-        })
+            secrets.set(secret_id, effective_api_key)
+            if _is_placeholder_api_key(effective_api_key):
+                masked = _NO_API_KEY_LOG_MARKER
+            elif len(effective_api_key) > 8:
+                masked = f"{effective_api_key[:4]}***{effective_api_key[-4:]}"
+            else:
+                masked = "***"
+            log.info("provider.credentials.saving", {
+                "provider_id": provider_id,
+                "secret_id": secret_id,
+                "api_key_masked": masked,
+                "api_key_optional": api_key_optional,
+                "base_url": request.base_url,
+            })
 
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
@@ -1705,10 +1758,13 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
                 ConfigWriter.update_provider_field(
                     provider_id, "options.baseURL", request.base_url
                 )
-                # Ensure apiKey reference is set
-                ConfigWriter.update_provider_field(
-                    provider_id, "options.apiKey", f"{{secret:{provider_id}_llm_key}}"
-                )
+                if not preserve_existing_secret:
+                    # A newly supplied key uses the canonical secret reference.
+                    # When preserving a stored or inline key, leave its existing
+                    # config reference untouched.
+                    ConfigWriter.update_provider_field(
+                        provider_id, "options.apiKey", f"{{secret:{secret_id}}}"
+                    )
             if request.provider_name:
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
@@ -1811,7 +1867,10 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
     summary="Delete provider credentials",
     description="Delete stored credentials for a provider or API service."
 )
-async def delete_provider_credentials(provider_id: str):
+async def delete_provider_credentials(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     """Delete a provider: remove from flocks.json and .secret.json."""
     from flocks.security import get_secret_manager
 
@@ -1866,7 +1925,10 @@ async def delete_provider_credentials(provider_id: str):
     summary="Get API service credentials (masked)",
     description="Get masked credential information for an API service (tool integrations)."
 )
-async def get_service_credentials(provider_id: str):
+async def get_service_credentials(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     """Get credential info for an API service (_api_key convention).
 
     Reads the secret_id from flocks.json api_services.{id}.secret first,
@@ -1923,15 +1985,30 @@ async def get_service_credentials(provider_id: str):
                     field_values["api_key"] = split_api_key
                     field_values["secret"] = split_secret
 
+        sensitive_field_names = {
+            field.key
+            for field in schema
+            if field.sensitive or field.storage == "secret"
+        }
+        sensitive_field_names.update(secret_ids)
+        safe_field_values = {
+            field_name: (
+                SecretManager.mask(value)
+                if value and field_name in sensitive_field_names
+                else value
+            )
+            for field_name, value in field_values.items()
+        }
+
         return ProviderCredentialResponse(
             secret_id=secret_ids.get("api_key"),
-            api_key=field_values.get("api_key"),
+            api_key=None,
             api_key_masked=SecretManager.mask(field_values["api_key"]) if field_values.get("api_key") else None,
-            secret=field_values.get("secret"),
+            secret=None,
             secret_masked=SecretManager.mask(field_values["secret"]) if field_values.get("secret") else None,
             base_url=field_values.get("base_url"),
             username=field_values.get("username"),
-            fields=field_values or None,
+            fields=safe_field_values or None,
             secret_ids=secret_ids or None,
             has_credential=bool(any(value for value in field_values.values())),
         )
@@ -1946,7 +2023,11 @@ async def get_service_credentials(provider_id: str):
     summary="Set API service credentials",
     description="Set authentication credentials for an API service."
 )
-async def set_service_credentials(provider_id: str, request: ProviderCredentialRequest):
+async def set_service_credentials(
+    provider_id: str,
+    request: ProviderCredentialRequest,
+    _admin: object = Depends(require_admin),
+):
     """Set credentials for an API service (_api_key convention).
 
     Saves to .secret.json AND writes the secret reference into flocks.json
@@ -2100,7 +2181,11 @@ class TestCredentialRequest(BaseModel):
     summary="Test provider credentials",
     description="Test if the stored credentials are valid by making a real chat API call."
 )
-async def test_provider_credentials(provider_id: str, body: Optional[TestCredentialRequest] = None):
+async def test_provider_credentials(
+    provider_id: str,
+    body: Optional[TestCredentialRequest] = None,
+    _admin: object = Depends(require_admin),
+):
     """Test credentials for a provider or API service by making a real API call"""
     from flocks.security import get_secret_manager
 
@@ -2717,7 +2802,9 @@ async def get_api_services_status():
     summary="Refresh API service connectivity status",
     description="Manually trigger a refresh of all API service connectivity statuses."
 )
-async def refresh_api_services_status():
+async def refresh_api_services_status(
+    _admin: object = Depends(require_admin),
+):
     """Refresh all API service connectivity statuses and cache them."""
     try:
         await Storage.init()

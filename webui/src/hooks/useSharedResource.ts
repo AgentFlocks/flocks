@@ -26,6 +26,7 @@ export interface SharedResource<T> {
   getSnapshot: () => SharedResourceSnapshot<T>;
   subscribe: (listener: () => void) => () => void;
   fetch: (options?: SharedResourceFetchOptions) => Promise<T>;
+  invalidate: () => void;
   resetForTesting: () => void;
 }
 
@@ -64,6 +65,9 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
   const listeners = new Set<() => void>();
 
   let inFlight: Promise<T> | null = null;
+  let inFlightGeneration: number | null = null;
+  let queuedRevalidation: Promise<T> | null = null;
+  let generation = 0;
   let lastStartedAt = 0;
   let snapshot: SharedResourceSnapshot<T> = {
     data: options.initialData,
@@ -97,6 +101,15 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
     }
 
     if (inFlight) {
+      if (force && inFlightGeneration !== generation) {
+        if (!queuedRevalidation) {
+          queuedRevalidation = inFlight.then(() => {
+            queuedRevalidation = null;
+            return fetch(fetchOptions);
+          });
+        }
+        return queuedRevalidation;
+      }
       return inFlight;
     }
 
@@ -105,6 +118,7 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
     }
 
     lastStartedAt = now;
+    const requestGeneration = generation;
     updateSnapshot({
       loading: silent ? snapshot.loading : true,
       error: null,
@@ -112,6 +126,9 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
 
     const request = options.fetcher()
       .then((data) => {
+        if (requestGeneration !== generation) {
+          return data;
+        }
         updateSnapshot({
           data,
           loading: false,
@@ -122,6 +139,9 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
         return data;
       })
       .catch((error: unknown) => {
+        if (requestGeneration !== generation) {
+          return snapshot.data;
+        }
         const data = resolveFallbackData(options.fallbackDataOnError, snapshot.data);
         updateSnapshot({
           data,
@@ -134,10 +154,12 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
       .finally(() => {
         if (inFlight === request) {
           inFlight = null;
+          inFlightGeneration = null;
         }
       });
 
     inFlight = request;
+    inFlightGeneration = requestGeneration;
     return request;
   };
 
@@ -150,8 +172,16 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
       };
     },
     fetch,
+    invalidate: () => {
+      generation += 1;
+      lastStartedAt = 0;
+      updateSnapshot({ updatedAt: 0 });
+    },
     resetForTesting: () => {
       inFlight = null;
+      inFlightGeneration = null;
+      queuedRevalidation = null;
+      generation = 0;
       lastStartedAt = 0;
       snapshot = {
         data: options.initialData,

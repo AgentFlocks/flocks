@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   __resetTaskResourcesForTesting,
+  __getTaskResourceCacheSizesForTesting,
   useQueueStatus,
   useTaskDashboard,
   useTaskExecutions,
@@ -171,5 +172,14 @@ describe('useTasks shared resources', () => {
     expect(result.current.loading).toBe(false);
     expect(result.current.records).toEqual([]);
     expect(listSchedulerExecutionsMock).not.toHaveBeenCalled();
+  });
+
+  it('bounds parameterized execution resources for long-lived sessions', () => {
+    for (let offset = 0; offset < 100; offset += 1) {
+      const hook = renderHook(() => useTaskExecutions({ offset, limit: 20 }));
+      hook.unmount();
+    }
+
+    expect(__getTaskResourceCacheSizesForTesting().executions).toBe(80);
   });
 });
