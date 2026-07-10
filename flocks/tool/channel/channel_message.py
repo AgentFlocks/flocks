@@ -25,6 +25,7 @@ _CHANNEL_ALIASES: dict[str, list[str]] = {
     "weixin": ["weixin", "微信", "wechat", "wx"],
     "feishu": ["feishu", "飞书", "lark"],
     "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
+    "teams": ["teams", "team", "msteams", "ms-teams", "微软teams", "微软 team"],
 }
 
 
@@ -131,7 +132,7 @@ async def _http_session_send(
     name="channel_message",
     description=(
         "Send a message to the IM channel bound to a session. "
-        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk. "
+        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk, Teams=teams. "
         "Resolves the target channel and chat automatically from session_id. "
         "Use channel_type to target a specific channel when the session has multiple bindings."
     ),
@@ -153,9 +154,9 @@ async def _http_session_send(
             name="channel_type",
             type=ParameterType.STRING,
             required=False,
-            enum=["wecom", "weixin", "feishu", "dingtalk", "企微", "企业微信", "微信", "飞书", "钉钉"],
+            enum=["wecom", "weixin", "feishu", "dingtalk", "teams", "企微", "企业微信", "微信", "飞书", "钉钉", "Teams"],
             description=(
-                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, or dingtalk=钉钉. "
+                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, dingtalk=钉钉, or teams=Microsoft Teams. "
                 "Chinese aliases are accepted. "
                 "If omitted and the session has only one binding, that channel is used automatically. "
                 "If omitted and the session has multiple bindings, the message is sent to all of them."

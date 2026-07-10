@@ -60,6 +60,7 @@ async def test_onboarding_status_uses_default_model_services_and_channels(isolat
                 "wecom": {"enabled": False},
                 "dingtalk": {"enabled": True},
                 "telegram": {"enabled": False},
+                "teams": {"enabled": True},
             },
         },
     )
@@ -104,6 +105,7 @@ async def test_onboarding_status_uses_default_model_services_and_channels(isolat
         "wecom": False,
         "dingtalk": True,
         "telegram": False,
+        "teams": True,
     }
 
 

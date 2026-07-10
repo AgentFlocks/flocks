@@ -1548,7 +1548,7 @@ class SessionRunner:
         """Build a brief system prompt snippet describing the IM channel context.
 
         When the current session was initiated from an IM channel (Feishu, WeCom,
-        or DingTalk), this injects a one-liner so the agent knows:
+        DingTalk, or Teams), this injects a one-liner so the agent knows:
           - which platform the user is on
           - the current Flocks session ID
 
@@ -1574,6 +1574,7 @@ class SessionRunner:
                 "feishu": "Feishu (飞书)",
                 "wecom": "WeCom (企业微信)",
                 "dingtalk": "DingTalk (钉钉)",
+                "teams": "Microsoft Teams",
             }
 
             parts = []

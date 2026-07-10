@@ -130,7 +130,7 @@ def _normalize_schedule_task_create_inputs(
         "'等会', '稍后', '待会', '有空时', '不着急'\n\n"
         "IMPORTANT — IM session resolution before creating:\n"
         "If the task involves sending a message to an IM platform "
-        "(企业微信/WeCom、微信/Weixin/WeChat、飞书/Feishu、钉钉/DingTalk), "
+        "(企业微信/WeCom、微信/Weixin/WeChat、飞书/Feishu、钉钉/DingTalk、Teams), "
         "you MUST resolve the target session_id and channel_type with im_send_message(resolve_only=true) "
         "BEFORE calling this tool. "
         "Use channel_type=wecom for 企业微信 and channel_type=weixin for 微信. "
@@ -150,7 +150,7 @@ def _normalize_schedule_task_create_inputs(
             type=ParameterType.STRING,
             description=(
                 "Detailed task description. "
-                "If the task involves sending a message to an IM platform (WeCom/Weixin/Feishu/DingTalk), "
+                "If the task involves sending a message to an IM platform (WeCom/Weixin/Feishu/DingTalk/Teams), "
                 "MUST include the resolved channel_type and session_id here. "
                 "Use channel_type=wecom for 企业微信 and channel_type=weixin for 微信. "
                 "Example: '每天早上8点向飞书群发送日报 channel_type=feishu session_id=ses_abc123'"
@@ -260,7 +260,7 @@ def _normalize_schedule_task_create_inputs(
                 "Example — user says: '帮我加个任务，明天上午扫描一下内网资产' "
                 "→ user_prompt should be: '扫描内网资产' "
                 "CRITICAL — IM tasks: If the action involves sending a message to an IM platform "
-                "(WeCom/Weixin/Feishu/DingTalk), you MUST include the resolved channel_type and session_id "
+                "(WeCom/Weixin/Feishu/DingTalk/Teams), you MUST include the resolved channel_type and session_id "
                 "in user_prompt. NEVER omit them — the task runs unattended and cannot ask the user. "
                 "Use channel_type=wecom for 企业微信 and channel_type=weixin for 微信. "
                 "Example — user says: '每天8点发飞书消息给研发群' (session already resolved to ses_abc123) "

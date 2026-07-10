@@ -129,6 +129,22 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
+interface TeamsChannelConfig {
+  enabled: boolean;
+  clientId?: string;
+  clientSecret?: string;
+  tenantId?: string;
+  serviceUrl?: string;
+  botId?: string;
+  defaultAgent?: string;
+  dmPolicy?: string;
+  groupTrigger?: string;
+  allowFrom?: string[];
+  textChunkLimit?: number;
+  rateLimit?: number;
+  rateBurst?: number;
+}
+
 interface WeixinChannelConfig {
   enabled: boolean;
   token?: string;
@@ -144,7 +160,7 @@ interface WeixinChannelConfig {
   dataDir?: string;
 }
 
-type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | WeixinChannelConfig;
+type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | TeamsChannelConfig | WeixinChannelConfig;
 
 function defaultFeishuConfig(): FeishuChannelConfig {
   return {
@@ -188,6 +204,17 @@ function defaultTelegramConfig(): TelegramChannelConfig {
     streaming: false,
     streamingCoalesceMs: 200,
     mentionContextMessages: 0,
+  };
+}
+
+function defaultTeamsConfig(): TeamsChannelConfig {
+  return {
+    enabled: false,
+    dmPolicy: 'open',
+    groupTrigger: 'mention',
+    textChunkLimit: 28000,
+    rateLimit: 5,
+    rateBurst: 3,
   };
 }
 
@@ -1397,6 +1424,128 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// Microsoft Teams Config Panel
+// ============================================================================
+
+interface TeamsPanelProps {
+  config: TeamsChannelConfig;
+  onChange: (c: TeamsChannelConfig) => void;
+}
+
+function TeamsPanel({ config, onChange }: TeamsPanelProps) {
+  const { t } = useTranslation('channel');
+  const set = useCallback(
+    <K extends keyof TeamsChannelConfig>(key: K, value: TeamsChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  return (
+    <>
+      <Section title={t('teams.credentials')} description={t('teams.credentialsDesc')}>
+        <FieldRow label="Client ID" required hint={t('teams.clientIdHint')}>
+          <TextInput
+            value={config.clientId ?? ''}
+            onChange={(v) => set('clientId', v || undefined)}
+            placeholder="00000000-0000-0000-0000-000000000000"
+          />
+        </FieldRow>
+        <FieldRow label="Client Secret" required hint={t('teams.clientSecretHint')}>
+          <SecretInput
+            value={config.clientSecret ?? ''}
+            onChange={(v) => set('clientSecret', v || undefined)}
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxx"
+          />
+        </FieldRow>
+        <FieldRow label="Tenant ID" required hint={t('teams.tenantIdHint')}>
+          <TextInput
+            value={config.tenantId ?? ''}
+            onChange={(v) => set('tenantId', v || undefined)}
+            placeholder="00000000-0000-0000-0000-000000000000"
+          />
+        </FieldRow>
+        <FieldRow label="Bot ID" hint={t('teams.botIdHint')}>
+          <TextInput
+            value={config.botId ?? ''}
+            onChange={(v) => set('botId', v || undefined)}
+            placeholder={t('teams.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('teams.serviceUrl')} hint={t('teams.serviceUrlHint')}>
+          <TextInput
+            value={config.serviceUrl ?? ''}
+            onChange={(v) => set('serviceUrl', v || undefined)}
+            placeholder="https://smba.trafficmanager.net/teams/"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('teams.behavior')} description={t('teams.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('teams.defaultAgent')} hint={t('teams.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('teams.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('teams.dmPolicy')} hint={t('teams.dmPolicyHint')}>
+          <Select
+            value={config.dmPolicy ?? 'open'}
+            onChange={(v) => set('dmPolicy', v)}
+            options={[
+              { value: 'open', label: t('teams.dmPolicyOpen') },
+              { value: 'allowlist', label: t('teams.dmPolicyAllowlist') },
+              { value: 'disabled', label: t('teams.dmPolicyDisabled') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('teams.groupTrigger')} hint={t('teams.groupTriggerHint')}>
+          <Select
+            value={config.groupTrigger ?? 'mention'}
+            onChange={(v) => set('groupTrigger', v)}
+            options={[
+              { value: 'mention', label: t('teams.triggerMention') },
+              { value: 'all', label: t('teams.triggerAll') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('teams.allowFrom')} hint={t('teams.allowFromHint')}>
+          <TagsInput
+            value={config.allowFrom ?? []}
+            onChange={(v) => set('allowFrom', v.length ? v : undefined)}
+            placeholder={t('teams.allowFromPlaceholder')}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('teams.advanced')} description={t('teams.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('teams.textChunkLimit')} hint={t('teams.textChunkLimitHint')}>
+          <NumberInput
+            value={config.textChunkLimit ?? 28000}
+            onChange={(v) => set('textChunkLimit', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('teams.rateLimit')} hint={t('teams.rateLimitHint')}>
+          <NumberInput
+            value={config.rateLimit ?? 5}
+            onChange={(v) => set('rateLimit', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('teams.rateBurst')} hint={t('teams.rateBurstHint')}>
+          <NumberInput
+            value={config.rateBurst ?? 3}
+            onChange={(v) => set('rateBurst', v)}
+            min={1}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
 // Weixin Config Panel
 // ============================================================================
 
@@ -1956,6 +2105,8 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'teams') {
+          configs[ch.id] = { ...defaultTeamsConfig(), ...saved };
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -2279,6 +2430,12 @@ export default function ChannelPage() {
                       config={selectedConfig as TelegramChannelConfig}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
+                    />
+                  )}
+                  {selectedId === 'teams' && (
+                    <TeamsPanel
+                      config={selectedConfig as TeamsChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('teams', cfg)}
                     />
                   )}
                   {selectedId === 'weixin' && (

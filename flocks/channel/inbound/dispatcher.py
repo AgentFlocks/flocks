@@ -142,9 +142,10 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
     -----
     * ``dm_policy = "open"``       — all DMs are allowed (default).
     * ``dm_policy = "allowlist"``  — only senders in ``allow_from``.
+    * ``dm_policy = "disabled"``   — DMs are blocked.
     * ``dm_policy = "pairing"``    — reserved for future 1-on-1 flow.
     * Group messages are subject to ``allow_from`` when the list is
-      non-empty, but are otherwise unrestricted.
+      non-empty. Both sender id and chat/conversation id are accepted.
     """
     allow_from = config.allow_from
     dm_policy = config.dm_policy or "open"
@@ -157,11 +158,14 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
                 log.debug("allowlist.dm_blocked_no_list", {"sender": msg.sender_id})
                 return False
             return msg.sender_id in allow_from
+        if dm_policy == "disabled":
+            log.debug("allowlist.dm_blocked_disabled", {"sender": msg.sender_id})
+            return False
         if dm_policy == "pairing":
             return True
         return True
 
-    if allow_from and msg.sender_id not in allow_from:
+    if allow_from and msg.sender_id not in allow_from and msg.chat_id not in allow_from:
         log.debug("allowlist.group_blocked", {
             "sender": msg.sender_id, "chat_id": msg.chat_id,
         })
@@ -716,7 +720,7 @@ class InboundDispatcher:
             return False
 
         event = UserInputEvent(
-            source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram"} else "channel",
+            source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram", "teams"} else "channel",
             sessionID=binding.session_id,
             text=normalised_text,
             parts=[{"type": "text", "text": normalised_text}],

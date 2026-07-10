@@ -1,6 +1,6 @@
 {
   "pageTitle": "Channels",
-  "pageDescription": "IM channel configuration (Feishu, WeCom, DingTalk)",
+  "pageDescription": "IM channel configuration (Feishu, WeCom, DingTalk, Telegram, Teams)",
   "cardTitle": "Channel Configuration",
   "cardDesc": "Configure IM bot integrations to allow AI Agents to receive and send messages on Feishu, WeCom, and other platforms.",
   "tabs": {
@@ -12,6 +12,7 @@
     "wecom": "WeCom",
     "dingtalk": "DingTalk",
     "telegram": "Telegram",
+    "teams": "Microsoft Teams",
     "weixin": "WeChat"
   },
   "status": {
@@ -232,6 +233,41 @@
     "inboundDebounceMsHint": "Wait time for merging consecutive messages, 0 to disable (default 800ms)",
     "dedupTtlSeconds": "Dedup TTL (seconds)",
     "dedupTtlSecondsHint": "Retention time for message deduplication records (default 86400s = 24h)",
+    "optional": "Optional"
+  },
+  "teams": {
+    "credentials": "Bot Credentials",
+    "credentialsDesc": "Configure the Microsoft Entra app credentials used by the Teams bot.",
+    "clientIdHint": "Microsoft Entra Application (client) ID",
+    "clientSecretHint": "Client secret for the Teams bot application",
+    "tenantIdHint": "Microsoft Entra Directory (tenant) ID",
+    "botIdHint": "Optional bot app ID used to filter self-sent messages",
+    "serviceUrl": "Service URL",
+    "serviceUrlHint": "Optional Bot Framework service URL override",
+    "behavior": "Message Behavior",
+    "behaviorDesc": "Configure routing, DM policy, and group trigger conditions.",
+    "defaultAgent": "Default Agent",
+    "defaultAgentHint": "Default Agent ID used when no Agent is specified",
+    "dmPolicy": "DM Policy",
+    "dmPolicyHint": "Controls which users' direct messages can trigger the Agent",
+    "dmPolicyOpen": "Open (everyone allowed)",
+    "dmPolicyAllowlist": "Allowlist (only listed users)",
+    "dmPolicyDisabled": "Disabled (no DMs accepted)",
+    "groupTrigger": "Group Trigger",
+    "groupTriggerHint": "When to trigger Agent response in Teams chats and channels",
+    "triggerMention": "Only when @mentioned",
+    "triggerAll": "All messages",
+    "allowFrom": "Allowed User / Chat IDs",
+    "allowFromHint": "Allowlist of Teams user IDs or conversation IDs. Leave empty to allow everyone.",
+    "allowFromPlaceholder": "Enter Teams user ID or conversation ID and press Enter",
+    "advanced": "Advanced Settings",
+    "advancedDesc": "Message chunking and outbound rate limits.",
+    "textChunkLimit": "Text Chunk Limit",
+    "textChunkLimitHint": "Maximum characters per Teams message",
+    "rateLimit": "Rate Limit",
+    "rateLimitHint": "Maximum outbound messages per second",
+    "rateBurst": "Rate Burst",
+    "rateBurstHint": "Maximum burst size for outbound messages",
     "optional": "Optional"
   },
   "weixin": {

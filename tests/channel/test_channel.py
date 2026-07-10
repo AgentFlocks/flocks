@@ -1059,10 +1059,10 @@ class TestMultimodalInput:
 # =====================================================================
 
 class TestCheckAllowlist:
-    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1"):
+    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1", chat_id="chat1"):
         return InboundMessage(
             channel_id="test", account_id="acc", message_id="m1",
-            sender_id=sender_id, chat_type=chat_type,
+            sender_id=sender_id, chat_type=chat_type, chat_id=chat_id,
         )
 
     def test_dm_open_allows_all(self):
@@ -1085,11 +1085,22 @@ class TestCheckAllowlist:
         cfg = ChannelConfig(dm_policy="allowlist", allow_from=None)
         assert _check_allowlist(self._make_msg(), cfg) is False
 
+    def test_dm_disabled_blocks_direct_messages(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="disabled")
+        assert _check_allowlist(self._make_msg(chat_type=ChatType.DIRECT), cfg) is False
+
     def test_group_allow_from_blocks(self):
         from flocks.channel.inbound.dispatcher import _check_allowlist
         cfg = ChannelConfig(allow_from=["u2"])
         msg = self._make_msg(chat_type=ChatType.GROUP, sender_id="u1")
         assert _check_allowlist(msg, cfg) is False
+
+    def test_group_allow_from_accepts_chat_id(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="disabled", allow_from=["chat1"])
+        msg = self._make_msg(chat_type=ChatType.GROUP, sender_id="u1", chat_id="chat1")
+        assert _check_allowlist(msg, cfg) is True
 
     def test_group_no_allow_from_passes(self):
         from flocks.channel.inbound.dispatcher import _check_allowlist

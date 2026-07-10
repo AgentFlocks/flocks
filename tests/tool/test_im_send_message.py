@@ -51,6 +51,14 @@ def test_im_send_message_normalizes_wecom_aliases() -> None:
     assert _normalize_channel_type("wxwork") == "wecom"
 
 
+def test_im_send_message_normalizes_teams_aliases() -> None:
+    assert _normalize_channel_type("teams") == "teams"
+    assert _normalize_channel_type("Teams") == "teams"
+    assert _normalize_channel_type("team") == "teams"
+    assert _normalize_channel_type("msteams") == "teams"
+    assert _normalize_channel_type("微软Teams") == "teams"
+
+
 @pytest.mark.asyncio
 async def test_im_send_message_requires_message_unless_resolve_only() -> None:
     result = await im_send_message(_ctx(), session_id="ses_target")

@@ -22,7 +22,7 @@ from flocks.server.routes.provider import get_provider_credentials, get_service_
 
 THREATBOOK_PROVIDER_IDS = {"threatbook-cn-llm", "threatbook-io-llm"}
 SECURITY_SERVICES = ("virustotal", "fofa", "urlscan", "shodan")
-KNOWN_CHANNELS = ("feishu", "wecom", "dingtalk", "telegram")
+KNOWN_CHANNELS = ("feishu", "wecom", "dingtalk", "telegram", "teams")
 PROVIDER_SECRET_CANDIDATES = {
     "openai": ("openai_llm_key", "openai_api_key"),
     "anthropic": ("anthropic_llm_key", "anthropic_api_key"),

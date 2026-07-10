@@ -1,6 +1,6 @@
 {
   "pageTitle": "通道",
-  "pageDescription": "IM 通道连接配置（飞书、企业微信、钉钉）",
+  "pageDescription": "IM 通道连接配置（飞书、企业微信、钉钉、Telegram、Teams）",
   "cardTitle": "通道配置",
   "cardDesc": "配置 IM 机器人接入，让 AI Agent 能够在飞书、企业微信等平台上接收和发送消息。",
   "tabs": {
@@ -12,6 +12,7 @@
     "wecom": "企业微信",
     "dingtalk": "钉钉",
     "telegram": "Telegram",
+    "teams": "Microsoft Teams",
     "weixin": "微信"
   },
   "status": {
@@ -234,6 +235,41 @@
     "inboundDebounceMsHint": "连续消息合并等待时间，0 表示禁用（默认 800ms）",
     "dedupTtlSeconds": "去重 TTL (秒)",
     "dedupTtlSecondsHint": "消息去重记录的保留时间（默认 86400 秒 = 24 小时）",
+    "optional": "选填"
+  },
+  "teams": {
+    "credentials": "机器人凭证",
+    "credentialsDesc": "配置 Teams 机器人使用的 Microsoft Entra 应用凭证。",
+    "clientIdHint": "Microsoft Entra 应用的 Application (client) ID",
+    "clientSecretHint": "Teams 机器人应用的 Client Secret",
+    "tenantIdHint": "Microsoft Entra Directory (tenant) ID",
+    "botIdHint": "可选，用于过滤机器人自己发送的消息",
+    "serviceUrl": "Service URL",
+    "serviceUrlHint": "可选的 Bot Framework serviceUrl 覆盖值",
+    "behavior": "消息行为",
+    "behaviorDesc": "配置消息路由、私信策略和群聊触发条件。",
+    "defaultAgent": "默认 Agent",
+    "defaultAgentHint": "未指定 Agent 时使用的默认 Agent ID",
+    "dmPolicy": "私信策略",
+    "dmPolicyHint": "控制哪些用户的私信可以触发 Agent",
+    "dmPolicyOpen": "开放（所有人均可）",
+    "dmPolicyAllowlist": "白名单（仅允许名单内用户）",
+    "dmPolicyDisabled": "关闭（不接受私信）",
+    "groupTrigger": "群聊触发方式",
+    "groupTriggerHint": "Teams 群聊和频道中什么情况下触发 Agent 响应",
+    "triggerMention": "仅 @ 提及时触发",
+    "triggerAll": "所有消息都触发",
+    "allowFrom": "允许的用户 / 会话 ID",
+    "allowFromHint": "Teams 用户 ID 或 conversation ID 白名单。留空则允许所有人。",
+    "allowFromPlaceholder": "输入 Teams 用户 ID 或 conversation ID 后按回车添加",
+    "advanced": "高级设置",
+    "advancedDesc": "消息分块和出站限速设置。",
+    "textChunkLimit": "文本分块上限",
+    "textChunkLimitHint": "单条 Teams 消息的最大字符数",
+    "rateLimit": "发送速率",
+    "rateLimitHint": "每秒最多发送的消息数",
+    "rateBurst": "突发容量",
+    "rateBurstHint": "短时间内允许的最大突发消息数",
     "optional": "选填"
   },
   "weixin": {
