@@ -41,6 +41,12 @@ from flocks.mcp.utils import (
 )
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security.action_gateway import (
+    ActionDecisionError,
+    SecurityAction,
+    enforce_action_decision,
+    run_before_action,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -231,6 +237,17 @@ async def add_mcp_server(request: McpAddRequest):
     Returns the updated status of ALL MCP servers (not just the new one).
     """
     try:
+        decision = await run_before_action(
+            SecurityAction(
+                action="configure",
+                resource={"type": "mcp_server", "id": request.name},
+                canonical_input=request.config,
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
+
         # Extract any API key embedded in the URL and move it to .secret.json.
         # The URL is rewritten to use a {secret:...} reference so that the
         # plain-text credential is never written to flocks.json.
@@ -274,6 +291,8 @@ async def add_mcp_server(request: McpAddRequest):
 
         # Return updated status, including configured-but-not-connected entries.
         return await _build_mcp_status_response()
+    except ActionDecisionError:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -413,6 +432,17 @@ async def remove_mcp_server(name: str):
     Returns {"success": true} on success.
     """
     try:
+        decision = await run_before_action(
+            SecurityAction(
+                action="delete",
+                resource={"type": "mcp_server", "id": name},
+                canonical_input={},
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
+
         # Try to remove from persistent config (may not exist if server was only in memory)
         removed_from_config = ConfigWriter.remove_mcp_server(name)
 
@@ -446,6 +476,8 @@ async def remove_mcp_server(name: str):
 
         log.info("mcp.remove.success", {"name": name, "from_config": removed_from_config, "from_memory": in_memory})
         return {"success": True}
+    except ActionDecisionError:
+        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -472,6 +504,16 @@ async def update_mcp_server(name: str, request: McpUpdateRequest):
         updated_config = restore_masked_mcp_config_secrets(
             existing_config, updated_config
         )
+        decision = await run_before_action(
+            SecurityAction(
+                action="configure",
+                resource={"type": "mcp_server", "id": name},
+                canonical_input=updated_config,
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
         clean_config = _prepare_mcp_config_for_save(name, updated_config)
         _persist_mcp_server_config(name, clean_config)
 
@@ -543,6 +585,8 @@ async def update_mcp_server(name: str, request: McpUpdateRequest):
             "reconnected": reconnected,
             "reconnect_error": reconnect_error,
         }
+    except ActionDecisionError:
+        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -863,10 +907,20 @@ async def set_mcp_credentials(name: str, request: McpCredentialRequest):
         if not request.api_key:
             raise HTTPException(status_code=400, detail="API key required")
 
-        secrets = get_secret_manager()
-
         # Use provided secret_id or convention-based default (_mcp_key for MCP servers)
         secret_id = request.secret_id or f"{name}_mcp_key"
+        decision = await run_before_action(
+            SecurityAction(
+                action="use_secret",
+                resource={"type": "secret", "id": secret_id},
+                canonical_input={"secret_id": secret_id, "operation": "set"},
+                execution_domain="control_plane",
+                metadata={"entry": "api", "mcp_server": name},
+            )
+        )
+        enforce_action_decision(decision)
+
+        secrets = get_secret_manager()
         secrets.set(secret_id, request.api_key)
 
         log.info("mcp.credentials.set", {"name": name, "secret_id": secret_id})
@@ -877,6 +931,8 @@ async def set_mcp_credentials(name: str, request: McpCredentialRequest):
             "secret_id": secret_id,
         }
 
+    except ActionDecisionError:
+        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -895,11 +951,23 @@ async def delete_mcp_credentials(name: str):
     from flocks.security import get_secret_manager
 
     try:
-        secrets = get_secret_manager()
         # Delete both current (_mcp_key) and legacy (_api_key) entries
         secret_id = f"{name}_mcp_key"
+        legacy_id = f"{name}_api_key"
+        decision = await run_before_action(
+            SecurityAction(
+                action="delete",
+                resource={"type": "secret", "id": secret_id},
+                canonical_input={"secret_ids": [secret_id, legacy_id]},
+                execution_domain="control_plane",
+                metadata={"entry": "api", "mcp_server": name},
+            )
+        )
+        enforce_action_decision(decision)
+
+        secrets = get_secret_manager()
         deleted = secrets.delete(secret_id)
-        deleted = secrets.delete(f"{name}_api_key") or deleted
+        deleted = secrets.delete(legacy_id) or deleted
 
         if deleted:
             log.info("mcp.credentials.deleted", {"name": name, "secret_id": secret_id})
@@ -907,6 +975,8 @@ async def delete_mcp_credentials(name: str):
         else:
             raise HTTPException(status_code=404, detail="No credentials found for this server")
 
+    except ActionDecisionError:
+        raise
     except HTTPException:
         raise
     except Exception as e:

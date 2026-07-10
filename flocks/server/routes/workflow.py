@@ -88,6 +88,12 @@ from flocks.workflow.triggers.compat import (
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
+from flocks.security.action_gateway import (
+    ActionDecisionError,
+    SecurityAction,
+    enforce_action_decision,
+    run_before_action,
+)
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
 
@@ -2451,6 +2457,16 @@ async def publish_workflow_as_api(
     starts the selected runtime, and returns the service URL and generated API key.
     """
     try:
+        decision = await run_before_action(
+            SecurityAction(
+                action="publish",
+                resource={"type": "workflow", "id": workflow_id},
+                canonical_input=req.model_dump(exclude_none=True) if req else {},
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
         data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
         # Preserve existing API key across re-publishes so callers don't break.
@@ -2489,6 +2505,8 @@ async def publish_workflow_as_api(
 
         log.info("workflow.api.published", {"id": workflow_id, "url": service_url})
         return service_info
+    except ActionDecisionError:
+        raise
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
@@ -2511,6 +2529,17 @@ async def unpublish_workflow_api(workflow_id: str):
         if not existing:
             raise HTTPException(status_code=404, detail="No published service found for this workflow")
 
+        decision = await run_before_action(
+            SecurityAction(
+                action="unpublish",
+                resource={"type": "workflow", "id": workflow_id},
+                canonical_input={},
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
+
         try:
             await stop_workflow_service(workflow_id)
         except (WorkflowNotFoundError, WorkflowNotPublishedError):
@@ -2522,6 +2551,8 @@ async def unpublish_workflow_api(workflow_id: str):
 
         log.info("workflow.api.unpublished", {"id": workflow_id})
         return {"ok": True}
+    except ActionDecisionError:
+        raise
     except HTTPException:
         raise
     except Exception as e:

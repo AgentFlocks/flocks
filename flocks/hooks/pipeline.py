@@ -155,6 +155,7 @@ class HookStage:
     LLM_AFTER = "llm.call.after"
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
+    ACTION_BEFORE = "action.before"
     EVENT = "event"
     CHANNEL_INBOUND = "channel.inbound"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
@@ -167,6 +168,7 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.LLM_AFTER: 5.0,
     HookStage.TOOL_BEFORE: 5.0,
     HookStage.TOOL_AFTER: 5.0,
+    HookStage.ACTION_BEFORE: 5.0,
     HookStage.CHANNEL_INBOUND: 5.0,
     HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
@@ -195,6 +197,9 @@ class HookBase:
         return None
 
     async def tool_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def action_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def event(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -382,6 +387,14 @@ class HookPipeline:
         return await cls._run_stage(HookStage.TOOL_AFTER, input_data, output_data)
 
     @classmethod
+    async def run_action_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.ACTION_BEFORE, input_data, output_data)
+
+    @classmethod
     async def run_event(
         cls,
         input_data: Dict[str, Any],
@@ -446,6 +459,7 @@ class HookPipeline:
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
         handler_count = 0
+        decision_stage = stage in {HookStage.TOOL_BEFORE, HookStage.ACTION_BEFORE}
         decision_expected = bool(ctx.output.get("policy_engine_present"))
         current_decision = normalize_tool_decision(
             ctx.output,
@@ -459,7 +473,7 @@ class HookPipeline:
             decision_before = _MISSING
             decision_snapshot = _MISSING
             policy_was_expected = decision_expected
-            if stage == HookStage.TOOL_BEFORE:
+            if decision_stage:
                 decision_before = ctx.output.get("decision", _MISSING)
                 decision_snapshot = (
                     deepcopy(decision_before)
@@ -500,7 +514,7 @@ class HookPipeline:
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
-            if stage == HookStage.TOOL_BEFORE:
+            if decision_stage:
                 policy_marker_present = bool(ctx.output.get("policy_engine_present"))
                 active_policy_started = not policy_was_expected and policy_marker_present
                 decision_expected = policy_was_expected or policy_marker_present
@@ -591,6 +605,8 @@ class HookPipeline:
             return getattr(hook, "tool_before", None)
         if stage == HookStage.TOOL_AFTER:
             return getattr(hook, "tool_after", None)
+        if stage == HookStage.ACTION_BEFORE:
+            return getattr(hook, "action_before", None)
         if stage == HookStage.EVENT:
             return getattr(hook, "event", None)
         if stage == HookStage.CHANNEL_INBOUND:

@@ -29,6 +29,12 @@ from defusedxml.common import DefusedXmlException
 from flocks.config.config import Config, GlobalConfig, ConfigInfo as ConfigInfoModel, UIConfig
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.provider import Provider
+from flocks.security.action_gateway import (
+    ActionDecisionError,
+    SecurityAction,
+    enforce_action_decision,
+    run_before_action,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -554,6 +560,17 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     flocks.json, so that plaintext secrets never land in that file.
     """
     try:
+        decision = await run_before_action(
+            SecurityAction(
+                action="configure",
+                resource={"type": "control_plane_config", "id": "flocks"},
+                canonical_input=config_data,
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
+
         # Extract channel sensitive fields into .secret.json before persisting
         if "channels" in config_data and isinstance(config_data.get("channels"), dict):
             from flocks.security.channel_secrets import extract_channel_secrets
@@ -571,6 +588,8 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         log.info("config.updated")
         
         return await get_config()
+    except ActionDecisionError:
+        raise
     except Exception as e:
         log.error("config.update.error", {"error": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
