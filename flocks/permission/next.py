@@ -227,6 +227,9 @@ class PermissionNext:
         reply: str,
         session_id: Optional[str] = None,
     ) -> None:
+        if request_info.metadata.get("strict_once") is True:
+            return
+
         resolved_session_id = session_id or request_info.session_id
         permission = request_info.permission
 
@@ -268,46 +271,49 @@ class PermissionNext:
         always_patterns = always or []
         strict_once = bool(metadata.get("strict_once")) if isinstance(metadata, dict) else False
 
-        if os.environ.get("FLOCKS_AUTO_APPROVE") == "true" and not strict_once:
-            log.debug("permission.auto_approved", {
-                "permission": permission,
-                "reason": "FLOCKS_AUTO_APPROVE=true",
-            })
-            return
-
-        session_perms = cls._session_permissions.get(session_id, {})
-        if permission in session_perms:
-            action = session_perms[permission]
-            if action == "allow":
+        if not strict_once:
+            if os.environ.get("FLOCKS_AUTO_APPROVE") == "true":
+                log.debug("permission.auto_approved", {
+                    "permission": permission,
+                    "reason": "FLOCKS_AUTO_APPROVE=true",
+                })
                 return
-            if action == "deny":
-                raise DeniedError([])
 
-        if permission in cls._permanent_rules:
-            action = cls._permanent_rules[permission]
-            if action in ("allow", "always"):
-                return
-            if action in ("deny", "never"):
-                raise DeniedError([])
-
-        if ruleset:
-            action = cls._evaluate(permission, patterns[0] if patterns else "*", ruleset)
-            if action == "allow":
-                return
-            if action == "deny":
-                matching_rules = [
-                    rule for rule in ruleset
-                    if cls._pattern_matches(permission, rule.permission or "*")
-                    and cls._pattern_matches(patterns[0] if patterns else "*", rule.pattern or "*")
-                ]
-                raise DeniedError(matching_rules)
-
-        if always_patterns:
-            for pattern in always_patterns:
-                if cls._pattern_matches(patterns[0] if patterns else "*", pattern):
+            session_perms = cls._session_permissions.get(session_id, {})
+            if permission in session_perms:
+                action = session_perms[permission]
+                if action == "allow":
                     return
+                if action == "deny":
+                    raise DeniedError([])
+
+            if permission in cls._permanent_rules:
+                action = cls._permanent_rules[permission]
+                if action in ("allow", "always"):
+                    return
+                if action in ("deny", "never"):
+                    raise DeniedError([])
+
+            if ruleset:
+                action = cls._evaluate(permission, patterns[0] if patterns else "*", ruleset)
+                if action == "allow":
+                    return
+                if action == "deny":
+                    matching_rules = [
+                        rule for rule in ruleset
+                        if cls._pattern_matches(permission, rule.permission or "*")
+                        and cls._pattern_matches(patterns[0] if patterns else "*", rule.pattern or "*")
+                    ]
+                    raise DeniedError(matching_rules)
+
+            if always_patterns:
+                for pattern in always_patterns:
+                    if cls._pattern_matches(patterns[0] if patterns else "*", pattern):
+                        return
 
         req_id = request_id or Identifier.create("permission")
+        if strict_once:
+            await cls._delete_reply(req_id)
         request_info = PermissionRequestInfo(
             id=req_id,
             sessionID=session_id,
@@ -344,10 +350,11 @@ class PermissionNext:
         timeout_at = asyncio.get_running_loop().time() + 300
         reply: Optional[str] = None
         while reply is None:
-            persisted_reply = await cls._consume_persisted_reply(req_id)
-            if persisted_reply is not None:
-                reply = persisted_reply
-                break
+            if not strict_once:
+                persisted_reply = await cls._consume_persisted_reply(req_id)
+                if persisted_reply is not None:
+                    reply = persisted_reply
+                    break
 
             remaining = timeout_at - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -436,7 +443,14 @@ class PermissionNext:
         if pending is None:
             log.warn("permission.reply.not_found", {"request_id": request_id})
             resolved_session_id = session_id or (pending_info.session_id if pending_info else None)
-            await cls._persist_reply(request_id, reply, session_id=resolved_session_id)
+            strict_once = bool(
+                pending_info is not None
+                and pending_info.metadata.get("strict_once") is True
+            )
+            if strict_once:
+                await cls._delete_reply(request_id)
+            else:
+                await cls._persist_reply(request_id, reply, session_id=resolved_session_id)
             if pending_info is not None:
                 await cls._apply_reply_without_future(
                     pending_info,

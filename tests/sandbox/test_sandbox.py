@@ -1112,6 +1112,11 @@ class TestStreamProcessorSandboxMeta:
         result = await processor._resolve_sandbox_meta("delegate_task")
         assert result["blocked"] is True
         assert "blocked by sandbox tool policy" in result["error"]
+        assert result["extra"]["tool_policy_constraint"] == {
+            "allowed": False,
+            "tool": "delegate_task",
+            "source": "sandbox.tool_policy",
+        }
 
     @pytest.mark.asyncio
     async def test_sandbox_meta_non_file_tool_passes(self):

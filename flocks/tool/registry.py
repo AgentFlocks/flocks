@@ -483,7 +483,7 @@ class ToolContext:
         request = PermissionRequest(
             permission=permission,
             patterns=patterns,
-            always=always or ["*"],
+            always=["*"] if always is None else list(always),
             metadata=metadata or {}
         )
 

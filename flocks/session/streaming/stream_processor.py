@@ -1111,9 +1111,12 @@ class StreamProcessor:
                 )
 
             if not is_tool_allowed(runtime.tool_policy, tool_name):
-                # B3: tool_policy remains a visibility/constraint signal only.
-                # Final allow/deny must come from Policy Engine in tool gateway.
-                result["extra"]["tool_policy_hint"] = {
+                result["blocked"] = True
+                result["error"] = (
+                    f"Tool '{tool_name}' is blocked by sandbox tool policy. "
+                    "Update sandbox.tools.allow/deny in ~/.flocks/config/flocks.json if needed."
+                )
+                result["extra"]["tool_policy_constraint"] = {
                     "allowed": False,
                     "tool": tool_name,
                     "source": "sandbox.tool_policy",
@@ -1144,12 +1147,10 @@ class StreamProcessor:
                 container_workdir=sandbox_ctx.container_workdir,
                 env=sandbox_ctx.docker.env,
             )
-            result["extra"] = {
-                "sandbox": {
-                    **sandbox.model_dump(exclude_none=True),
-                    "workspace_access": sandbox_ctx.workspace_access,
-                    "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
-                }
+            result["extra"]["sandbox"] = {
+                **sandbox.model_dump(exclude_none=True),
+                "workspace_access": sandbox_ctx.workspace_access,
+                "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
             }
             elevated_cfg = getattr(self._sandbox_config_cache, "elevated", None)
             if elevated_cfg and elevated_cfg.enabled:
