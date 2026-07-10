@@ -104,6 +104,11 @@ def _build_tool_hook_payload(
         "canonical": canonical_payload,
         "canonical_hash": canonical_payload.get("hash"),
     }
+    tool_policy_constraint = (ctx.extra or {}).get("tool_policy_constraint")
+    if isinstance(tool_policy_constraint, dict):
+        # Keep the execution context's ``extra`` untouched while exposing the
+        # structured sandbox constraint at the hook contract boundary.
+        payload["tool_policy_constraint"] = deepcopy(tool_policy_constraint)
     if decision is not None:
         payload["decision"] = dict(decision)
     if permission_checked is not None:

@@ -185,6 +185,43 @@ async def test_registry_fails_closed_on_malformed_active_policy_decision(
 
 
 @pytest.mark.asyncio
+async def test_registry_forwards_tool_policy_constraint_to_hook_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ToolRegistry.init()
+    tool_name = "b3_registry_hook_constraint_forward"
+    constraint = {
+        "allowed": False,
+        "tool": tool_name,
+        "source": "sandbox.tool_policy",
+    }
+    extra = {"tool_policy_constraint": constraint, "sandbox": {"enabled": True}}
+
+    async def _handler(ctx: ToolContext, value: str) -> ToolResult:
+        return ToolResult(success=True, output=value)
+
+    _register_test_tool(tool_name, _handler)
+    try:
+        run_before = AsyncMock(return_value=SimpleNamespace(output={"decision": {"action": "allow"}}))
+        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
+        monkeypatch.setattr(
+            "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+            AsyncMock(return_value=SimpleNamespace(output={})),
+        )
+        monkeypatch.setattr(registry_mod, "_emit_tool_audit", AsyncMock())
+
+        ctx = ToolContext(session_id="s-hook", message_id="m-hook", extra=extra)
+        result = await ToolRegistry.execute(tool_name, ctx=ctx, value="hello")
+    finally:
+        ToolRegistry.unregister(tool_name)
+
+    assert result.success is True
+    hook_payload = run_before.await_args.args[0]
+    assert hook_payload["tool_policy_constraint"] == constraint
+    assert ctx.extra == extra
+
+
+@pytest.mark.asyncio
 async def test_registry_returns_pending_metadata_for_approval_mode(monkeypatch: pytest.MonkeyPatch):
     ToolRegistry.init()
     tool_name = "b3_registry_hook_approval_pending"
