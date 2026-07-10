@@ -129,6 +129,29 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
+interface LineChannelConfig {
+  enabled: boolean;
+  channelAccessToken?: string;
+  channelSecret?: string;
+  botUserId?: string;
+  botMentionText?: string;
+  defaultAgent?: string;
+  groupTrigger?: string;
+  allowFrom?: string[];
+  allowedUsers?: string[];
+  allowedGroups?: string[];
+  allowedRooms?: string[];
+  allowAll?: boolean;
+  pushFallback?: boolean;
+  textChunkLimit?: number;
+  rateLimit?: number;
+  rateBurst?: number;
+  timeoutSeconds?: number;
+  apiRoot?: string;
+  dataApiRoot?: string;
+  videoPreviewUrl?: string;
+}
+
 interface WeixinChannelConfig {
   enabled: boolean;
   token?: string;
@@ -144,7 +167,7 @@ interface WeixinChannelConfig {
   dataDir?: string;
 }
 
-type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | WeixinChannelConfig;
+type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | LineChannelConfig | WeixinChannelConfig;
 
 function defaultFeishuConfig(): FeishuChannelConfig {
   return {
@@ -188,6 +211,23 @@ function defaultTelegramConfig(): TelegramChannelConfig {
     streaming: false,
     streamingCoalesceMs: 200,
     mentionContextMessages: 0,
+  };
+}
+
+function defaultLineConfig(): LineChannelConfig {
+  return {
+    enabled: false,
+    groupTrigger: 'mention',
+    allowFrom: [],
+    allowedUsers: [],
+    allowedGroups: [],
+    allowedRooms: [],
+    allowAll: false,
+    pushFallback: true,
+    textChunkLimit: 4500,
+    rateLimit: 10,
+    rateBurst: 3,
+    timeoutSeconds: 30,
   };
 }
 
@@ -644,6 +684,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           {channelId === 'dingtalk' && 'Stream'}
           {channelId === 'weixin' && 'Long-Poll'}
           {channelId === 'telegram' && ((config as TelegramChannelConfig).mode === 'webhook' ? 'Webhook' : 'Polling')}
+          {channelId === 'line' && 'Webhook'}
         </span>
       </div>
 
@@ -1397,6 +1438,169 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// LINE Config Panel
+// ============================================================================
+
+interface LinePanelProps {
+  config: LineChannelConfig;
+  onChange: (c: LineChannelConfig) => void;
+}
+
+function LinePanel({ config, onChange }: LinePanelProps) {
+  const { t } = useTranslation('channel');
+  const set = useCallback(
+    <K extends keyof LineChannelConfig>(key: K, value: LineChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  return (
+    <>
+      <Section title={t('line.credentials')} description={t('line.credentialsDesc')}>
+        <FieldRow label={t('line.channelAccessToken')} required hint={t('line.channelAccessTokenHint')}>
+          <SecretInput
+            value={config.channelAccessToken ?? ''}
+            onChange={(v) => set('channelAccessToken', v || undefined)}
+            placeholder="Channel access token (long-lived)"
+          />
+        </FieldRow>
+        <FieldRow label={t('line.channelSecret')} required hint={t('line.channelSecretHint')}>
+          <SecretInput
+            value={config.channelSecret ?? ''}
+            onChange={(v) => set('channelSecret', v || undefined)}
+            placeholder="Channel secret"
+          />
+        </FieldRow>
+        <FieldRow label={t('line.webhookUrl')} hint={t('line.webhookUrlHint')}>
+          <TextInput
+            value="/api/channel/line/webhook"
+            onChange={() => undefined}
+            disabled
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('line.behavior')} description={t('line.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('line.defaultAgent')} hint={t('line.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('line.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.groupTrigger')} hint={t('line.groupTriggerHint')}>
+          <Select
+            value={config.groupTrigger ?? 'mention'}
+            onChange={(v) => set('groupTrigger', v)}
+            options={[
+              { value: 'mention', label: t('line.triggerMention') },
+              { value: 'all', label: t('line.triggerAll') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.botUserId')} hint={t('line.botUserIdHint')}>
+          <TextInput
+            value={config.botUserId ?? ''}
+            onChange={(v) => set('botUserId', v || undefined)}
+            placeholder="Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          />
+        </FieldRow>
+        <FieldRow label={t('line.botMentionText')} hint={t('line.botMentionTextHint')}>
+          <TextInput
+            value={config.botMentionText ?? ''}
+            onChange={(v) => set('botMentionText', v || undefined)}
+            placeholder="@Flocks"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('line.accessControl')} description={t('line.accessControlDesc')} defaultOpen={false}>
+        <FieldRow label={t('line.allowAll')} hint={t('line.allowAllHint')}>
+          <Toggle
+            checked={config.allowAll ?? false}
+            onChange={(v) => set('allowAll', v)}
+            label={t('line.allowAllLabel')}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.allowedUsers')} hint={t('line.allowedUsersHint')}>
+          <TagsInput
+            value={config.allowedUsers ?? []}
+            onChange={(v) => set('allowedUsers', v)}
+            placeholder="U..."
+          />
+        </FieldRow>
+        <FieldRow label={t('line.allowedGroups')} hint={t('line.allowedGroupsHint')}>
+          <TagsInput
+            value={config.allowedGroups ?? []}
+            onChange={(v) => set('allowedGroups', v)}
+            placeholder="C..."
+          />
+        </FieldRow>
+        <FieldRow label={t('line.allowedRooms')} hint={t('line.allowedRoomsHint')}>
+          <TagsInput
+            value={config.allowedRooms ?? []}
+            onChange={(v) => set('allowedRooms', v)}
+            placeholder="R..."
+          />
+        </FieldRow>
+        <FieldRow label={t('line.allowFrom')} hint={t('line.allowFromHint')}>
+          <TagsInput
+            value={config.allowFrom ?? []}
+            onChange={(v) => set('allowFrom', v)}
+            placeholder="U..."
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('line.advanced')} description={t('line.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('line.pushFallback')} hint={t('line.pushFallbackHint')}>
+          <Toggle
+            checked={config.pushFallback ?? true}
+            onChange={(v) => set('pushFallback', v)}
+            label={t('line.pushFallbackLabel')}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.textChunkLimit')} hint={t('line.textChunkLimitHint')}>
+          <NumberInput
+            value={config.textChunkLimit ?? 4500}
+            onChange={(v) => set('textChunkLimit', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.rateLimit')} hint={t('line.rateLimitHint')}>
+          <NumberInput
+            value={config.rateLimit ?? 10}
+            onChange={(v) => set('rateLimit', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.rateBurst')} hint={t('line.rateBurstHint')}>
+          <NumberInput
+            value={config.rateBurst ?? 3}
+            onChange={(v) => set('rateBurst', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.timeoutSeconds')} hint={t('line.timeoutSecondsHint')}>
+          <NumberInput
+            value={config.timeoutSeconds ?? 30}
+            onChange={(v) => set('timeoutSeconds', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('line.videoPreviewUrl')} hint={t('line.videoPreviewUrlHint')}>
+          <TextInput
+            value={config.videoPreviewUrl ?? ''}
+            onChange={(v) => set('videoPreviewUrl', v || undefined)}
+            placeholder="https://example.com/preview.jpg"
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
 // Weixin Config Panel
 // ============================================================================
 
@@ -1956,6 +2160,8 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'line') {
+          configs[ch.id] = { ...defaultLineConfig(), ...saved };
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -2279,6 +2485,12 @@ export default function ChannelPage() {
                       config={selectedConfig as TelegramChannelConfig}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
+                    />
+                  )}
+                  {selectedId === 'line' && (
+                    <LinePanel
+                      config={selectedConfig as LineChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('line', cfg)}
                     />
                   )}
                   {selectedId === 'weixin' && (

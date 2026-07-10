@@ -23,6 +23,8 @@ SENSITIVE_FIELD_NAMES: Set[str] = {
     "apiKey",
     "token",
     "accessToken",
+    "channelAccessToken",
+    "channelSecret",
     "refreshToken",
     "webhookSecret",
     "verificationToken",

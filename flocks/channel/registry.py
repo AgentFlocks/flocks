@@ -92,12 +92,14 @@ class ChannelRegistry:
     def _register_builtin_channels(self) -> None:
         from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
         from flocks.channel.builtin.feishu.channel import FeishuChannel
+        from flocks.channel.builtin.line.channel import LineChannel
         from flocks.channel.builtin.telegram.channel import TelegramChannel
         from flocks.channel.builtin.wecom.channel import WeComChannel
         from flocks.channel.builtin.weixin.channel import WeixinChannel
         self.register(FeishuChannel())
         self.register(WeComChannel())
         self.register(TelegramChannel())
+        self.register(LineChannel())
         self.register(DingTalkChannel())
         self.register(WeixinChannel())
 

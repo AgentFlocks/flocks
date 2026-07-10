@@ -716,7 +716,7 @@ class InboundDispatcher:
             return False
 
         event = UserInputEvent(
-            source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram"} else "channel",
+            source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram", "line"} else "channel",
             sessionID=binding.session_id,
             text=normalised_text,
             parts=[{"type": "text", "text": normalised_text}],
@@ -1512,10 +1512,12 @@ def _is_placeholder_text(text: str) -> bool:
         "[Attachment]",
         "[图片]",
         "[文件]",
+        "[音频]",
+        "[视频]",
     )
     if text in placeholders:
         return True
-    return text.startswith("[文件消息:")
+    return text.startswith("[文件消息:") or text.startswith("[文件:")
 
 
 # Best-effort eager registration at import time.  Channels that need
@@ -1544,6 +1546,12 @@ try:
 except Exception:  # pragma: no cover
     pass
 
+try:
+    from flocks.channel.builtin.line import inbound_media as _line_inbound_media
+    register_inbound_media_downloader("line", _line_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover
+    pass
+
 
 async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     """Dispatch inbound media download to the appropriate channel handler.
@@ -1566,4 +1574,7 @@ async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     if channel_id == "telegram":
         from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
         return await _telegram_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "line":
+        from flocks.channel.builtin.line import inbound_media as _line_inbound_media
+        return await _line_inbound_media.download_inbound_media(msg, config)
     return None
