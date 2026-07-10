@@ -51,6 +51,11 @@ def test_im_send_message_normalizes_wecom_aliases() -> None:
     assert _normalize_channel_type("wxwork") == "wecom"
 
 
+def test_im_send_message_normalizes_slack_aliases() -> None:
+    assert _normalize_channel_type("slack") == "slack"
+    assert _normalize_channel_type("sl") == "slack"
+
+
 @pytest.mark.asyncio
 async def test_im_send_message_requires_message_unless_resolve_only() -> None:
     result = await im_send_message(_ctx(), session_id="ses_target")

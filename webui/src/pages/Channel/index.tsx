@@ -129,6 +129,20 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
+interface SlackChannelConfig {
+  enabled: boolean;
+  botToken?: string;
+  appToken?: string;
+  homeChannel?: string;
+  homeChannelName?: string;
+  defaultAgent?: string;
+  groupTrigger?: string;
+  allowFrom?: string[];
+  replyInThread?: boolean;
+  replyBroadcast?: boolean;
+  allowBots?: 'none' | 'mentions' | 'all';
+}
+
 interface WeixinChannelConfig {
   enabled: boolean;
   token?: string;
@@ -144,7 +158,7 @@ interface WeixinChannelConfig {
   dataDir?: string;
 }
 
-type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | WeixinChannelConfig;
+type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | SlackChannelConfig | WeixinChannelConfig;
 
 function defaultFeishuConfig(): FeishuChannelConfig {
   return {
@@ -188,6 +202,17 @@ function defaultTelegramConfig(): TelegramChannelConfig {
     streaming: false,
     streamingCoalesceMs: 200,
     mentionContextMessages: 0,
+  };
+}
+
+function defaultSlackConfig(): SlackChannelConfig {
+  return {
+    enabled: false,
+    groupTrigger: 'mention',
+    allowFrom: [],
+    replyInThread: true,
+    replyBroadcast: false,
+    allowBots: 'none',
   };
 }
 
@@ -644,6 +669,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           {channelId === 'dingtalk' && 'Stream'}
           {channelId === 'weixin' && 'Long-Poll'}
           {channelId === 'telegram' && ((config as TelegramChannelConfig).mode === 'webhook' ? 'Webhook' : 'Polling')}
+          {channelId === 'slack' && 'Socket Mode'}
         </span>
       </div>
 
@@ -1397,6 +1423,115 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// Slack Config Panel
+// ============================================================================
+
+function SlackPanel({
+  config,
+  onChange,
+}: {
+  config: SlackChannelConfig;
+  onChange: (c: SlackChannelConfig) => void;
+}) {
+  const { t } = useTranslation('channel');
+  const set = useCallback(
+    <K extends keyof SlackChannelConfig>(key: K, value: SlackChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  return (
+    <>
+      <Section title={t('slack.credentials')} description={t('slack.credentialsDesc')}>
+        <FieldRow label="Bot Token" required hint={t('slack.botTokenHint')}>
+          <SecretInput
+            value={config.botToken ?? ''}
+            onChange={(v) => set('botToken', v || undefined)}
+            placeholder="xoxb-..."
+          />
+        </FieldRow>
+        <FieldRow label="App Token" required hint={t('slack.appTokenHint')}>
+          <SecretInput
+            value={config.appToken ?? ''}
+            onChange={(v) => set('appToken', v || undefined)}
+            placeholder="xapp-..."
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.homeChannel')} hint={t('slack.homeChannelHint')}>
+          <TextInput
+            value={config.homeChannel ?? ''}
+            onChange={(v) => set('homeChannel', v || undefined)}
+            placeholder="C0123456789"
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.homeChannelName')} hint={t('slack.homeChannelNameHint')}>
+          <TextInput
+            value={config.homeChannelName ?? ''}
+            onChange={(v) => set('homeChannelName', v || undefined)}
+            placeholder="general"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('slack.behavior')} description={t('slack.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('slack.defaultAgent')} hint={t('slack.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('slack.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.groupTrigger')} hint={t('slack.groupTriggerHint')}>
+          <Select
+            value={config.groupTrigger ?? 'mention'}
+            onChange={(v) => set('groupTrigger', v)}
+            options={[
+              { value: 'mention', label: t('slack.triggerMention') },
+              { value: 'all', label: t('slack.triggerAll') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.allowFrom')} hint={t('slack.allowFromHint')}>
+          <TagsInput
+            value={config.allowFrom ?? []}
+            onChange={(v) => set('allowFrom', v)}
+            placeholder={t('slack.allowFromPlaceholder')}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('slack.advanced')} description={t('slack.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('slack.replyInThread')} hint={t('slack.replyInThreadHint')}>
+          <Toggle
+            checked={config.replyInThread ?? true}
+            onChange={(v) => set('replyInThread', v)}
+            label={t('slack.replyInThreadLabel')}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.replyBroadcast')} hint={t('slack.replyBroadcastHint')}>
+          <Toggle
+            checked={config.replyBroadcast ?? false}
+            onChange={(v) => set('replyBroadcast', v)}
+            label={t('slack.replyBroadcastLabel')}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.allowBots')} hint={t('slack.allowBotsHint')}>
+          <Select
+            value={config.allowBots ?? 'none'}
+            onChange={(v) => set('allowBots', v as 'none' | 'mentions' | 'all')}
+            options={[
+              { value: 'none', label: t('slack.allowBotsNone') },
+              { value: 'mentions', label: t('slack.allowBotsMentions') },
+              { value: 'all', label: t('slack.allowBotsAll') },
+            ]}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
 // Weixin Config Panel
 // ============================================================================
 
@@ -1956,6 +2091,8 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'slack') {
+          configs[ch.id] = { ...defaultSlackConfig(), ...saved };
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -2279,6 +2416,12 @@ export default function ChannelPage() {
                       config={selectedConfig as TelegramChannelConfig}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
+                    />
+                  )}
+                  {selectedId === 'slack' && (
+                    <SlackPanel
+                      config={selectedConfig as SlackChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('slack', cfg)}
                     />
                   )}
                   {selectedId === 'weixin' && (

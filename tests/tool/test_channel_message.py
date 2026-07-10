@@ -26,7 +26,12 @@ def test_channel_message_normalizes_wecom_aliases() -> None:
     assert _normalize_channel_type("wxwork") == "wecom"
 
 
-def test_channel_message_schema_includes_weixin() -> None:
+def test_channel_message_normalizes_slack_aliases() -> None:
+    assert _normalize_channel_type("slack") == "slack"
+    assert _normalize_channel_type("sl") == "slack"
+
+
+def test_channel_message_schema_includes_builtin_channels() -> None:
     schema = ToolRegistry.get_schema("channel_message")
 
     assert schema is not None
@@ -34,6 +39,7 @@ def test_channel_message_schema_includes_weixin() -> None:
     assert "企业微信" in schema.properties["channel_type"]["enum"]
     assert "weixin" in schema.properties["channel_type"]["enum"]
     assert "微信" in schema.properties["channel_type"]["enum"]
+    assert "slack" in schema.properties["channel_type"]["enum"]
 
 
 @pytest.mark.asyncio

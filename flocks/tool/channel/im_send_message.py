@@ -20,6 +20,7 @@ _CHANNEL_ALIASES: dict[str, list[str]] = {
     "weixin": ["weixin", "微信", "wechat", "wx"],
     "feishu": ["feishu", "飞书", "lark"],
     "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
+    "slack": ["slack", "sl"],
 }
 
 
@@ -201,8 +202,8 @@ async def _resolve_target(
     name="im_send_message",
     description=(
         "Resolve an IM target session and optionally send a message. "
-        "Use this for WeCom/企业微信, Weixin/微信, Feishu, DingTalk, or custom channel sessions when the user asks to send an IM message. "
-        "Use channel_type=wecom for 企业微信 and channel_type=weixin for 微信. "
+        "Use this for WeCom/企业微信, Weixin/微信, Feishu, DingTalk, Slack, or custom channel sessions when the user asks to send an IM message. "
+        "Use channel_type=wecom for 企业微信, channel_type=weixin for 微信, and channel_type=slack for Slack. "
         "If session_id is omitted, it uses the current IM session when available, otherwise asks the user to pick one."
     ),
     category=ToolCategory.SYSTEM,
@@ -225,7 +226,7 @@ async def _resolve_target(
             required=False,
             description=(
                 "Optional channel filter, such as wecom=企业微信, weixin=微信, "
-                "feishu, dingtalk, telegram, or a custom channel id."
+                "feishu, dingtalk, slack, telegram, or a custom channel id."
             ),
         ),
         ToolParameter(
