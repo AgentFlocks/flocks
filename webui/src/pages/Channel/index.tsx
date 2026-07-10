@@ -144,7 +144,31 @@ interface WeixinChannelConfig {
   dataDir?: string;
 }
 
-type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | WeixinChannelConfig;
+interface WhatsAppChannelConfig {
+  enabled: boolean;
+  mode?: 'bot' | 'self-chat';
+  sessionPath?: string;
+  bridgePort?: number;
+  defaultAgent?: string;
+  dmPolicy?: string;
+  allowFrom?: string[];
+  groupPolicy?: string;
+  groupAllowFrom?: string[];
+  groupTrigger?: string;
+  replyPrefix?: string;
+  textBatchDelaySeconds?: number;
+  sendChunkDelayMs?: number;
+  sendTimeoutMs?: number;
+  mediaCacheDir?: string;
+}
+
+type ChannelConfig =
+  | FeishuChannelConfig
+  | WeComChannelConfig
+  | DingTalkChannelConfig
+  | TelegramChannelConfig
+  | WeixinChannelConfig
+  | WhatsAppChannelConfig;
 
 function defaultFeishuConfig(): FeishuChannelConfig {
   return {
@@ -197,6 +221,21 @@ function defaultWeixinConfig(): WeixinChannelConfig {
     dmPolicy: 'open',
     groupPolicy: 'all',
     sendChunkDelay: 1.5,
+  };
+}
+
+function defaultWhatsAppConfig(): WhatsAppChannelConfig {
+  return {
+    enabled: false,
+    mode: 'bot',
+    dmPolicy: 'allowlist',
+    allowFrom: [],
+    groupPolicy: 'disabled',
+    groupTrigger: 'mention',
+    bridgePort: 3100,
+    textBatchDelaySeconds: 3,
+    sendChunkDelayMs: 300,
+    sendTimeoutMs: 60000,
   };
 }
 
@@ -1397,6 +1436,340 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// WhatsApp Config Panel
+// ============================================================================
+
+interface WhatsAppPanelProps {
+  config: WhatsAppChannelConfig;
+  onChange: (c: WhatsAppChannelConfig) => void;
+  onPairSuccess?: (data: { sessionPath: string }) => Promise<void> | void;
+}
+
+type WhatsAppQrPhase =
+  | 'idle'
+  | 'loading'
+  | 'scanning'
+  | 'connected'
+  | 'complete'
+  | 'error';
+
+function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) {
+  const { t } = useTranslation('channel');
+  const toast = useToast();
+  const set = useCallback(
+    <K extends keyof WhatsAppChannelConfig>(key: K, value: WhatsAppChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  const [qrPhase, setQrPhase] = useState<WhatsAppQrPhase>('idle');
+  const [qrValue, setQrValue] = useState('');
+  const [qrError, setQrError] = useState('');
+  const [pairingId, setPairingId] = useState('');
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const completedRef = useRef(false);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  useEffect(() => () => stopPolling(), []);
+
+  const closeQrModal = async () => {
+    stopPolling();
+    if (pairingId && !['complete', 'connected'].includes(qrPhase)) {
+      client.post(`/api/channel/whatsapp/pair/${pairingId}/cancel`, {}, { timeout: 5000 }).catch(() => {});
+    }
+    setQrPhase('idle');
+    setQrValue('');
+    setQrError('');
+    setPairingId('');
+  };
+
+  const finishPairing = async (sessionPath: string) => {
+    if (completedRef.current) return;
+    completedRef.current = true;
+    stopPolling();
+    setQrPhase('complete');
+    const newConfig = { ...config, sessionPath, enabled: true };
+    onChange(newConfig);
+    if (onPairSuccess) {
+      await onPairSuccess({ sessionPath });
+    }
+    toast.success(t('whatsapp.qrSuccess'));
+  };
+
+  const startPairing = async () => {
+    stopPolling();
+    completedRef.current = false;
+    setQrError('');
+    setQrValue('');
+    setQrPhase('loading');
+    try {
+      const res = await client.post('/api/channel/whatsapp/pair/start', {
+        sessionPath: config.sessionPath || null,
+      });
+      const id = String(res.data?.pairing_id ?? '');
+      setPairingId(id);
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await client.get(`/api/channel/whatsapp/pair/${id}/status`);
+          const status = String(statusRes.data?.status ?? '');
+          const qr = String(statusRes.data?.qr ?? '');
+          if (qr) {
+            setQrValue(qr);
+            setQrPhase('scanning');
+          }
+          if (status === 'connected') {
+            setQrPhase('connected');
+          }
+          if (status === 'complete') {
+            await finishPairing(String(statusRes.data?.session_path ?? config.sessionPath ?? ''));
+          }
+          if (status === 'error') {
+            stopPolling();
+            setQrError(String(statusRes.data?.error ?? t('whatsapp.qrError')));
+            setQrPhase('error');
+          }
+        } catch {
+          // Pairing may still be starting; keep polling until the bridge reports a terminal state.
+        }
+      }, 1500);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      setQrError(detail);
+      setQrPhase('error');
+    }
+  };
+
+  const showModal = qrPhase !== 'idle';
+  const allowFromEnabled = config.allowFrom !== undefined;
+
+  return (
+    <>
+      <Section title={t('whatsapp.credentials')} description={t('whatsapp.credentialsDesc')}>
+        <div className="mb-3">
+          <button
+            type="button"
+            onClick={startPairing}
+            disabled={qrPhase === 'loading'}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+          >
+            {qrPhase === 'loading' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <MessageSquare className="w-4 h-4" />
+            )}
+            {qrPhase === 'loading' ? t('whatsapp.qrLoading') : t('whatsapp.qrLoginButton')}
+          </button>
+          {config.sessionPath && (
+            <p className="mt-1.5 text-xs text-gray-500 flex items-center gap-1">
+              <CheckCircle className="w-3 h-3 text-emerald-500" />
+              {t('whatsapp.sessionConfigured')}
+            </p>
+          )}
+        </div>
+
+        {showModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-80 flex flex-col items-center gap-4 relative">
+              <button
+                type="button"
+                onClick={closeQrModal}
+                className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 text-xl leading-none"
+              >
+                x
+              </button>
+              <h3 className="text-base font-semibold text-gray-800">{t('whatsapp.qrModalTitle')}</h3>
+              {qrPhase === 'loading' && (
+                <div className="w-48 h-48 flex items-center justify-center">
+                  <Loader2 className="w-10 h-10 animate-spin text-emerald-500" />
+                </div>
+              )}
+              {qrPhase === 'scanning' && qrValue && (
+                <QRCodeSVG value={qrValue} size={192} />
+              )}
+              {(qrPhase === 'connected' || qrPhase === 'complete') && (
+                <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
+                  <CheckCircle className="w-14 h-14 text-emerald-500" />
+                  <p className="text-sm font-medium text-emerald-700">
+                    {qrPhase === 'complete' ? t('whatsapp.qrComplete') : t('whatsapp.qrConnected')}
+                  </p>
+                </div>
+              )}
+              {qrPhase === 'error' && (
+                <div className="w-48 flex flex-col items-center gap-3">
+                  <XCircle className="w-10 h-10 text-red-500" />
+                  <p className="text-xs text-red-600 text-center break-all">{qrError || t('whatsapp.qrError')}</p>
+                  <button
+                    type="button"
+                    onClick={startPairing}
+                    className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                  >
+                    {t('whatsapp.qrRetry')}
+                  </button>
+                </div>
+              )}
+              <p className="text-xs text-gray-500 text-center leading-relaxed">
+                {qrPhase === 'loading' && t('whatsapp.qrHintLoading')}
+                {qrPhase === 'scanning' && t('whatsapp.qrHintScanning')}
+                {qrPhase === 'connected' && t('whatsapp.qrHintConnected')}
+                {qrPhase === 'complete' && t('whatsapp.qrHintComplete')}
+              </p>
+              {qrPhase === 'complete' && (
+                <button
+                  type="button"
+                  onClick={closeQrModal}
+                  className="w-full py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                >
+                  {t('whatsapp.qrDone')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="my-2 border-t border-gray-100" />
+
+        <FieldRow label={t('whatsapp.sessionPath')} hint={t('whatsapp.sessionPathHint')}>
+          <TextInput
+            value={config.sessionPath ?? ''}
+            onChange={(v) => set('sessionPath', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.mode')} hint={t('whatsapp.modeHint')}>
+          <Select
+            value={config.mode ?? 'bot'}
+            onChange={(v) => set('mode', v as 'bot' | 'self-chat')}
+            options={[
+              { value: 'bot', label: t('whatsapp.modeBot') },
+              { value: 'self-chat', label: t('whatsapp.modeSelfChat') },
+            ]}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('whatsapp.behavior')} description={t('whatsapp.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('whatsapp.defaultAgent')} hint={t('whatsapp.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.dmPolicy')} hint={t('whatsapp.dmPolicyHint')}>
+          <Select
+            value={config.dmPolicy ?? 'allowlist'}
+            onChange={(v) => set('dmPolicy', v)}
+            options={[
+              { value: 'allowlist', label: t('whatsapp.dmPolicyAllowlist') },
+              { value: 'open', label: t('whatsapp.dmPolicyOpen') },
+              { value: 'disabled', label: t('whatsapp.dmPolicyDisabled') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.allowFromEnabled')} hint={t('whatsapp.allowFromEnabledHint')}>
+          <Toggle
+            checked={allowFromEnabled}
+            onChange={(enabled) => onChange({ ...config, allowFrom: enabled ? [] : undefined })}
+          />
+        </FieldRow>
+        {allowFromEnabled && (
+          <FieldRow label={t('whatsapp.allowFrom')} hint={t('whatsapp.allowFromHint')}>
+            <TagsInput
+              value={config.allowFrom ?? []}
+              onChange={(v) => set('allowFrom', v)}
+              placeholder={t('whatsapp.allowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('whatsapp.groupPolicy')} hint={t('whatsapp.groupPolicyHint')}>
+          <Select
+            value={config.groupPolicy ?? 'disabled'}
+            onChange={(v) => set('groupPolicy', v)}
+            options={[
+              { value: 'disabled', label: t('whatsapp.groupPolicyDisabled') },
+              { value: 'allowlist', label: t('whatsapp.groupPolicyAllowlist') },
+              { value: 'open', label: t('whatsapp.groupPolicyOpen') },
+            ]}
+          />
+        </FieldRow>
+        {(config.groupPolicy ?? 'disabled') === 'allowlist' && (
+          <FieldRow label={t('whatsapp.groupAllowFrom')} hint={t('whatsapp.groupAllowFromHint')}>
+            <TagsInput
+              value={config.groupAllowFrom ?? []}
+              onChange={(v) => set('groupAllowFrom', v.length ? v : undefined)}
+              placeholder={t('whatsapp.groupAllowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+        {(config.groupPolicy ?? 'disabled') !== 'disabled' && (
+          <FieldRow label={t('whatsapp.groupTrigger')} hint={t('whatsapp.groupTriggerHint')}>
+            <Select
+              value={config.groupTrigger ?? 'mention'}
+              onChange={(v) => set('groupTrigger', v)}
+              options={[
+                { value: 'mention', label: t('whatsapp.triggerMention') },
+                { value: 'all', label: t('whatsapp.triggerAll') },
+              ]}
+            />
+          </FieldRow>
+        )}
+      </Section>
+
+      <Section title={t('whatsapp.advanced')} description={t('whatsapp.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('whatsapp.bridgePort')} hint={t('whatsapp.bridgePortHint')}>
+          <NumberInput
+            value={config.bridgePort ?? 3100}
+            onChange={(v) => set('bridgePort', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.replyPrefix')} hint={t('whatsapp.replyPrefixHint')}>
+          <TextInput
+            value={config.replyPrefix ?? ''}
+            onChange={(v) => set('replyPrefix', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.textBatchDelaySeconds')} hint={t('whatsapp.textBatchDelaySecondsHint')}>
+          <NumberInput
+            value={config.textBatchDelaySeconds ?? 3}
+            onChange={(v) => set('textBatchDelaySeconds', v)}
+            min={0}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.sendChunkDelayMs')} hint={t('whatsapp.sendChunkDelayMsHint')}>
+          <NumberInput
+            value={config.sendChunkDelayMs ?? 300}
+            onChange={(v) => set('sendChunkDelayMs', v)}
+            min={0}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.sendTimeoutMs')} hint={t('whatsapp.sendTimeoutMsHint')}>
+          <NumberInput
+            value={config.sendTimeoutMs ?? 60000}
+            onChange={(v) => set('sendTimeoutMs', v)}
+            min={1000}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.mediaCacheDir')} hint={t('whatsapp.mediaCacheDirHint')}>
+          <TextInput
+            value={config.mediaCacheDir ?? ''}
+            onChange={(v) => set('mediaCacheDir', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
 // Weixin Config Panel
 // ============================================================================
 
@@ -1956,6 +2329,8 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'whatsapp') {
+          configs[ch.id] = { ...defaultWhatsAppConfig(), ...saved };
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -2086,6 +2461,36 @@ export default function ChannelPage() {
     client.post(`/api/channel/${channelId}/restart`, {}, { timeout: 5000 }).catch(() => {});
 
     // Sync UI state after the connection has had time to come up.
+    setTimeout(() => { fetchAll(); fetchStatuses(true); }, 3000);
+    setTimeout(() => { fetchAll(); fetchStatuses(true); }, 8000);
+  };
+
+  const handleWhatsAppPairSuccess = async (
+    data: { sessionPath: string }
+  ) => {
+    const channelId = 'whatsapp';
+    const savedChannelCfg = (fullConfig.channels?.[channelId] ?? {}) as Record<string, any>;
+    const updatedChannelCfg: Record<string, any> = {
+      ...savedChannelCfg,
+      ...stripEmpty(channelConfigs[channelId] ?? {}),
+      enabled: true,
+    };
+    if (data.sessionPath) updatedChannelCfg.sessionPath = data.sessionPath;
+
+    const updatedChannels = { ...(fullConfig.channels ?? {}), [channelId]: updatedChannelCfg };
+    const updated = { ...fullConfig, channels: updatedChannels };
+
+    await client.patch('/api/config/', updated);
+    setFullConfig(updated);
+    setChannelConfigs((prev) => ({
+      ...prev,
+      [channelId]: { ...prev[channelId], ...updatedChannelCfg } as ChannelConfig,
+    }));
+    originalConfigsRef.current = {
+      ...originalConfigsRef.current,
+      [channelId]: { ...originalConfigsRef.current[channelId], ...updatedChannelCfg },
+    };
+    client.post(`/api/channel/${channelId}/restart`, {}, { timeout: 5000 }).catch(() => {});
     setTimeout(() => { fetchAll(); fetchStatuses(true); }, 3000);
     setTimeout(() => { fetchAll(); fetchStatuses(true); }, 8000);
   };
@@ -2279,6 +2684,13 @@ export default function ChannelPage() {
                       config={selectedConfig as TelegramChannelConfig}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
+                    />
+                  )}
+                  {selectedId === 'whatsapp' && (
+                    <WhatsAppPanel
+                      config={selectedConfig as WhatsAppChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('whatsapp', cfg)}
+                      onPairSuccess={handleWhatsAppPairSuccess}
                     />
                   )}
                   {selectedId === 'weixin' && (
