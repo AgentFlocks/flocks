@@ -1030,9 +1030,18 @@ class ToolRegistry:
             include_content=True,
         )
         before_ctx = await HookPipeline.run_tool_before(before_payload)
-        decision = normalize_tool_decision(before_ctx.output if before_ctx else None).as_dict()
+        before_output = before_ctx.output if before_ctx else None
         policy_engine_present = bool(
-            decision.get("action") in {"deny", "ask", "constrain"}
+            isinstance(before_output, dict)
+            and before_output.get("policy_engine_present")
+        )
+        decision = normalize_tool_decision(
+            before_output,
+            decision_expected=policy_engine_present,
+        ).as_dict()
+        policy_engine_present = bool(
+            policy_engine_present
+            or decision.get("action") in {"deny", "ask", "constrain"}
             or decision.get("matched_rule")
             or decision.get("policy_version")
             or decision.get("grant_ref")

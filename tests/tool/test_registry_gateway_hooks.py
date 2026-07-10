@@ -136,6 +136,52 @@ async def test_registry_stops_execution_on_deny_decision(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_registry_fails_closed_on_malformed_active_policy_decision(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ToolRegistry.init()
+    tool_name = "b3_registry_hook_malformed_policy"
+    executed = {"handler": False}
+
+    async def _handler(ctx: ToolContext, value: str) -> ToolResult:
+        executed["handler"] = True
+        return ToolResult(success=True, output=value)
+
+    _register_test_tool(tool_name, _handler)
+    try:
+        run_before = AsyncMock(
+            return_value=SimpleNamespace(
+                output={
+                    "policy_engine_present": True,
+                    "decision": {"action": "typo"},
+                }
+            )
+        )
+        run_after = AsyncMock(return_value=SimpleNamespace(output={}))
+        audit_emit = AsyncMock()
+        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
+        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_after", run_after)
+        monkeypatch.setattr(registry_mod, "_emit_tool_audit", audit_emit)
+
+        result = await ToolRegistry.execute(
+            tool_name,
+            ctx=ToolContext(session_id="s-hook", message_id="m-hook"),
+            value="hello",
+        )
+    finally:
+        ToolRegistry.unregister(tool_name)
+
+    assert result.success is False
+    assert result.error == "invalid_policy_decision"
+    assert result.metadata["decision"]["action"] == "deny"
+    assert result.metadata["blocked_by_policy"] is True
+    assert executed["handler"] is False
+    assert run_after.await_count == 0
+    assert audit_emit.await_count == 1
+    assert audit_emit.await_args_list[0].args[1]["permission_checked"] is True
+
+
+@pytest.mark.asyncio
 async def test_registry_returns_pending_metadata_for_approval_mode(monkeypatch: pytest.MonkeyPatch):
     ToolRegistry.init()
     tool_name = "b3_registry_hook_approval_pending"

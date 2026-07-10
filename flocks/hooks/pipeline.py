@@ -53,22 +53,35 @@ class ToolDecision:
         return payload
 
 
-def normalize_tool_decision(output: Optional[Dict[str, Any]]) -> ToolDecision:
+def _invalid_tool_decision() -> ToolDecision:
+    return ToolDecision(action="deny", reason="invalid_policy_decision")
+
+
+def normalize_tool_decision(
+    output: Optional[Dict[str, Any]],
+    *,
+    decision_expected: bool = False,
+) -> ToolDecision:
     if not isinstance(output, dict):
-        return ToolDecision()
+        return _invalid_tool_decision() if decision_expected else ToolDecision()
 
     raw_decision = output.get("decision")
     if not isinstance(raw_decision, dict):
+        if output.get("skip") is not True:
+            return _invalid_tool_decision() if decision_expected else ToolDecision()
         raw_decision = {}
 
     if output.get("skip") is True:
         raw_decision = {**raw_decision, "action": "deny"}
         raw_decision.setdefault("reason", "blocked_by_hook_skip")
 
-    raw_action = str(raw_decision.get("action") or "allow").strip().lower()
+    raw_action_value = raw_decision.get("action")
+    raw_action = str(raw_action_value or "allow").strip().lower()
     action: ToolDecisionAction = "allow"
     if raw_action in _VALID_TOOL_DECISION_ACTIONS:
         action = raw_action  # type: ignore[assignment]
+    elif decision_expected:
+        return _invalid_tool_decision()
 
     reason = str(raw_decision.get("reason") or "").strip()
     updated_input = raw_decision.get("updated_input")
@@ -78,6 +91,13 @@ def normalize_tool_decision(output: Optional[Dict[str, Any]]) -> ToolDecision:
     mode: Optional[ToolDecisionMode] = None
     if raw_mode in _VALID_TOOL_DECISION_MODES:
         mode = raw_mode  # type: ignore[assignment]
+    if decision_expected:
+        if not isinstance(raw_action_value, str) or not raw_action_value.strip():
+            return _invalid_tool_decision()
+        if action == "ask" and mode is None:
+            return _invalid_tool_decision()
+        if action == "constrain" and updated_input is None:
+            return _invalid_tool_decision()
     grant_ref = str(raw_decision.get("grant_ref") or "").strip() or None
     matched_rule = str(raw_decision.get("matched_rule") or "").strip() or None
     policy_version = str(raw_decision.get("policy_version") or "").strip() or None
@@ -90,6 +110,39 @@ def normalize_tool_decision(output: Optional[Dict[str, Any]]) -> ToolDecision:
         grant_ref=grant_ref,
         matched_rule=matched_rule,
         policy_version=policy_version,
+    )
+
+
+def _tool_decision_rank(decision: ToolDecision) -> int:
+    if decision.action == "deny":
+        return 4
+    if decision.action == "ask":
+        return 3 if decision.mode == "approval" else 2
+    if decision.action == "constrain":
+        return 1
+    return 0
+
+
+def merge_tool_decisions(current: ToolDecision, candidate: ToolDecision) -> ToolDecision:
+    """Merge sequential hook decisions without weakening prior restrictions."""
+    current_is_stronger = _tool_decision_rank(current) >= _tool_decision_rank(candidate)
+    stronger, weaker = (current, candidate) if current_is_stronger else (candidate, current)
+
+    updated_input: Optional[Dict[str, Any]] = None
+    if current.updated_input is not None or candidate.updated_input is not None:
+        updated_input = {
+            **(current.updated_input or {}),
+            **(candidate.updated_input or {}),
+        }
+
+    return ToolDecision(
+        action=stronger.action,
+        reason=stronger.reason or weaker.reason,
+        updated_input=updated_input,
+        mode=stronger.mode,
+        grant_ref=stronger.grant_ref or weaker.grant_ref,
+        matched_rule=stronger.matched_rule or weaker.matched_rule,
+        policy_version=stronger.policy_version or weaker.policy_version,
     )
 
 
@@ -390,6 +443,11 @@ class HookPipeline:
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
         handler_count = 0
+        decision_expected = bool(ctx.output.get("policy_engine_present"))
+        current_decision = normalize_tool_decision(
+            ctx.output,
+            decision_expected=decision_expected,
+        )
         for entry in cls._hooks:
             handler = cls._resolve_handler(entry.hook, stage)
             if not handler:
@@ -430,8 +488,18 @@ class HookPipeline:
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
             if stage == HookStage.TOOL_BEFORE:
-                decision = normalize_tool_decision(ctx.output)
+                decision_expected = decision_expected or bool(
+                    ctx.output.get("policy_engine_present")
+                )
+                candidate = normalize_tool_decision(
+                    ctx.output,
+                    decision_expected=decision_expected,
+                )
+                decision = merge_tool_decisions(current_decision, candidate)
+                current_decision = decision
                 ctx.output["decision"] = decision.as_dict()
+                if decision_expected:
+                    ctx.output["policy_engine_present"] = True
                 if decision.action == "deny":
                     log.debug("hook.stage_short_circuit", {
                         "stage": stage,
