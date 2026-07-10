@@ -1003,6 +1003,155 @@ describe('getRenderableThinkingText', () => {
   });
 });
 
+describe('ChatMessageBubble reasoning streaming', () => {
+  it.each(['reasoning', 'thinking'] as const)(
+    'paces an active %s part after a tool and flushes the completed text',
+    (partType) => {
+      type RafCallback = (time: number) => void;
+      const callbacks = new Map<number, RafCallback>();
+      let nextRafId = 0;
+      vi.stubGlobal('requestAnimationFrame', (callback: RafCallback) => {
+        const id = ++nextRafId;
+        callbacks.set(id, callback);
+        return id;
+      });
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+        callbacks.delete(id);
+      });
+
+      const makeReasoningMessage = (text: string, finish?: Message['finish']) => makeMessage({
+        id: 'assistant-reasoning-stream',
+        role: 'assistant',
+        finish,
+        parts: [
+          {
+            id: 'tool-before-reasoning',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: 'tool',
+            tool: 'read',
+            state: { status: 'completed', output: 'done' },
+          } as any,
+          {
+            id: 'reasoning-stream',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: partType,
+            text,
+          } as any,
+        ],
+      });
+
+      let unmount = () => {};
+      try {
+        const rendered = render(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思'),
+          isActive: true,
+        }));
+        unmount = rendered.unmount;
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程'),
+          isActive: true,
+        }));
+
+        expect(screen.getByText('思考中...')).toBeInTheDocument();
+        expect(screen.getByText('思')).toBeInTheDocument();
+        expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
+
+        act(() => {
+          const pending = [...callbacks.values()];
+          callbacks.clear();
+          pending.forEach(callback => callback(1000 / 60));
+        });
+        expect(screen.getByText('思考')).toBeInTheDocument();
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程', 'stop'),
+          isActive: false,
+        }));
+        expect(screen.getByText('思考过程')).toBeInTheDocument();
+      } finally {
+        unmount();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it('does not animate reasoning while its process group is closed', () => {
+    let nextRafId = 0;
+    const requestAnimationFrameSpy = vi.fn(() => ++nextRafId);
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrameSpy);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    const messageId = 'assistant-hidden-reasoning';
+    const processGroupKey = `${messageId}:process:0`;
+    const makeHiddenReasoningMessage = (text: string) => makeMessage({
+      id: messageId,
+      role: 'assistant',
+      parts: [
+        {
+          id: 'tool-before-hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'completed', output: 'done' },
+        } as any,
+        {
+          id: 'hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text,
+        } as any,
+      ],
+    });
+
+    let unmount = () => {};
+    try {
+      const rendered = render(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      unmount = rendered.unmount;
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新继续'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('getMessageErrorText', () => {
   it('prefers user-facing display messages over raw provider errors', () => {
     expect(getMessageErrorText(makeMessage({

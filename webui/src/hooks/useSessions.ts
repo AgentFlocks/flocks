@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef, startTransition } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message } from '@/types';
@@ -7,11 +7,6 @@ const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
 const ABORTED_TOOL_ERROR = 'Tool execution was interrupted';
 const SESSION_LIST_PAGE_SIZE = 100;
 const MESSAGE_PAGE_SIZE = 50;
-
-interface PendingPartUpdate {
-  partInfo: any;
-  delta?: string;
-}
 
 function finalizeStoppedMessageParts(parts: Message['parts'], stoppedAt = Date.now()): Message['parts'] {
   return parts.map((part) => {
@@ -355,11 +350,6 @@ export function useSessionMessages(sessionId?: string) {
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Tracks part IDs seen in this session to distinguish first-time creation
-  // (structural change → immediate update) from content deltas (low-priority).
-  const knownPartIdsRef = useRef<Set<string>>(new Set());
-  const pendingKnownPartUpdatesRef = useRef<Map<string, PendingPartUpdate>>(new Map());
-  const pendingKnownPartFrameRef = useRef<number | null>(null);
 
   const fetchMessages = useCallback(async () => {
     if (!sessionId) return;
@@ -412,45 +402,19 @@ export function useSessionMessages(sessionId?: string) {
     }
   }, [hasMore, loadingOlder, nextBefore, sessionId]);
 
-  const flushPendingKnownPartUpdates = useCallback(() => {
-    pendingKnownPartFrameRef.current = null;
-    const updates = Array.from(pendingKnownPartUpdatesRef.current.values());
-    pendingKnownPartUpdatesRef.current.clear();
-    if (updates.length === 0) return;
-
-    startTransition(() => {
-      setMessages(prev => updates.reduce(
-        (next, update) => applyMessagePartUpdate(next, update.partInfo, update.delta),
-        prev,
-      ));
-    });
-  }, []);
-
-  const cancelPendingKnownPartUpdates = useCallback(() => {
-    if (pendingKnownPartFrameRef.current !== null) {
-      cancelAnimationFrame(pendingKnownPartFrameRef.current);
-      pendingKnownPartFrameRef.current = null;
-    }
-    pendingKnownPartUpdatesRef.current.clear();
-  }, []);
-
   // Reset state synchronously before paint when session changes
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
-    cancelPendingKnownPartUpdates();
     setMessages([]);
     setError(null);
     setHasMore(false);
     setNextBefore(null);
-    knownPartIdsRef.current.clear();
     if (sessionId) {
       setLoading(true);
     } else {
       setLoading(false);
     }
-  }, [cancelPendingKnownPartUpdates, sessionId]);
-
-  useEffect(() => cancelPendingKnownPartUpdates, [cancelPendingKnownPartUpdates]);
+  }, [sessionId]);
 
   useEffect(() => {
     fetchMessages();
@@ -488,14 +452,6 @@ export function useSessionMessages(sessionId?: string) {
             providerID: messageInfo.providerID ?? existing.providerID,
             cost: messageInfo.cost ?? existing.cost,
           };
-          // When a message finishes streaming, evict its part IDs from the
-          // known-parts registry to reclaim memory.
-          if (messageInfo.finish) {
-            const parts = updated[existingIndex].parts as any[] | undefined;
-            parts?.forEach((p: any) => {
-              if (p?.id) knownPartIdsRef.current.delete(p.id);
-            });
-          }
           return updated;
         }
 
@@ -553,24 +509,12 @@ export function useSessionMessages(sessionId?: string) {
      * @param partInfo - Part object containing id, messageID, sessionID, type, text, etc.
      * @param delta - Optional text delta for this update.
      *
-     * New parts are structural changes and update synchronously so thinking or
-     * streaming indicators appear immediately. Known parts are folded into the
-     * next animation frame so high-frequency text deltas trigger fewer renders.
+     * Every SSE update enters message state immediately so a following finish
+     * event cannot overtake the final delta. Display-layer smoothing owns the
+     * frame-level typing cadence and Markdown parse budget.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
-      const partId = partInfo?.id;
-      const isNewPart = !partId || !knownPartIdsRef.current.has(partId);
-      if (isNewPart) {
-        // Structural change: first appearance of this part — must render immediately
-        // so that "thinking" / "streaming" indicators show without delay.
-        if (partId) knownPartIdsRef.current.add(partId);
-        setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
-      } else {
-        pendingKnownPartUpdatesRef.current.set(partId, { partInfo, delta });
-        if (pendingKnownPartFrameRef.current === null) {
-          pendingKnownPartFrameRef.current = requestAnimationFrame(flushPendingKnownPartUpdates);
-        }
-      }
+      setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
     },
     replaceMessageText: (messageId: string, partId: string, text: string) => {
       setMessages(prev => prev.map((message) => {

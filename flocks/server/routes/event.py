@@ -44,6 +44,10 @@ EVENT_QUEUE_DROP_TO = max(0, min(
     EVENT_QUEUE_MAXSIZE - 1,
     int(os.getenv("FLOCKS_EVENT_QUEUE_DROP_TO", str(EVENT_QUEUE_MAXSIZE // 2))),
 ))
+EVENT_QUEUE_COALESCE_AT = max(1, min(
+    EVENT_QUEUE_MAXSIZE,
+    int(os.getenv("FLOCKS_EVENT_QUEUE_COALESCE_AT", str(min(EVENT_QUEUE_MAXSIZE, 64)))),
+))
 
 
 # Current directory context for SSE events
@@ -157,19 +161,21 @@ class EventQueue(asyncio.Queue[dict]):
     def _pending_events(self) -> deque[dict]:
         return cast(deque[dict], self.__dict__["_queue"])
 
-    def coalesce_snapshot(self, event: dict) -> bool:
+    def coalesce_tail_snapshot(self, event: dict) -> bool:
+        """Merge only with the immediately preceding snapshot.
+
+        Control events form an ordering barrier: snapshots on opposite sides of
+        one must remain separate even while a client is backpressured.
+        """
         key = _snapshot_key(event)
         pending = self._pending_events()
         if key is None or not pending:
             return False
-        for index in range(len(pending) - 1, -1, -1):
-            queued = pending[index]
-            if _snapshot_key(queued) != key:
-                continue
-            del pending[index]
-            pending.append(_merge_snapshots(queued, event))
-            return True
-        return False
+        queued = pending[-1]
+        if _snapshot_key(queued) != key:
+            return False
+        pending[-1] = _merge_snapshots(queued, event)
+        return True
 
     def drop_snapshots_until(self, target_size: int) -> int:
         pending = self._pending_events()
@@ -228,7 +234,12 @@ class EventBroadcaster:
     
     _instance: Optional["EventBroadcaster"] = None
     
-    def __init__(self, queue_maxsize: int = EVENT_QUEUE_MAXSIZE, queue_drop_to: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        queue_maxsize: int = EVENT_QUEUE_MAXSIZE,
+        queue_drop_to: Optional[int] = None,
+        queue_coalesce_at: Optional[int] = None,
+    ) -> None:
         self._clients: dict[EventQueue, Optional["AuthUser"]] = {}
         self._lock = asyncio.Lock()
         self._queue_maxsize = max(1, queue_maxsize)
@@ -237,6 +248,13 @@ class EventBroadcaster:
             min(
                 self._queue_maxsize - 1,
                 EVENT_QUEUE_DROP_TO if queue_drop_to is None else queue_drop_to,
+            ),
+        )
+        self._queue_coalesce_at = max(
+            1,
+            min(
+                self._queue_maxsize,
+                EVENT_QUEUE_COALESCE_AT if queue_coalesce_at is None else queue_coalesce_at,
             ),
         )
     
@@ -292,7 +310,14 @@ class EventBroadcaster:
             self._publish_to_queue(queue, event)
 
     def _publish_to_queue(self, queue: EventQueue, event: dict) -> None:
-        if queue.coalesce_snapshot(event):
+        # Preserve the event cadence for healthy clients. Once a subscriber is
+        # materially behind, compact only adjacent snapshots for the same part;
+        # this bounds accumulated full-text payloads without crossing control
+        # events or changing their relative order.
+        if (
+            queue.qsize() >= self._queue_coalesce_at
+            and queue.coalesce_tail_snapshot(event)
+        ):
             return
 
         try:

@@ -214,7 +214,6 @@ describe('updateMessagePart scheduling', () => {
   });
 
   it('second call with same part ID accumulates delta content correctly', async () => {
-    vi.useFakeTimers();
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     // Wait for initial fetch to settle
     await act(async () => {});
@@ -230,7 +229,6 @@ describe('updateMessagePart scheduling', () => {
     // Second call — content delta on the same part
     await act(async () => {
       result.current.updateMessagePart(delta, ' world');
-      await vi.advanceTimersByTimeAsync(16);
     });
 
     const msgs = result.current.messages;
@@ -239,8 +237,7 @@ describe('updateMessagePart scheduling', () => {
     expect((msg!.parts as any[])[0].text).toBe('hello world');
   });
 
-  it('coalesces repeated known part updates into the next animation frame', async () => {
-    vi.useFakeTimers();
+  it('applies every known part update without waiting for an animation frame', async () => {
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     await act(async () => {});
 
@@ -253,20 +250,51 @@ describe('updateMessagePart scheduling', () => {
 
     await act(async () => {
       result.current.updateMessagePart({ ...part, text: 'he' }, 'e');
-      result.current.updateMessagePart({ ...part, text: 'hel' }, 'l');
-      result.current.updateMessagePart({ ...part, text: 'hello' }, 'lo');
     });
-
-    expect((result.current.messages[0].parts as any[])[0].text).toBe('h');
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('he');
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(16);
+      result.current.updateMessagePart({ ...part, text: 'hel' }, 'l');
     });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hel');
 
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'hello' }, 'lo');
+    });
     expect((result.current.messages[0].parts as any[])[0].text).toBe('hello');
   });
 
-  it('resets known part tracking when session changes', async () => {
+  it('commits the final delta before an immediately following finish update', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    const part = {
+      id: 'part-final',
+      messageID: 'msg-final',
+      sessionID: 'sess-1',
+      type: 'text',
+      text: 'almost',
+    };
+    await act(async () => {
+      result.current.updateMessagePart(part);
+    });
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'almost done' }, ' done');
+      result.current.updateMessage({
+        id: 'msg-final',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        finish: 'stop',
+      });
+    });
+
+    const message = result.current.messages.find((item) => item.id === 'msg-final');
+    expect((message?.parts as any[])[0].text).toBe('almost done');
+    expect(message?.finish).toBe('stop');
+  });
+
+  it('resets streamed messages when session changes', async () => {
     const { result, rerender } = renderHook(
       ({ id }: { id?: string }) => useSessionMessages(id),
       { initialProps: { id: 'sess-a' } },
@@ -280,7 +308,7 @@ describe('updateMessagePart scheduling', () => {
       result.current.updateMessagePart(part);
     });
 
-    // Switch to a different session — messages and knownPartIds should reset
+    // Switching sessions must clear streamed state before the next paint.
     await act(async () => {
       rerender({ id: 'sess-b' });
     });

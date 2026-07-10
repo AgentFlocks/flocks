@@ -10,6 +10,22 @@ from flocks.server.routes.event import EventBroadcaster
 from flocks.session.session import SessionInfo
 
 
+def _snapshot(text: str, delta: str, part_type: str = "text") -> dict:
+    return {
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "part-1",
+                "messageID": "message-1",
+                "sessionID": "session-1",
+                "type": part_type,
+                "text": text,
+            },
+            "delta": delta,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_event_broadcaster_compacts_overflowing_client_queue():
     broadcaster = EventBroadcaster(queue_maxsize=3, queue_drop_to=1)
@@ -68,115 +84,104 @@ async def test_event_broadcaster_keeps_latest_event_when_drop_target_is_max_minu
 
 
 @pytest.mark.asyncio
-async def test_event_broadcaster_coalesces_accumulated_text_and_preserves_delta():
-    broadcaster = EventBroadcaster(queue_maxsize=3)
+async def test_event_broadcaster_preserves_low_backlog_snapshot_cadence():
+    broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=3)
     queue = await broadcaster.subscribe()
-    first = {
-        "type": "message.part.updated",
-        "properties": {
-            "part": {
-                "id": "part-1",
-                "messageID": "message-1",
-                "sessionID": "session-1",
-                "type": "text",
-                "text": "hello",
-            },
-            "delta": "hello",
-        },
-    }
-    latest = {
-        "type": "message.part.updated",
-        "properties": {
-            "part": {
-                "id": "part-1",
-                "messageID": "message-1",
-                "sessionID": "session-1",
-                "type": "text",
-                "text": "hello world",
-            },
-            "delta": " world",
-        },
-    }
+    first = _snapshot("hello", "hello")
+    latest = _snapshot("hello world", " world")
 
     broadcaster._publish_to_queue(queue, first)
     broadcaster._publish_to_queue(queue, latest)
 
-    assert queue.qsize() == 1
-    event = queue.get_nowait()
-    assert event["properties"]["part"]["text"] == "hello world"
-    assert event["properties"]["delta"] == "hello world"
+    assert queue.qsize() == 2
+    assert queue.get_nowait() == first
+    assert queue.get_nowait() == latest
+
+
+@pytest.mark.parametrize("part_type", ["text", "reasoning"])
+@pytest.mark.asyncio
+async def test_event_broadcaster_coalesces_adjacent_snapshots_at_high_water(part_type: str):
+    broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=3)
+    queue = await broadcaster.subscribe()
+    snapshots = [
+        _snapshot("h", "h", part_type),
+        _snapshot("he", "e", part_type),
+        _snapshot("hel", "l", part_type),
+        _snapshot("hello", "lo", part_type),
+    ]
+
+    for snapshot in snapshots:
+        broadcaster._publish_to_queue(queue, snapshot)
+
+    assert queue.qsize() == 3
+    assert queue.get_nowait() == snapshots[0]
+    assert queue.get_nowait() == snapshots[1]
+    merged = queue.get_nowait()
+    assert merged["properties"]["part"]["text"] == "hello"
+    assert merged["properties"]["delta"] == "llo"
 
 
 @pytest.mark.asyncio
-async def test_event_broadcaster_coalesces_snapshots_across_interleaved_events():
-    broadcaster = EventBroadcaster(queue_maxsize=4)
+async def test_event_broadcaster_does_not_coalesce_across_control_events():
+    broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=2)
     queue = await broadcaster.subscribe()
-    first = {
-        "type": "message.part.updated",
-        "properties": {
-            "part": {
-                "id": "part-1",
-                "messageID": "message-1",
-                "sessionID": "session-1",
-                "type": "text",
-                "text": "hello",
-            },
-            "delta": "hello",
-        },
-    }
+    first = _snapshot("hello", "hello")
     control = {"type": "question.asked", "properties": {"requestID": "question-1"}}
-    latest = {
-        "type": "message.part.updated",
-        "properties": {
-            "part": {
-                "id": "part-1",
-                "messageID": "message-1",
-                "sessionID": "session-1",
-                "type": "text",
-                "text": "hello world",
-            },
-            "delta": " world",
-        },
-    }
+    latest = _snapshot("hello world", " world")
 
     broadcaster._publish_to_queue(queue, first)
     broadcaster._publish_to_queue(queue, control)
     broadcaster._publish_to_queue(queue, latest)
 
-    assert queue.qsize() == 2
+    assert queue.qsize() == 3
+    assert queue.get_nowait() == first
     assert queue.get_nowait() == control
-    snapshot = queue.get_nowait()
-    assert snapshot["properties"]["part"]["text"] == "hello world"
-    assert snapshot["properties"]["delta"] == "hello world"
+    assert queue.get_nowait() == latest
 
 
 @pytest.mark.asyncio
-async def test_accumulated_text_queue_memory_tracks_latest_snapshot_not_full_history():
-    broadcaster = EventBroadcaster(queue_maxsize=1000)
+async def test_message_finish_is_an_ordering_barrier_at_high_water():
+    broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=2)
+    queue = await broadcaster.subscribe()
+    first = _snapshot("hello", "hello")
+    finish = {
+        "type": "message.updated",
+        "properties": {
+            "info": {
+                "id": "message-1",
+                "sessionID": "session-1",
+                "finish": "stop",
+            },
+        },
+    }
+    later = _snapshot("hello world", " world")
+
+    broadcaster._publish_to_queue(queue, first)
+    broadcaster._publish_to_queue(queue, finish)
+    broadcaster._publish_to_queue(queue, later)
+
+    assert queue.qsize() == 3
+    assert queue.get_nowait() == first
+    assert queue.get_nowait() == finish
+    assert queue.get_nowait() == later
+
+
+@pytest.mark.asyncio
+async def test_high_backlog_snapshot_memory_remains_bounded():
+    broadcaster = EventBroadcaster(queue_maxsize=1000, queue_coalesce_at=4)
     queue = await broadcaster.subscribe()
     text = ""
 
     for _ in range(1000):
         delta = "x" * 100
         text += delta
-        broadcaster._publish_to_queue(queue, {
-            "type": "message.part.updated",
-            "properties": {
-                "part": {
-                    "id": "part-1",
-                    "messageID": "message-1",
-                    "sessionID": "session-1",
-                    "type": "text",
-                    "text": text,
-                },
-                "delta": delta,
-            },
-        })
+        broadcaster._publish_to_queue(queue, _snapshot(text, delta))
 
-    assert queue.qsize() == 1
-    payload = queue.get_nowait()
-    assert payload["properties"]["delta"] == text
-    assert len(json.dumps(payload)) < 250_000
+    assert queue.qsize() == 4
+    payloads = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert "".join(payload["properties"]["delta"] for payload in payloads) == text
+    assert payloads[-1]["properties"]["part"]["text"] == text
+    assert len(json.dumps(payloads)) < 250_000
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
-import { StreamingMarkdown } from './StreamingMarkdown';
+import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
@@ -237,6 +237,17 @@ export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text
   if (!text || INSIGNIFICANT_THINKING_TEXT_RE.test(text)) return '';
   return text;
 }
+
+const StreamingReasoningText = memo(function StreamingReasoningText({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming: boolean;
+}) {
+  const displayContent = useStreamingContent(content, isStreaming);
+  return <>{displayContent}</>;
+});
 
 function stringifyToolPayload(value: unknown): string {
   if (value == null) return '';
@@ -3896,7 +3907,7 @@ function ChatMessageBubbleInner({
   const { t } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
-  const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(parts, message.finish);
+  const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
   // ``window.open`` would land on a blank page. We open an in-app overlay
@@ -4026,7 +4037,10 @@ function ChatMessageBubbleInner({
             if (part.type === 'file') return !!part.url;
             return false;
           };
-          const renderPart = (part: MessagePart, i: number) => (
+          const activeTailPart = isActive
+            ? [...displayParts].reverse().find(isRenderableDisplayPart)
+            : undefined;
+          const renderPart = (part: MessagePart, i: number, isVisible = true) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
             // own `mt-2 first:mt-0`, but since every part lives in its own
@@ -4087,8 +4101,8 @@ function ChatMessageBubbleInner({
                 const thinkingText = getRenderableThinkingText(part);
                 if (!thinkingText) return null;
                 const partKey = part.id || `reasoning-${i}`;
-                const isExpanded = getPartExpanded(partKey);
-                const isThinking = !isReasoningDone;
+                const isThinking = part === activeTailPart;
+                const isExpanded = isThinking || getPartExpanded(partKey);
                 return (
                   // Vertical spacing is provided by the parent part wrapper
                   // (see `otherParts.map` above); keep this container neutral
@@ -4121,9 +4135,12 @@ function ChatMessageBubbleInner({
                         )}
                       </div>
                     </button>
-                    {isExpanded && (
+                    {isExpanded && isVisible && (
                       <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
-                        {thinkingText}
+                        <StreamingReasoningText
+                          content={thinkingText}
+                          isStreaming={isThinking}
+                        />
                       </div>
                     )}
                   </div>
@@ -4168,14 +4185,14 @@ function ChatMessageBubbleInner({
                 )}
               >
                 <div className="border-t border-zinc-200/70 px-2.5 py-2">
-                  {group.map(({ part, index }) => renderPart(part, index))}
+                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen))}
                 </div>
               </ProcessGroupDetails>
             );
           };
           const renderDisplayParts = () => {
             if (!collapseIntermediateSteps || isUser) {
-              return displayParts.map(renderPart);
+              return displayParts.map((part, index) => renderPart(part, index));
             }
             const nodes: React.ReactNode[] = [];
             let processGroup: Array<{ part: MessagePart; index: number }> = [];
