@@ -12,6 +12,7 @@ oh-my-opencode's lifecycle stages:
 """
 
 import asyncio
+from copy import deepcopy
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,8 @@ from flocks.utils.log import Log
 
 
 log = Log.create(service="hooks.pipeline")
+
+_MISSING = object()
 
 ToolDecisionAction = Literal["allow", "deny", "ask", "constrain"]
 _VALID_TOOL_DECISION_ACTIONS: set[str] = {"allow", "deny", "ask", "constrain"}
@@ -131,8 +134,8 @@ def merge_tool_decisions(current: ToolDecision, candidate: ToolDecision) -> Tool
     updated_input: Optional[Dict[str, Any]] = None
     if current.updated_input is not None or candidate.updated_input is not None:
         updated_input = {
-            **(current.updated_input or {}),
-            **(candidate.updated_input or {}),
+            **(weaker.updated_input or {}),
+            **(stronger.updated_input or {}),
         }
 
     return ToolDecision(
@@ -453,6 +456,16 @@ class HookPipeline:
             if not handler:
                 continue
             handler_count += 1
+            decision_before = _MISSING
+            decision_snapshot = _MISSING
+            policy_was_expected = decision_expected
+            if stage == HookStage.TOOL_BEFORE:
+                decision_before = ctx.output.get("decision", _MISSING)
+                decision_snapshot = (
+                    deepcopy(decision_before)
+                    if isinstance(decision_before, dict)
+                    else decision_before
+                )
             try:
                 timeout_seconds = entry.timeout_seconds
                 if timeout_seconds is None:
@@ -488,13 +501,24 @@ class HookPipeline:
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
             if stage == HookStage.TOOL_BEFORE:
-                decision_expected = decision_expected or bool(
-                    ctx.output.get("policy_engine_present")
+                policy_marker_present = bool(ctx.output.get("policy_engine_present"))
+                active_policy_started = not policy_was_expected and policy_marker_present
+                decision_expected = policy_was_expected or policy_marker_present
+                decision_after = ctx.output.get("decision", _MISSING)
+                decision_was_produced = (
+                    decision_after is not decision_before
+                    or decision_after != decision_snapshot
                 )
-                candidate = normalize_tool_decision(
-                    ctx.output,
-                    decision_expected=decision_expected,
-                )
+                if active_policy_started and not decision_was_produced:
+                    candidate = normalize_tool_decision(
+                        None,
+                        decision_expected=True,
+                    )
+                else:
+                    candidate = normalize_tool_decision(
+                        ctx.output,
+                        decision_expected=decision_expected,
+                    )
                 decision = merge_tool_decisions(current_decision, candidate)
                 current_decision = decision
                 ctx.output["decision"] = decision.as_dict()

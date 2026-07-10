@@ -60,6 +60,26 @@ def test_confirmation_keeps_constraints_from_weaker_decisions() -> None:
     assert merged.updated_input == {"path": "/safe", "recursive": False}
 
 
+def test_weaker_allow_cannot_override_stronger_constraint_input() -> None:
+    merged = merge_tool_decisions(
+        ToolDecision(
+            action="constrain",
+            updated_input={"path": "/safe", "recursive": False},
+        ),
+        ToolDecision(
+            action="allow",
+            updated_input={"path": "/unsafe", "force": False},
+        ),
+    )
+
+    assert merged.action == "constrain"
+    assert merged.updated_input == {
+        "path": "/safe",
+        "recursive": False,
+        "force": False,
+    }
+
+
 def test_deny_is_stronger_than_approval() -> None:
     merged = merge_tool_decisions(
         ToolDecision(action="ask", mode="approval", grant_ref="approval-123"),
@@ -134,3 +154,32 @@ async def test_pipeline_preserves_approval_against_later_allow() -> None:
     assert hook_ctx.output["decision"]["reason"] == "approval_required"
     assert hook_ctx.output["decision"]["matched_rule"] == "managed:approval"
     assert hook_ctx.output["decision"]["policy_version"] == "b3-v1"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_active_hook_without_new_decision() -> None:
+    class _OrdinaryAllowHook(HookBase):
+        async def tool_before(self, ctx) -> None:
+            ctx.output["decision"] = {
+                "action": "allow",
+                "reason": "ordinary_hook_allow",
+            }
+
+    class _MalformedActivePolicyHook(HookBase):
+        async def tool_before(self, ctx) -> None:
+            ctx.output["policy_engine_present"] = True
+
+    HookPipeline.register("b3-test-ordinary-allow", _OrdinaryAllowHook(), order=1)
+    HookPipeline.register(
+        "b3-test-malformed-active-policy",
+        _MalformedActivePolicyHook(),
+        order=2,
+    )
+    try:
+        hook_ctx = await HookPipeline.run_tool_before({"tool": {"name": "write"}})
+    finally:
+        HookPipeline.unregister("b3-test-ordinary-allow")
+        HookPipeline.unregister("b3-test-malformed-active-policy")
+
+    assert hook_ctx.output["decision"]["action"] == "deny"
+    assert hook_ctx.output["decision"]["reason"] == "invalid_policy_decision"
