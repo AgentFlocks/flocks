@@ -6,6 +6,7 @@ Compatible with Flocks's TypeScript Tool system.
 """
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import importlib
 import json
@@ -60,6 +61,8 @@ def _build_tool_hook_payload(
     duration_ms: Optional[int] = None,
     permission_checked: Optional[bool] = None,
     include_content: bool = True,
+    resource: Optional[Dict[str, Any]] = None,
+    execution_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
     subject_payload = _resolve_subject_payload(ctx)
     entry = (
@@ -67,8 +70,19 @@ def _build_tool_hook_payload(
         or str((ctx.extra or {}).get("entry") or "").strip()
         or "unknown"
     )
-    execution_domain = str((ctx.extra or {}).get("execution_domain") or "").strip() or "unknown"
-    canonical_payload = _build_canonical_payload(tool_name=tool_name, tool_input=tool_input)
+    resolved_execution_domain = (
+        str(execution_domain or (ctx.extra or {}).get("execution_domain") or "").strip()
+        or "unknown"
+    )
+    resolved_resource = deepcopy(resource or {"type": "tool", "id": tool_name})
+    policy_input = deepcopy(tool_input)
+    canonical_payload = _build_canonical_payload(
+        tool_name=tool_name,
+        tool_input=policy_input,
+        ctx=ctx,
+        resource=resolved_resource,
+        execution_domain=resolved_execution_domain,
+    )
     payload: Dict[str, Any] = {
         "phase": phase,
         "trace_id": trace_id,
@@ -85,11 +99,8 @@ def _build_tool_hook_payload(
             "category": tool.info.category.value,
             "enabled": tool.info.enabled,
         },
-        "resource": {
-            "type": "tool",
-            "id": tool_name,
-        },
-        "execution_domain": execution_domain,
+        "resource": resolved_resource,
+        "execution_domain": resolved_execution_domain,
         "canonical": canonical_payload,
         "canonical_hash": canonical_payload.get("hash"),
     }
@@ -98,7 +109,7 @@ def _build_tool_hook_payload(
     if permission_checked is not None:
         payload["permission_checked"] = bool(permission_checked)
     if include_content:
-        payload["tool"]["input"] = dict(tool_input)
+        payload["tool"]["input"] = deepcopy(policy_input)
     else:
         payload["tool"]["input_hash"] = _payload_sha256(tool_input)
     if result is not None:
@@ -113,17 +124,37 @@ def _build_tool_hook_payload(
     return payload
 
 
-def _build_canonical_payload(*, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
-    generic = canonicalize_json({"tool": tool_name, "input": tool_input}).as_dict()
-    command: Dict[str, Any] | None = None
-    path: Dict[str, Any] | None = None
+def _build_canonical_payload(
+    *,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    ctx: Optional["ToolContext"] = None,
+    resource: Optional[Dict[str, Any]] = None,
+    execution_domain: Optional[str] = None,
+) -> Dict[str, Any]:
+    resolved_resource = dict(resource or {"type": "tool", "id": tool_name})
+    resolved_execution_domain = (
+        str(execution_domain or ((ctx.extra or {}).get("execution_domain") if ctx else "") or "").strip()
+        or "unknown"
+    )
+
+    command = None
+    path = None
+    cwd = None
     if tool_name == "bash":
         command = canonicalize_command(str(tool_input.get("command") or "")).as_dict()
-        candidate_path = tool_input.get("workdir")
-        if isinstance(candidate_path, str):
-            path = canonicalize_path(candidate_path).as_dict()
+        from flocks.tool.path_utils import get_tool_base_dir, resolve_host_path
+
+        base_dir = get_tool_base_dir()
+        candidate_workdir = tool_input.get("workdir")
+        resolved_cwd = resolve_host_path(
+            candidate_workdir if isinstance(candidate_workdir, str) else base_dir,
+            base_dir=base_dir,
+        )
+        cwd = canonicalize_path(resolved_cwd).as_dict()
     elif tool_name in {"read", "write", "edit", "glob"}:
-        candidate_path = (
+        candidate_path = resolved_resource.get("id") if resolved_resource.get("type") == "file" else None
+        candidate_path = candidate_path or (
             tool_input.get("filePath")
             or tool_input.get("path")
             or tool_input.get("file_path")
@@ -131,33 +162,60 @@ def _build_canonical_payload(*, tool_name: str, tool_input: Dict[str, Any]) -> D
         )
         if isinstance(candidate_path, str):
             path = canonicalize_path(candidate_path).as_dict()
+
+    generic_value: Dict[str, Any] = {
+        "tool": tool_name,
+        "input": tool_input,
+        "resource": resolved_resource,
+        "execution_domain": resolved_execution_domain,
+    }
+    if cwd is not None:
+        generic_value["cwd"] = cwd.get("value")
+    generic = canonicalize_json(generic_value).as_dict()
+    resource_result = canonicalize_json(resolved_resource).as_dict()
+
+    child_results = [generic, resource_result]
+    child_results.extend(result for result in (command, cwd, path) if result is not None)
+    uncertain_child = next(
+        (result for result in child_results if result.get("status") != "ok"),
+        None,
+    )
     canonical = {
-        "status": "ok" if generic.get("hash") else "uncertain",
+        "status": "uncertain" if uncertain_child else "ok",
         "parser_version": CANONICAL_PARSER_VERSION,
-        "reason": "" if generic.get("hash") else "hash_failed",
+        "reason": str((uncertain_child or {}).get("reason") or ""),
         "generic": generic.get("value"),
-        "hash": generic.get("hash"),
+        "resource": resolved_resource,
+        "resource_status": resource_result.get("status"),
+        "resource_hash": resource_result.get("hash"),
+        "execution_domain": resolved_execution_domain,
+        "hash": None,
     }
     if command:
         canonical["command"] = command.get("value")
         canonical["command_status"] = command.get("status")
         canonical["command_hash"] = command.get("hash")
+    if cwd:
+        canonical["cwd"] = cwd.get("value")
+        canonical["cwd_status"] = cwd.get("status")
+        canonical["cwd_hash"] = cwd.get("hash")
     if path:
         canonical["path"] = path.get("value")
         canonical["path_status"] = path.get("status")
         canonical["path_hash"] = path.get("hash")
-    if canonical.get("hash") is None:
-        canonical["status"] = "uncertain"
-    merged_hash = canonical_hash(
-        {
-            "generic": canonical.get("hash"),
-            "command": canonical.get("command_hash"),
-            "path": canonical.get("path_hash"),
-        }
-    )
-    canonical["hash"] = merged_hash or canonical.get("hash")
+    if uncertain_child is None:
+        canonical["hash"] = canonical_hash(
+            {
+                "generic": generic.get("hash"),
+                "resource": resource_result.get("hash"),
+                "command": canonical.get("command_hash"),
+                "cwd": canonical.get("cwd_hash"),
+                "path": canonical.get("path_hash"),
+            }
+        )
     if canonical["hash"] is None:
-        canonical["reason"] = "canonical_hash_missing"
+        canonical["status"] = "uncertain"
+        canonical["reason"] = canonical["reason"] or "canonical_hash_missing"
     return canonical
 
 
@@ -600,6 +658,16 @@ def _schema_hint_from_properties(
     return f"Allowed parameters: {allowed_preview}. Required: {required_preview}."
 
 
+@dataclass
+class PreparedToolInput:
+    """Schema-normalized input and identities used by policy and execution."""
+
+    kwargs: Dict[str, Any]
+    aliases: Dict[str, str]
+    resource: Dict[str, Any]
+    validation_error: Optional[ToolResult] = None
+
+
 class Tool:
     """Tool wrapper class"""
 
@@ -611,98 +679,153 @@ class Tool:
         self.info = info
         self.handler = handler
 
+    def prepare_input(
+        self,
+        kwargs: Dict[str, Any],
+        *,
+        device_id: Optional[str] = None,
+    ) -> PreparedToolInput:
+        """Normalize input once before policy so the handler sees identical values."""
+        schema = self.info.get_schema()
+        schema_properties = schema.properties if isinstance(schema.properties, dict) else {}
+        declared_param_names = list(schema_properties.keys())
+        aliases: Dict[str, str] = {}
+        effective_kwargs = dict(kwargs)
+
+        if declared_param_names:
+            effective_kwargs, aliases = _remap_schema_kwargs(
+                effective_kwargs,
+                declared_param_names,
+                tool_name=self.info.name,
+            )
+            if aliases:
+                log.info("tool.execute.param_remapped", {
+                    "tool": self.info.name,
+                    "aliases": aliases,
+                })
+
+        resource = self._resolve_resource(effective_kwargs, device_id=device_id)
+        unknown = sorted(key for key in effective_kwargs if key not in schema_properties)
+        if declared_param_names and unknown:
+            schema_hint = _schema_hint_from_properties(
+                declared_param_names,
+                list(schema.required),
+            )
+            return PreparedToolInput(
+                kwargs=effective_kwargs,
+                aliases=aliases,
+                resource=resource,
+                validation_error=ToolResult(
+                    success=False,
+                    error=(
+                        f"Invalid arguments for {self.info.name}: unknown parameters: "
+                        f"{', '.join(unknown)}. {schema_hint}"
+                    ),
+                    metadata={
+                        "schema_precheck": {
+                            "tool": self.info.name,
+                            "source": self.info.source,
+                            "unknown": unknown,
+                            "allowed": declared_param_names,
+                            "required": list(schema.required),
+                            "aliases": aliases,
+                        }
+                    },
+                ),
+            )
+
+        for required_param in schema.required:
+            if required_param in effective_kwargs:
+                continue
+            log.error("tool.execute.missing_param", {
+                "tool": self.info.name,
+                "missing": required_param,
+                "provided": list(effective_kwargs.keys()),
+            })
+            schema_hint = _schema_hint_from_properties(
+                declared_param_names,
+                list(schema.required),
+            )
+            return PreparedToolInput(
+                kwargs=effective_kwargs,
+                aliases=aliases,
+                resource=resource,
+                validation_error=ToolResult(
+                    success=False,
+                    error=f"Missing required parameter: {required_param}. {schema_hint}",
+                    metadata={
+                        "schema_precheck": {
+                            "tool": self.info.name,
+                            "source": self.info.source,
+                            "provided": sorted(effective_kwargs.keys()),
+                            "allowed": declared_param_names,
+                            "required": list(schema.required),
+                            "aliases": aliases,
+                        }
+                    },
+                ),
+            )
+
+        coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
+        return PreparedToolInput(
+            kwargs=coerced_kwargs,
+            aliases=aliases,
+            resource=self._resolve_resource(coerced_kwargs, device_id=device_id),
+        )
+
+    def _resolve_resource(
+        self,
+        kwargs: Dict[str, Any],
+        *,
+        device_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if self.info.source == "device":
+            return {
+                "type": "device",
+                "id": device_id or "unknown",
+                "provider": self.info.provider or "unknown",
+            }
+        if self.info.name == "bash":
+            return {"type": "command", "id": self.info.name}
+        if self.info.name in {"read", "write", "edit", "glob"}:
+            candidate = (
+                kwargs.get("filePath")
+                or kwargs.get("path")
+                or kwargs.get("file_path")
+                or kwargs.get("target")
+            )
+            if isinstance(candidate, str) and candidate.strip():
+                from flocks.tool.path_utils import resolve_host_path
+
+                try:
+                    resolved = resolve_host_path(candidate)
+                except (OSError, ValueError):
+                    resolved = candidate
+                return {"type": "file", "id": resolved}
+        return {"type": "tool", "id": self.info.name}
+
     async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
-        """Execute the tool with given parameters and context"""
+        """Prepare and execute a direct tool call."""
+        prepared = self.prepare_input(kwargs)
+        if prepared.validation_error is not None:
+            return prepared.validation_error
+        return await self.execute_prepared(ctx, prepared)
+
+    async def execute_prepared(
+        self,
+        ctx: ToolContext,
+        prepared: PreparedToolInput,
+    ) -> ToolResult:
+        """Execute input already normalized and evaluated by the registry gateway."""
         try:
-            # Log tool execution start
             log.info("tool.execute.start", {
                 "tool": self.info.name,
                 "agent": ctx.agent,
                 "session": ctx.session_id,
-                "params": list(kwargs.keys()),
+                "params": list(prepared.kwargs.keys()),
             })
 
-            schema = self.info.get_schema()
-            schema_properties = schema.properties if isinstance(schema.properties, dict) else {}
-            declared_param_names = list(schema_properties.keys())
-
-            # Strict schema precheck: remap obvious aliases first, then validate.
-            # This reduces first-call failures caused by case/separator drift
-            # (e.g. file_path -> filePath) without allowing speculative params.
-            remap_aliases: Dict[str, str] = {}
-            effective_kwargs = dict(kwargs)
-            if declared_param_names:
-                effective_kwargs, remap_aliases = _remap_schema_kwargs(
-                    effective_kwargs,
-                    declared_param_names,
-                    tool_name=self.info.name,
-                )
-                if remap_aliases:
-                    log.info("tool.execute.param_remapped", {
-                        "tool": self.info.name,
-                        "aliases": remap_aliases,
-                    })
-
-                unknown = sorted(
-                    key for key in effective_kwargs.keys() if key not in schema_properties
-                )
-                if unknown:
-                    schema_hint = _schema_hint_from_properties(
-                        declared_param_names,
-                        list(schema.required),
-                    )
-                    return ToolResult(
-                        success=False,
-                        error=(
-                            f"Invalid arguments for {self.info.name}: unknown parameters: "
-                            f"{', '.join(unknown)}. {schema_hint}"
-                        ),
-                        metadata={
-                            "schema_precheck": {
-                                "tool": self.info.name,
-                                "source": self.info.source,
-                                "unknown": unknown,
-                                "allowed": declared_param_names,
-                                "required": list(schema.required),
-                                "aliases": remap_aliases,
-                            }
-                        },
-                    )
-
-            # Validate required parameters
-            for required_param in schema.required:
-                if required_param not in effective_kwargs:
-                    log.error("tool.execute.missing_param", {
-                        "tool": self.info.name,
-                        "missing": required_param,
-                        "provided": list(effective_kwargs.keys()),
-                    })
-                    schema_hint = _schema_hint_from_properties(
-                        declared_param_names,
-                        list(schema.required),
-                    )
-                    return ToolResult(
-                        success=False,
-                        error=(
-                            f"Missing required parameter: {required_param}. "
-                            f"{schema_hint}"
-                        ),
-                        metadata={
-                            "schema_precheck": {
-                                "tool": self.info.name,
-                                "source": self.info.source,
-                                "provided": sorted(effective_kwargs.keys()),
-                                "allowed": declared_param_names,
-                                "required": list(schema.required),
-                                "aliases": remap_aliases,
-                            }
-                        },
-                    )
-
-            coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
-
-            # Execute handler
-            result = await self.handler(ctx, **coerced_kwargs)
+            result = await self.handler(ctx, **prepared.kwargs)
 
             # Auto-truncate output unless the tool already handled it
             if result.success and not result.truncated:
@@ -1017,9 +1140,18 @@ class ToolRegistry:
                     "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
                 })
 
-        from flocks.hooks.pipeline import HookPipeline, normalize_tool_decision
+        from flocks.hooks.pipeline import (
+            HookPipeline,
+            merge_tool_decisions,
+            normalize_tool_decision,
+        )
 
-        current_tool_input = dict(kwargs)
+        execution_domain = str((ctx.extra or {}).get("execution_domain") or "").strip() or "unknown"
+        prepared_input = tool.prepare_input(dict(kwargs), device_id=device_id)
+        if prepared_input.validation_error is not None:
+            return prepared_input.validation_error
+
+        current_tool_input = dict(prepared_input.kwargs)
         before_payload = _build_tool_hook_payload(
             phase="before_execute",
             ctx=ctx,
@@ -1028,6 +1160,8 @@ class ToolRegistry:
             tool_input=current_tool_input,
             trace_id=trace_id,
             include_content=True,
+            resource=prepared_input.resource,
+            execution_domain=execution_domain,
         )
         before_ctx = await HookPipeline.run_tool_before(before_payload)
         before_output = before_ctx.output if before_ctx else None
@@ -1035,21 +1169,59 @@ class ToolRegistry:
             isinstance(before_output, dict)
             and before_output.get("policy_engine_present")
         )
-        decision = normalize_tool_decision(
+        current_decision = normalize_tool_decision(
             before_output,
             decision_expected=policy_engine_present,
-        ).as_dict()
+        )
         policy_engine_present = bool(
             policy_engine_present
-            or decision.get("action") in {"deny", "ask", "constrain"}
-            or decision.get("matched_rule")
-            or decision.get("policy_version")
-            or decision.get("grant_ref")
+            or current_decision.action in {"deny", "ask", "constrain"}
+            or current_decision.matched_rule
+            or current_decision.policy_version
+            or current_decision.grant_ref
         )
 
-        if decision.get("action") == "constrain" and isinstance(decision.get("updated_input"), dict):
-            current_tool_input = dict(decision["updated_input"])
-            before_payload["tool"]["input"] = dict(current_tool_input)
+        if current_decision.action == "constrain" and isinstance(current_decision.updated_input, dict):
+            prepared_input = tool.prepare_input(
+                dict(current_decision.updated_input),
+                device_id=device_id,
+            )
+            if prepared_input.validation_error is not None:
+                return prepared_input.validation_error
+            current_tool_input = dict(prepared_input.kwargs)
+            current_decision.updated_input = dict(current_tool_input)
+            before_payload = _build_tool_hook_payload(
+                phase="before_execute",
+                ctx=ctx,
+                tool=tool,
+                tool_name=tool_name,
+                tool_input=current_tool_input,
+                trace_id=trace_id,
+                include_content=True,
+                resource=prepared_input.resource,
+                execution_domain=execution_domain,
+            )
+            recheck_ctx = await HookPipeline.run_tool_before(before_payload)
+            recheck_output = recheck_ctx.output if recheck_ctx else None
+            recheck_policy_present = bool(
+                isinstance(recheck_output, dict)
+                and recheck_output.get("policy_engine_present")
+            )
+            recheck_decision = normalize_tool_decision(
+                recheck_output,
+                decision_expected=policy_engine_present or recheck_policy_present,
+            )
+            current_decision = merge_tool_decisions(current_decision, recheck_decision)
+            policy_engine_present = bool(
+                policy_engine_present
+                or recheck_policy_present
+                or recheck_decision.action in {"deny", "ask", "constrain"}
+                or recheck_decision.matched_rule
+                or recheck_decision.policy_version
+                or recheck_decision.grant_ref
+            )
+
+        decision = current_decision.as_dict()
 
         before_audit_payload = _build_tool_hook_payload(
             phase="before_execute",
@@ -1061,6 +1233,8 @@ class ToolRegistry:
             decision=decision,
             permission_checked=policy_engine_present,
             include_content=False,
+            resource=prepared_input.resource,
+            execution_domain=execution_domain,
         )
         await _emit_tool_audit("tool.before_execute", before_audit_payload)
 
@@ -1107,9 +1281,9 @@ class ToolRegistry:
                         success=False,
                         error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
-                result = await tool.execute(ctx, **current_tool_input)
+                result = await tool.execute_prepared(ctx, prepared_input)
         else:
-            result = await tool.execute(ctx, **current_tool_input)
+            result = await tool.execute_prepared(ctx, prepared_input)
 
         after_payload = _build_tool_hook_payload(
             phase="after_execute",
@@ -1123,6 +1297,8 @@ class ToolRegistry:
             duration_ms=int((time.perf_counter() - tool_started_at) * 1000),
             permission_checked=True,
             include_content=True,
+            resource=prepared_input.resource,
+            execution_domain=execution_domain,
         )
         after_ctx = await HookPipeline.run_tool_after(after_payload)
         if after_ctx and isinstance(after_ctx.output, dict):
@@ -1141,6 +1317,8 @@ class ToolRegistry:
                     duration_ms=after_payload.get("duration_ms"),
                     permission_checked=policy_engine_present,
                     include_content=True,
+                    resource=prepared_input.resource,
+                    execution_domain=execution_domain,
                 )
         after_audit_payload = _build_tool_hook_payload(
             phase="after_execute",
@@ -1154,6 +1332,8 @@ class ToolRegistry:
             duration_ms=after_payload.get("duration_ms"),
             permission_checked=policy_engine_present,
             include_content=False,
+            resource=prepared_input.resource,
+            execution_domain=execution_domain,
         )
         await _emit_tool_audit("tool.after_execute", after_audit_payload)
 

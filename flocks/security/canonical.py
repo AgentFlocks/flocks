@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict
 import shlex
@@ -36,10 +37,33 @@ class CanonicalResult:
         }
 
 
+def _is_json_compatible(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_compatible(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_json_compatible(item)
+            for key, item in value.items()
+        )
+    return False
+
+
 def canonical_hash(value: Any) -> str | None:
+    if not _is_json_compatible(value):
+        return None
     try:
-        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    except Exception:
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
         return None
     return hashlib.sha256(encoded).hexdigest()
 
