@@ -1352,7 +1352,7 @@ class ToolRegistry:
             decision=decision,
             result=result,
             duration_ms=int((time.perf_counter() - tool_started_at) * 1000),
-            permission_checked=True,
+            permission_checked=policy_engine_present,
             include_content=True,
             resource=prepared_input.resource,
             execution_domain=execution_domain,

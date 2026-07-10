@@ -1784,12 +1784,24 @@ async def workflow_center_list():
 async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenterPublishRequest] = None):
     """Publish workflow as an API service."""
     try:
+        decision = await run_before_action(
+            SecurityAction(
+                action="publish",
+                resource={"type": "workflow", "id": workflow_id},
+                canonical_input=req.model_dump(exclude_none=True) if req else {},
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
         result = await publish_workflow(
             workflow_id,
             image=req.image if req else None,
             driver=req.driver if req else None,
         )
         return result
+    except ActionDecisionError:
+        raise
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:
@@ -1803,8 +1815,20 @@ async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenter
 async def workflow_center_stop(workflow_id: str):
     """Stop published workflow docker service."""
     try:
+        decision = await run_before_action(
+            SecurityAction(
+                action="unpublish",
+                resource={"type": "workflow", "id": workflow_id},
+                canonical_input={},
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            )
+        )
+        enforce_action_decision(decision)
         result = await stop_workflow_service(workflow_id)
         return result
+    except ActionDecisionError:
+        raise
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:

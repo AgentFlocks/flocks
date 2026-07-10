@@ -189,6 +189,32 @@ async def test_unpublish_workflow_denied_before_runtime_stop(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_workflow_center_publish_denied_before_publish(monkeypatch) -> None:
+    gateway_calls = _deny_route(monkeypatch, workflow_routes)
+    first_side_effect = AsyncMock(side_effect=AssertionError("workflow center publish reached"))
+    monkeypatch.setattr(workflow_routes, "publish_workflow", first_side_effect)
+
+    await _assert_typed_deny(
+        lambda: workflow_routes.workflow_center_publish("wf-center-1"),
+        first_side_effect,
+        gateway_calls,
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_center_stop_denied_before_runtime_stop(monkeypatch) -> None:
+    gateway_calls = _deny_route(monkeypatch, workflow_routes)
+    first_side_effect = AsyncMock(side_effect=AssertionError("workflow center stop reached"))
+    monkeypatch.setattr(workflow_routes, "stop_workflow_service", first_side_effect)
+
+    await _assert_typed_deny(
+        lambda: workflow_routes.workflow_center_stop("wf-center-1"),
+        first_side_effect,
+        gateway_calls,
+    )
+
+
+@pytest.mark.asyncio
 async def test_add_mcp_server_denied_before_config_preparation(monkeypatch) -> None:
     gateway_calls = _deny_route(monkeypatch, mcp_routes)
     first_side_effect = Mock(side_effect=AssertionError("secret/config write reached"))

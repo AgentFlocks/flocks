@@ -46,6 +46,7 @@ async def test_registry_executes_before_after_hooks_and_emits_audit(monkeypatch:
     assert result.output == "ok:hello"
     assert run_before.await_count == 1
     assert run_after.await_count == 1
+    assert run_after.await_args.args[0]["permission_checked"] is False
     assert audit_emit.await_count == 2
     assert audit_emit.await_args_list[0].args[0] == "tool.before_execute"
     assert audit_emit.await_args_list[1].args[0] == "tool.after_execute"
@@ -57,6 +58,7 @@ async def test_registry_executes_before_after_hooks_and_emits_audit(monkeypatch:
     assert "input_hash" in before_payload["tool"]
     assert "result" not in after_payload
     assert "output_hash" in after_payload
+    assert after_payload["permission_checked"] is False
 
 
 @pytest.mark.asyncio
