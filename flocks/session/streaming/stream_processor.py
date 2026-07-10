@@ -1111,12 +1111,13 @@ class StreamProcessor:
                 )
 
             if not is_tool_allowed(runtime.tool_policy, tool_name):
-                result["blocked"] = True
-                result["error"] = (
-                    f"Tool '{tool_name}' is blocked by sandbox tool policy. "
-                    "Update sandbox.tools.allow/deny in ~/.flocks/config/flocks.json if needed."
-                )
-                return result
+                # B3: tool_policy remains a visibility/constraint signal only.
+                # Final allow/deny must come from Policy Engine in tool gateway.
+                result["extra"]["tool_policy_hint"] = {
+                    "allowed": False,
+                    "tool": tool_name,
+                    "source": "sandbox.tool_policy",
+                }
 
             # Sandbox metadata is needed for sandbox-aware tools, including workflow
             # entrypoint so workflow runtime can execute python nodes in sandbox.

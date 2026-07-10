@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 
+from flocks.security.canonical import CANONICAL_PARSER_VERSION, canonical_hash, canonicalize_command, canonicalize_json, canonicalize_path
 from flocks.utils.log import Log
 
 log = Log.create(service="tool-registry")
@@ -66,6 +67,8 @@ def _build_tool_hook_payload(
         or str((ctx.extra or {}).get("entry") or "").strip()
         or "unknown"
     )
+    execution_domain = str((ctx.extra or {}).get("execution_domain") or "").strip() or "unknown"
+    canonical_payload = _build_canonical_payload(tool_name=tool_name, tool_input=tool_input)
     payload: Dict[str, Any] = {
         "phase": phase,
         "trace_id": trace_id,
@@ -86,6 +89,9 @@ def _build_tool_hook_payload(
             "type": "tool",
             "id": tool_name,
         },
+        "execution_domain": execution_domain,
+        "canonical": canonical_payload,
+        "canonical_hash": canonical_payload.get("hash"),
     }
     if decision is not None:
         payload["decision"] = dict(decision)
@@ -105,6 +111,54 @@ def _build_tool_hook_payload(
     if duration_ms is not None:
         payload["duration_ms"] = int(duration_ms)
     return payload
+
+
+def _build_canonical_payload(*, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    generic = canonicalize_json({"tool": tool_name, "input": tool_input}).as_dict()
+    command: Dict[str, Any] | None = None
+    path: Dict[str, Any] | None = None
+    if tool_name == "bash":
+        command = canonicalize_command(str(tool_input.get("command") or "")).as_dict()
+        candidate_path = tool_input.get("workdir")
+        if isinstance(candidate_path, str):
+            path = canonicalize_path(candidate_path).as_dict()
+    elif tool_name in {"read", "write", "edit", "glob"}:
+        candidate_path = (
+            tool_input.get("filePath")
+            or tool_input.get("path")
+            or tool_input.get("file_path")
+            or tool_input.get("target")
+        )
+        if isinstance(candidate_path, str):
+            path = canonicalize_path(candidate_path).as_dict()
+    canonical = {
+        "status": "ok" if generic.get("hash") else "uncertain",
+        "parser_version": CANONICAL_PARSER_VERSION,
+        "reason": "" if generic.get("hash") else "hash_failed",
+        "generic": generic.get("value"),
+        "hash": generic.get("hash"),
+    }
+    if command:
+        canonical["command"] = command.get("value")
+        canonical["command_status"] = command.get("status")
+        canonical["command_hash"] = command.get("hash")
+    if path:
+        canonical["path"] = path.get("value")
+        canonical["path_status"] = path.get("status")
+        canonical["path_hash"] = path.get("hash")
+    if canonical.get("hash") is None:
+        canonical["status"] = "uncertain"
+    merged_hash = canonical_hash(
+        {
+            "generic": canonical.get("hash"),
+            "command": canonical.get("command_hash"),
+            "path": canonical.get("path_hash"),
+        }
+    )
+    canonical["hash"] = merged_hash or canonical.get("hash")
+    if canonical["hash"] is None:
+        canonical["reason"] = "canonical_hash_missing"
+    return canonical
 
 
 async def _emit_tool_audit(event_type: str, payload: Dict[str, Any]) -> None:
@@ -369,11 +423,21 @@ class ToolContext:
         if self._permission_callback:
             await self._permission_callback(request)
         else:
-            # Default: auto-approve (for testing/non-interactive mode)
-            log.debug("permission.auto_approved", {
+            rollout_mode = str(os.environ.get("FLOCKSPRO_POLICY_ROLLOUT_MODE", "shadow")).strip().lower()
+            if rollout_mode != "enforce":
+                log.warn("permission.callback_missing_compat_auto_approve", {
+                    "permission": permission,
+                    "patterns": patterns,
+                    "rollout_mode": rollout_mode,
+                })
+                return
+            log.warn("permission.callback_missing", {
                 "permission": permission,
-                "patterns": patterns
+                "patterns": patterns,
             })
+            raise PermissionError(
+                f"Permission callback is required for `{permission}`; silent auto-approve is disabled."
+            )
 
     def metadata(self, input_data: Dict[str, Any]) -> None:
         """
@@ -967,6 +1031,12 @@ class ToolRegistry:
         )
         before_ctx = await HookPipeline.run_tool_before(before_payload)
         decision = normalize_tool_decision(before_ctx.output if before_ctx else None).as_dict()
+        policy_engine_present = bool(
+            decision.get("action") in {"deny", "ask", "constrain"}
+            or decision.get("matched_rule")
+            or decision.get("policy_version")
+            or decision.get("grant_ref")
+        )
 
         if decision.get("action") == "constrain" and isinstance(decision.get("updated_input"), dict):
             current_tool_input = dict(decision["updated_input"])
@@ -980,12 +1050,12 @@ class ToolRegistry:
             tool_input=current_tool_input,
             trace_id=trace_id,
             decision=decision,
-            permission_checked=True,
+            permission_checked=policy_engine_present,
             include_content=False,
         )
         await _emit_tool_audit("tool.before_execute", before_audit_payload)
 
-        if decision.get("action") in {"deny", "ask"}:
+        if decision.get("action") == "deny":
             return ToolResult(
                 success=False,
                 error=decision.get("reason") or "Tool execution blocked by hook decision",
@@ -995,6 +1065,29 @@ class ToolRegistry:
                     "blocked_by_policy": True,
                 },
             )
+        if decision.get("action") == "ask":
+            mode = str(decision.get("mode") or "confirm")
+            error = decision.get("reason") or "Tool execution requires additional approval"
+            metadata: Dict[str, Any] = {
+                "decision": decision,
+                "trace_id": trace_id,
+                "blocked_by_policy": True,
+                "pending": True,
+                "pending_mode": mode,
+            }
+            if mode == "approval":
+                metadata["pending_approval"] = {
+                    "request_id": decision.get("grant_ref"),
+                    "policy_version": decision.get("policy_version"),
+                    "matched_rule": decision.get("matched_rule"),
+                    "canonical_hash": before_payload.get("canonical_hash"),
+                }
+                if decision.get("grant_ref"):
+                    error = (
+                        f"Approval required. request_id={decision.get('grant_ref')}. "
+                        "请审批通过后使用相同输入重试。"
+                    )
+            return ToolResult(success=False, error=error, metadata=metadata)
 
         tool_started_at = time.perf_counter()
         if device_id:
@@ -1037,7 +1130,7 @@ class ToolRegistry:
                     decision=decision,
                     result=result,
                     duration_ms=after_payload.get("duration_ms"),
-                    permission_checked=True,
+                    permission_checked=policy_engine_present,
                     include_content=True,
                 )
         after_audit_payload = _build_tool_hook_payload(
@@ -1050,7 +1143,7 @@ class ToolRegistry:
             decision=decision,
             result=result,
             duration_ms=after_payload.get("duration_ms"),
-            permission_checked=True,
+            permission_checked=policy_engine_present,
             include_content=False,
         )
         await _emit_tool_audit("tool.after_execute", after_audit_payload)

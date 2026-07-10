@@ -266,8 +266,9 @@ class PermissionNext:
         await cls._ensure_persisted_state_loaded()
         metadata = metadata or {}
         always_patterns = always or []
+        strict_once = bool(metadata.get("strict_once")) if isinstance(metadata, dict) else False
 
-        if os.environ.get("FLOCKS_AUTO_APPROVE") == "true":
+        if os.environ.get("FLOCKS_AUTO_APPROVE") == "true" and not strict_once:
             log.debug("permission.auto_approved", {
                 "permission": permission,
                 "reason": "FLOCKS_AUTO_APPROVE=true",
@@ -368,6 +369,10 @@ class PermissionNext:
             return
         if reply in ("deny", "reject"):
             raise DeniedError([])
+        if strict_once and reply in {"always", "allow_session"}:
+            return
+        if strict_once and reply == "never":
+            raise DeniedError([])
         if reply == "always":
             cls._permanent_rules[permission] = "allow"
             cls._schedule_persist(cls._persist_permanent_rule(permission, "allow"))
@@ -384,6 +389,36 @@ class PermissionNext:
             return
 
         raise PermissionError(f"Unknown permission reply: {reply}")
+
+    @classmethod
+    async def request_confirm(
+        cls,
+        *,
+        session_id: str,
+        permission: str,
+        patterns: List[str],
+        metadata: Optional[Dict[str, Any]] = None,
+        tool: Optional[Dict[str, str]] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """
+        B3 confirm adapter.
+
+        This keeps PermissionNext as interaction channel only.
+        Persistent allow/deny semantics are disabled by strict_once.
+        """
+        combined_metadata = dict(metadata or {})
+        combined_metadata["strict_once"] = True
+        await cls.ask(
+            session_id=session_id,
+            permission=permission,
+            patterns=patterns,
+            ruleset=[],
+            metadata=combined_metadata,
+            always=[],
+            tool=tool,
+            request_id=request_id,
+        )
 
     @classmethod
     async def reply(

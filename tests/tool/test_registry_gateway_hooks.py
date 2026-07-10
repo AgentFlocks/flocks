@@ -133,3 +133,44 @@ async def test_registry_stops_execution_on_deny_decision(monkeypatch: pytest.Mon
     assert audit_emit.await_count == 1
     assert audit_emit.await_args_list[0].args[0] == "tool.before_execute"
     assert "input" not in audit_emit.await_args_list[0].args[1]["tool"]
+
+
+@pytest.mark.asyncio
+async def test_registry_returns_pending_metadata_for_approval_mode(monkeypatch: pytest.MonkeyPatch):
+    ToolRegistry.init()
+    tool_name = "b3_registry_hook_approval_pending"
+
+    async def _handler(ctx: ToolContext, value: str) -> ToolResult:
+        return ToolResult(success=True, output=value)
+
+    _register_test_tool(tool_name, _handler)
+    try:
+        run_before = AsyncMock(
+            return_value=SimpleNamespace(
+                output={
+                    "decision": {
+                        "action": "ask",
+                        "mode": "approval",
+                        "reason": "approval_required",
+                        "grant_ref": "approval_123",
+                        "policy_version": "b3-v1",
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
+        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_after", AsyncMock(return_value=SimpleNamespace(output={})))
+        monkeypatch.setattr(registry_mod, "_emit_tool_audit", AsyncMock())
+
+        result = await ToolRegistry.execute(
+            tool_name,
+            ctx=ToolContext(session_id="s-hook", message_id="m-hook"),
+            value="hello",
+        )
+    finally:
+        ToolRegistry.unregister(tool_name)
+
+    assert result.success is False
+    assert result.metadata["pending"] is True
+    assert result.metadata["pending_mode"] == "approval"
+    assert result.metadata["pending_approval"]["request_id"] == "approval_123"

@@ -26,6 +26,8 @@ log = Log.create(service="hooks.pipeline")
 
 ToolDecisionAction = Literal["allow", "deny", "ask", "constrain"]
 _VALID_TOOL_DECISION_ACTIONS: set[str] = {"allow", "deny", "ask", "constrain"}
+ToolDecisionMode = Literal["confirm", "approval"]
+_VALID_TOOL_DECISION_MODES: set[str] = {"confirm", "approval"}
 
 
 @dataclass
@@ -33,12 +35,20 @@ class ToolDecision:
     action: ToolDecisionAction = "allow"
     reason: str = ""
     updated_input: Optional[Dict[str, Any]] = None
+    mode: Optional[ToolDecisionMode] = None
+    grant_ref: Optional[str] = None
+    matched_rule: Optional[str] = None
+    policy_version: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "action": self.action,
             "reason": self.reason,
             "updated_input": self.updated_input,
+            "mode": self.mode,
+            "grant_ref": self.grant_ref,
+            "matched_rule": self.matched_rule,
+            "policy_version": self.policy_version,
         }
         return payload
 
@@ -64,8 +74,23 @@ def normalize_tool_decision(output: Optional[Dict[str, Any]]) -> ToolDecision:
     updated_input = raw_decision.get("updated_input")
     if not isinstance(updated_input, dict):
         updated_input = None
+    raw_mode = str(raw_decision.get("mode") or "").strip().lower()
+    mode: Optional[ToolDecisionMode] = None
+    if raw_mode in _VALID_TOOL_DECISION_MODES:
+        mode = raw_mode  # type: ignore[assignment]
+    grant_ref = str(raw_decision.get("grant_ref") or "").strip() or None
+    matched_rule = str(raw_decision.get("matched_rule") or "").strip() or None
+    policy_version = str(raw_decision.get("policy_version") or "").strip() or None
 
-    return ToolDecision(action=action, reason=reason, updated_input=updated_input)
+    return ToolDecision(
+        action=action,
+        reason=reason,
+        updated_input=updated_input,
+        mode=mode,
+        grant_ref=grant_ref,
+        matched_rule=matched_rule,
+        policy_version=policy_version,
+    )
 
 
 class HookStage:
