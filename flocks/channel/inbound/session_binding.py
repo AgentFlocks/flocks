@@ -135,6 +135,9 @@ async def _get_db() -> aiosqlite.Connection:
     """
     global _db_conn, _db_ready, _db_owner_pid
 
+    from flocks.storage.storage import Storage
+
+    await Storage._ensure_init()
     current_pid = os.getpid()
     if (
         _db_conn is not None
@@ -169,7 +172,6 @@ async def _get_db() -> aiosqlite.Connection:
             _db_ready = False
             _db_owner_pid = None
 
-        from flocks.storage.storage import Storage
         db_path = Storage.get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -230,17 +232,28 @@ async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
         })
 
 
+async def _close_binding_db_locked(*, suppress_errors: bool) -> None:
+    """Invalidate and close ``_db_conn`` while ``_init_lock`` is held."""
+
+    global _db_conn, _db_ready, _db_owner_pid
+
+    conn = _db_conn
+    _db_conn = None
+    _db_ready = False
+    _db_owner_pid = None
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception:
+            if not suppress_errors:
+                raise
+
+
 async def close_binding_db() -> None:
     """Close the persistent connection (call during shutdown)."""
-    global _db_conn, _db_ready, _db_owner_pid
-    if _db_conn is not None:
-        try:
-            await _db_conn.close()
-        except Exception:
-            pass
-        _db_conn = None
-        _db_ready = False
-        _db_owner_pid = None
+
+    async with _init_lock:
+        await _close_binding_db_locked(suppress_errors=True)
 
 
 class SessionBindingService:

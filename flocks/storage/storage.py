@@ -8,6 +8,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import uuid
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -71,6 +72,7 @@ class Storage:
     _log = Log.create(service="storage")
     _db_path: Optional[Path] = None
     _initialized = False
+    _db_identity: Optional[Tuple[int, int]] = None
     # PID of the process that called ``init()``.  Used by ``_ensure_init`` to
     # detect ``fork()`` (uvicorn ``--reload`` / multiprocessing workers) and
     # re-initialise per-process state so the parent's open SQLite file
@@ -148,6 +150,34 @@ class Storage:
             return cls._db_path
         data_dir = Config.get_data_path()
         return data_dir / "flocks.db"
+
+    @staticmethod
+    def _file_identity(db_path: Path) -> Optional[Tuple[int, int]]:
+        """Return the filesystem identity used to detect an online DB replacement."""
+
+        try:
+            stat_result = db_path.stat()
+        except OSError:
+            return None
+        return stat_result.st_dev, stat_result.st_ino
+
+    @classmethod
+    def _assert_active_db_identity(cls, db_path: Path) -> None:
+        """Reject direct connections after the active primary DB was moved or replaced."""
+
+        if (
+            not cls._initialized
+            or cls._init_pid != os.getpid()
+            or cls._db_path is None
+            or cls._db_identity is None
+            or db_path.resolve() != cls._db_path.resolve()
+        ):
+            return
+        if cls._file_identity(db_path) != cls._db_identity:
+            raise StorageError(
+                f"The active SQLite database changed on disk: {db_path}. "
+                "Refusing to open a connection to a different file identity; restart Flocks."
+            )
 
     @classmethod
     def get_workflow_db_path(cls) -> Path:
@@ -264,9 +294,10 @@ class Storage:
 
         Returns the new location of the main file so callers can surface it
         in logs or recovery instructions.  Returns ``None`` when there was
-        nothing to quarantine (no main file present), or when the rename
-        failed — in which case the caller must propagate the original error
-        because we cannot safely recreate the file in place.
+        nothing to quarantine (no main file present), or when the main file
+        and its data-bearing WAL cannot be kept together. In that case the
+        caller must propagate the original error because recovery without the
+        matching WAL could silently omit committed transactions.
         """
         db_path = Path(db_path)
         if not db_path.exists():
@@ -276,12 +307,18 @@ class Storage:
 
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         suffix = f".corrupt.{timestamp}"
+        sidecar_suffixes = ("-wal", "-shm")
 
         new_main = db_path.with_name(db_path.name + suffix)
         # Avoid collision if multiple corruptions happen within the same
-        # second — fall back to a counter suffix.
+        # second — fall back to a counter suffix.  Reserve the paired WAL/SHM
+        # names as well so every quarantined main file keeps the exact sidecar
+        # names SQLite expects: ``<quarantined-main>-wal`` and ``-shm``.
         counter = 1
-        while new_main.exists():
+        while new_main.exists() or any(
+            new_main.with_name(new_main.name + sidecar_suffix).exists()
+            for sidecar_suffix in sidecar_suffixes
+        ):
             new_main = db_path.with_name(f"{db_path.name}{suffix}.{counter}")
             counter += 1
 
@@ -297,20 +334,34 @@ class Storage:
             )
             return None
 
-        for sidecar_name in (f"{db_path.name}-wal", f"{db_path.name}-shm"):
-            side_path = db_path.with_name(sidecar_name)
+        for sidecar_suffix in sidecar_suffixes:
+            side_path = db_path.with_name(db_path.name + sidecar_suffix)
             if not side_path.exists():
                 continue
             try:
-                side_path.rename(side_path.with_name(sidecar_name + suffix))
+                side_path.rename(new_main.with_name(new_main.name + sidecar_suffix))
             except OSError as exc:
-                cls._log.warn(
+                log_method = cls._log.error if sidecar_suffix == "-wal" else cls._log.warn
+                log_method(
                     "storage.quarantine.sidecar_rename_failed",
                     {
                         "path": str(side_path),
                         "error": str(exc),
                     },
                 )
+                if sidecar_suffix == "-wal":
+                    try:
+                        new_main.rename(db_path)
+                    except OSError as rollback_exc:
+                        cls._log.error(
+                            "storage.quarantine.rollback_failed",
+                            {
+                                "original_path": str(db_path),
+                                "quarantined_path": str(new_main),
+                                "error": str(rollback_exc),
+                            },
+                        )
+                    return None
 
         cls._log.error(
             "storage.corruption.quarantined",
@@ -355,13 +406,8 @@ class Storage:
 
     @classmethod
     def _try_sqlite_recover_sync(cls, quarantined_path: Path, target_path: Path) -> Optional[Path]:
-        """Try SQLite's lightweight `.recover` and install the recovered DB.
+        """Recover from an isolated copy without allowing SQLite to mutate evidence."""
 
-        This intentionally avoids the heavier raw-page/WAL reconstruction script.
-        It handles the common case where SQLite can still scan a malformed DB
-        enough to emit recoverable SQL.  Failure is non-fatal; callers fall back
-        to bootstrapping an empty database.
-        """
         sqlite_bin = shutil.which("sqlite3")
         if sqlite_bin is None:
             cls._log.warn(
@@ -374,6 +420,67 @@ class Storage:
             )
             return None
 
+        working_path = quarantined_path.with_name(
+            f".{quarantined_path.name}.recovery-source-{uuid.uuid4().hex}"
+        )
+        working_files = [
+            working_path,
+            working_path.with_name(working_path.name + "-wal"),
+            working_path.with_name(working_path.name + "-shm"),
+            working_path.with_name(working_path.name + "-journal"),
+        ]
+        try:
+            shutil.copy2(quarantined_path, working_path)
+            working_path.chmod(0o600)
+            for suffix in ("-wal", "-shm"):
+                evidence_sidecar = quarantined_path.with_name(quarantined_path.name + suffix)
+                if not evidence_sidecar.exists():
+                    continue
+                working_sidecar = working_path.with_name(working_path.name + suffix)
+                shutil.copy2(evidence_sidecar, working_sidecar)
+                working_sidecar.chmod(0o600)
+            return cls._try_sqlite_recover_working_copy_sync(
+                working_path,
+                quarantined_path,
+                target_path,
+                sqlite_bin,
+            )
+        except OSError as exc:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "copy_evidence",
+                    "error": str(exc),
+                },
+            )
+            return None
+        finally:
+            for path in working_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    cls._log.warn(
+                        "storage.corruption.recovery.temp_cleanup_failed",
+                        {"path": str(path), "error": str(exc)},
+                    )
+
+    @classmethod
+    def _try_sqlite_recover_working_copy_sync(
+        cls,
+        working_path: Path,
+        quarantined_path: Path,
+        target_path: Path,
+        sqlite_bin: str,
+    ) -> Optional[Path]:
+        """Try SQLite's lightweight `.recover` and install the recovered DB.
+
+        This intentionally avoids the heavier raw-page/WAL reconstruction script.
+        It handles the common case where SQLite can still scan a malformed DB
+        enough to emit recoverable SQL.  Failure is non-fatal; callers fall back
+        to bootstrapping an empty database.
+        """
         recovered_path = target_path.with_name(target_path.name + ".recovered")
         sql_path = target_path.with_name(target_path.name + ".recover.sql")
         for path in (recovered_path, sql_path):
@@ -383,8 +490,13 @@ class Storage:
                 pass
 
         try:
+            lost_and_found_table = f"flocks_recovery_lost_{uuid.uuid4().hex}"
             completed = subprocess.run(
-                [sqlite_bin, str(quarantined_path), ".recover"],
+                [
+                    sqlite_bin,
+                    str(working_path),
+                    f".recover --lost-and-found {lost_and_found_table}",
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -493,6 +605,42 @@ class Storage:
         )
         return target_path
 
+    @staticmethod
+    async def _wait_for_recovery_worker_on_cancel(
+        worker: "asyncio.Task[Optional[Path]]",
+    ) -> Optional[Path]:
+        """Do not let a cancelled coroutine leave a recovery thread mutating files."""
+
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if worker.done() and not worker.cancelled():
+                try:
+                    worker.result()
+                except BaseException:
+                    pass
+            raise cancelled
+
+    @classmethod
+    async def _run_sqlite_recover_async(
+        cls,
+        quarantined_path: Path,
+        target_path: Path,
+    ) -> Optional[Path]:
+        """Run blocking sqlite recovery without outliving a cancelled startup task."""
+
+        worker = asyncio.create_task(
+            asyncio.to_thread(cls._try_sqlite_recover_sync, quarantined_path, target_path)
+        )
+        return await cls._wait_for_recovery_worker_on_cancel(worker)
+
     @classmethod
     async def recover_corrupt_db(
         cls,
@@ -515,6 +663,26 @@ class Storage:
             if generation is not None and generation != cls._corruption_recovery_generation:
                 return False
 
+            is_primary_db = cls._db_path == db_path or db_path.name == "flocks.db"
+            is_live_process = (
+                cls._initialized
+                and cls._init_pid is not None
+                and cls._init_pid == os.getpid()
+            )
+            if is_primary_db and is_live_process:
+                cls._log.error(
+                    "storage.corruption.online_recovery_refused",
+                    {
+                        "db_path": str(db_path),
+                        "action": action,
+                        "hint": "Restart Flocks so recovery runs before request connections open.",
+                    },
+                )
+                raise StorageError(
+                    "Refusing to replace the primary SQLite database while Flocks is running; "
+                    "restart Flocks to recover it safely."
+                ) from exc
+
             cls._log.error(
                 "storage.corruption.detected",
                 {
@@ -527,15 +695,16 @@ class Storage:
             quarantined = cls._quarantine_corrupt_db(db_path)
             if quarantined is None:
                 raise exc
-            await asyncio.to_thread(cls._try_sqlite_recover_sync, quarantined, db_path)
+            await cls._run_sqlite_recover_async(quarantined, db_path)
 
             if cls._db_path == db_path:
                 cls._initialized = False
                 cls._init_pid = None
+                cls._db_identity = None
 
             if reinitialize is not None:
                 await reinitialize()
-            elif cls._db_path == db_path or db_path.name == "flocks.db":
+            elif is_primary_db:
                 await cls.init(db_path)
 
             cls._corruption_recovery_generation += 1
@@ -557,19 +726,29 @@ class Storage:
         db_path: Path,
         action: str,
     ) -> R:
-        generation = cls._corruption_recovery_generation
+        """Run a request operation without replacing its SQLite file in-place.
+
+        Runtime corruption is deliberately deferred to the next process start,
+        where no request handlers or persistent connections can still reference
+        the old inode. Primary-DB online recovery is explicitly refused.
+        """
+
         try:
             return await operation()
         except Exception as exc:
             if not cls._is_db_corruption_error(exc):
                 raise
-            await cls.recover_corrupt_db(
-                db_path,
-                action=action,
-                exc=exc,
-                generation=generation,
+            cls._log.error(
+                "storage.corruption.deferred_to_restart",
+                {
+                    "db_path": str(db_path),
+                    "action": action,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "hint": "Restart Flocks to run startup database recovery safely.",
+                },
             )
-            return await operation()
+            raise
 
     @classmethod
     def _is_sqlite_busy_error(cls, exc: Exception) -> bool:
@@ -666,9 +845,11 @@ class Storage:
     async def connect(cls, db_path: Optional[Path] = None) -> AsyncIterator[aiosqlite.Connection]:
         """Open a configured async SQLite connection for the active storage DB."""
         target = Path(db_path) if db_path is not None else cls.get_db_path()
+        cls._assert_active_db_identity(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(target, timeout=cls._sqlite_timeout_s)
         try:
+            cls._assert_active_db_identity(target)
             await cls.configure_connection(conn)
             yield conn
         finally:
@@ -678,10 +859,16 @@ class Storage:
     def connect_sync(cls, db_path: Optional[Path] = None) -> sqlite3.Connection:
         """Open a configured sync SQLite connection for the active storage DB."""
         target = Path(db_path) if db_path is not None else cls.get_db_path()
+        cls._assert_active_db_identity(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(target, timeout=cls._sqlite_timeout_s)
-        conn.row_factory = sqlite3.Row
-        return cls.configure_sync_connection(conn)
+        try:
+            cls._assert_active_db_identity(target)
+            conn.row_factory = sqlite3.Row
+            return cls.configure_sync_connection(conn)
+        except BaseException:
+            conn.close()
+            raise
 
     @classmethod
     def register_ddl(cls, ddl: DDLScript) -> None:
@@ -815,13 +1002,59 @@ class Storage:
             db_path = data_dir / "flocks.db"
 
         db_path = Path(db_path)
+        current_pid = os.getpid()
+        same_process = cls._init_pid is None or cls._init_pid == current_pid
+        if cls._initialized and same_process and cls._db_path is not None:
+            if cls._db_path != db_path:
+                # An explicit path switch is allowed for tests and embedded
+                # callers, but the process-owned persistent binding handle
+                # must not silently remain attached to the previous DB.
+                from flocks.channel.inbound.session_binding import close_binding_db
+
+                await close_binding_db()
+                cls._initialized = False
+                cls._init_pid = None
+                cls._db_identity = None
+            elif not db_path.exists():
+                from flocks.channel.inbound.session_binding import close_binding_db
+
+                await close_binding_db()
+                cls._log.error(
+                    "storage.live_path_disappeared",
+                    {
+                        "db_path": str(db_path),
+                        "hint": "Restart Flocks after restoring or recovering the database file.",
+                    },
+                )
+                raise StorageError(
+                    f"The active SQLite database disappeared: {db_path}. "
+                    "Refusing to create a second database while existing handles may reference "
+                    "the old file; restart Flocks."
+                )
+            elif (
+                cls._db_identity is not None
+                and cls._file_identity(db_path) != cls._db_identity
+            ):
+                from flocks.channel.inbound.session_binding import close_binding_db
+
+                await close_binding_db()
+                cls._log.error(
+                    "storage.live_path_replaced",
+                    {
+                        "db_path": str(db_path),
+                        "hint": "Restart Flocks; never replace SQLite files while it is running.",
+                    },
+                )
+                raise StorageError(
+                    f"The active SQLite database was replaced on disk: {db_path}. "
+                    "Refusing to mix connections to different file identities; restart Flocks."
+                )
+
         # Tests and short-lived processes may initialize Storage against a
         # temporary database that later disappears.  We also force a
         # reinit after ``fork()`` (detected via PID mismatch) to avoid the
         # child silently reusing the parent's open SQLite handle.
-        current_pid = os.getpid()
         same_path = cls._db_path == db_path and db_path.exists()
-        same_process = cls._init_pid is None or cls._init_pid == current_pid
         if cls._initialized and same_path and same_process:
             return
 
@@ -879,7 +1112,7 @@ class Storage:
             quarantined = cls._quarantine_corrupt_db(cls._db_path)
             if quarantined is None:
                 raise
-            await asyncio.to_thread(cls._try_sqlite_recover_sync, quarantined, cls._db_path)
+            await cls._run_sqlite_recover_async(quarantined, cls._db_path)
             await cls._bootstrap_schema()
 
         # Drain any residual WAL frames left by the previous process so the
@@ -893,6 +1126,7 @@ class Storage:
             cls._log.warn("storage.startup_checkpoint.failed", {"error": str(exc)})
 
         cls._init_pid = os.getpid()
+        cls._db_identity = cls._file_identity(cls._db_path)
         cls._initialized = True
         cls._log.info(
             "storage.initialized",
@@ -979,6 +1213,19 @@ class Storage:
         """
         if not cls._initialized:
             return
+        if (
+            cls._db_path is not None
+            and cls._db_identity is not None
+            and cls._file_identity(cls._db_path) != cls._db_identity
+        ):
+            cls._log.warn(
+                "storage.shutdown.checkpoint.skipped_replaced_path",
+                {"db_path": str(cls._db_path)},
+            )
+            cls._initialized = False
+            cls._init_pid = None
+            cls._db_identity = None
+            return
 
         attempts = max(int(cls._shutdown_checkpoint_attempts), 1)
         backoff = max(float(cls._shutdown_checkpoint_backoff_s), 0.0)
@@ -1046,6 +1293,7 @@ class Storage:
         finally:
             cls._initialized = False
             cls._init_pid = None
+            cls._db_identity = None
 
     @classmethod
     async def _bootstrap_schema(cls) -> None:
@@ -1197,8 +1445,20 @@ class Storage:
             )
             cls._initialized = False
             cls._init_pid = None
+            cls._db_identity = None
 
-        if not cls._initialized or cls._db_path is None or not cls._db_path.exists():
+        identity_changed = (
+            cls._initialized
+            and cls._db_path is not None
+            and cls._db_identity is not None
+            and cls._file_identity(cls._db_path) != cls._db_identity
+        )
+        if (
+            not cls._initialized
+            or cls._db_path is None
+            or not cls._db_path.exists()
+            or identity_changed
+        ):
             await cls.init(cls._db_path)
 
     @classmethod
