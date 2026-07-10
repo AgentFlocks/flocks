@@ -160,8 +160,17 @@ def _build_canonical_payload(
             or tool_input.get("file_path")
             or tool_input.get("target")
         )
-        if isinstance(candidate_path, str):
-            path = canonicalize_path(candidate_path).as_dict()
+        if tool_name == "glob" and not candidate_path:
+            candidate_path = "."
+        if isinstance(candidate_path, str) and candidate_path.strip():
+            from flocks.tool.path_utils import resolve_host_path
+
+            try:
+                candidate_path = resolve_host_path(candidate_path)
+            except (OSError, ValueError):
+                pass
+        resolved_resource = {"type": "file", "id": candidate_path}
+        path = canonicalize_path(candidate_path).as_dict()
 
     generic_value: Dict[str, Any] = {
         "tool": tool_name,
@@ -767,6 +776,33 @@ class Tool:
             )
 
         coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
+        if self.info.name in {"read", "write", "edit"}:
+            file_path = coerced_kwargs.get("filePath")
+            if not isinstance(file_path, str) or not file_path.strip():
+                resource = self._resolve_resource(coerced_kwargs, device_id=device_id)
+                schema_hint = _schema_hint_from_properties(
+                    declared_param_names,
+                    list(schema.required),
+                )
+                return PreparedToolInput(
+                    kwargs=coerced_kwargs,
+                    aliases=aliases,
+                    resource=resource,
+                    validation_error=ToolResult(
+                        success=False,
+                        error=f"Missing required parameter: filePath. {schema_hint}",
+                        metadata={
+                            "schema_precheck": {
+                                "tool": self.info.name,
+                                "source": self.info.source,
+                                "provided": sorted(coerced_kwargs.keys()),
+                                "allowed": declared_param_names,
+                                "required": list(schema.required),
+                                "aliases": aliases,
+                            }
+                        },
+                    ),
+                )
         return PreparedToolInput(
             kwargs=coerced_kwargs,
             aliases=aliases,
@@ -794,6 +830,8 @@ class Tool:
                 or kwargs.get("file_path")
                 or kwargs.get("target")
             )
+            if self.info.name == "glob" and not candidate:
+                candidate = "."
             if isinstance(candidate, str) and candidate.strip():
                 from flocks.tool.path_utils import resolve_host_path
 
@@ -802,6 +840,7 @@ class Tool:
                 except (OSError, ValueError):
                     resolved = candidate
                 return {"type": "file", "id": resolved}
+            return {"type": "file", "id": candidate}
         return {"type": "tool", "id": self.info.name}
 
     async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
@@ -1142,6 +1181,7 @@ class ToolRegistry:
 
         from flocks.hooks.pipeline import (
             HookPipeline,
+            ToolDecision,
             merge_tool_decisions,
             normalize_tool_decision,
         )
@@ -1211,7 +1251,19 @@ class ToolRegistry:
                 recheck_output,
                 decision_expected=policy_engine_present or recheck_policy_present,
             )
-            current_decision = merge_tool_decisions(current_decision, recheck_decision)
+            merged_decision = merge_tool_decisions(current_decision, recheck_decision)
+            if recheck_decision.action == "constrain":
+                current_decision = ToolDecision(
+                    action="deny",
+                    reason="constraint_recheck_limit",
+                    updated_input=merged_decision.updated_input,
+                    mode=merged_decision.mode,
+                    grant_ref=merged_decision.grant_ref,
+                    matched_rule=merged_decision.matched_rule,
+                    policy_version=merged_decision.policy_version,
+                )
+            else:
+                current_decision = merged_decision
             policy_engine_present = bool(
                 policy_engine_present
                 or recheck_policy_present

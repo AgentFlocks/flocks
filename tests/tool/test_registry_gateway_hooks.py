@@ -72,14 +72,17 @@ async def test_registry_respects_constrain_decision(monkeypatch: pytest.MonkeyPa
     _register_test_tool(tool_name, _handler)
     try:
         run_before = AsyncMock(
-            return_value=SimpleNamespace(
-                output={
-                    "decision": {
-                        "action": "constrain",
-                        "updated_input": {"value": "rewritten"},
+            side_effect=[
+                SimpleNamespace(
+                    output={
+                        "decision": {
+                            "action": "constrain",
+                            "updated_input": {"value": "rewritten"},
+                        }
                     }
-                }
-            )
+                ),
+                SimpleNamespace(output={"decision": {"action": "allow"}}),
+            ]
         )
         monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
         monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_after", AsyncMock(return_value=SimpleNamespace(output={})))

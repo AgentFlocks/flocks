@@ -284,6 +284,113 @@ async def test_constraint_triggers_only_one_reprepare_recanonicalize_and_policy_
     assert handled == {"itemCount": 2}
 
 
+@pytest.mark.asyncio
+async def test_second_constraint_fails_closed_without_executing_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled = False
+    policy_calls = 0
+
+    async def _handler(_ctx: ToolContext, itemCount: int) -> ToolResult:
+        nonlocal handled
+        handled = True
+        return ToolResult(success=True, output=itemCount)
+
+    tool = _tool(
+        "b3_constraint_recheck_limit",
+        _handler,
+        parameters=[
+            ToolParameter(
+                name="itemCount",
+                type=ParameterType.INTEGER,
+                required=True,
+            )
+        ],
+    )
+
+    async def _before(_payload):
+        nonlocal policy_calls
+        policy_calls += 1
+        updated = 2 if policy_calls == 1 else 3
+        return SimpleNamespace(
+            output={
+                "policy_engine_present": True,
+                "decision": {
+                    "action": "constrain",
+                    "updated_input": {"itemCount": updated},
+                    "matched_rule": f"constraint-{policy_calls}",
+                    "policy_version": "b3-v1",
+                },
+            }
+        )
+
+    monkeypatch.setattr(ToolRegistry, "get", lambda _name: tool)
+    monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", _before)
+    monkeypatch.setattr(
+        "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+        AsyncMock(return_value=SimpleNamespace(output={})),
+    )
+    monkeypatch.setattr(registry_mod, "_emit_tool_audit", AsyncMock())
+
+    result = await ToolRegistry.execute(
+        tool.info.name,
+        ctx=ToolContext(session_id="s", message_id="m"),
+        itemCount=1,
+    )
+
+    assert result.success is False
+    assert result.error == "constraint_recheck_limit"
+    assert result.metadata["decision"]["action"] == "deny"
+    assert result.metadata["decision"]["policy_version"] == "b3-v1"
+    assert result.metadata["decision"]["updated_input"] == {"itemCount": 2}
+    assert policy_calls == 2
+    assert handled is False
+
+
+@pytest.mark.parametrize("tool_name", ["read", "write", "edit"])
+def test_prepare_input_rejects_empty_required_file_path(tool_name: str) -> None:
+    async def _handler(_ctx: ToolContext, filePath: str) -> ToolResult:
+        return ToolResult(success=True, output=filePath)
+
+    tool = _tool(
+        tool_name,
+        _handler,
+        parameters=[
+            ToolParameter(
+                name="filePath",
+                type=ParameterType.STRING,
+                required=True,
+            )
+        ],
+    )
+
+    prepared = tool.prepare_input({"filePath": ""})
+
+    assert prepared.validation_error is not None
+
+
+def test_prepare_input_resolves_glob_default_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    async def _handler(_ctx: ToolContext, pattern: str, path: str | None = None) -> ToolResult:
+        return ToolResult(success=True, output=path or pattern)
+
+    tool = _tool(
+        "glob",
+        _handler,
+        parameters=[
+            ToolParameter(name="pattern", type=ParameterType.STRING, required=True),
+            ToolParameter(name="path", type=ParameterType.STRING, required=False),
+        ],
+    )
+
+    prepared = tool.prepare_input({"pattern": "*.py"})
+
+    assert prepared.validation_error is None
+    assert prepared.kwargs == {"pattern": "*.py"}
+    assert prepared.resource == {"type": "file", "id": str(tmp_path.resolve())}
+
+
 def test_second_policy_decision_cannot_weaken_first_decision() -> None:
     from flocks.hooks.pipeline import merge_tool_decisions
 

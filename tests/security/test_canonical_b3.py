@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from flocks.security.canonical import canonical_hash, canonicalize_command, canonicalize_json, canonicalize_path
 from flocks.tool.registry import _build_canonical_payload
 
@@ -66,3 +68,37 @@ def test_canonical_payload_binds_resolved_cwd_resource_and_execution_domain(tmp_
     assert result["resource"] == resource
     assert result["execution_domain"] == "production"
     assert result["hash"] is not None
+
+
+def test_glob_without_path_binds_resolved_default_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    result = _build_canonical_payload(
+        tool_name="glob",
+        tool_input={"pattern": "*.py"},
+    )
+
+    assert result["status"] == "ok"
+    assert result["resource"] == {"type": "file", "id": str(tmp_path.resolve())}
+    assert result["path"] == {"path": str(tmp_path.resolve())}
+    assert result["path_status"] == "ok"
+    assert result["hash"] is not None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("read", {}),
+        ("write", {"filePath": ""}),
+        ("edit", {"filePath": ""}),
+    ],
+)
+def test_required_file_tool_path_is_always_applicable(tool_name, tool_input):
+    result = _build_canonical_payload(
+        tool_name=tool_name,
+        tool_input=tool_input,
+    )
+
+    assert result["path_status"] == "uncertain"
+    assert result["status"] == "uncertain"
+    assert result["hash"] is None
