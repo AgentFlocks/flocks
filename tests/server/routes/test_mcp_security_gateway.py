@@ -102,3 +102,54 @@ async def test_catalog_install_is_denied_before_secret_package_and_config_writes
     secrets.assert_not_called()
     preflight.assert_not_awaited()
     config_write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_catalog_install_after_hook_records_real_install_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The install action must cover package/config work, not a no-op gate."""
+    observed_after = []
+
+    class _ObserveInstall(HookBase):
+        async def action_before(self, ctx) -> None:
+            ctx.output["policy_engine_present"] = True
+            ctx.output["decision"] = {"action": "allow"}
+
+        async def action_after(self, ctx) -> None:
+            observed_after.append(ctx.input)
+
+    class _Entry:
+        name = "Demo"
+        required_env_vars = {}
+
+        def to_mcp_config(self, *_args, **_kwargs):
+            return {"type": "local", "command": ["demo-mcp"]}
+
+    class _Catalog:
+        def get_entry(self, server_id):
+            return _Entry() if server_id == "demo" else None
+
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("observe-mcp-install", _ObserveInstall(), critical=True)
+    monkeypatch.setattr(mcp_routes.McpCatalog, "get", lambda: _Catalog())
+    monkeypatch.setattr(
+        mcp_routes,
+        "preflight_install",
+        AsyncMock(side_effect=RuntimeError("package install failed")),
+    )
+    try:
+        with pytest.raises(mcp_routes.HTTPException) as exc_info:
+            await mcp_routes.install_from_catalog(
+                mcp_routes.CatalogInstallRequest(server_id="demo")
+            )
+    finally:
+        HookPipeline.reset()
+
+    assert exc_info.value.status_code == 400
+    assert observed_after[-1]["outcome"] == {
+        "success": False,
+        "executed": True,
+        "error_type": "HTTPException",
+    }

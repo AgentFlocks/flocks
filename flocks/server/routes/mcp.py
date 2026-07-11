@@ -1314,20 +1314,7 @@ async def install_from_catalog(request: CatalogInstallRequest):
     If credentials are provided, they are saved to .secret.json and the config
     uses {secret:key} references so that actual values stay out of flocks.json.
     """
-    try:
-        async def _authorize_install() -> None:
-            return None
-
-        await _execute_mcp_action(
-            action="mcp_catalog_install",
-            name=request.server_id,
-            config={
-                "enabled": request.enabled,
-                "credentials_present": bool(request.credentials),
-                "skip_package_install": request.skip_package_install,
-            },
-            effect=_authorize_install,
-        )
+    async def _install() -> Dict[str, Any]:
         catalog = McpCatalog.get()
         entry = catalog.get_entry(request.server_id)
         if not entry:
@@ -1403,6 +1390,21 @@ async def install_from_catalog(request: CatalogInstallRequest):
                 for k, v in entry.required_env_vars.items()
             ],
         }
+
+    try:
+        # Keep every stateful step — secret persistence, package preflight,
+        # runtime connection and config write — inside the action effect.  A
+        # no-op preflight gate is not sufficient for outcome auditing.
+        return await _execute_mcp_action(
+            action="mcp_catalog_install",
+            name=request.server_id,
+            config={
+                "enabled": request.enabled,
+                "credentials_present": bool(request.credentials),
+                "skip_package_install": request.skip_package_install,
+            },
+            effect=_install,
+        )
     except HTTPException:
         raise
     except Exception as e:

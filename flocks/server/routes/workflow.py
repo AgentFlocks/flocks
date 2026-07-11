@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import shutil
 import threading
 import time
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, Body, HTTPException, Request, status, Query
@@ -91,16 +93,103 @@ from flocks.server.routes.event import publish_event
 from flocks.security.action_gateway import (
     ActionDecisionError,
     SecurityAction,
-    enforce_action_decision,
-    run_before_action,
+    execute_action,
 )
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
 
 
-router = APIRouter()
-webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
+
+
+def _workflow_control_action_name(endpoint_name: str) -> str:
+    """Preserve stable action names for existing publish lifecycle policy."""
+    if endpoint_name in {"workflow_center_publish", "publish_workflow_as_api"}:
+        return "publish"
+    if endpoint_name in {"workflow_center_stop", "unpublish_workflow_api"}:
+        return "unpublish"
+    return f"workflow.{endpoint_name}"
+
+
+def _control_value_fingerprint(value: Any) -> str:
+    """Fingerprint request data without forwarding it to policy/audit hooks."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json", exclude_none=True)
+    try:
+        encoded = json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = repr(type(value)).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _workflow_control_context(endpoint, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """Build a compact, secret-free canonical input for a control endpoint."""
+    try:
+        arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
+    except TypeError:
+        arguments = dict(kwargs)
+
+    workflow_id = str(arguments.get("workflow_id") or "collection")
+    canonical_args: Dict[str, Any] = {}
+    for name, value in arguments.items():
+        if name == "request":
+            # Never canonicalize raw HTTP request data at this generic layer.
+            continue
+        if name in {"workflow_id", "trigger_id", "exec_id"}:
+            canonical_args[name] = str(value)
+            continue
+        canonical_args[name] = {
+            "type": type(value).__name__,
+            "sha256": _control_value_fingerprint(value),
+        }
+    return workflow_id, canonical_args
+
+
+def _wrap_workflow_control_endpoint(endpoint):
+    action_name = _workflow_control_action_name(endpoint.__name__)
+
+    @wraps(endpoint)
+    async def _wrapped(*args, **kwargs):
+        workflow_id, canonical_args = _workflow_control_context(endpoint, args, kwargs)
+        action = SecurityAction(
+            action=action_name,
+            resource={"type": "workflow", "id": workflow_id},
+            canonical_input={"operation": action_name, "arguments": canonical_args},
+            execution_domain="control_plane",
+            metadata={"entry": "api", "operation": endpoint.__name__},
+        )
+        try:
+            return await execute_action(action, lambda: endpoint(*args, **kwargs))
+        except ActionDecisionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    return _wrapped
+
+
+class _WorkflowControlRouter(APIRouter):
+    """Apply the neutral action gateway to every mutating workflow API route.
+
+    Webhook receiver routes deliberately live on ``webhook_router`` instead:
+    their retirement is outside the B1/B3 acceptance boundary.
+    """
+
+    def api_route(self, path: str, *args, **kwargs):
+        methods = kwargs.get("methods") or []
+        method_set = {str(item).upper() for item in methods}
+        base_decorator = super().api_route(path, *args, **kwargs)
+
+        def _decorate(endpoint):
+            wrapped = endpoint
+            if method_set & {"POST", "PUT", "PATCH", "DELETE"}:
+                wrapped = _wrap_workflow_control_endpoint(endpoint)
+            base_decorator(wrapped)
+            return wrapped
+
+        return _decorate
+
+
+router = _WorkflowControlRouter()
+webhook_router = APIRouter()
 
 _PROGRESS_FLUSH_EVERY_STEPS = 5
 
@@ -1784,24 +1873,12 @@ async def workflow_center_list():
 async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenterPublishRequest] = None):
     """Publish workflow as an API service."""
     try:
-        decision = await run_before_action(
-            SecurityAction(
-                action="publish",
-                resource={"type": "workflow", "id": workflow_id},
-                canonical_input=req.model_dump(exclude_none=True) if req else {},
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
-        )
-        enforce_action_decision(decision)
         result = await publish_workflow(
             workflow_id,
             image=req.image if req else None,
             driver=req.driver if req else None,
         )
         return result
-    except ActionDecisionError:
-        raise
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:
@@ -1815,20 +1892,8 @@ async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenter
 async def workflow_center_stop(workflow_id: str):
     """Stop published workflow docker service."""
     try:
-        decision = await run_before_action(
-            SecurityAction(
-                action="unpublish",
-                resource={"type": "workflow", "id": workflow_id},
-                canonical_input={},
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
-        )
-        enforce_action_decision(decision)
         result = await stop_workflow_service(workflow_id)
         return result
-    except ActionDecisionError:
-        raise
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:
@@ -2481,16 +2546,6 @@ async def publish_workflow_as_api(
     starts the selected runtime, and returns the service URL and generated API key.
     """
     try:
-        decision = await run_before_action(
-            SecurityAction(
-                action="publish",
-                resource={"type": "workflow", "id": workflow_id},
-                canonical_input=req.model_dump(exclude_none=True) if req else {},
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
-        )
-        enforce_action_decision(decision)
         data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
         # Preserve existing API key across re-publishes so callers don't break.
@@ -2529,8 +2584,6 @@ async def publish_workflow_as_api(
 
         log.info("workflow.api.published", {"id": workflow_id, "url": service_url})
         return service_info
-    except ActionDecisionError:
-        raise
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
@@ -2553,17 +2606,6 @@ async def unpublish_workflow_api(workflow_id: str):
         if not existing:
             raise HTTPException(status_code=404, detail="No published service found for this workflow")
 
-        decision = await run_before_action(
-            SecurityAction(
-                action="unpublish",
-                resource={"type": "workflow", "id": workflow_id},
-                canonical_input={},
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
-        )
-        enforce_action_decision(decision)
-
         try:
             await stop_workflow_service(workflow_id)
         except (WorkflowNotFoundError, WorkflowNotPublishedError):
@@ -2575,8 +2617,6 @@ async def unpublish_workflow_api(workflow_id: str):
 
         log.info("workflow.api.unpublished", {"id": workflow_id})
         return {"ok": True}
-    except ActionDecisionError:
-        raise
     except HTTPException:
         raise
     except Exception as e:

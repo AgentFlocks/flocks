@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow.triggers.security import execute_trigger_action
+from flocks.security.action_gateway import ActionDecisionError
 from flocks.workflow.tool_context import build_workflow_tool_context
 
 log = Log.create(service="workflow.service_runtime")
@@ -48,6 +50,18 @@ def create_service_app(
         _app.state.mcp_error = None
         try:
             await MCP.init()
+        except ActionDecisionError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "request_id": req.request_id,
+                    "workflow_id": app.state.workflow_id,
+                    "release_id": app.state.release_id,
+                    "status": "DENIED",
+                    "error": str(exc),
+                    "duration_ms": int((time.time() - started) * 1000),
+                },
+            ) from exc
         except Exception as exc:
             _app.state.mcp_error = str(exc)
             log.warning("workflow_service.mcp.init_failed", {"error": str(exc)})
@@ -106,18 +120,27 @@ def create_service_app(
             )
 
         try:
-            tool_context = await build_workflow_tool_context(
+            async def _run_workflow_effect() -> RunWorkflowResult:
+                tool_context = await build_workflow_tool_context(
+                    workflow_id=app.state.workflow_id,
+                    action_name="invoke",
+                )
+                return await asyncio.to_thread(
+                    run_workflow,
+                    workflow=app.state.workflow_json,
+                    inputs=req.inputs,
+                    timeout_s=req.timeout_s,
+                    trace=req.trace,
+                    ensure_requirements=req.ensure_requirements,
+                    tool_context=tool_context,
+                )
+
+            result: RunWorkflowResult = await execute_trigger_action(
                 workflow_id=app.state.workflow_id,
-                action_name="invoke",
-            )
-            result: RunWorkflowResult = await asyncio.to_thread(
-                run_workflow,
-                workflow=app.state.workflow_json,
-                inputs=req.inputs,
-                timeout_s=req.timeout_s,
-                trace=req.trace,
-                ensure_requirements=req.ensure_requirements,
-                tool_context=tool_context,
+                trigger_id="api-service",
+                trigger_type="api_service",
+                mapped_inputs=req.inputs,
+                effect=_run_workflow_effect,
             )
             return {
                 "request_id": req.request_id,

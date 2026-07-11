@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from flocks.mcp import MCP
+from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.tool import ToolContext
 import flocks.server.routes.workflow as workflow_module
 
@@ -38,6 +39,35 @@ def _two_node_workflow_json(edge):
         ],
         "edges": [edge],
     }
+
+
+@pytest.mark.asyncio
+async def test_workflow_control_route_is_denied_before_filesystem_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DenyWorkflowControl(HookBase):
+        async def action_before(self, ctx) -> None:
+            ctx.output["policy_engine_present"] = True
+            ctx.output["decision"] = {"action": "deny", "reason": "workflow_control_denied"}
+
+    write_workflow = Mock(side_effect=AssertionError("workflow write reached"))
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("deny-workflow-control", _DenyWorkflowControl(), critical=True)
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", write_workflow)
+    try:
+        with pytest.raises(workflow_module.HTTPException) as exc_info:
+            await workflow_module.create_workflow(
+                workflow_module.WorkflowCreateRequest(
+                    name="blocked workflow",
+                    workflowJson=_minimal_workflow_json(),
+                )
+            )
+    finally:
+        HookPipeline.reset()
+
+    assert exc_info.value.status_code == 403
+    write_workflow.assert_not_called()
 
 
 @pytest.mark.asyncio

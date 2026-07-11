@@ -31,6 +31,7 @@ from flocks.workflow.triggers.models import (
     workflow_json_declares_triggers,
     workflow_trigger_definitions_from_json,
 )
+from flocks.workflow.triggers.security import execute_trigger_action
 
 log = Log.create(service="syslog.manager")
 
@@ -610,17 +611,28 @@ class SyslogManager:
                         "entry": "headless",
                         "trace_id": str(exec_id),
                         "subject": workflow_subject or {},
+                        "legacy_compat": True,
                     },
                 )
-                result = await asyncio.to_thread(
-                    run_workflow,
-                    workflow=workflow_plan,
-                    inputs=mapped_inputs,
-                    run_id=exec_id,
-                    trace=False,
-                    execution_profile="high_frequency",
-                    on_step_complete=step_recorder.on_step_complete,
-                    tool_context=workflow_ctx,
+                async def _run_workflow_effect():
+                    return await asyncio.to_thread(
+                        run_workflow,
+                        workflow=workflow_plan,
+                        inputs=mapped_inputs,
+                        run_id=exec_id,
+                        trace=False,
+                        execution_profile="high_frequency",
+                        on_step_complete=step_recorder.on_step_complete,
+                        tool_context=workflow_ctx,
+                    )
+
+                result = await execute_trigger_action(
+                    workflow_id=workflow_id,
+                    trigger_id=trigger.id,
+                    trigger_type=trigger.type,
+                    mapped_inputs=mapped_inputs,
+                    effect=_run_workflow_effect,
+                    subject=workflow_subject,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time
