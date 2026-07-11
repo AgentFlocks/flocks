@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import HTTPException
 
 from flocks.hooks.pipeline import HookBase, HookPipeline, ToolDecision
 import flocks.security.action_gateway as action_gateway
@@ -27,12 +28,28 @@ def _deny_route(monkeypatch: pytest.MonkeyPatch, route_module):
         return ToolDecision(action="deny", reason="test_policy_deny")
 
     monkeypatch.setattr(route_module, "run_before_action", _deny, raising=False)
+
+    # Newer route families delegate the entire effect to the neutral gateway
+    # instead of spelling out before/enforce in each endpoint.  Keep this test
+    # helper at that same public boundary so both migration shapes prove the
+    # side effect is unreachable after a deny.
+    async def _deny_execute(action, effect, *, subject=None):
+        calls.append((action, subject))
+        raise ActionDeniedError(ToolDecision(action="deny", reason="test_policy_deny"))
+
+    monkeypatch.setattr(route_module, "execute_action", _deny_execute, raising=False)
     return calls
 
 
 async def _assert_typed_deny(call, side_effect: Mock, gateway_calls: list) -> None:
-    with pytest.raises(ActionDeniedError):
+    # Direct route calls retain the historical typed gateway exception for
+    # hand-wired endpoints; the generic workflow Router correctly adapts the
+    # same deny to HTTP 403 for FastAPI.  Both must stop the side effect.
+    with pytest.raises((ActionDeniedError, HTTPException)) as exc_info:
         await call()
+
+    if isinstance(exc_info.value, HTTPException):
+        assert exc_info.value.status_code == 403
 
     side_effect.assert_not_called()
     assert len(gateway_calls) == 1
