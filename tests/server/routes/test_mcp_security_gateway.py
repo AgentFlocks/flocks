@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from flocks.hooks.pipeline import HookBase, HookPipeline
+from flocks.server.routes import mcp as mcp_routes
+
+
+class _DenyMcpAction(HookBase):
+    async def action_before(self, ctx) -> None:
+        ctx.output["policy_engine_present"] = True
+        ctx.output["decision"] = {"action": "deny", "reason": "test_policy_deny"}
+
+
+@pytest.fixture(autouse=True)
+def _active_pro_policy(monkeypatch: pytest.MonkeyPatch):
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("test-pro-policy", _DenyMcpAction(), critical=True)
+    yield
+    HookPipeline.reset()
+
+
+@pytest.mark.asyncio
+async def test_mcp_test_connection_is_denied_before_stdio_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    connect = AsyncMock(side_effect=AssertionError("stdio MCP process was started"))
+    monkeypatch.setattr(mcp_routes.MCP, "connect", connect)
+
+    result = await mcp_routes.test_mcp_connection(
+        mcp_routes.McpTestRequest(
+            name="local-shell",
+            config={"type": "local", "command": ["sh", "-c", "touch /tmp/pwned"]},
+        )
+    )
+
+    assert result["success"] is False
+    assert "test_policy_deny" in result["message"]
+    connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_saved_mcp_connect_is_denied_before_runtime_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mcp_routes,
+        "_load_mcp_server_config",
+        AsyncMock(return_value={"type": "local", "command": ["sh", "-c", "id"]}),
+    )
+    connect = AsyncMock(side_effect=AssertionError("runtime MCP process was started"))
+    monkeypatch.setattr(mcp_routes.MCP, "connect", connect)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.connect_mcp_server("local-shell")
+
+    assert exc_info.value.status_code == 403
+    connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_existing_mcp_test_is_denied_before_override_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mcp_routes,
+        "_load_mcp_server_config",
+        AsyncMock(return_value={"type": "remote", "url": "https://safe.example"}),
+    )
+    connect = AsyncMock(side_effect=AssertionError("override MCP process was started"))
+    monkeypatch.setattr(mcp_routes.MCP, "connect", connect)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.test_existing_mcp_connection(
+            "existing",
+            mcp_routes.McpUpdateRequest(
+                config={"type": "local", "command": ["sh", "-c", "id"]},
+            ),
+        )
+
+    assert exc_info.value.status_code == 403
+    connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catalog_install_is_denied_before_secret_package_and_config_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secrets = Mock(side_effect=AssertionError("secret manager was reached"))
+    preflight = AsyncMock(side_effect=AssertionError("package install was reached"))
+    config_write = Mock(side_effect=AssertionError("config write was reached"))
+    monkeypatch.setattr("flocks.security.get_secret_manager", secrets)
+    monkeypatch.setattr(mcp_routes, "preflight_install", preflight)
+    monkeypatch.setattr(mcp_routes.ConfigWriter, "add_mcp_server", config_write)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.install_from_catalog(
+            mcp_routes.CatalogInstallRequest(
+                server_id="demo",
+                credentials={"TOKEN": "super-secret"},
+            )
+        )
+
+    assert exc_info.value.status_code == 403
+    secrets.assert_not_called()
+    preflight.assert_not_awaited()
+    config_write.assert_not_called()

@@ -8,6 +8,8 @@ MCP state is instance-scoped for project isolation.
 """
 
 import asyncio
+import hashlib
+import json
 from typing import Dict, Optional, List, Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -44,6 +46,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.security.action_gateway import (
     ActionDecisionError,
     SecurityAction,
+    execute_action,
     enforce_action_decision,
     run_before_action,
 )
@@ -51,6 +54,50 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.mcp")
+
+
+def _mcp_action_input(name: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build policy context without forwarding credential values to action hooks."""
+    normalized = dict(config or {})
+    command = normalized.get("command")
+    if isinstance(command, list):
+        command_name = str(command[0]) if command else ""
+    else:
+        command_name = str(command or "")
+    try:
+        encoded = json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
+        config_hash = hashlib.sha256(encoded).hexdigest()
+    except (TypeError, ValueError):
+        config_hash = None
+    return {
+        "name": name,
+        "transport": str(normalized.get("type") or normalized.get("transport") or ""),
+        "command": command_name,
+        "config_hash": config_hash,
+    }
+
+
+async def _execute_mcp_action(
+    *,
+    action: str,
+    name: str,
+    config: Optional[Dict[str, Any]],
+    effect,
+):
+    """Run an MCP side effect through the OSS-neutral ActionGateway."""
+    try:
+        return await execute_action(
+            SecurityAction(
+                action=action,
+                resource={"type": "mcp_server", "id": name},
+                canonical_input=_mcp_action_input(name, config),
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            ),
+            effect,
+        )
+    except ActionDecisionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -329,7 +376,12 @@ async def test_mcp_connection(request: McpTestRequest):
     temp_name = f"{request.name}__test__"
     try:
         normalized_config = normalize_mcp_config(request.config)
-        success = await MCP.connect(temp_name, normalized_config)
+        success = await _execute_mcp_action(
+            action="mcp_test",
+            name=request.name,
+            config=normalized_config,
+            effect=lambda: MCP.connect(temp_name, normalized_config),
+        )
         if not success:
             status = await MCP.status()
             server_status = status.get(temp_name)
@@ -383,7 +435,12 @@ async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
         merged_config.update(normalize_mcp_config(request.config))
         merged_config = restore_masked_mcp_config_secrets(base_config, merged_config)
 
-        success = await MCP.connect(temp_name, merged_config)
+        success = await _execute_mcp_action(
+            action="mcp_test",
+            name=name,
+            config=merged_config,
+            effect=lambda: MCP.connect(temp_name, merged_config),
+        )
         if not success:
             status = await MCP.status()
             server_status = status.get(temp_name)
@@ -653,9 +710,14 @@ async def connect_mcp_server(name: str):
             raise HTTPException(status_code=400, detail=blocked_reason)
 
         timeout_seconds = max(float(server_config.get("timeout", 30.0) or 30.0), 1.0) + 2.0
-        success = await asyncio.wait_for(
-            MCP.connect(name, server_config),
-            timeout=timeout_seconds,
+        success = await _execute_mcp_action(
+            action="mcp_connect",
+            name=name,
+            config=server_config,
+            effect=lambda: asyncio.wait_for(
+                MCP.connect(name, server_config),
+                timeout=timeout_seconds,
+            ),
         )
         if not success:
             status_info = get_manager()._status.get(name)
@@ -826,7 +888,12 @@ async def get_server_resources(name: str):
 async def refresh_mcp_tools(name: str):
     """Refresh tools from a server - returns count of tools registered"""
     try:
-        count = await MCP.refresh_tools(name)
+        count = await _execute_mcp_action(
+            action="mcp_refresh",
+            name=name,
+            config=None,
+            effect=lambda: MCP.refresh_tools(name),
+        )
         return count
     except Exception as e:
         log.error("mcp.refresh.error", {"name": name, "error": str(e)})
@@ -1011,7 +1078,12 @@ async def test_mcp_credentials(name: str):
         # If not connected, try to connect first
         if not server_status or server_status.status != McpStatus.CONNECTED:
             log.info("test_credentials.connecting", {"server": name})
-            success = await MCP.connect(name, server_config)
+            success = await _execute_mcp_action(
+                action="mcp_test_credentials",
+                name=name,
+                config=server_config,
+                effect=lambda: MCP.connect(name, server_config),
+            )
             if not success:
                 return {
                     "success": False,
@@ -1020,7 +1092,12 @@ async def test_mcp_credentials(name: str):
                 }
         
         # Try to refresh tools (validates the connection and credentials)
-        count = await MCP.refresh_tools(name)
+        count = await _execute_mcp_action(
+            action="mcp_test_credentials",
+            name=name,
+            config=server_config,
+            effect=lambda: MCP.refresh_tools(name),
+        )
         latency = int((time.time() - start) * 1000)
         
         return {
@@ -1183,34 +1260,42 @@ async def get_catalog_configured():
 async def auto_setup_catalog():
     """Batch write all no-secret catalog entries to flocks.json with enabled=false."""
     try:
-        catalog = McpCatalog.get()
-        existing = ConfigWriter.list_mcp_servers()
-        configured: List[str] = []
-        skipped: List[str] = []
+        async def _setup() -> Dict[str, Any]:
+            catalog = McpCatalog.get()
+            existing = ConfigWriter.list_mcp_servers()
+            configured: List[str] = []
+            skipped: List[str] = []
 
-        for entry in catalog.entries:
-            if entry.id in existing:
-                skipped.append(entry.id)
-                continue
-            if entry.requires_auth:
-                continue
-            config = entry.to_mcp_config()
-            if not config:
-                continue
-            config["enabled"] = False
-            ConfigWriter.add_mcp_server(entry.id, config)
-            configured.append(entry.id)
+            for entry in catalog.entries:
+                if entry.id in existing:
+                    skipped.append(entry.id)
+                    continue
+                if entry.requires_auth:
+                    continue
+                config = entry.to_mcp_config()
+                if not config:
+                    continue
+                config["enabled"] = False
+                ConfigWriter.add_mcp_server(entry.id, config)
+                configured.append(entry.id)
 
-        log.info("mcp.catalog.auto_setup", {
-            "configured": len(configured),
-            "skipped": len(skipped),
-        })
-        all_configured = list(ConfigWriter.list_mcp_servers().keys())
-        return {
-            "newly_configured": configured,
-            "skipped": skipped,
-            "all_configured_ids": all_configured,
-        }
+            log.info("mcp.catalog.auto_setup", {
+                "configured": len(configured),
+                "skipped": len(skipped),
+            })
+            all_configured = list(ConfigWriter.list_mcp_servers().keys())
+            return {
+                "newly_configured": configured,
+                "skipped": skipped,
+                "all_configured_ids": all_configured,
+            }
+
+        return await _execute_mcp_action(
+            action="mcp_catalog_auto_setup",
+            name="catalog",
+            config=None,
+            effect=_setup,
+        )
     except Exception as e:
         log.error("mcp.catalog.auto_setup.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -1230,6 +1315,19 @@ async def install_from_catalog(request: CatalogInstallRequest):
     uses {secret:key} references so that actual values stay out of flocks.json.
     """
     try:
+        async def _authorize_install() -> None:
+            return None
+
+        await _execute_mcp_action(
+            action="mcp_catalog_install",
+            name=request.server_id,
+            config={
+                "enabled": request.enabled,
+                "credentials_present": bool(request.credentials),
+                "skip_package_install": request.skip_package_install,
+            },
+            effect=_authorize_install,
+        )
         catalog = McpCatalog.get()
         entry = catalog.get_entry(request.server_id)
         if not entry:
