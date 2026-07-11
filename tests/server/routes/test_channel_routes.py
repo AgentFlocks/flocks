@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -164,3 +165,47 @@ async def test_channel_webhook_pro_hook_can_reject_before_plugin_execution(monke
 
     assert exc_info.value.status_code == 403
     plugin.handle_webhook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_channel_webhook_does_not_probe_hook_pipeline_without_registered_ingress_hook(monkeypatch) -> None:
+    class _Plugin:
+        requires_signature = False
+        handle_webhook = AsyncMock(return_value={"ok": True})
+
+    HookPipeline.reset()
+    probe = AsyncMock(side_effect=AssertionError("OSS should not initialize a new ingress hook stage"))
+    monkeypatch.setattr(HookPipeline, "has_stage_handlers", probe)
+    plugin = _Plugin()
+    with patch("flocks.server.routes.channel.default_registry.get", return_value=plugin):
+        result = await channel_webhook("test", _webhook_request())
+
+    assert result == {"ok": True}
+    probe.assert_not_awaited()
+    plugin.handle_webhook.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_channel_webhook_exposes_only_authentication_facts_to_pro_hook(monkeypatch) -> None:
+    observed = []
+
+    class _Plugin:
+        requires_signature = False
+        handle_webhook = AsyncMock(return_value={"ok": True})
+
+    class _ProIngressHook(HookBase):
+        async def channel_webhook_before(self, ctx) -> None:
+            observed.append(deepcopy(ctx.input))
+
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("pro-channel-ingress", _ProIngressHook(), critical=True)
+    plugin = _Plugin()
+    try:
+        with patch("flocks.server.routes.channel.default_registry.get", return_value=plugin):
+            await channel_webhook("test", _webhook_request())
+    finally:
+        HookPipeline.reset()
+
+    assert "headers" not in observed[0]
+    assert observed[0]["authentication"] == {"plugin_authenticated": False}

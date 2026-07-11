@@ -13,6 +13,29 @@ from flocks.security.canonical import canonicalize_json
 T = TypeVar("T")
 
 
+def _safe_action_decision(decision: ToolDecision) -> Dict[str, Any]:
+    """Return only decision metadata that is safe to forward to audit hooks."""
+    return {
+        "action": decision.action,
+        "reason": decision.reason,
+        "mode": decision.mode,
+        "grant_ref": decision.grant_ref,
+        "matched_rule": decision.matched_rule,
+        "policy_version": decision.policy_version,
+    }
+
+
+def _safe_action_outcome(outcome: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep action outcome events free of result bodies and arbitrary metadata."""
+    safe: Dict[str, Any] = {"success": bool(outcome.get("success"))}
+    if isinstance(outcome.get("executed"), bool):
+        safe["executed"] = outcome["executed"]
+    error_type = outcome.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        safe["error_type"] = error_type
+    return safe
+
+
 @dataclass(frozen=True)
 class SecurityAction:
     action: str
@@ -135,8 +158,8 @@ async def run_after_action(
             },
             "canonical_hash": canonical.get("hash"),
             "execution_domain": canonical["execution_domain"],
-            "decision": decision.as_dict(),
-            "outcome": deepcopy(dict(outcome)),
+            "decision": _safe_action_decision(decision),
+            "outcome": _safe_action_outcome(outcome),
         }
     )
 

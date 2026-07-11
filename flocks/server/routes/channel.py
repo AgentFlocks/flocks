@@ -178,11 +178,12 @@ async def channel_webhook(channel_id: str, request: Request):
         "entry": "channel_webhook",
         "channel_id": channel_id,
         "plugin": plugin.meta().id if hasattr(plugin, "meta") else channel_id,
-        "headers": headers,
         "body_sha256": hashlib.sha256(body).hexdigest(),
-        "plugin_authenticated": bool(getattr(plugin, "requires_signature", False)),
+        "authentication": {
+            "plugin_authenticated": bool(getattr(plugin, "requires_signature", False)),
+        },
     }
-    if await HookPipeline.has_stage_handlers(HookStage.CHANNEL_WEBHOOK_BEFORE, ingress_payload):
+    if HookPipeline.has_registered_stage_handlers(HookStage.CHANNEL_WEBHOOK_BEFORE):
         ingress_ctx = await HookPipeline.run_channel_webhook_before(ingress_payload)
         raw_decision = ingress_ctx.output.get("decision") if isinstance(ingress_ctx.output, dict) else None
         decision = raw_decision if isinstance(raw_decision, dict) else {}

@@ -474,6 +474,11 @@ class HookPipeline:
         return has_handlers
 
     @classmethod
+    def has_registered_stage_handlers(cls, stage: str) -> bool:
+        """Check already-registered hooks without loading plugins on an OSS path."""
+        return any(cls._resolve_handler(entry.hook, stage) is not None for entry in cls._hooks)
+
+    @classmethod
     async def _run_stage(
         cls,
         stage: str,
@@ -621,28 +626,26 @@ class HookPipeline:
 
     @staticmethod
     def _resolve_handler(hook: HookBase, stage: str) -> Optional[Callable[[HookContext], Awaitable[None]]]:
-        if stage == HookStage.CHAT_MESSAGE:
-            return getattr(hook, "chat_message", None)
-        if stage == HookStage.LLM_BEFORE:
-            return getattr(hook, "llm_before", None)
-        if stage == HookStage.LLM_AFTER:
-            return getattr(hook, "llm_after", None)
-        if stage == HookStage.TOOL_BEFORE:
-            return getattr(hook, "tool_before", None)
-        if stage == HookStage.TOOL_AFTER:
-            return getattr(hook, "tool_after", None)
-        if stage == HookStage.ACTION_BEFORE:
-            return getattr(hook, "action_before", None)
-        if stage == HookStage.ACTION_AFTER:
-            return getattr(hook, "action_after", None)
-        if stage == HookStage.EVENT:
-            return getattr(hook, "event", None)
-        if stage == HookStage.CHANNEL_INBOUND:
-            return getattr(hook, "channel_inbound", None)
-        if stage == HookStage.CHANNEL_WEBHOOK_BEFORE:
-            return getattr(hook, "channel_webhook_before", None)
-        if stage == HookStage.CHANNEL_OUTBOUND_BEFORE:
-            return getattr(hook, "channel_outbound_before", None)
-        if stage == HookStage.CHANNEL_OUTBOUND_AFTER:
-            return getattr(hook, "channel_outbound_after", None)
-        return None
+        handler_names = {
+            HookStage.CHAT_MESSAGE: "chat_message",
+            HookStage.LLM_BEFORE: "llm_before",
+            HookStage.LLM_AFTER: "llm_after",
+            HookStage.TOOL_BEFORE: "tool_before",
+            HookStage.TOOL_AFTER: "tool_after",
+            HookStage.ACTION_BEFORE: "action_before",
+            HookStage.ACTION_AFTER: "action_after",
+            HookStage.EVENT: "event",
+            HookStage.CHANNEL_INBOUND: "channel_inbound",
+            HookStage.CHANNEL_WEBHOOK_BEFORE: "channel_webhook_before",
+            HookStage.CHANNEL_OUTBOUND_BEFORE: "channel_outbound_before",
+            HookStage.CHANNEL_OUTBOUND_AFTER: "channel_outbound_after",
+        }
+        handler_name = handler_names.get(stage)
+        if handler_name is None:
+            return None
+        handler = getattr(hook, handler_name, None)
+        base_handler = getattr(HookBase, handler_name, None)
+        handler_impl = getattr(handler, "__func__", handler)
+        if handler_impl is base_handler:
+            return None
+        return handler

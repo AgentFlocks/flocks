@@ -95,6 +95,33 @@ async def test_action_gateway_executes_effect_and_emits_outcome_without_policy()
 
 
 @pytest.mark.asyncio
+async def test_action_gateway_after_hook_allowlists_outcome_and_decision_fields() -> None:
+    observed = []
+
+    class _OutcomeHook(HookBase):
+        async def action_after(self, ctx) -> None:
+            observed.append(deepcopy(ctx.input))
+
+    HookPipeline.register("capture-action-after-schema", _OutcomeHook())
+    try:
+        await action_gateway.run_after_action(
+            SecurityAction(
+                action="configure",
+                resource={"type": "mcp_server", "id": "demo"},
+                canonical_input={"token": "must-not-leak"},
+                execution_domain="control_plane",
+            ),
+            decision=ToolDecision(action="allow", updated_input={"token": "must-not-leak"}),
+            outcome={"success": True, "token": "must-not-leak", "nested": {"secret": "no"}},
+        )
+    finally:
+        HookPipeline.unregister("capture-action-after-schema")
+
+    assert observed[0]["outcome"] == {"success": True}
+    assert "updated_input" not in observed[0]["decision"]
+
+
+@pytest.mark.asyncio
 async def test_action_gateway_is_canonical_and_deterministic() -> None:
     inputs = []
 
