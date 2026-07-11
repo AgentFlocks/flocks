@@ -153,3 +153,65 @@ async def test_catalog_install_after_hook_records_real_install_failure(
         "executed": True,
         "error_type": "HTTPException",
     }
+
+
+@pytest.mark.asyncio
+async def test_mcp_update_uses_gateway_before_persist_or_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mcp_routes,
+        "_load_raw_mcp_server_config",
+        lambda _name: {"type": "local", "command": ["safe-mcp"], "enabled": True},
+    )
+    persist = Mock(side_effect=AssertionError("config persistence was reached"))
+    connect = AsyncMock(side_effect=AssertionError("MCP reconnect was reached"))
+    monkeypatch.setattr(mcp_routes, "_persist_mcp_server_config", persist)
+    monkeypatch.setattr(mcp_routes.MCP, "connect", connect)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.update_mcp_server(
+            "demo",
+            mcp_routes.McpUpdateRequest(config={"enabled": True}),
+        )
+
+    assert exc_info.value.status_code == 403
+    persist.assert_not_called()
+    connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_test_action_after_covers_refresh_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed_after = []
+
+    class _ObserveTestAction(HookBase):
+        async def action_before(self, ctx) -> None:
+            ctx.output["policy_engine_present"] = True
+            ctx.output["decision"] = {"action": "allow"}
+
+        async def action_after(self, ctx) -> None:
+            observed_after.append(ctx.input)
+
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("observe-mcp-test", _ObserveTestAction(), critical=True)
+    monkeypatch.setattr(mcp_routes.MCP, "connect", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        mcp_routes.MCP,
+        "refresh_tools",
+        AsyncMock(side_effect=RuntimeError("refresh failed")),
+    )
+    monkeypatch.setattr(mcp_routes.MCP, "remove", AsyncMock())
+    try:
+        response = await mcp_routes.test_mcp_connection(
+            mcp_routes.McpTestRequest(name="demo", config={"type": "local", "command": ["demo"]})
+        )
+    finally:
+        HookPipeline.reset()
+
+    assert response["success"] is False
+    assert observed_after[-1]["outcome"] == {
+        "success": False,
+        "executed": True,
+        "error_type": "RuntimeError",
+    }

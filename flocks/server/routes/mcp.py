@@ -100,6 +100,20 @@ async def _execute_mcp_action(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+class _McpTestFailure(RuntimeError):
+    """Expected connectivity failure kept inside the audited test action."""
+
+
+async def _run_mcp_connection_test(*, temp_name: str, config: Dict[str, Any]) -> int:
+    success = await MCP.connect(temp_name, config)
+    if not success:
+        status = await MCP.status()
+        server_status = status.get(temp_name)
+        error_detail = getattr(server_status, "error", None) if server_status else None
+        raise _McpTestFailure(error_detail or f"unable to connect to MCP server: {temp_name}")
+    return await MCP.refresh_tools(temp_name)
+
+
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize backend transport names for the frontend form."""
     server_config = mask_sensitive_mcp_config_for_frontend(server_config)
@@ -224,6 +238,79 @@ def _prepare_mcp_config_for_save(name: str, config: Dict[str, Any]) -> Dict[str,
     return clean_config
 
 
+async def _apply_mcp_update(name: str, updated_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist and (when eligible) reconnect a server inside one action effect."""
+    clean_config = _prepare_mcp_config_for_save(name, updated_config)
+    _persist_mcp_server_config(name, clean_config)
+
+    status = await MCP.status()
+    previous_status = status.get(name)
+    becoming_enabled = clean_config.get("enabled", True) is not False
+    should_reconnect = becoming_enabled and not get_connect_block_reason(clean_config)
+
+    if previous_status is not None:
+        await MCP.remove(name)
+
+    reconnected = False
+    reconnect_error: Optional[str] = None
+    if should_reconnect:
+        reconnect_timeout_seconds = max(float(clean_config.get("timeout", 30.0) or 30.0), 1.0) + 2.0
+        try:
+            reconnected = await asyncio.wait_for(
+                MCP.connect(name, clean_config),
+                timeout=reconnect_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            reconnect_error = f"Connection timed out while reconnecting MCP server: {name}"
+        except Exception as exc:
+            reconnect_error = str(exc)
+        if not reconnected and reconnect_error is None:
+            reconnect_status = (await MCP.status()).get(name)
+            reconnect_error = (
+                getattr(reconnect_status, "error", None)
+                if reconnect_status is not None
+                else None
+            ) or f"Failed to reconnect MCP server: {name}"
+
+    message = f"MCP server '{name}' updated successfully."
+    if should_reconnect and reconnected:
+        message = f"MCP server '{name}' updated and reconnected successfully."
+    elif should_reconnect and reconnect_error:
+        message = f"MCP server '{name}' updated successfully, but reconnect failed: {reconnect_error}"
+    return {
+        "success": True,
+        "message": message,
+        "config": _to_frontend_mcp_config(clean_config),
+        "reconnected": reconnected,
+        "reconnect_error": reconnect_error,
+    }
+
+
+async def _apply_mcp_add(name: str, config: Dict[str, Any]) -> Dict[str, McpStatusInfo]:
+    """Create/connect/persist a server inside one gateway-managed effect."""
+    clean_config = _prepare_mcp_config_for_save(name, config)
+    if should_skip_connect_on_add(clean_config):
+        _persist_mcp_server_config(name, clean_config)
+        log.info("mcp.add.deferred", {"name": name, "reason": "credentials_not_configured"})
+        return await _build_mcp_status_response()
+
+    success = await MCP.connect(name, clean_config)
+    if not success:
+        status = await MCP.status()
+        server_status = status.get(name)
+        error_detail = getattr(server_status, "error", None) if server_status else None
+        if should_allow_unconnected_add(clean_config, error_detail):
+            await MCP.remove(name)
+            _persist_mcp_server_config(name, clean_config)
+            log.info("mcp.add.deferred", {"name": name, "reason": error_detail or "auth_pending"})
+            return await _build_mcp_status_response()
+        raise ValueError(error_detail or f"Failed to connect to server: {name}")
+
+    _persist_mcp_server_config(name, clean_config)
+    log.info("mcp.add.persisted", {"name": name})
+    return await _build_mcp_status_response()
+
+
 # Request/Response models
 
 class McpAddRequest(BaseModel):
@@ -284,61 +371,13 @@ async def add_mcp_server(request: McpAddRequest):
     Returns the updated status of ALL MCP servers (not just the new one).
     """
     try:
-        decision = await run_before_action(
-            SecurityAction(
-                action="configure",
-                resource={"type": "mcp_server", "id": request.name},
-                canonical_input=request.config,
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
+        return await _execute_mcp_action(
+            action="configure",
+            name=request.name,
+            config=request.config,
+            effect=lambda: _apply_mcp_add(request.name, request.config),
         )
-        enforce_action_decision(decision)
-
-        # Extract any API key embedded in the URL and move it to .secret.json.
-        # The URL is rewritten to use a {secret:...} reference so that the
-        # plain-text credential is never written to flocks.json.
-        clean_config = _prepare_mcp_config_for_save(request.name, request.config)
-
-        if should_skip_connect_on_add(clean_config):
-            _persist_mcp_server_config(request.name, clean_config)
-            log.info("mcp.add.deferred", {
-                "name": request.name,
-                "reason": "credentials_not_configured",
-            })
-            return await _build_mcp_status_response()
-
-        # Connect to server
-        success = await MCP.connect(request.name, clean_config)
-        if not success:
-            # Check status for error detail
-            status = await MCP.status()
-            server_status = status.get(request.name)
-            error_detail = getattr(server_status, 'error', None) if server_status else None
-            if should_allow_unconnected_add(clean_config, error_detail):
-                # Drop the transient FAILED runtime state so the new entry appears
-                # as a persisted-but-disconnected server until credentials are added.
-                await MCP.remove(request.name)
-                _persist_mcp_server_config(request.name, clean_config)
-                log.info("mcp.add.deferred", {
-                    "name": request.name,
-                    "reason": error_detail or "auth_pending",
-                })
-                return await _build_mcp_status_response()
-
-            raise ValueError(
-                error_detail or f"Failed to connect to server: {request.name}"
-            )
-
-        # Persist to flocks.json (runtime config) — use clean_config so that
-        # any extracted API key is stored as a {secret:...} reference.
-        _persist_mcp_server_config(request.name, clean_config)
-
-        log.info("mcp.add.persisted", {"name": request.name})
-
-        # Return updated status, including configured-but-not-connected entries.
-        return await _build_mcp_status_response()
-    except ActionDecisionError:
+    except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -376,22 +415,15 @@ async def test_mcp_connection(request: McpTestRequest):
     temp_name = f"{request.name}__test__"
     try:
         normalized_config = normalize_mcp_config(request.config)
-        success = await _execute_mcp_action(
+        count = await _execute_mcp_action(
             action="mcp_test",
             name=request.name,
             config=normalized_config,
-            effect=lambda: MCP.connect(temp_name, normalized_config),
+            effect=lambda: _run_mcp_connection_test(
+                temp_name=temp_name,
+                config=normalized_config,
+            ),
         )
-        if not success:
-            status = await MCP.status()
-            server_status = status.get(temp_name)
-            error_detail = getattr(server_status, "error", None) if server_status else None
-            return {
-                "success": False,
-                "message": error_detail or f"无法连接到服务 '{request.name}'",
-            }
-
-        count = await MCP.refresh_tools(temp_name)
         latency = int((time.time() - start) * 1000)
 
         return {
@@ -399,6 +431,11 @@ async def test_mcp_connection(request: McpTestRequest):
             "message": f"连接成功，找到 {count} 个工具。",
             "latency_ms": latency,
             "tools_count": count,
+        }
+    except _McpTestFailure as exc:
+        return {
+            "success": False,
+            "message": str(exc) or f"无法连接到服务 '{request.name}'",
         }
     except Exception as e:
         return {
@@ -435,28 +472,26 @@ async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
         merged_config.update(normalize_mcp_config(request.config))
         merged_config = restore_masked_mcp_config_secrets(base_config, merged_config)
 
-        success = await _execute_mcp_action(
+        count = await _execute_mcp_action(
             action="mcp_test",
             name=name,
             config=merged_config,
-            effect=lambda: MCP.connect(temp_name, merged_config),
+            effect=lambda: _run_mcp_connection_test(
+                temp_name=temp_name,
+                config=merged_config,
+            ),
         )
-        if not success:
-            status = await MCP.status()
-            server_status = status.get(temp_name)
-            error_detail = getattr(server_status, "error", None) if server_status else None
-            return {
-                "success": False,
-                "message": error_detail or f"无法连接到服务 '{name}'",
-            }
-
-        count = await MCP.refresh_tools(temp_name)
         latency = int((time.time() - start) * 1000)
         return {
             "success": True,
             "message": f"连接成功，找到 {count} 个工具。",
             "latency_ms": latency,
             "tools_count": count,
+        }
+    except _McpTestFailure as exc:
+        return {
+            "success": False,
+            "message": str(exc) or f"无法连接到服务 '{name}'",
         }
     except HTTPException:
         raise
@@ -561,87 +596,12 @@ async def update_mcp_server(name: str, request: McpUpdateRequest):
         updated_config = restore_masked_mcp_config_secrets(
             existing_config, updated_config
         )
-        decision = await run_before_action(
-            SecurityAction(
-                action="configure",
-                resource={"type": "mcp_server", "id": name},
-                canonical_input=updated_config,
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
+        return await _execute_mcp_action(
+            action="configure",
+            name=name,
+            config=updated_config,
+            effect=lambda: _apply_mcp_update(name, updated_config),
         )
-        enforce_action_decision(decision)
-        clean_config = _prepare_mcp_config_for_save(name, updated_config)
-        _persist_mcp_server_config(name, clean_config)
-
-        status = await MCP.status()
-        previous_status = status.get(name)
-        was_connected = (
-            previous_status is not None
-            and previous_status.status == McpStatus.CONNECTED
-        )
-        # Reconnect whenever the user just saved a config that asks the
-        # server to be enabled AND the config is complete enough to try.
-        # This covers three real flows:
-        #
-        #   * config change while already connected — pre-existing case;
-        #   * first enable from a previously-disabled/never-seen server —
-        #     the runtime ``status`` dict is empty for that name;
-        #   * fixing credentials after a failed connect — runtime state
-        #     was FAILED/DISCONNECTED and the user just saved the corrected
-        #     config; they expect a re-try without an extra click.
-        #
-        # ``get_connect_block_reason`` short-circuits when the config is
-        # still incomplete (e.g. ``{secret:...}`` placeholder with no value
-        # in the secret store) so we never spin up doomed connect attempts.
-        becoming_enabled = clean_config.get("enabled", True) is not False
-        should_reconnect = (
-            becoming_enabled
-            and not get_connect_block_reason(clean_config)
-        )
-
-        if previous_status is not None:
-            await MCP.remove(name)
-
-        reconnected = False
-        reconnect_error: Optional[str] = None
-        if should_reconnect:
-            reconnect_timeout_seconds = max(float(clean_config.get("timeout", 30.0) or 30.0), 1.0) + 2.0
-            try:
-                reconnected = await asyncio.wait_for(
-                    MCP.connect(name, clean_config),
-                    timeout=reconnect_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                reconnect_error = (
-                    f"Connection timed out while reconnecting MCP server: {name}"
-                )
-            except Exception as exc:
-                reconnect_error = str(exc)
-            if not reconnected and reconnect_error is None:
-                reconnect_status = (await MCP.status()).get(name)
-                reconnect_error = (
-                    getattr(reconnect_status, "error", None)
-                    if reconnect_status is not None
-                    else None
-                ) or f"Failed to reconnect MCP server: {name}"
-
-        message = f"MCP server '{name}' updated successfully."
-        if should_reconnect and reconnected:
-            message = f"MCP server '{name}' updated and reconnected successfully."
-        elif should_reconnect and reconnect_error:
-            message = (
-                f"MCP server '{name}' updated successfully, but reconnect failed: "
-                f"{reconnect_error}"
-            )
-
-        return {
-            "success": True,
-            "message": message,
-            "config": _to_frontend_mcp_config(clean_config),
-            "reconnected": reconnected,
-            "reconnect_error": reconnect_error,
-        }
     except ActionDecisionError:
         raise
     except HTTPException:

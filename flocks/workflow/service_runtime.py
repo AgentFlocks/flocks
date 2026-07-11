@@ -51,17 +51,11 @@ def create_service_app(
         try:
             await MCP.init()
         except ActionDecisionError as exc:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "request_id": req.request_id,
-                    "workflow_id": app.state.workflow_id,
-                    "release_id": app.state.release_id,
-                    "status": "DENIED",
-                    "error": str(exc),
-                    "duration_ms": int((time.time() - started) * 1000),
-                },
-            ) from exc
+            # Lifespan has no request context.  Keep the service alive but
+            # unavailable so /invoke returns its normal structured 503 rather
+            # than crashing startup through an undefined request variable.
+            _app.state.mcp_error = f"mcp_init_denied:{exc}"
+            log.warning("workflow_service.mcp.init_denied", {"error": str(exc)})
         except Exception as exc:
             _app.state.mcp_error = str(exc)
             log.warning("workflow_service.mcp.init_failed", {"error": str(exc)})
