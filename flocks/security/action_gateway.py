@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping
+from typing import Any, Awaitable, Callable, Dict, Mapping, TypeVar
 
 from flocks.hooks.pipeline import HookPipeline, ToolDecision, normalize_tool_decision
 from flocks.security.canonical import canonicalize_json
+
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,82 @@ async def run_before_action(
         output,
         decision_expected=policy_engine_present,
     )
+
+
+async def run_after_action(
+    action: SecurityAction,
+    *,
+    decision: ToolDecision,
+    outcome: Mapping[str, Any],
+    subject: Any = None,
+) -> None:
+    """Publish an outcome-only action record without forwarding raw inputs/results."""
+    subject_data = _subject_payload(subject)
+    metadata = deepcopy(dict(action.metadata))
+    canonical = _canonical_payload(action)
+    await HookPipeline.run_action_after(
+        {
+            "phase": "after_action",
+            "entry": str(metadata.get("entry") or subject_data.get("entry") or "unknown"),
+            "sessionID": str(metadata.get("sessionID") or metadata.get("session_id") or ""),
+            "actor": deepcopy(metadata.get("actor")),
+            "subject": subject_data,
+            "action": str(action.action),
+            "resource": deepcopy(dict(action.resource)),
+            "canonical": {
+                "status": canonical.get("status"),
+                "parser_version": canonical.get("parser_version"),
+                "reason": canonical.get("reason"),
+            },
+            "canonical_hash": canonical.get("hash"),
+            "execution_domain": canonical["execution_domain"],
+            "decision": decision.as_dict(),
+            "outcome": deepcopy(dict(outcome)),
+        }
+    )
+
+
+async def execute_action(
+    action: SecurityAction,
+    effect: Callable[[], Awaitable[T]],
+    *,
+    subject: Any = None,
+) -> T:
+    """Execute a side effect only after extension hooks permit it.
+
+    This is intentionally policy-neutral: Flocks forwards context to hooks and
+    enforces their returned decision, while FlocksPro owns policy and grants.
+    """
+    decision = await run_before_action(action, subject=subject)
+    try:
+        enforce_action_decision(decision)
+    except BaseException:
+        await run_after_action(
+            action,
+            decision=decision,
+            outcome={"success": False, "executed": False},
+            subject=subject,
+        )
+        raise
+
+    try:
+        result = await effect()
+    except BaseException as exc:
+        await run_after_action(
+            action,
+            decision=decision,
+            outcome={"success": False, "executed": True, "error_type": type(exc).__name__},
+            subject=subject,
+        )
+        raise
+
+    await run_after_action(
+        action,
+        decision=decision,
+        outcome={"success": True},
+        subject=subject,
+    )
+    return result
 
 
 def enforce_action_decision(decision: ToolDecision) -> None:

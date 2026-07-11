@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from flocks.hooks.pipeline import HookBase, HookPipeline, ToolDecision
+import flocks.security.action_gateway as action_gateway
 from flocks.security.action_gateway import (
     ActionDeniedError,
     ActionPendingError,
@@ -58,6 +59,39 @@ async def test_action_gateway_is_passthrough_without_active_policy() -> None:
     )
 
     assert decision == ToolDecision(action="allow")
+
+
+@pytest.mark.asyncio
+async def test_action_gateway_executes_effect_and_emits_outcome_without_policy() -> None:
+    observed = []
+    effect = AsyncMock(return_value={"ok": True, "secret": "must-not-be-forwarded"})
+
+    class _OutcomeHook(HookBase):
+        async def action_after(self, ctx) -> None:
+            observed.append(deepcopy(ctx.input))
+
+    HookPipeline.register("capture-action-outcome", _OutcomeHook())
+    try:
+        execute_action = getattr(action_gateway, "execute_action", None)
+        assert callable(execute_action)
+        result = await execute_action(
+            SecurityAction(
+                action="configure",
+                resource={"type": "mcp_server", "id": "demo"},
+                canonical_input={"name": "demo"},
+                execution_domain="control_plane",
+                metadata={"entry": "api"},
+            ),
+            effect,
+        )
+    finally:
+        HookPipeline.unregister("capture-action-outcome")
+
+    assert result == {"ok": True, "secret": "must-not-be-forwarded"}
+    effect.assert_awaited_once()
+    assert observed[0]["phase"] == "after_action"
+    assert observed[0]["outcome"] == {"success": True}
+    assert "secret" not in observed[0]
 
 
 @pytest.mark.asyncio

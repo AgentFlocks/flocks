@@ -156,8 +156,10 @@ class HookStage:
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
     ACTION_BEFORE = "action.before"
+    ACTION_AFTER = "action.after"
     EVENT = "event"
     CHANNEL_INBOUND = "channel.inbound"
+    CHANNEL_WEBHOOK_BEFORE = "channel.webhook.before"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
     CHANNEL_OUTBOUND_AFTER = "channel.outbound.after"
 
@@ -169,7 +171,9 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.TOOL_BEFORE: 5.0,
     HookStage.TOOL_AFTER: 5.0,
     HookStage.ACTION_BEFORE: 5.0,
+    HookStage.ACTION_AFTER: 5.0,
     HookStage.CHANNEL_INBOUND: 5.0,
+    HookStage.CHANNEL_WEBHOOK_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
     HookStage.EVENT: 10.0,
@@ -202,10 +206,16 @@ class HookBase:
     async def action_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
+    async def action_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
     async def event(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def channel_inbound(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def channel_webhook_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def channel_outbound_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -395,6 +405,14 @@ class HookPipeline:
         return await cls._run_stage(HookStage.ACTION_BEFORE, input_data, output_data)
 
     @classmethod
+    async def run_action_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.ACTION_AFTER, input_data, output_data)
+
+    @classmethod
     async def run_event(
         cls,
         input_data: Dict[str, Any],
@@ -409,6 +427,14 @@ class HookPipeline:
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
         return await cls._run_stage(HookStage.CHANNEL_INBOUND, input_data, output_data)
+
+    @classmethod
+    async def run_channel_webhook_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.CHANNEL_WEBHOOK_BEFORE, input_data, output_data)
 
     @classmethod
     async def run_channel_outbound_before(
@@ -607,10 +633,14 @@ class HookPipeline:
             return getattr(hook, "tool_after", None)
         if stage == HookStage.ACTION_BEFORE:
             return getattr(hook, "action_before", None)
+        if stage == HookStage.ACTION_AFTER:
+            return getattr(hook, "action_after", None)
         if stage == HookStage.EVENT:
             return getattr(hook, "event", None)
         if stage == HookStage.CHANNEL_INBOUND:
             return getattr(hook, "channel_inbound", None)
+        if stage == HookStage.CHANNEL_WEBHOOK_BEFORE:
+            return getattr(hook, "channel_webhook_before", None)
         if stage == HookStage.CHANNEL_OUTBOUND_BEFORE:
             return getattr(hook, "channel_outbound_before", None)
         if stage == HookStage.CHANNEL_OUTBOUND_AFTER:

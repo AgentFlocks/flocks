@@ -4,6 +4,7 @@ Channel HTTP routes: webhook callbacks, health/status, and outbound send APIs.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 
 from flocks.channel.gateway.manager import default_manager
 from flocks.channel.registry import default_registry
+from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -170,6 +172,25 @@ async def channel_webhook(channel_id: str, request: Request):
             raise HTTPException(status_code=403, detail="Webhook 签名校验未实现") from exc
         if not verified:
             raise HTTPException(status_code=403, detail="Webhook 签名校验失败")
+
+    ingress_payload = {
+        "phase": "before_action",
+        "entry": "channel_webhook",
+        "channel_id": channel_id,
+        "plugin": plugin.meta().id if hasattr(plugin, "meta") else channel_id,
+        "headers": headers,
+        "body_sha256": hashlib.sha256(body).hexdigest(),
+        "plugin_authenticated": bool(getattr(plugin, "requires_signature", False)),
+    }
+    if await HookPipeline.has_stage_handlers(HookStage.CHANNEL_WEBHOOK_BEFORE, ingress_payload):
+        ingress_ctx = await HookPipeline.run_channel_webhook_before(ingress_payload)
+        raw_decision = ingress_ctx.output.get("decision") if isinstance(ingress_ctx.output, dict) else None
+        decision = raw_decision if isinstance(raw_decision, dict) else {}
+        if str(decision.get("action") or "").lower() == "deny":
+            raise HTTPException(status_code=403, detail=decision.get("reason") or "Webhook ingress denied")
+        subject = ingress_ctx.output.get("subject") if isinstance(ingress_ctx.output, dict) else None
+        if isinstance(subject, dict):
+            request.state.channel_security_subject = subject
 
     result = await plugin.handle_webhook(body, headers)
     if isinstance(result, dict) and isinstance(result.get("status_code"), int):
