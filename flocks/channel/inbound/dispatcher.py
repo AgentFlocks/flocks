@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
+from flocks.channel.inbound.security import get_ingress_subject
 from flocks.channel.inbound.session_binding import SessionBindingService, resolve_channel_subject
 from flocks.config.config import ChannelConfig
 from flocks.utils.log import Log
@@ -363,7 +364,10 @@ class InboundDispatcher:
                 default_agent = "rex"
         default_agent = _enforce_visible_agent(default_agent, visible_agents)
 
-        msg.resolved_subject = await resolve_channel_subject(
+        # A Pro ingress hook can attach an already-verified subject to the
+        # plugin task.  Keep it through the asynchronous dispatch boundary;
+        # otherwise retain the long-standing local channel identity mapping.
+        msg.resolved_subject = get_ingress_subject() or await resolve_channel_subject(
             msg,
             permission_mode=permission_mode,
         )
@@ -504,10 +508,13 @@ class InboundDispatcher:
 
             # 12. run Agent (inside lock to keep same-session serial)
             # Wrap with Typing Indicator for feishu channels when enabled
+            security_context = self._security_context_for_message(msg)
             if msg.channel_id == "feishu":
-                await self._run_agent_with_typing(binding, callbacks, msg, channel_config)
+                await self._run_agent_with_typing(
+                    binding, callbacks, msg, channel_config, security_context=security_context,
+                )
             else:
-                await self._run_agent(binding, callbacks)
+                await self._run_agent(binding, callbacks, security_context=security_context)
 
     # --- helpers ---
 
@@ -1047,16 +1054,39 @@ class InboundDispatcher:
             return ChannelConfig()
 
     @staticmethod
-    async def _run_agent(binding, callbacks: ChannelDeliveryCallbacks) -> None:
+    def _security_context_for_message(msg: InboundMessage) -> Optional[dict[str, Any]]:
+        subject = msg.resolved_subject
+        if subject is None:
+            return None
+        try:
+            subject_payload = subject.model_dump()
+        except Exception:
+            return None
+        return {
+            "entry": "channel",
+            "execution_domain": "channel",
+            "subject": subject_payload,
+        }
+
+    @staticmethod
+    async def _run_agent(
+        binding,
+        callbacks: ChannelDeliveryCallbacks,
+        *,
+        security_context: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Run Agent and deliver the final assistant reply."""
         try:
             from flocks.session.session_loop import SessionLoop
             loop_callbacks = callbacks.to_loop_callbacks()
-            result = await SessionLoop.run(
-                session_id=binding.session_id,
-                agent_name=binding.agent_id,
-                callbacks=loop_callbacks,
-            )
+            run_kwargs: dict[str, Any] = {
+                "session_id": binding.session_id,
+                "agent_name": binding.agent_id,
+                "callbacks": loop_callbacks,
+            }
+            if security_context is not None:
+                run_kwargs["security_context"] = security_context
+            result = await SessionLoop.run(**run_kwargs)
 
             if result.last_message:
                 text = await _extract_message_text(
@@ -1077,6 +1107,8 @@ class InboundDispatcher:
         callbacks: ChannelDeliveryCallbacks,
         msg: InboundMessage,
         channel_config: ChannelConfig,
+        *,
+        security_context: Optional[dict[str, Any]] = None,
     ) -> None:
         """Run Agent wrapped with Feishu Typing Indicator and optional Streaming Card."""
         raw_cfg: dict = channel_config.model_dump(by_alias=True, exclude_none=True)
@@ -1085,7 +1117,7 @@ class InboundDispatcher:
         if streaming_enabled:
             try:
                 await InboundDispatcher._run_agent_with_streaming(
-                    binding, callbacks, msg, raw_cfg,
+                    binding, callbacks, msg, raw_cfg, security_context=security_context,
                 )
                 return
             except Exception:
@@ -1098,9 +1130,13 @@ class InboundDispatcher:
             async with feishu_typing_indicator(
                 raw_cfg, msg.message_id, msg.account_id or "default",
             ):
-                await InboundDispatcher._run_agent(binding, callbacks)
+                await InboundDispatcher._run_agent(
+                    binding, callbacks, security_context=security_context,
+                )
         except Exception:
-            await InboundDispatcher._run_agent(binding, callbacks)
+            await InboundDispatcher._run_agent(
+                binding, callbacks, security_context=security_context,
+            )
 
     @staticmethod
     async def _run_agent_with_streaming(
@@ -1108,6 +1144,8 @@ class InboundDispatcher:
         callbacks: ChannelDeliveryCallbacks,
         msg: InboundMessage,
         raw_cfg: dict,
+        *,
+        security_context: Optional[dict[str, Any]] = None,
     ) -> None:
         """Run Agent with Feishu Streaming Card for real-time text output."""
         from flocks.channel.builtin.feishu.streaming_card import StreamingCard
@@ -1128,7 +1166,9 @@ class InboundDispatcher:
             async with feishu_typing_indicator(
                 raw_cfg, msg.message_id, msg.account_id or "default",
             ):
-                await InboundDispatcher._run_agent(binding, callbacks)
+                await InboundDispatcher._run_agent(
+                    binding, callbacks, security_context=security_context,
+                )
             return
 
         try:
@@ -1141,11 +1181,14 @@ class InboundDispatcher:
             loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)
 
             from flocks.session.session_loop import SessionLoop
-            result = await SessionLoop.run(
-                session_id=binding.session_id,
-                agent_name=binding.agent_id,
-                callbacks=loop_callbacks,
-            )
+            run_kwargs: dict[str, Any] = {
+                "session_id": binding.session_id,
+                "agent_name": binding.agent_id,
+                "callbacks": loop_callbacks,
+            }
+            if security_context is not None:
+                run_kwargs["security_context"] = security_context
+            result = await SessionLoop.run(**run_kwargs)
 
             final_text = None
             if result.last_message:

@@ -235,6 +235,7 @@ class SessionRunner:
         session_ctx: Optional[Any] = None,  # SessionContext interface
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
         static_cache: Optional[Dict[str, Any]] = None,
+        security_context: Optional[Dict[str, Any]] = None,
     ):
         self.session = session
         from flocks.session.core.defaults import fallback_provider_id, fallback_model_id
@@ -249,6 +250,7 @@ class SessionRunner:
         self.session_ctx = session_ctx  # SessionContext interface for decoupled access
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
+        self._security_context = deepcopy(security_context or {})
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -2522,6 +2524,7 @@ class SessionRunner:
             workspace_dir=self.session.directory,
             langfuse_generation=None,
             step_index=self._step,
+            security_context=self._security_context,
         )
         
         # Build provider options (thinking / reasoning / max_tokens)

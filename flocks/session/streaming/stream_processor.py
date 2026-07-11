@@ -9,6 +9,7 @@ import json
 import re
 import asyncio
 import time as _time
+from copy import deepcopy
 from datetime import datetime
 from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
 from dataclasses import dataclass
@@ -119,6 +120,7 @@ class StreamProcessor:
         workspace_dir: Optional[str] = None,
         langfuse_generation: Optional[Any] = None,
         step_index: Optional[int] = None,
+        security_context: Optional[Dict[str, Any]] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -136,6 +138,7 @@ class StreamProcessor:
         self._workspace_dir = workspace_dir
         self._langfuse_generation = langfuse_generation
         self._step_index = step_index
+        self._security_context = deepcopy(security_context or {})
         self._sandbox_runtime_cache = None
         self._sandbox_config_cache = None
         self._sandbox_context_cache = None
@@ -172,6 +175,16 @@ class StreamProcessor:
         # model response can launch too; the runner drains these before the step
         # returns.
         self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
+
+    def _tool_context_extra(self, sandbox_extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Combine trusted entry context with optional sandbox metadata.
+
+        Security context is applied last so sandbox plumbing can never replace
+        the authenticated subject or declared execution domain.
+        """
+        extra = deepcopy(sandbox_extra or {})
+        extra.update(deepcopy(self._security_context))
+        return extra
     
     async def process_event(self, event: StreamEvent) -> None:
         """
@@ -797,7 +810,7 @@ class StreamProcessor:
                     call_id=tool_call_id,
                     abort_event=self.abort_event,
                     permission_callback=self.permission_callback,
-                    extra=sandbox_meta["extra"],
+                    extra=self._tool_context_extra(sandbox_meta["extra"]),
                     metadata_callback=_make_metadata_cb(),
                     event_publish_callback=self.event_publish_callback,
                 )

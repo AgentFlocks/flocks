@@ -209,3 +209,40 @@ async def test_channel_webhook_exposes_only_authentication_facts_to_pro_hook(mon
 
     assert "headers" not in observed[0]
     assert observed[0]["authentication"] == {"plugin_authenticated": False}
+
+
+@pytest.mark.asyncio
+async def test_channel_webhook_pro_subject_is_available_to_plugin_dispatch(monkeypatch) -> None:
+    """A Pro ingress decision must survive the route → plugin task boundary."""
+    from flocks.identity.subject import get_current_subject
+
+    seen = {}
+
+    class _Plugin:
+        requires_signature = False
+
+        async def handle_webhook(self, body, headers):
+            subject = get_current_subject()
+            seen["subject_id"] = subject.subject_id if subject else None
+            return {"ok": True}
+
+    class _ProIngressHook(HookBase):
+        async def channel_webhook_before(self, ctx) -> None:
+            ctx.output["subject"] = {
+                "subject_id": "pro-webhook-user",
+                "subject_type": "channel_user",
+                "entry": "channel",
+                "auth_source": "flockspro:channel_ingress",
+                "verified": True,
+            }
+
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("pro-channel-ingress", _ProIngressHook(), critical=True)
+    try:
+        with patch("flocks.server.routes.channel.default_registry.get", return_value=_Plugin()):
+            await channel_webhook("test", _webhook_request())
+    finally:
+        HookPipeline.reset()
+
+    assert seen["subject_id"] == "pro-webhook-user"

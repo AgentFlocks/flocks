@@ -60,6 +60,9 @@ class LoopContext:
     abort_event: asyncio.Event = field(default_factory=asyncio.Event)
     # SessionContext interface for decoupled session access
     session_ctx: Optional[Any] = None  # Type: Optional[SessionContext]
+    # Optional trusted context supplied by an entry adapter (for example a
+    # Channel dispatcher).  The core remains policy-neutral.
+    security_context: Dict[str, Any] = field(default_factory=dict, repr=False)
     # Offset so observability step numbers are cumulative across the session
     trace_step_offset: int = 0
     # Track current step asyncio.Task so abort() can cancel it immediately
@@ -297,6 +300,7 @@ class SessionLoop:
         model_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         callbacks: Optional[LoopCallbacks] = None,
+        security_context: Optional[Dict[str, Any]] = None,
     ) -> LoopResult:
         """
         Run session loop
@@ -315,6 +319,7 @@ class SessionLoop:
             model_id: Model ID
             agent_name: Agent name (default: build)
             callbacks: Loop callbacks
+            security_context: trusted entry context propagated to ToolContext
             
         Returns:
             LoopResult with final state
@@ -379,7 +384,21 @@ class SessionLoop:
             agent_name=agent_name or session.agent or "rex",
             session_ctx=session_ctx,
             trace_step_offset=trace_offset,
+            security_context=dict(security_context or {}),
         )
+
+        security_subject_token = None
+        raw_subject = ctx.security_context.get("subject")
+        if isinstance(raw_subject, dict):
+            try:
+                from flocks.identity.subject import Subject, set_current_subject
+
+                security_subject_token = set_current_subject(Subject.model_validate(raw_subject))
+            except Exception as exc:
+                log.warning("loop.security_context.invalid_subject", {
+                    "session_id": session_id,
+                    "error": type(exc).__name__,
+                })
         
         # Register context
         cls._active_loops[session_id] = ctx
@@ -442,6 +461,10 @@ class SessionLoop:
                 await Bus.publish(SessionIdle, {"sessionID": session_id})
             except Exception as exc:
                 log.warn("loop.idle.event_error", {"error": str(exc)})
+            if security_subject_token is not None:
+                from flocks.identity.subject import reset_current_subject
+
+                reset_current_subject(security_subject_token)
     
     @staticmethod
     async def _resolve_model(
@@ -1225,6 +1248,7 @@ class SessionLoop:
                 session_ctx=ctx.session_ctx,
                 memory_bootstrap_data=ctx.memory_bootstrap_data,
                 static_cache=ctx.runner_static_cache,
+                security_context=ctx.security_context,
             )
             # Use session-cumulative step number for observability.
             runner._step = ctx.trace_step
