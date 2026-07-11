@@ -208,7 +208,47 @@ async def test_channel_webhook_exposes_only_authentication_facts_to_pro_hook(mon
         HookPipeline.reset()
 
     assert "headers" not in observed[0]
-    assert observed[0]["authentication"] == {"plugin_authenticated": False}
+    assert observed[0]["authentication"] == {
+        "plugin_authenticated": False,
+        "existing_authenticated": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_channel_webhook_pro_hook_receives_existing_verified_auth_subject(monkeypatch) -> None:
+    from flocks.identity.subject import Subject, reset_current_subject, set_current_subject
+
+    observed = []
+
+    class _Plugin:
+        requires_signature = False
+        handle_webhook = AsyncMock(return_value={"ok": True})
+
+    class _ProIngressHook(HookBase):
+        async def channel_webhook_before(self, ctx) -> None:
+            observed.append(deepcopy(ctx.input))
+
+    subject_token = set_current_subject(
+        Subject(
+            subject_id="api-key-user",
+            subject_type="human",
+            entry="api",
+            auth_source="api_key",
+            verified=True,
+        )
+    )
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("pro-channel-ingress", _ProIngressHook(), critical=True)
+    try:
+        with patch("flocks.server.routes.channel.default_registry.get", return_value=_Plugin()):
+            await channel_webhook("test", _webhook_request())
+    finally:
+        HookPipeline.reset()
+        reset_current_subject(subject_token)
+
+    assert observed[0]["authentication"]["existing_authenticated"] is True
+    assert observed[0]["authenticated_subject"]["subject_id"] == "api-key-user"
 
 
 @pytest.mark.asyncio

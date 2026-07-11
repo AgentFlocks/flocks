@@ -15,7 +15,12 @@ from flocks.channel.gateway.manager import default_manager
 from flocks.channel.inbound.security import reset_ingress_subject, set_ingress_subject
 from flocks.channel.registry import default_registry
 from flocks.hooks.pipeline import HookPipeline, HookStage
-from flocks.identity.subject import Subject, reset_current_subject, set_current_subject
+from flocks.identity.subject import (
+    Subject,
+    get_current_subject,
+    reset_current_subject,
+    set_current_subject,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -175,6 +180,16 @@ async def channel_webhook(channel_id: str, request: Request):
         if not verified:
             raise HTTPException(status_code=403, detail="Webhook 签名校验失败")
 
+    authenticated_subject = get_current_subject()
+    authenticated_subject_payload = None
+    if authenticated_subject is not None:
+        try:
+            candidate = authenticated_subject.model_dump()
+        except Exception:
+            candidate = None
+        if isinstance(candidate, dict) and candidate.get("verified") is not False:
+            authenticated_subject_payload = candidate
+
     ingress_payload = {
         "phase": "before_action",
         "entry": "channel_webhook",
@@ -183,8 +198,14 @@ async def channel_webhook(channel_id: str, request: Request):
         "body_sha256": hashlib.sha256(body).hexdigest(),
         "authentication": {
             "plugin_authenticated": bool(getattr(plugin, "requires_signature", False)),
+            # Existing API key/Token authentication remains owned by the
+            # normal middleware.  Pro receives only this verified fact and
+            # subject, never raw credential material.
+            "existing_authenticated": authenticated_subject_payload is not None,
         },
     }
+    if authenticated_subject_payload is not None:
+        ingress_payload["authenticated_subject"] = authenticated_subject_payload
     security_subject = None
     if HookPipeline.has_registered_stage_handlers(HookStage.CHANNEL_WEBHOOK_BEFORE):
         ingress_ctx = await HookPipeline.run_channel_webhook_before(ingress_payload)
