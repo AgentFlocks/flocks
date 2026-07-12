@@ -54,6 +54,20 @@ router = APIRouter()
 log = Log.create(service="routes.mcp")
 
 
+def _mcp_transport_category(config: Dict[str, Any]) -> str:
+    """Return a safe transport category without forwarding configuration text."""
+    server_type = str(config.get("type") or "").strip().lower()
+    if server_type in LOCAL_MCP_TYPES:
+        return "local"
+    if server_type in REMOTE_MCP_TYPES:
+        return "remote"
+
+    transport = str(config.get("transport") or "").strip().lower()
+    if transport in {"auto", "http", "sse", "streamablehttp", "streamable_http"}:
+        return "remote"
+    return "unknown"
+
+
 def _mcp_action_input(name: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Build policy context without forwarding credential values to action hooks."""
     normalized = dict(config or {})
@@ -70,7 +84,7 @@ def _mcp_action_input(name: str, config: Optional[Dict[str, Any]] = None) -> Dic
         command_hash = None
     return {
         "name": name,
-        "transport": str(normalized.get("type") or normalized.get("transport") or ""),
+        "transport": _mcp_transport_category(normalized),
         "command_present": bool(command),
         "command_sha256": command_hash,
         "config_hash": config_hash,

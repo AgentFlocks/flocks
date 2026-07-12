@@ -289,7 +289,8 @@ async def test_mcp_action_hook_receives_only_safe_command_summary(
     """MCP action hooks receive command presence and digests, never command data."""
     observed_before = []
     config = {
-        "type": "local",
+        "type": "Bearer type-secret",
+        "transport": "Bearer transport-secret",
         "command": ["confidential-cli", "--token=do-not-forward"],
         "headers": {"Authorization": "Bearer do-not-forward"},
     }
@@ -317,6 +318,7 @@ async def test_mcp_action_hook_receives_only_safe_command_summary(
     observed_text = json.dumps(observed_before, sort_keys=True)
 
     assert response["success"] is True
+    assert safe_input["transport"] == "unknown"
     assert safe_input["command_present"] is True
     assert len(safe_input["command_sha256"]) == 64
     assert len(safe_input["config_hash"]) == 64
@@ -325,6 +327,8 @@ async def test_mcp_action_hook_receives_only_safe_command_summary(
         "confidential-cli",
         "--token=do-not-forward",
         "Bearer do-not-forward",
+        "Bearer type-secret",
+        "Bearer transport-secret",
         "Authorization",
     ):
         assert sensitive_value not in observed_text
