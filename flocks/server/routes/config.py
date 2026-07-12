@@ -16,6 +16,8 @@ Flocks TUI expects Config format:
 }
 """
 
+import hashlib
+import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -39,6 +41,23 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.config")
+
+
+def _config_action_input(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize an update for action hooks without exposing config values."""
+    encoded = json.dumps(
+        config_data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "sections": [
+            {"name": section_name, "type": type(config_data[section_name]).__name__}
+            for section_name in sorted(config_data)
+        ],
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
 
 
 def _build_model_from_config(
@@ -564,7 +583,7 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
             SecurityAction(
                 action="configure",
                 resource={"type": "control_plane_config", "id": "flocks"},
-                canonical_input=config_data,
+                canonical_input=_config_action_input(config_data),
                 execution_domain="control_plane",
                 metadata={"entry": "api"},
             )

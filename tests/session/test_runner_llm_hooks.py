@@ -33,6 +33,21 @@ def _make_runner(session_id: str = "ses_runner_llm_hooks") -> SessionRunner:
     )
 
 
+def test_runner_construction_deep_copies_security_context() -> None:
+    security_context = {"subject": {"id": "user-1"}}
+
+    runner = SessionRunner(
+        session=_make_session(),
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        security_context=security_context,
+    )
+
+    security_context["subject"]["id"] = "changed-after-construction"
+
+    assert runner._security_context == {"subject": {"id": "user-1"}}
+
+
 class _FakeProcessor:
     def __init__(self, **_: object):
         self._text_parts: list[str] = []

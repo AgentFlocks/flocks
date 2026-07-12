@@ -58,19 +58,21 @@ def _mcp_action_input(name: str, config: Optional[Dict[str, Any]] = None) -> Dic
     """Build policy context without forwarding credential values to action hooks."""
     normalized = dict(config or {})
     command = normalized.get("command")
-    if isinstance(command, list):
-        command_name = str(command[0]) if command else ""
-    else:
-        command_name = str(command or "")
     try:
         encoded = json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
         config_hash = hashlib.sha256(encoded).hexdigest()
     except (TypeError, ValueError):
         config_hash = None
+    try:
+        encoded_command = json.dumps(command, sort_keys=True, default=str).encode("utf-8")
+        command_hash = hashlib.sha256(encoded_command).hexdigest()
+    except (TypeError, ValueError):
+        command_hash = None
     return {
         "name": name,
         "transport": str(normalized.get("type") or normalized.get("transport") or ""),
-        "command": command_name,
+        "command_present": bool(command),
+        "command_sha256": command_hash,
         "config_hash": config_hash,
     }
 
@@ -105,13 +107,16 @@ class _McpTestFailure(RuntimeError):
 
 
 async def _run_mcp_connection_test(*, temp_name: str, config: Dict[str, Any]) -> int:
-    success = await MCP.connect(temp_name, config)
-    if not success:
-        status = await MCP.status()
-        server_status = status.get(temp_name)
-        error_detail = getattr(server_status, "error", None) if server_status else None
-        raise _McpTestFailure(error_detail or f"unable to connect to MCP server: {temp_name}")
-    return await MCP.refresh_tools(temp_name)
+    try:
+        success = await MCP.connect(temp_name, config)
+        if not success:
+            status = await MCP.status()
+            server_status = status.get(temp_name)
+            error_detail = getattr(server_status, "error", None) if server_status else None
+            raise _McpTestFailure(error_detail or f"unable to connect to MCP server: {temp_name}")
+        return await MCP.refresh_tools(temp_name)
+    finally:
+        await MCP.remove(temp_name)
 
 
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -477,14 +482,6 @@ async def test_mcp_connection(request: McpTestRequest):
             "message": f"连接测试失败：{str(e)}",
             "error": str(e),
         }
-    finally:
-        # Fully remove from memory after test so the server doesn't appear in listings
-        try:
-            await MCP.remove(temp_name)
-        except Exception as e:
-            log.warn("mcp.test.cleanup_failed", {"server": temp_name, "error": str(e)})
-
-
 @router.post(
     "/{name}/test",
     response_model=Dict[str, Any],
@@ -535,13 +532,6 @@ async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
             "message": f"连接测试失败：{str(e)}",
             "error": str(e),
         }
-    finally:
-        try:
-            await MCP.remove(temp_name)
-        except Exception as e:
-            log.warn("mcp.test_existing.cleanup_failed", {"server": temp_name, "error": str(e)})
-
-
 @router.delete(
     "/{name}",
     response_model=Dict[str, bool],

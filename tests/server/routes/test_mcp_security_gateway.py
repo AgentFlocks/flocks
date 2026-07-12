@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -40,7 +41,9 @@ def _deny_only_through_execute_action(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_mcp_test_connection_is_denied_before_stdio_connect(monkeypatch: pytest.MonkeyPatch) -> None:
     connect = AsyncMock(side_effect=AssertionError("stdio MCP process was started"))
+    remove = AsyncMock(side_effect=AssertionError("temporary MCP server was removed"))
     monkeypatch.setattr(mcp_routes.MCP, "connect", connect)
+    monkeypatch.setattr(mcp_routes.MCP, "remove", remove)
 
     result = await mcp_routes.test_mcp_connection(
         mcp_routes.McpTestRequest(
@@ -52,6 +55,7 @@ async def test_mcp_test_connection_is_denied_before_stdio_connect(monkeypatch: p
     assert result["success"] is False
     assert "test_policy_deny" in result["message"]
     connect.assert_not_awaited()
+    remove.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -79,7 +83,9 @@ async def test_existing_mcp_test_is_denied_before_override_connect(monkeypatch: 
         AsyncMock(return_value={"type": "remote", "url": "https://safe.example"}),
     )
     connect = AsyncMock(side_effect=AssertionError("override MCP process was started"))
+    remove = AsyncMock(side_effect=AssertionError("temporary MCP server was removed"))
     monkeypatch.setattr(mcp_routes.MCP, "connect", connect)
+    monkeypatch.setattr(mcp_routes.MCP, "remove", remove)
 
     with pytest.raises(mcp_routes.HTTPException) as exc_info:
         await mcp_routes.test_existing_mcp_connection(
@@ -91,6 +97,7 @@ async def test_existing_mcp_test_is_denied_before_override_connect(monkeypatch: 
 
     assert exc_info.value.status_code == 403
     connect.assert_not_awaited()
+    remove.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -197,6 +204,7 @@ async def test_mcp_update_uses_gateway_before_persist_or_reconnect(
 @pytest.mark.asyncio
 async def test_mcp_test_action_after_covers_refresh_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     observed_after = []
+    events = []
 
     class _ObserveTestAction(HookBase):
         async def action_before(self, ctx) -> None:
@@ -205,6 +213,7 @@ async def test_mcp_test_action_after_covers_refresh_failure(monkeypatch: pytest.
 
         async def action_after(self, ctx) -> None:
             observed_after.append(ctx.input)
+            events.append("after")
 
     HookPipeline.reset()
     monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
@@ -215,7 +224,10 @@ async def test_mcp_test_action_after_covers_refresh_failure(monkeypatch: pytest.
         "refresh_tools",
         AsyncMock(side_effect=RuntimeError("refresh failed")),
     )
-    monkeypatch.setattr(mcp_routes.MCP, "remove", AsyncMock())
+    async def _remove_temp_server(_name: str) -> None:
+        events.append("remove")
+
+    monkeypatch.setattr(mcp_routes.MCP, "remove", _remove_temp_server)
     try:
         response = await mcp_routes.test_mcp_connection(
             mcp_routes.McpTestRequest(name="demo", config={"type": "local", "command": ["demo"]})
@@ -229,6 +241,93 @@ async def test_mcp_test_action_after_covers_refresh_failure(monkeypatch: pytest.
         "executed": True,
         "error_type": "RuntimeError",
     }
+    assert events == ["remove", "after"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_test_cleanup_precedes_success_action_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful temporary connections are removed inside the audited effect."""
+    observed_after = []
+    events = []
+
+    class _ObserveTestAction(HookBase):
+        async def action_before(self, ctx) -> None:
+            ctx.output["policy_engine_present"] = True
+            ctx.output["decision"] = {"action": "allow"}
+
+        async def action_after(self, ctx) -> None:
+            observed_after.append(ctx.input)
+            events.append("after")
+
+    async def _remove_temp_server(_name: str) -> None:
+        events.append("remove")
+
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("observe-mcp-test", _ObserveTestAction(), critical=True)
+    monkeypatch.setattr(mcp_routes.MCP, "connect", AsyncMock(return_value=True))
+    monkeypatch.setattr(mcp_routes.MCP, "refresh_tools", AsyncMock(return_value=2))
+    monkeypatch.setattr(mcp_routes.MCP, "remove", _remove_temp_server)
+    try:
+        response = await mcp_routes.test_mcp_connection(
+            mcp_routes.McpTestRequest(name="demo", config={"type": "local", "command": ["demo"]})
+        )
+    finally:
+        HookPipeline.reset()
+
+    assert response["success"] is True
+    assert observed_after[-1]["outcome"] == {"success": True}
+    assert events == ["remove", "after"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_action_hook_receives_only_safe_command_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP action hooks receive command presence and digests, never command data."""
+    observed_before = []
+    config = {
+        "type": "local",
+        "command": ["confidential-cli", "--token=do-not-forward"],
+        "headers": {"Authorization": "Bearer do-not-forward"},
+    }
+
+    class _CaptureMcpAction(HookBase):
+        async def action_before(self, ctx) -> None:
+            observed_before.append(ctx.input)
+            ctx.output["policy_engine_present"] = True
+            ctx.output["decision"] = {"action": "allow"}
+
+    HookPipeline.reset()
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("capture-mcp-action", _CaptureMcpAction(), critical=True)
+    monkeypatch.setattr(mcp_routes.MCP, "connect", AsyncMock(return_value=True))
+    monkeypatch.setattr(mcp_routes.MCP, "refresh_tools", AsyncMock(return_value=0))
+    monkeypatch.setattr(mcp_routes.MCP, "remove", AsyncMock())
+    try:
+        response = await mcp_routes.test_mcp_connection(
+            mcp_routes.McpTestRequest(name="demo", config=config)
+        )
+    finally:
+        HookPipeline.reset()
+
+    safe_input = observed_before[0]["canonical"]["generic"]["input"]
+    observed_text = json.dumps(observed_before, sort_keys=True)
+
+    assert response["success"] is True
+    assert safe_input["command_present"] is True
+    assert len(safe_input["command_sha256"]) == 64
+    assert len(safe_input["config_hash"]) == 64
+    assert "command" not in safe_input
+    for sensitive_value in (
+        "confidential-cli",
+        "--token=do-not-forward",
+        "Bearer do-not-forward",
+        "Authorization",
+    ):
+        assert sensitive_value not in observed_text
 
 
 @pytest.mark.asyncio

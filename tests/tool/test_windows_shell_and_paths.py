@@ -39,6 +39,47 @@ class _FakeProcess:
     returncode = 0
 
 
+class _StopAfterPermissionRequest(Exception):
+    """Stop a Bash helper after capturing its compatibility permission call."""
+
+
+@pytest.mark.asyncio
+async def test_bash_permissions_keep_oss_always_wildcard(monkeypatch):
+    """Host and sandbox Bash preserve the historic OSS always-grant argument."""
+    requests = []
+
+    class _CapturingContext:
+        async def ask(self, **kwargs):
+            requests.append(kwargs)
+            raise _StopAfterPermissionRequest
+
+    ctx = _CapturingContext()
+    monkeypatch.setattr(bash_module.Instance, "contains_path", lambda _path: True)
+
+    with pytest.raises(_StopAfterPermissionRequest):
+        await bash_module._execute_host(
+            ctx=ctx,
+            command="echo hi",
+            cwd="/tmp",
+            timeout_sec=1,
+            timeout_ms=1000,
+            description=None,
+        )
+
+    with pytest.raises(_StopAfterPermissionRequest):
+        await bash_module._execute_sandboxed(
+            ctx=ctx,
+            command="echo hi",
+            cwd="/tmp",
+            sandbox=SimpleNamespace(container_name="sandbox", env={}),
+            timeout_sec=1,
+            timeout_ms=1000,
+            description=None,
+        )
+
+    assert [request["always"] for request in requests] == [["*"], ["*"]]
+
+
 def test_get_shell_windows_prefers_powershell_variants(monkeypatch):
     """Windows shell detection should only consider PowerShell variants."""
     monkeypatch.setattr(bash_module.sys, "platform", "win32")
