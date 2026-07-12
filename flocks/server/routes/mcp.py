@@ -47,8 +47,6 @@ from flocks.security.action_gateway import (
     ActionDecisionError,
     SecurityAction,
     execute_action,
-    enforce_action_decision,
-    run_before_action,
 )
 from flocks.utils.log import Log
 
@@ -83,16 +81,18 @@ async def _execute_mcp_action(
     name: str,
     config: Optional[Dict[str, Any]],
     effect,
+    resource_type: str = "mcp_server",
+    resource_id: Optional[str] = None,
 ):
     """Run an MCP side effect through the OSS-neutral ActionGateway."""
     try:
         return await execute_action(
             SecurityAction(
                 action=action,
-                resource={"type": "mcp_server", "id": name},
+                resource={"type": resource_type, "id": resource_id or name},
                 canonical_input=_mcp_action_input(name, config),
                 execution_domain="control_plane",
-                metadata={"entry": "api"},
+                metadata={"entry": "api", "mcp_server": name},
             ),
             effect,
         )
@@ -311,6 +311,40 @@ async def _apply_mcp_add(name: str, config: Dict[str, Any]) -> Dict[str, McpStat
     return await _build_mcp_status_response()
 
 
+async def _remove_mcp_server_effect(name: str) -> Dict[str, bool]:
+    """Remove all MCP server state inside one audited action effect."""
+    removed_from_config = ConfigWriter.remove_mcp_server(name)
+
+    status = await MCP.status()
+    in_memory = name in status
+    if in_memory:
+        await MCP.remove(name)
+
+    if not removed_from_config and not in_memory:
+        raise HTTPException(
+            status_code=404,
+            detail=f"MCP server '{name}' not found",
+        )
+
+    catalog = McpCatalog.get()
+    entry = catalog.get_entry(name)
+    if entry:
+        try:
+            await preflight_uninstall(entry)
+        except Exception as uninstall_err:
+            log.warn("mcp.remove.uninstall_failed", {"name": name, "error": str(uninstall_err)})
+
+    try:
+        from flocks.tool.tool_loader import delete_mcp_config
+
+        delete_mcp_config(name)
+    except Exception as yaml_err:
+        log.warn("mcp.remove.yaml_delete_failed", {"name": name, "error": str(yaml_err)})
+
+    log.info("mcp.remove.success", {"name": name, "from_config": removed_from_config, "from_memory": in_memory})
+    return {"success": True}
+
+
 # Request/Response models
 
 class McpAddRequest(BaseModel):
@@ -524,52 +558,12 @@ async def remove_mcp_server(name: str):
     Returns {"success": true} on success.
     """
     try:
-        decision = await run_before_action(
-            SecurityAction(
-                action="delete",
-                resource={"type": "mcp_server", "id": name},
-                canonical_input={},
-                execution_domain="control_plane",
-                metadata={"entry": "api"},
-            )
+        return await _execute_mcp_action(
+            action="delete",
+            name=name,
+            config=None,
+            effect=lambda: _remove_mcp_server_effect(name),
         )
-        enforce_action_decision(decision)
-
-        # Try to remove from persistent config (may not exist if server was only in memory)
-        removed_from_config = ConfigWriter.remove_mcp_server(name)
-
-        # Always purge in-memory state regardless of config presence
-        status = await MCP.status()
-        in_memory = name in status
-        if in_memory:
-            await MCP.remove(name)
-
-        if not removed_from_config and not in_memory:
-            raise HTTPException(
-                status_code=404,
-                detail=f"MCP server '{name}' not found"
-            )
-
-        # Clean up installed npm packages under ~/.flocks/mcp if this is a catalog entry
-        catalog = McpCatalog.get()
-        entry = catalog.get_entry(name)
-        if entry:
-            try:
-                await preflight_uninstall(entry)
-            except Exception as uninstall_err:
-                log.warn("mcp.remove.uninstall_failed", {"name": name, "error": str(uninstall_err)})
-
-        # Clean up canonical YAML config if present
-        try:
-            from flocks.tool.tool_loader import delete_mcp_config
-            delete_mcp_config(name)
-        except Exception as yaml_err:
-            log.warn("mcp.remove.yaml_delete_failed", {"name": name, "error": str(yaml_err)})
-
-        log.info("mcp.remove.success", {"name": name, "from_config": removed_from_config, "from_memory": in_memory})
-        return {"success": True}
-    except ActionDecisionError:
-        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -708,8 +702,14 @@ async def connect_mcp_server(name: str):
 async def disconnect_mcp_server(name: str):
     """Disconnect from an MCP server - returns true on success"""
     try:
-        success = await MCP.disconnect(name)
-        return success
+        return await _execute_mcp_action(
+            action="mcp_disconnect",
+            name=name,
+            config=None,
+            effect=lambda: MCP.disconnect(name),
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("mcp.disconnect.error", {"name": name, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -746,8 +746,16 @@ async def start_mcp_auth(name: str):
 async def remove_mcp_auth(name: str):
     """Remove OAuth credentials - returns {"success": true}"""
     try:
-        await McpAuth.remove(name)
+        await _execute_mcp_action(
+            action="delete",
+            name=name,
+            config=None,
+            resource_type="mcp_auth",
+            effect=lambda: McpAuth.remove(name),
+        )
         return {"success": True}
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("mcp.auth.remove.error", {"name": name, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -936,30 +944,24 @@ async def set_mcp_credentials(name: str, request: McpCredentialRequest):
 
         # Use provided secret_id or convention-based default (_mcp_key for MCP servers)
         secret_id = request.secret_id or f"{name}_mcp_key"
-        decision = await run_before_action(
-            SecurityAction(
-                action="use_secret",
-                resource={"type": "secret", "id": secret_id},
-                canonical_input={"secret_id": secret_id, "operation": "set"},
-                execution_domain="control_plane",
-                metadata={"entry": "api", "mcp_server": name},
-            )
+        async def _store_credential() -> Dict[str, Any]:
+            secrets = get_secret_manager()
+            secrets.set(secret_id, request.api_key)
+            log.info("mcp.credentials.set", {"name": name, "secret_id": secret_id})
+            return {
+                "success": True,
+                "message": f"Credentials saved as '{secret_id}'",
+                "secret_id": secret_id,
+            }
+
+        return await _execute_mcp_action(
+            action="use_secret",
+            name=name,
+            config={"operation": "set"},
+            resource_type="secret",
+            resource_id=secret_id,
+            effect=_store_credential,
         )
-        enforce_action_decision(decision)
-
-        secrets = get_secret_manager()
-        secrets.set(secret_id, request.api_key)
-
-        log.info("mcp.credentials.set", {"name": name, "secret_id": secret_id})
-
-        return {
-            "success": True,
-            "message": f"Credentials saved as '{secret_id}'",
-            "secret_id": secret_id,
-        }
-
-    except ActionDecisionError:
-        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -981,29 +983,24 @@ async def delete_mcp_credentials(name: str):
         # Delete both current (_mcp_key) and legacy (_api_key) entries
         secret_id = f"{name}_mcp_key"
         legacy_id = f"{name}_api_key"
-        decision = await run_before_action(
-            SecurityAction(
-                action="delete",
-                resource={"type": "secret", "id": secret_id},
-                canonical_input={"secret_ids": [secret_id, legacy_id]},
-                execution_domain="control_plane",
-                metadata={"entry": "api", "mcp_server": name},
-            )
-        )
-        enforce_action_decision(decision)
-
-        secrets = get_secret_manager()
-        deleted = secrets.delete(secret_id)
-        deleted = secrets.delete(legacy_id) or deleted
-
-        if deleted:
+        async def _delete_credentials() -> Dict[str, bool]:
+            secrets = get_secret_manager()
+            deleted = secrets.delete(secret_id)
+            deleted = secrets.delete(legacy_id) or deleted
+            if not deleted:
+                raise HTTPException(status_code=404, detail="No credentials found for this server")
             log.info("mcp.credentials.deleted", {"name": name, "secret_id": secret_id})
             return {"success": True}
-        else:
-            raise HTTPException(status_code=404, detail="No credentials found for this server")
 
-    except ActionDecisionError:
-        raise
+        return await _execute_mcp_action(
+            action="delete",
+            name=name,
+            config={"operation": "delete"},
+            resource_type="secret",
+            resource_id=secret_id,
+            effect=_delete_credentials,
+        )
+
     except HTTPException:
         raise
     except Exception as e:

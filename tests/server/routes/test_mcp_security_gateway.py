@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from flocks.hooks.pipeline import HookBase, HookPipeline
+from flocks.hooks.pipeline import HookBase, HookPipeline, ToolDecision
+from flocks.security.action_gateway import ActionDeniedError
 from flocks.server.routes import mcp as mcp_routes
 
 
@@ -21,6 +22,19 @@ def _active_pro_policy(monkeypatch: pytest.MonkeyPatch):
     HookPipeline.register("test-pro-policy", _DenyMcpAction(), critical=True)
     yield
     HookPipeline.reset()
+
+
+def _deny_only_through_execute_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prove a route uses the full lifecycle gateway, not a hand-wired check."""
+
+    async def _allow_before(*_args, **_kwargs) -> ToolDecision:
+        return ToolDecision(action="allow")
+
+    async def _deny_execute(*_args, **_kwargs):
+        raise ActionDeniedError(ToolDecision(action="deny", reason="test_policy_deny"))
+
+    monkeypatch.setattr(mcp_routes, "run_before_action", _allow_before, raising=False)
+    monkeypatch.setattr(mcp_routes, "execute_action", _deny_execute)
 
 
 @pytest.mark.asyncio
@@ -215,3 +229,81 @@ async def test_mcp_test_action_after_covers_refresh_failure(monkeypatch: pytest.
         "executed": True,
         "error_type": "RuntimeError",
     }
+
+
+@pytest.mark.asyncio
+async def test_mcp_disconnect_is_denied_by_execute_action_before_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _deny_only_through_execute_action(monkeypatch)
+    disconnect = AsyncMock(side_effect=AssertionError("MCP disconnect was reached"))
+    monkeypatch.setattr(mcp_routes.MCP, "disconnect", disconnect)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.disconnect_mcp_server("demo")
+
+    assert exc_info.value.status_code == 403
+    disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_removal_is_denied_by_execute_action_before_config_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _deny_only_through_execute_action(monkeypatch)
+    remove_config = Mock(side_effect=AssertionError("config delete was reached"))
+    monkeypatch.setattr(mcp_routes.ConfigWriter, "remove_mcp_server", remove_config)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.remove_mcp_server("demo")
+
+    assert exc_info.value.status_code == 403
+    remove_config.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_removal_is_denied_by_execute_action_before_secret_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _deny_only_through_execute_action(monkeypatch)
+    remove_auth = AsyncMock(side_effect=AssertionError("OAuth secret delete was reached"))
+    monkeypatch.setattr(mcp_routes.McpAuth, "remove", remove_auth)
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.remove_mcp_auth("demo")
+
+    assert exc_info.value.status_code == 403
+    remove_auth.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_credential_set_is_denied_by_execute_action_before_secret_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _deny_only_through_execute_action(monkeypatch)
+    secrets = Mock()
+    monkeypatch.setattr("flocks.security.get_secret_manager", Mock(return_value=secrets))
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.set_mcp_credentials(
+            "demo",
+            mcp_routes.McpCredentialRequest(api_key="secret-value"),
+        )
+
+    assert exc_info.value.status_code == 403
+    secrets.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mcp_credential_delete_is_denied_by_execute_action_before_secret_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _deny_only_through_execute_action(monkeypatch)
+    secrets = Mock()
+    monkeypatch.setattr("flocks.security.get_secret_manager", Mock(return_value=secrets))
+
+    with pytest.raises(mcp_routes.HTTPException) as exc_info:
+        await mcp_routes.delete_mcp_credentials("demo")
+
+    assert exc_info.value.status_code == 403
+    secrets.delete.assert_not_called()
