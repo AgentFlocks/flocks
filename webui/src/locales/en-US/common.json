@@ -55,6 +55,8 @@
     "backendUnavailable": "Cannot connect to backend service",
     "backendError": "Backend service error",
     "backendErrorHint": "Please ensure the backend service is running",
+    "chunkLoadFailed": "Page resources failed to load",
+    "chunkLoadHint": "The application may have been updated. Refresh and try again.",
     "processingFailed": "Processing failed",
     "deleteFailed": "Delete failed",
     "saveFailed": "Save failed"

@@ -13,6 +13,7 @@ import { AlertCircle, Loader2 } from 'lucide-react';
 import { getApiBase } from '@/api/client';
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
+import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { installWebUIContractPageRuntime, loadWebUIContractPageBundle } from './runtime';
 
 interface WebUIContractPageErrorBoundaryProps {
@@ -73,6 +74,7 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [buildHash, setBuildHash] = useState('');
+  const showLoading = useDelayedVisible(loading ? 180 : 0);
 
   const loadBundle = useCallback(async (hash: string) => {
     if (!pageId || !hash) return;
@@ -140,6 +142,7 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   }
 
   if (loading) {
+    if (!showLoading) return null;
     return (
       <div className="flex items-center gap-2 text-sm text-zinc-500">
         <Loader2 className="h-4 w-4 animate-spin" />

@@ -33,7 +33,7 @@ class TestAPIServiceManagement:
                 "threatbook_api": {"enabled": False},
             }.get(service_id, {})),
             patch(
-                "flocks.server.routes.provider._load_api_service_metadata_data",
+                "flocks.server.routes.provider._load_api_service_summary_metadata_data",
                 side_effect=lambda service_id: metadata_by_id[service_id],
             ),
             patch(
@@ -65,6 +65,35 @@ class TestAPIServiceManagement:
         assert result[1].enabled is False
         assert result[1].status == "disabled"
         assert result[1].tool_count == 2
+
+    def test_api_service_summary_uses_lightweight_metadata_loader(self):
+        from flocks.server.routes import provider as provider_routes
+
+        with (
+            patch(
+                "flocks.server.routes.provider._load_api_service_summary_metadata_data",
+                return_value={
+                    "name": "Example API",
+                    "description": "Summary metadata only",
+                    "version": "1.2.3",
+                },
+            ) as mock_summary_loader,
+            patch(
+                "flocks.server.routes.provider._load_api_service_metadata_data",
+                side_effect=AssertionError("list summaries should not load full API metadata"),
+            ),
+            patch("flocks.server.routes.provider._get_api_service_enabled", return_value=True),
+            patch("flocks.server.routes.provider._get_api_service_tool_infos", return_value=[]),
+            patch("flocks.server.routes.provider._is_api_service_builtin", return_value=False),
+            patch("flocks.config.config_writer.ConfigWriter.get_api_service_raw", return_value={}),
+        ):
+            summary = provider_routes._build_api_service_summary("example_api", {})
+
+        mock_summary_loader.assert_called_once_with("example_api")
+        assert summary.id == "example_api"
+        assert summary.name == "Example API"
+        assert summary.version == "1.2.3"
+        assert summary.tool_count == 0
 
     @pytest.mark.asyncio
     async def test_update_api_service_persists_enabled_flag_and_updates_status_cache(self):
@@ -393,6 +422,58 @@ class TestProviderYamlMetadata:
         assert metadata["name"] == "Example Service"
         assert metadata["base_url"] == "https://api.example.test"
         assert metadata["enabled"] is False
+
+    def test_load_api_service_summary_metadata_reuses_cached_yaml(self, tmp_path, monkeypatch):
+        from flocks.server.routes import provider as provider_routes
+
+        provider_routes._clear_api_service_summary_metadata_cache()
+        monkeypatch.setattr(provider_routes.api_service_schema_helpers, "_LEGACY_METADATA_DIR", tmp_path)
+        try:
+            with (
+                patch(
+                    "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+                    return_value={"enabled": True},
+                ),
+                patch(
+                    "flocks.server.routes.provider._provider_yaml_cache_key",
+                    return_value=("/plugins/example/_provider.yaml", 123),
+                ),
+                patch(
+                    "flocks.server.routes.provider._load_provider_yaml_summary_metadata",
+                    return_value={
+                        "name": "Example Service",
+                        "description": "Loaded from provider yaml",
+                    },
+                ) as mock_yaml_loader,
+            ):
+                first = provider_routes._load_api_service_summary_metadata_data("example_service")
+                second = provider_routes._load_api_service_summary_metadata_data("example_service")
+
+            mock_yaml_loader.assert_called_once_with("example_service")
+            assert first == second
+            assert first["name"] == "Example Service"
+            assert first["enabled"] is True
+        finally:
+            provider_routes._clear_api_service_summary_metadata_cache()
+
+    def test_summary_descriptor_lookup_uses_cached_discovery(self, monkeypatch):
+        from flocks.server.routes import provider as provider_routes
+
+        calls = []
+
+        def discover_api_service_descriptors(*, refresh=False):
+            calls.append(refresh)
+            if refresh:
+                raise AssertionError("summary lookup should not refresh descriptor discovery")
+            return []
+
+        monkeypatch.setattr(
+            "flocks.config.api_versioning.discover_api_service_descriptors",
+            discover_api_service_descriptors,
+        )
+
+        assert provider_routes._find_api_service_descriptor("missing_service") is None
+        assert calls == [False]
 
     def test_load_provider_yaml_metadata_from_project_plugins(self, tmp_path, monkeypatch):
         from flocks.server.routes.provider import _load_provider_yaml_metadata
