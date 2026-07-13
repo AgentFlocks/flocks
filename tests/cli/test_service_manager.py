@@ -1522,70 +1522,37 @@ def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path:
     assert daemon.backend.pid == 333
 
 
-def test_supervisor_waits_for_second_backend_health_failure(monkeypatch, tmp_path: Path) -> None:
+def test_supervisor_liveness_probe_keeps_backend_healthy(monkeypatch, tmp_path: Path) -> None:
+    """Liveness-only probe: process alive + TCP port open = healthy, no HTTP check needed."""
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     daemon = service_supervisor.SupervisorDaemon(
         service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
-        failure_threshold=2,
     )
     daemon.paths = paths
     daemon.backend.process = _fake_process(111, ["backend"])
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            return None
-
-        def get(self, _url, **_kwargs):
-            return httpx.Response(503, json={"status": "unhealthy"})
-
-    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
     monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
     monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
-    monkeypatch.setattr(
-        service_manager,
-        "_start_backend_process",
-        lambda *_args, **_kwargs: calls.append("start:backend") or _fake_process(333, ["backend-new"]),
-    )
 
     daemon.tick()
     assert calls == []
-    assert daemon.backend.state == "degraded"
+    assert daemon.backend.state == "healthy"
 
     daemon.tick()
-    assert calls == ["stop:后端", "start:backend"]
+    assert calls == []
+    assert daemon.backend.state == "healthy"
 
 
-def test_backend_probe_rejects_api_root_when_static_webui_missing(monkeypatch) -> None:
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            return None
-
-        def get(self, url, **_kwargs):
-            if str(url).endswith("/api/health"):
-                return httpx.Response(200, json={"status": "healthy"})
-            return httpx.Response(200, json={"status": "running"})
-
+def test_backend_probe_liveness_only_accepts_alive_process(monkeypatch) -> None:
+    """Liveness-only probe: process alive + TCP port open = healthy regardless of HTTP response."""
     monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
-    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
 
     result = service_process.BackendProcessAdapter().probe(_fake_process(111, ["backend"]), "127.0.0.1", 5173)
 
-    assert result.healthy is False
-    assert result.reason == "health status=200, root status=200"
+    assert result.healthy is True
+    assert result.reason == "liveness check passed"
 
 
 def test_supervisor_reports_webui_as_static_endpoint(monkeypatch, tmp_path: Path) -> None:

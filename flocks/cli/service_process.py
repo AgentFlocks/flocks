@@ -7,10 +7,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
-import httpx
-
-from flocks.cli.service_config import ServiceConfig
-
 
 @dataclass(frozen=True)
 class ServiceProbeResult:
@@ -59,29 +55,7 @@ class BackendProcessAdapter:
             )
         if not tcp_port_accepts_connections(host, port):
             return ServiceProbeResult(healthy=False, reason=f"port {port} is not listening", restart=True)
-
-        from flocks.cli.service_manager import _backend_health_url, _is_healthy_status_response, backend_access_base_url
-
-        url = _backend_health_url(host, port)
-        try:
-            with httpx.Client(timeout=2.0, trust_env=False) as client:
-                response = client.get(url)
-                root_response = client.get(
-                    backend_access_base_url(ServiceConfig(backend_host=host, backend_port=port)),
-                    headers={"Accept": "text/html"},
-                )
-            healthy = _is_healthy_status_response(response) and _is_static_webui_response(root_response)
-            reason = f"health status={response.status_code}, root status={root_response.status_code}"
-        except Exception as exc:
-            healthy = False
-            reason = f"health failed: {exc}"
-        return ServiceProbeResult(healthy=healthy, reason=reason)
-
-
-def _is_static_webui_response(response: httpx.Response) -> bool:
-    """Return True only when the unified service serves the SPA index."""
-    content_type = response.headers.get("content-type", "").lower()
-    return response.status_code == 200 and "text/html" in content_type
+        return ServiceProbeResult(healthy=True, reason="liveness check passed")
 
 
 def tcp_port_accepts_connections(host: str, port: int) -> bool:
