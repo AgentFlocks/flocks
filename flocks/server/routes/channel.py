@@ -387,6 +387,7 @@ async def weixin_qr_login_status(qrcode: str, baseUrl: Optional[str] = None):
 class WhatsAppPairStartRequest(BaseModel):
     sessionPath: Optional[str] = None
     bridgeDir: Optional[str] = None
+    resetSession: bool = False
 
 
 @router.post("/whatsapp/pair/start")
@@ -400,9 +401,12 @@ async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
     from flocks.channel.builtin.whatsapp.pairing import start_pairing
 
     try:
+        if default_manager.is_channel_running("whatsapp"):
+            await default_manager.stop_channel("whatsapp")
         pairing = await start_pairing(
             session_path=req.sessionPath,
             bridge_dir=req.bridgeDir,
+            reset_session=req.resetSession,
         )
         return {
             "ok": True,
@@ -413,6 +417,20 @@ async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
     except Exception as exc:
         log.error("whatsapp.pair.start_failed", {"error": str(exc)})
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/whatsapp/session-status")
+async def whatsapp_session_status(sessionPath: Optional[str] = None):
+    """Return whether the configured WhatsApp session contains credentials."""
+    from pathlib import Path
+
+    from flocks.channel.builtin.whatsapp.config import default_session_path
+
+    path = Path(sessionPath).expanduser() if sessionPath else default_session_path()
+    return {
+        "session_path": str(path),
+        "paired": (path / "creds.json").exists(),
+    }
 
 
 @router.get("/whatsapp/pair/{pairing_id}/status")

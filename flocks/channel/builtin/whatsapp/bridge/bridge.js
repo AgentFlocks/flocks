@@ -100,7 +100,7 @@ function rememberSent(id) {
 
 function normalizeJid(value) {
   if (!value) return '';
-  return String(value).replace(':', '@');
+  return String(value).replace(/:\d+@/, '@');
 }
 
 function splitLongMessage(message, limit = 4096) {

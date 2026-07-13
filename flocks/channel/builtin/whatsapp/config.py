@@ -85,7 +85,7 @@ def normalize_jid(value: str) -> str:
     if not raw:
         return ""
     if ":" in raw and "@" in raw:
-        raw = raw.replace(":", "@", 1)
+        raw = re.sub(r":\d+@", "@", raw, count=1)
     if _JID_RE.fullmatch(raw):
         return raw
     phone = raw.lstrip("+").replace(" ", "")
@@ -125,4 +125,3 @@ def matches_identifier(candidate: str, allowed: list[str]) -> bool:
 
 def format_env_list(items: list[str]) -> str:
     return ",".join(item for item in items if item)
-

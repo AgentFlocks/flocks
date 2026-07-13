@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -68,6 +69,18 @@ def _release_session(pairing: PairingSession) -> None:
     pairing.finished_at = pairing.finished_at or time.time()
 
 
+def _backup_session_dir(session_path: Path) -> Optional[Path]:
+    if not session_path.exists() or not any(session_path.iterdir()):
+        return None
+    backup_path = session_path.with_name(f"{session_path.name}.backup.{int(time.time())}.{uuid.uuid4().hex[:8]}")
+    shutil.move(str(session_path), str(backup_path))
+    log.info("whatsapp.pairing.session_backed_up", {
+        "session_path": str(session_path),
+        "backup_path": str(backup_path),
+    })
+    return backup_path
+
+
 async def _read_pair_output(pairing: PairingSession) -> None:
     assert pairing.process.stdout is not None
     while True:
@@ -107,6 +120,7 @@ async def start_pairing(
     *,
     session_path: Optional[str] = None,
     bridge_dir: Optional[str] = None,
+    reset_session: bool = False,
 ) -> PairingSession:
     _cleanup_pairings()
     node = find_executable("node")
@@ -120,7 +134,6 @@ async def start_pairing(
     await ensure_bridge_deps(bridge_root)
 
     sess = Path(session_path).expanduser() if session_path else default_session_path()
-    sess.mkdir(parents=True, exist_ok=True)
     key = _session_key(sess)
     if key in _active_session_paths:
         raise RuntimeError("WhatsApp pairing is already running for this session")
@@ -133,6 +146,10 @@ async def start_pairing(
         pass
     except ValueError:
         pass
+
+    if reset_session:
+        _backup_session_dir(sess)
+    sess.mkdir(parents=True, exist_ok=True)
 
     pairing_id = uuid.uuid4().hex
     env = os.environ.copy()

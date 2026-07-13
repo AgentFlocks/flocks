@@ -43,6 +43,7 @@ def test_registry_registers_builtin_whatsapp_channel():
         ("120363001234@g.us", "120363001234@g.us"),
         ("abc123@lid", "abc123@lid"),
         ("whatsapp:+15551234567", "15551234567@s.whatsapp.net"),
+        ("15551234567:12@s.whatsapp.net", "15551234567@s.whatsapp.net"),
     ],
 )
 def test_normalize_and_parse_targets(raw: str, expected: str):
@@ -225,6 +226,60 @@ async def test_pairing_rejects_running_session_after_dependency_bootstrap(
         await pairing.start_pairing(session_path=str(session), bridge_dir=str(bridge_dir))
 
     assert calls == [bridge_dir]
+
+
+@pytest.mark.asyncio
+async def test_pairing_reset_session_backs_up_existing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.js").write_text("console.log('bridge')", encoding="utf-8")
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "creds.json").write_text("old", encoding="utf-8")
+
+    class FakeStream:
+        async def readline(self) -> bytes:
+            return b""
+
+    class FakeProcess:
+        stdout = FakeStream()
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess()
+
+    async def fake_ensure(path: Path) -> None:
+        pass
+
+    monkeypatch.setattr(pairing, "find_executable", lambda name: "/usr/bin/node")
+    monkeypatch.setattr(pairing, "ensure_bridge_deps", fake_ensure)
+    monkeypatch.setattr(pairing.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    session_info = await pairing.start_pairing(
+        session_path=str(session),
+        bridge_dir=str(bridge_dir),
+        reset_session=True,
+    )
+
+    backups = list(tmp_path.glob("session.backup.*"))
+    assert len(backups) == 1
+    assert (backups[0] / "creds.json").read_text(encoding="utf-8") == "old"
+    assert session.exists()
+    assert not (session / "creds.json").exists()
+
+    await pairing.cancel_pairing(session_info.id)
 
 
 class _FakeResponse:

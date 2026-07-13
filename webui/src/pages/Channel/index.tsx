@@ -160,6 +160,7 @@ interface WhatsAppChannelConfig {
   sendChunkDelayMs?: number;
   sendTimeoutMs?: number;
   mediaCacheDir?: string;
+  _paired?: boolean;
 }
 
 type ChannelConfig =
@@ -495,6 +496,7 @@ const CHANNEL_ICON_SRC: Record<string, string> = {
   dingtalk: '/channel-dingtalk.png',
   telegram: '/channel-telegram.png',
   weixin: '/channel-weixin.png',
+  whatsapp: '/channel-whatsapp.png',
 };
 
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
@@ -1494,7 +1496,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
     completedRef.current = true;
     stopPolling();
     setQrPhase('complete');
-    const newConfig = { ...config, sessionPath, enabled: true };
+    const newConfig = { ...config, sessionPath, enabled: true, _paired: true };
     onChange(newConfig);
     if (onPairSuccess) {
       await onPairSuccess({ sessionPath });
@@ -1502,15 +1504,20 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
     toast.success(t('whatsapp.qrSuccess'));
   };
 
-  const startPairing = async () => {
+  const startPairing = async (replaceExisting = false) => {
     stopPolling();
     completedRef.current = false;
     setQrError('');
     setQrValue('');
     setQrPhase('loading');
     try {
+      const pairingSessionPath =
+        replaceExisting && config.sessionPath
+          ? `${config.sessionPath}.relink.${Date.now()}`
+          : (config.sessionPath || null);
       const res = await client.post('/api/channel/whatsapp/pair/start', {
-        sessionPath: config.sessionPath || null,
+        sessionPath: pairingSessionPath,
+        resetSession: false,
       });
       const id = String(res.data?.pairing_id ?? '');
       setPairingId(id);
@@ -1546,7 +1553,8 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
   };
 
   const showModal = qrPhase !== 'idle';
-  const allowFromEnabled = config.allowFrom !== undefined;
+  const isPaired = Boolean(config._paired);
+  const allowFromEnabled = (config.dmPolicy ?? 'allowlist') === 'allowlist';
 
   return (
     <>
@@ -1554,7 +1562,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
         <div className="mb-3">
           <button
             type="button"
-            onClick={startPairing}
+            onClick={() => startPairing(isPaired)}
             disabled={qrPhase === 'loading'}
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
           >
@@ -1563,10 +1571,14 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
             ) : (
               <MessageSquare className="w-4 h-4" />
             )}
-            {qrPhase === 'loading' ? t('whatsapp.qrLoading') : t('whatsapp.qrLoginButton')}
+            {qrPhase === 'loading'
+              ? t('whatsapp.qrLoading')
+              : isPaired
+                ? t('whatsapp.qrRelinkButton')
+                : t('whatsapp.qrLoginButton')}
           </button>
-          {config.sessionPath && (
-            <p className="mt-1.5 text-xs text-gray-500 flex items-center gap-1">
+          {isPaired && (
+            <p className="mt-1.5 text-xs text-emerald-700 flex items-center gap-1">
               <CheckCircle className="w-3 h-3 text-emerald-500" />
               {t('whatsapp.sessionConfigured')}
             </p>
@@ -1606,7 +1618,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
                   <p className="text-xs text-red-600 text-center break-all">{qrError || t('whatsapp.qrError')}</p>
                   <button
                     type="button"
-                    onClick={startPairing}
+                    onClick={() => startPairing(isPaired)}
                     className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
                   >
                     {t('whatsapp.qrRetry')}
@@ -1668,14 +1680,17 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
             options={[
               { value: 'allowlist', label: t('whatsapp.dmPolicyAllowlist') },
               { value: 'open', label: t('whatsapp.dmPolicyOpen') },
-              { value: 'disabled', label: t('whatsapp.dmPolicyDisabled') },
             ]}
           />
         </FieldRow>
         <FieldRow label={t('whatsapp.allowFromEnabled')} hint={t('whatsapp.allowFromEnabledHint')}>
           <Toggle
             checked={allowFromEnabled}
-            onChange={(enabled) => onChange({ ...config, allowFrom: enabled ? [] : undefined })}
+            onChange={(enabled) => onChange({
+              ...config,
+              dmPolicy: enabled ? 'allowlist' : 'open',
+              allowFrom: enabled ? (config.allowFrom ?? []) : undefined,
+            })}
           />
         </FieldRow>
         {allowFromEnabled && (
@@ -2299,9 +2314,9 @@ export default function ChannelPage() {
   const originalConfigsRef = useRef<Record<string, ChannelConfig>>({});
   const toggleInFlightRef = useRef(false);
 
-  const fetchAll = useCallback(async () => {
+  const fetchAll = useCallback(async (showLoading = false) => {
     try {
-      setLoading(true);
+      if (showLoading) setLoading(true);
       const [listRes, configRes] = await Promise.all([
         client.get('/api/channel/list'),
         client.get('/api/config'),
@@ -2330,7 +2345,23 @@ export default function ChannelPage() {
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
         } else if (ch.id === 'whatsapp') {
-          configs[ch.id] = { ...defaultWhatsAppConfig(), ...saved };
+          const whatsappCfg = { ...defaultWhatsAppConfig(), ...saved };
+          if (whatsappCfg.dmPolicy === 'disabled') {
+            whatsappCfg.dmPolicy = 'open';
+          }
+          if (whatsappCfg.sessionPath) {
+            try {
+              const sessionRes = await client.get('/api/channel/whatsapp/session-status', {
+                params: { sessionPath: whatsappCfg.sessionPath },
+              });
+              whatsappCfg._paired = Boolean(sessionRes.data?.paired);
+            } catch {
+              whatsappCfg._paired = false;
+            }
+          } else {
+            whatsappCfg._paired = false;
+          }
+          configs[ch.id] = whatsappCfg;
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -2368,7 +2399,7 @@ export default function ChannelPage() {
   }, []);
 
   useEffect(() => {
-    fetchAll();
+    fetchAll(true);
     fetchStatuses(true);
     const interval = setInterval(() => fetchStatuses(true), 15000);
     return () => clearInterval(interval);
@@ -2476,6 +2507,7 @@ export default function ChannelPage() {
       enabled: true,
     };
     if (data.sessionPath) updatedChannelCfg.sessionPath = data.sessionPath;
+    const nextUiConfig = { ...updatedChannelCfg, _paired: true };
 
     const updatedChannels = { ...(fullConfig.channels ?? {}), [channelId]: updatedChannelCfg };
     const updated = { ...fullConfig, channels: updatedChannels };
@@ -2484,11 +2516,11 @@ export default function ChannelPage() {
     setFullConfig(updated);
     setChannelConfigs((prev) => ({
       ...prev,
-      [channelId]: { ...prev[channelId], ...updatedChannelCfg } as ChannelConfig,
+      [channelId]: { ...prev[channelId], ...nextUiConfig } as ChannelConfig,
     }));
     originalConfigsRef.current = {
       ...originalConfigsRef.current,
-      [channelId]: { ...originalConfigsRef.current[channelId], ...updatedChannelCfg },
+      [channelId]: { ...originalConfigsRef.current[channelId], ...nextUiConfig },
     };
     client.post(`/api/channel/${channelId}/restart`, {}, { timeout: 5000 }).catch(() => {});
     setTimeout(() => { fetchAll(); fetchStatuses(true); }, 3000);
@@ -2725,6 +2757,7 @@ export default function ChannelPage() {
 function stripEmpty(obj: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const [k, v] of Object.entries(obj)) {
+    if (k.startsWith('_')) continue;
     if (v === '' || v === undefined) continue;
     // Empty arrays ARE preserved: e.g. allowFrom:[] means "require pairing for everyone"
     // (distinct from absent key which means "open access").
