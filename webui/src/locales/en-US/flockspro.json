@@ -154,6 +154,28 @@
     "invalidEmailError": "Please enter a valid applicant email.",
     "invalidPhoneError": "Please enter a valid applicant phone number (international numbers supported)."
   },
+  "sensitiveDetection": {
+    "title": "Prompt Redaction",
+    "description": "When enabled, sensitive values in user, assistant, and tool messages are replaced before model input.",
+    "enabledLabel": "Enable prompt redaction",
+    "placeholderFormat": "Placeholder Format",
+    "verbosePreview": "Example: [[V_EMAIL_1]]",
+    "compactPreview": "Example: [EMAIL_1]",
+    "promptHint": "Model Value Passing Hint",
+    "promptHintDescription": "Add guidance for passing replaced values to tools. Recommended on; disabling it may make models treat values as template variables.",
+    "loading": "Loading prompt redaction settings...",
+    "saving": "Saving prompt redaction settings...",
+    "placeholderFormats": {
+      "verbose": "Stable",
+      "compact": "Compact"
+    },
+    "errors": {
+      "fetch": "Failed to load prompt redaction settings",
+      "save": "Failed to save prompt redaction settings",
+      "fetchSettings": "Failed to load sensitive detection settings",
+      "updateSettings": "Failed to save sensitive detection settings"
+    }
+  },
   "callback": {
     "processing": "Completing console login, please wait...",
     "missingConsoleLoginId": "Missing console_login_id in callback URL.",

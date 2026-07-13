@@ -33,6 +33,13 @@ from flocks.session.core.defaults import (
 )
 from flocks.session.lifecycle.retry import CONNECTION_ERROR_DISPLAY_MESSAGE, SessionRetry
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
+from flocks.session.llm_hook_utils import (
+    StreamingTextReplacementBuffer,
+    apply_hook_request_output,
+    restore_value_with_replacements,
+    serialize_chat_message,
+    stream_text_replacements_from_hook_output,
+)
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
     StartEvent,
@@ -2471,12 +2478,6 @@ class SessionRunner:
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
-        def _serialize_message(message: ChatMessage) -> Dict[str, Any]:
-            payload = message.model_dump(exclude_none=True)
-            if not payload.get("custom_settings"):
-                payload.pop("custom_settings", None)
-            return payload
-
         def _build_llm_response_payload(
             *,
             content: str,
@@ -2646,7 +2647,24 @@ class SessionRunner:
         }
         llm_before_enabled = False
         llm_after_enabled = False
+        replacements: list[tuple[str, str]] = []
+        stream_text_rewriter: Optional[StreamingTextReplacementBuffer] = None
+        stream_reasoning_rewriter: Optional[StreamingTextReplacementBuffer] = None
         self._llm_call_aborted = False
+
+        async def _flush_reasoning_rewriter() -> None:
+            if stream_reasoning_rewriter is None or not hasattr(self, '_current_reasoning_id'):
+                return
+            trailing_reasoning = stream_reasoning_rewriter.flush()
+            if not trailing_reasoning:
+                return
+            reasoning_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+            await processor.process_event(ReasoningDeltaEvent(
+                id=self._current_reasoning_id,
+                text=trailing_reasoning,
+                metadata=reasoning_metadata,
+            ))
+
         try:
             llm_before_enabled = await HookPipeline.has_stage_handlers(
                 HookStage.LLM_BEFORE,
@@ -2664,7 +2682,7 @@ class SessionRunner:
                 **llm_hook_metadata,
                 "request": {
                     "messageCount": len(messages),
-                    "messages": [_serialize_message(message) for message in messages],
+                    "messages": [serialize_chat_message(message) for message in messages],
                     "toolCount": len(tools),
                     "tools": copy.deepcopy(tools),
                     "providerOptions": dict(provider_options),
@@ -2673,7 +2691,23 @@ class SessionRunner:
             }
             try:
                 hook_started_at = time.perf_counter()
-                await HookPipeline.run_llm_before(llm_before_hook_input)
+                llm_before_ctx = await HookPipeline.run_llm_before(llm_before_hook_input)
+                hook_output = llm_before_ctx.output or {}
+                replacements = stream_text_replacements_from_hook_output(hook_output)
+                if replacements:
+                    stream_text_rewriter = StreamingTextReplacementBuffer(replacements)
+                    stream_reasoning_rewriter = StreamingTextReplacementBuffer(replacements)
+                updated_request = hook_output.get("request")
+                if isinstance(updated_request, dict):
+                    messages, provider_options = apply_hook_request_output(
+                        messages,
+                        provider_options,
+                        hook_output,
+                    )
+                    updated_tools = updated_request.get("tools")
+                    if isinstance(updated_tools, list):
+                        tools = copy.deepcopy(updated_tools)
+                        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
                 self._log_perf(
                     "runner.hook.llm_before.complete",
                     hook_started_at,
@@ -2733,23 +2767,29 @@ class SessionRunner:
                 # reasoning text.
                 event_type = getattr(chunk, 'event_type', None)
                 chunk_metadata = getattr(chunk, 'metadata', None) or {}
+                display_chunk_metadata = (
+                    restore_value_with_replacements(chunk_metadata, replacements)
+                    if replacements
+                    else chunk_metadata
+                )
                 reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
 
-                if hasattr(self, '_current_reasoning_id') and chunk_metadata:
+                if hasattr(self, '_current_reasoning_id') and display_chunk_metadata:
                     current_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-                    current_metadata.update(chunk_metadata)
+                    current_metadata.update(display_chunk_metadata)
                     self._current_reasoning_metadata = current_metadata
 
                 if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
                     reasoning_id_counter += 1
                     self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
-                    self._current_reasoning_metadata = dict(chunk_metadata)
+                    self._current_reasoning_metadata = dict(display_chunk_metadata)
                     await processor.process_event(ReasoningStartEvent(
                         id=self._current_reasoning_id,
-                        metadata=chunk_metadata,
+                        metadata=display_chunk_metadata,
                     ))
 
                 if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
+                    await _flush_reasoning_rewriter()
                     reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
                     await processor.process_event(ReasoningEndEvent(
                         id=self._current_reasoning_id,
@@ -2790,22 +2830,26 @@ class SessionRunner:
                     if not hasattr(self, '_current_reasoning_id'):
                         reasoning_id_counter += 1
                         self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
-                        self._current_reasoning_metadata = dict(chunk_metadata)
+                        self._current_reasoning_metadata = dict(display_chunk_metadata)
                         await processor.process_event(ReasoningStartEvent(
                             id=self._current_reasoning_id,
-                            metadata=chunk_metadata,
+                            metadata=display_chunk_metadata,
                         ))
 
                     if chunk_reasoning:
-                        await processor.process_event(ReasoningDeltaEvent(
-                            id=self._current_reasoning_id,
-                            text=chunk_reasoning,
-                            metadata=chunk_metadata,
-                        ))
+                        if stream_reasoning_rewriter is not None:
+                            reasoning_text = stream_reasoning_rewriter.feed(reasoning_text)
+                        if reasoning_text:
+                            await processor.process_event(ReasoningDeltaEvent(
+                                id=self._current_reasoning_id,
+                                text=reasoning_text,
+                                metadata=display_chunk_metadata,
+                            ))
 
                 # 2) End reasoning block when this chunk also carries non-reasoning
                 #    content (or once the stream moves away from reasoning).
                 if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
+                    await _flush_reasoning_rewriter()
                     reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
                     await processor.process_event(ReasoningEndEvent(
                         id=self._current_reasoning_id,
@@ -2816,8 +2860,13 @@ class SessionRunner:
                         delattr(self, '_current_reasoning_metadata')
 
                 # 3) Process text delta.
-                if chunk_text:
+                raw_chunk_text = chunk_text
+                if chunk_text and stream_text_rewriter is not None:
+                    chunk_text = stream_text_rewriter.feed(chunk_text)
+
+                if raw_chunk_text:
                     chunk_counts["text"] += 1
+                if chunk_text:
                     if not text_started:
                         await processor.process_event(TextStartEvent())
                         text_started = True
@@ -2867,6 +2916,14 @@ class SessionRunner:
         })
 
         await tool_accumulator.flush_remaining(stream_finish_reason)
+
+        if stream_text_rewriter is not None:
+            trailing_text = stream_text_rewriter.flush()
+            if trailing_text:
+                if not text_started:
+                    await processor.process_event(TextStartEvent())
+                    text_started = True
+                await processor.process_event(TextDeltaEvent(text=trailing_text))
         
         # End text block if started
         if text_started:
@@ -2874,6 +2931,7 @@ class SessionRunner:
         
         # End any remaining reasoning block
         if hasattr(self, '_current_reasoning_id'):
+            await _flush_reasoning_rewriter()
             reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
             await processor.process_event(ReasoningEndEvent(
                 id=self._current_reasoning_id,

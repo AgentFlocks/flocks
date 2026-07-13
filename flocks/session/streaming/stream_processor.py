@@ -568,6 +568,32 @@ class StreamProcessor:
             })
             return
 
+        # Hook pipeline: tool.execute.before
+        # Apply any input rewrite before publishing the running state so UI
+        # surfaces show the actual tool input that will be executed.
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            hook_ctx = await HookPipeline.run_tool_before({
+                "sessionID": self.session_id,
+                "workspace": self._workspace_dir,
+                "agent": self.agent.name,
+                "tool": {
+                    "name": tool_name,
+                    "input": tool_input,
+                    "callID": tool_call_id,
+                },
+            })
+            if hook_ctx and isinstance(hook_ctx.input, dict):
+                updated = hook_ctx.input.get("tool", {}).get("input")
+                if isinstance(updated, dict):
+                    tool_input = updated
+                    tool_state.input = tool_input
+            hook_output = hook_ctx.output if hook_ctx and isinstance(hook_ctx.output, dict) else {}
+            hook_skip = hook_output.get("skip", False)
+        except Exception as e:
+            log.error("stream.tool_before_hook.error", {"error": str(e)})
+            hook_skip = False
+
         tool_state.status = "running"
         
         # Update ToolPart to running state (like Flocks's Session.updatePart)
@@ -656,29 +682,6 @@ class StreamProcessor:
                 await self.tool_start_callback(tool_name, tool_input)
             except Exception as e:
                 log.error("stream.tool_start_callback.error", {"error": str(e)})
-        
-        # Hook pipeline: tool.execute.before
-        try:
-            from flocks.hooks.pipeline import HookPipeline
-            hook_ctx = await HookPipeline.run_tool_before({
-                "sessionID": self.session_id,
-                "workspace": self._workspace_dir,
-                "agent": self.agent.name,
-                "tool": {
-                    "name": tool_name,
-                    "input": tool_input,
-                    "callID": tool_call_id,
-                },
-            })
-            if hook_ctx and isinstance(hook_ctx.input, dict):
-                updated = hook_ctx.input.get("tool", {}).get("input")
-                if isinstance(updated, dict):
-                    tool_input = updated
-            hook_skip = hook_ctx.output.get("skip") if hook_ctx else False
-        except Exception as e:
-            log.error("stream.tool_before_hook.error", {"error": str(e)})
-            hook_skip = False
-
         # Execute tool synchronously
         tool_span_ctx = None
         if self._langfuse_generation is not None:

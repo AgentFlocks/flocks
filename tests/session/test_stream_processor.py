@@ -450,6 +450,53 @@ class TestToolCallExecution:
         assert seen_abort["event"] is abort_event
 
     @pytest.mark.asyncio
+    async def test_tool_before_rewrite_is_published_in_running_state(self):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+
+        async def _fake_tool_before(payload):
+            assert payload["tool"]["input"] == {"ip": "[IP_1]"}
+            payload["tool"]["input"] = {"ip": "10.1.2.3"}
+            ctx = MagicMock()
+            ctx.input = payload
+            ctx.output = {}
+            return ctx
+
+        result = ToolResult(success=True, output="ok", title="ip query", metadata={})
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=result),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(side_effect=_fake_tool_before),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_restore_running", tool_name="ip_query"))
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc_restore_running",
+                    tool_name="ip_query",
+                    input={"ip": "[IP_1]"},
+                )
+            )
+
+        running_inputs = [
+            call.args[1]["part"]["state"]["input"]
+            for call in event_callback.await_args_list
+            if (
+                call.args[0] == "message.part.updated"
+                and call.args[1].get("part", {}).get("type") == "tool"
+                and call.args[1]["part"]["state"]["status"] == "running"
+            )
+        ]
+        assert running_inputs == [{"ip": "10.1.2.3"}]
+
+    @pytest.mark.asyncio
     async def test_cancelled_tool_blocks_late_running_metadata_updates(self):
         event_callback = AsyncMock()
         proc = _make_processor(event_callback=event_callback)

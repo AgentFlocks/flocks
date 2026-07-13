@@ -59,6 +59,9 @@ class _FakeProcessor:
     def get_finish_reason(self):
         return self.finish_reason
 
+    async def drain_parallel_tool_calls(self) -> None:
+        return None
+
 
 class _FakeToolAccumulator:
     def __init__(self, processor):
@@ -165,6 +168,11 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
     monkeypatch.setattr(
         runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
         "run_llm_before",
         AsyncMock(side_effect=_before),
     )
@@ -258,6 +266,11 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         assert "provider boom" in result["error"]["message"]
 
     monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
     monkeypatch.setattr(
         runner_mod.HookPipeline,
         "run_llm_before",
