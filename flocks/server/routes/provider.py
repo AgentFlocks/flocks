@@ -6,6 +6,7 @@ Model objects must include: id, name, providerID, attachment, reasoning,
 temperature, tool_call, limit, etc.
 """
 
+import asyncio
 import json
 import re
 import threading
@@ -47,6 +48,60 @@ router = APIRouter()
 log = Log.create(service="provider-routes")
 _api_service_summary_metadata_cache_lock = threading.Lock()
 _api_service_summary_metadata_cache: Dict[str, tuple[tuple[Any, ...], Optional[Dict[str, Any]]]] = {}
+_provider_initialization_lock = asyncio.Lock()
+_provider_initialization_task: asyncio.Task[None] | None = None
+_dynamic_provider_load_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _run_provider_initialization() -> None:
+    async with _provider_initialization_lock:
+        if Provider._initialized:
+            return
+        await asyncio.to_thread(Provider._ensure_initialized)
+
+
+async def _ensure_provider_initialized() -> None:
+    """Run synchronous provider discovery without blocking the event loop."""
+    global _provider_initialization_task
+
+    if Provider._initialized:
+        return
+
+    task = _provider_initialization_task
+    if task is None or task.done():
+        task = asyncio.create_task(_run_provider_initialization())
+        _provider_initialization_task = task
+
+        def clear_completed(completed: asyncio.Task[None]) -> None:
+            global _provider_initialization_task
+            if _provider_initialization_task is completed:
+                _provider_initialization_task = None
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(clear_completed)
+
+    await asyncio.shield(task)
+
+
+async def _run_dynamic_provider_load() -> None:
+    async with _provider_initialization_lock:
+        await asyncio.to_thread(Provider._load_dynamic_providers)
+
+
+async def _load_dynamic_providers() -> None:
+    """Queue one serialized config scan per trigger without blocking the event loop."""
+    task = asyncio.create_task(_run_dynamic_provider_load())
+    _dynamic_provider_load_tasks.add(task)
+
+    def clear_completed(completed: asyncio.Task[None]) -> None:
+        _dynamic_provider_load_tasks.discard(completed)
+        if not completed.cancelled():
+            completed.exception()
+
+    task.add_done_callback(clear_completed)
+
+    await asyncio.shield(task)
 
 
 def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
@@ -470,8 +525,9 @@ async def list_providers() -> ProviderListResponse:
         List of providers with their models
     """
     try:
-        # Ensure providers are initialized
-        Provider._ensure_initialized()
+        # Initial discovery imports provider modules and uses a threading lock.
+        # Keep that synchronous work off the server event loop.
+        await _ensure_provider_initialized()
         
         # Get config for enabled/disabled providers
         try:
@@ -752,7 +808,7 @@ async def get_provider(provider_id: str) -> ProviderInfo:
         Provider information
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -809,7 +865,7 @@ async def list_models(provider_id: str) -> List[Dict[str, Any]]:
         List of models in Flocks-compatible format
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         if provider_id not in ConfigWriter.list_provider_ids():
             return []
         config = await Config.get()
@@ -858,7 +914,7 @@ async def configure_provider(
         Updated provider information
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -911,7 +967,7 @@ async def test_provider(
         Test result
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -966,7 +1022,7 @@ async def update_provider(
     Updates the provider's API key, base URL, and custom settings.
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -1817,7 +1873,7 @@ async def set_provider_credentials(
             ConfigWriter.add_provider(provider_id, config_dict)
 
         # 3. Configure the provider runtime so is_configured() reflects the change
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         if provider:
             # Preserve the existing base_url from flocks.json when not explicitly provided,
@@ -1893,7 +1949,7 @@ async def delete_provider_credentials(
             raise HTTPException(status_code=404, detail="No credentials found for this provider")
 
         # 4. Clear provider runtime config
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         if provider:
             provider._config = None
@@ -2227,12 +2283,12 @@ async def test_provider_credentials(
             await _save_api_service_status_if_configured(provider_id, response)
             return response
 
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         # Re-run dynamic provider loading in case this provider was created after
         # the server started (e.g. user just added azure-openai via the UI).
         # _load_dynamic_providers skips already-registered providers, so it is safe
         # to call multiple times.
-        Provider._load_dynamic_providers()
+        await _load_dynamic_providers()
         # Apply config to ensure _config_models (user-defined models) are loaded
         config = await Config.get()
         await Provider.apply_config(config, provider_id=provider_id)

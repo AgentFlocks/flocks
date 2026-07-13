@@ -64,28 +64,22 @@ async def _check_update_cached(
     now = time.monotonic()
     task: asyncio.Task[VersionInfo]
     async with _update_check_lock:
-        if force:
-            # Make the forced check the authoritative in-flight request. An
-            # older non-forced task may still finish for its original caller,
-            # but its identity guard in _run_update_check_for_cache prevents
-            # it from overwriting this newer result.
+        if not force:
+            cached = _update_check_cache.get(key)
+            if cached and cached[0] > now:
+                return cached[1].model_copy(deep=True)
+
+        # A forced check bypasses only the completed-result cache. Reuse any
+        # same-key request already reaching the upstream service so concurrent
+        # manual refreshes cannot fan out into an update-check storm.
+        existing_task = _update_check_inflight.get(key)
+        if existing_task is None:
             task = asyncio.create_task(
                 _run_update_check_for_cache(key, locale=locale, edition=edition)
             )
             _update_check_inflight[key] = task
         else:
-            cached = _update_check_cache.get(key)
-            if cached and cached[0] > now:
-                return cached[1].model_copy(deep=True)
-
-            existing_task = _update_check_inflight.get(key)
-            if existing_task is None:
-                task = asyncio.create_task(
-                    _run_update_check_for_cache(key, locale=locale, edition=edition)
-                )
-                _update_check_inflight[key] = task
-            else:
-                task = existing_task
+            task = existing_task
 
     info = await asyncio.shield(task)
     return info.model_copy(deep=True)

@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
   createSuiteInstallProgressState,
@@ -143,6 +145,11 @@ const HUB_TEXT = {
     suiteInstallFailed: '安装失败',
     suiteInstallProgress: '安装进度',
     suiteInstallDismiss: '关闭',
+    refreshFailed: '刷新 Hub 失败',
+    refreshReloadFailed: 'Hub 刷新已完成，但列表重载失败',
+    actionRefreshFailed: '操作已完成，但刷新 Hub 列表失败',
+    actionFailed: { install: '安装失败', update: '更新失败', uninstall: '卸载失败' },
+    unknownError: '未知错误',
     suiteItemStatuses: {
       pending: '等待中',
       installing: '安装中',
@@ -199,6 +206,11 @@ const HUB_TEXT = {
     suiteInstallFailed: 'Install failed',
     suiteInstallProgress: 'Progress',
     suiteInstallDismiss: 'Close',
+    refreshFailed: 'Hub refresh failed',
+    refreshReloadFailed: 'Hub refresh completed, but catalog reload failed',
+    actionRefreshFailed: 'Action completed, but Hub reload failed',
+    actionFailed: { install: 'Install failed', update: 'Update failed', uninstall: 'Uninstall failed' },
+    unknownError: 'Unknown error',
     suiteItemStatuses: {
       pending: 'Pending',
       installing: 'Installing',
@@ -262,6 +274,7 @@ export default function HubPage() {
   const { i18n } = useTranslation();
   const { user } = useAuth();
   const { productName } = useProductName();
+  const toast = useToast();
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
   const hubTitle = `${productName} Hub`;
@@ -320,7 +333,7 @@ export default function HubPage() {
   currentTreeRequestKeyRef.current = treeRequestKey;
   const canManageHub = user?.role === 'admin';
 
-  const fetchCatalog = useCallback(async (silent = false) => {
+  const fetchCatalog = useCallback(async (silent = false, propagateError = false) => {
     const requestKey = catalogRequestKey;
     if (requestKey !== currentCatalogRequestKeyRef.current) return null;
     const requestId = ++catalogRequestIdRef.current;
@@ -347,9 +360,11 @@ export default function HubPage() {
       setFacetCounts(res.data.facets ?? EMPTY_HUB_FACETS);
       return nextItems;
     } catch (error) {
-      if (isCurrentRequest()) {
+      const currentRequest = isCurrentRequest();
+      if (currentRequest) {
         setCatalogError(error instanceof Error ? error.message : 'Failed to load Hub catalog');
       }
+      if (propagateError && currentRequest) throw error;
       return null;
     } finally {
       if (isCurrentRequest()) {
@@ -359,7 +374,7 @@ export default function HubPage() {
     }
   }, [catalogRequestKey, debouncedQuery, page, pageSize, stateFilter, tagFilter, typeFilter, useCaseFilter]);
 
-  const fetchTreeCatalog = useCallback(async (silent = false) => {
+  const fetchTreeCatalog = useCallback(async (silent = false, propagateError = false) => {
     const requestKey = treeRequestKey;
     if (requestKey !== currentTreeRequestKeyRef.current) return;
     const requestId = ++treeRequestIdRef.current;
@@ -380,9 +395,11 @@ export default function HubPage() {
       if (!isCurrentRequest()) return;
       setTreeItems(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
-      if (isCurrentRequest()) {
+      const currentRequest = isCurrentRequest();
+      if (currentRequest) {
         setTreeError(error instanceof Error ? error.message : 'Failed to load Hub tree');
       }
+      if (propagateError && currentRequest) throw error;
     } finally {
       if (isCurrentRequest() && !silent) {
         setTreeLoading(false);
@@ -439,10 +456,25 @@ export default function HubPage() {
     setRefreshing(true);
     try {
       await hubAPI.refresh();
+    } catch (error) {
+      toast.error(
+        text.refreshFailed,
+        extractErrorMessage(error, text.unknownError),
+      );
+      setRefreshing(false);
+      return;
+    }
+
+    try {
       await Promise.all([
-        fetchCatalog(true),
-        viewMode === 'tree' ? fetchTreeCatalog(true) : Promise.resolve(),
+        fetchCatalog(true, true),
+        viewMode === 'tree' ? fetchTreeCatalog(true, true) : Promise.resolve(),
       ]);
+    } catch (error) {
+      toast.error(
+        text.refreshReloadFailed,
+        extractErrorMessage(error, text.unknownError),
+      );
     } finally {
       setRefreshing(false);
     }
@@ -465,9 +497,24 @@ export default function HubPage() {
       }
       if (action === 'update') await hubAPI.update(entry.type, entry.id);
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
+    } catch (error) {
+      if (action === 'install' && entry.type === 'component') {
+        const message = extractErrorMessage(error, text.suiteInstallFailed);
+        setSuiteInstallProgress(current => failSuiteInstallProgress(current, entry, message));
+      } else {
+        toast.error(
+          `${text.actionFailed[action]}: ${getHubName(entry, i18n.language)}`,
+          extractErrorMessage(error, text.unknownError),
+        );
+      }
+      setActionId(null);
+      return;
+    }
+
+    try {
       const [, , refreshedEntry] = await Promise.all([
-        fetchCatalog(true),
-        viewMode === 'tree' ? fetchTreeCatalog(true) : Promise.resolve(),
+        fetchCatalog(true, true),
+        viewMode === 'tree' ? fetchTreeCatalog(true, true) : Promise.resolve(),
         hubAPI.catalog({ q: entry.id, type: entry.type }).then(res => (
           (Array.isArray(res.data) ? res.data : []).find(item => (
             item.type === entry.type && item.id === entry.id
@@ -478,12 +525,10 @@ export default function HubPage() {
         current?.type === entry.type && current?.id === entry.id ? refreshedEntry : current
       ));
     } catch (error) {
-      if (action === 'install' && entry.type === 'component') {
-        const message = error instanceof Error ? error.message : text.suiteInstallFailed;
-        setSuiteInstallProgress(current => failSuiteInstallProgress(current, entry, message));
-      } else {
-        console.error(error);
-      }
+      toast.error(
+        `${text.actionRefreshFailed}: ${getHubName(entry, i18n.language)}`,
+        extractErrorMessage(error, text.unknownError),
+      );
     } finally {
       setActionId(null);
     }

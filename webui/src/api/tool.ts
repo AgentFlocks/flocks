@@ -53,6 +53,20 @@ export interface ToolListPageResponse {
   facets: ToolListFacets;
 }
 
+export interface ToolRefreshResponse {
+  status: 'success' | 'partial' | 'error';
+  tool_count: number;
+  message: string;
+  stages: Record<string, 'success' | 'error'>;
+  errors: string[];
+}
+
+export interface ToolDeleteResponse {
+  status: 'success' | 'partial';
+  message: string;
+  errors?: string[];
+}
+
 export const toolAPI = {
   list: (params?: { source?: ToolSource; category?: string }) =>
     client.get<Tool[]>('/api/tools', { params }),
@@ -76,7 +90,7 @@ export const toolAPI = {
     client.get<Tool>(`/api/tools/${name}`),
 
   refresh: () =>
-    client.post('/api/tools/refresh'),
+    client.post<ToolRefreshResponse>('/api/tools/refresh'),
 
   test: (name: string, params: Record<string, any>) =>
     client.post(`/api/tools/${name}/test`, { params }),
@@ -102,7 +116,7 @@ export const toolAPI = {
     client.post<Tool>(`/api/tools/${name}/reset`),
 
   delete: (name: string) =>
-    client.delete<{ status: string; message: string }>(`/api/tools/${name}`),
+    client.delete<ToolDeleteResponse>(`/api/tools/${name}`),
 };
 
 export async function listAllToolPages(params: ToolListPageParams): Promise<Tool[]> {

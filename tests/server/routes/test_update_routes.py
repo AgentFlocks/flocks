@@ -183,6 +183,33 @@ async def test_check_version_deduplicates_inflight_requests(monkeypatch: pytest.
     assert [item.current_version for item in results] == ["v1"] * 5
 
 
+async def test_check_version_deduplicates_concurrent_forced_requests(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    calls = 0
+
+    async def _fake_check_update(**kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return VersionInfo(current_version=f"v{calls}")
+
+    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
+
+    results = await asyncio.gather(*[
+        update_routes.check_version(
+            _request(), locale="zh-CN", edition="flocks", force=True
+        )
+        for _ in range(10)
+    ])
+
+    assert calls == 1
+    assert [item.current_version for item in results] == ["v1"] * 10
+
+
 async def test_check_version_keeps_inflight_task_after_cancelled_request(monkeypatch: pytest.MonkeyPatch):
     from flocks.server.routes import update as update_routes
     from flocks.updater.models import VersionInfo
@@ -225,7 +252,7 @@ async def test_check_version_keeps_inflight_task_after_cancelled_request(monkeyp
             await asyncio.wait_for(second, timeout=1)
 
 
-async def test_forced_check_cannot_be_overwritten_by_older_inflight_request(
+async def test_forced_check_reuses_older_same_key_inflight_request(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from flocks.server.routes import update as update_routes
@@ -251,19 +278,23 @@ async def test_forced_check_cannot_be_overwritten_by_older_inflight_request(
     )
     await older_started.wait()
 
-    forced = await update_routes.check_version(
-        _request(), locale="zh-CN", edition="flocks", force=True
+    forced = asyncio.create_task(
+        update_routes.check_version(
+            _request(), locale="zh-CN", edition="flocks", force=True
+        )
     )
-    assert forced.current_version == "v2"
+    await asyncio.sleep(0)
+    assert calls == 1
 
     release_older.set()
     assert (await older).current_version == "v1"
+    assert (await forced).current_version == "v1"
 
     cached = await update_routes.check_version(
         _request(), locale="zh-CN", edition="flocks"
     )
-    assert cached.current_version == "v2"
-    assert calls == 2
+    assert cached.current_version == "v1"
+    assert calls == 1
 
 
 @pytest.mark.skipif(

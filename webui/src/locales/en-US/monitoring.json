@@ -15,7 +15,8 @@
   "metrics": {
     "messageRate": "Message Rate",
     "toolCallRate": "Tool Calls",
-    "errorRate": "Tool Parse Failures",
+    "errorRate": "System Errors",
+    "toolParseFailureRate": "Tool Parse Failures",
     "avgResponse": "Avg Response",
     "activeRequests": "Active Requests"
   },

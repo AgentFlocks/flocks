@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { canDirectlyTestTool, toolAPI, Tool, ToolFixture } from '@/api/tool';
@@ -57,6 +58,7 @@ import APITabContent from './components/APITabContent';
 import LocalTabContent from './components/LocalTabContent';
 import { getSourceLabel } from './constants';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
+import { extractErrorMessage } from '@/utils/error';
 import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
 import {
   DEFAULT_TOOL_TAB,
@@ -158,6 +160,7 @@ function mergeFacetKeys(facets: Record<string, number>, activeValues: Set<string
 
 export default function ToolPage() {
   const { t, i18n } = useTranslation('tool');
+  const toast = useToast();
 
   const TABS: TabConfig[] = [
     { key: 'all', label: t('tabs.all'), icon: <Grid className="w-5 h-5" /> },
@@ -306,11 +309,30 @@ export default function ToolPage() {
   }, [fetchApiServicesCount]);
 
   const refreshToolData = useCallback(async () => {
-    await Promise.all([
+    const [refreshResult] = await Promise.all([
       refetch(),
       fetchApiServicesCount(),
     ]);
+    return refreshResult;
   }, [refetch, fetchApiServicesCount]);
+
+  const showRefreshOutcome = useCallback((status: 'success' | 'partial' | 'error', message: string) => {
+    if (status === 'partial') {
+      toast.warning(t('alert.refreshPartialTitle'), message || t('alert.refreshPartialDefault'));
+    } else if (status === 'error') {
+      toast.error(t('alert.refreshFailedTitle'), message || t('alert.unknownError'));
+    }
+  }, [t, toast]);
+
+  const refreshToolDataAfterMutation = useCallback(async () => {
+    try {
+      const result = await refreshToolData();
+      showRefreshOutcome(result.status, result.message);
+    } catch (err: unknown) {
+      const message = extractErrorMessage(err, t('alert.unknownError'));
+      toast.error(t('alert.refreshFailedTitle'), message);
+    }
+  }, [refreshToolData, showRefreshOutcome, t, toast]);
 
   // The backend still marks some valid MCP catalog entries as "api" based on category.
   // Until API catalog has its own rendering path, show all catalog entries in the MCP tab.
@@ -371,14 +393,20 @@ export default function ToolPage() {
     if (refreshing) return;
     try {
       setRefreshing(true);
-      await Promise.all([
+      setRefreshDone(false);
+      const [result] = await Promise.all([
         refreshToolData(),
         new Promise((r) => setTimeout(r, 600)),
       ]);
-      setRefreshDone(true);
-      setTimeout(() => setRefreshDone(false), 2000);
-    } catch (err: any) {
-      alert(t('alert.refreshFailed', { error: err.message }));
+      if (result.status === 'success') {
+        setRefreshDone(true);
+        setTimeout(() => setRefreshDone(false), 2000);
+      } else {
+        showRefreshOutcome(result.status, result.message);
+      }
+    } catch (err: unknown) {
+      const message = extractErrorMessage(err, t('alert.unknownError'));
+      toast.error(t('alert.refreshFailedTitle'), message);
     } finally {
       setRefreshing(false);
     }
@@ -455,7 +483,7 @@ export default function ToolPage() {
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
-          <button onClick={() => void refreshToolData()} className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800">
+          <button onClick={() => void handleRefresh()} className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800">
             {t('button.retry')}
           </button>
         </div>
@@ -588,7 +616,7 @@ export default function ToolPage() {
             tools={processedTools}
             searchQuery={searchQuery}
             onSelectTool={openDetail}
-            onRefreshTools={refreshToolData}
+            onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={mcpCatalogEntries}
             catalogCategories={catalogCategories}
             catalogLoading={catalogLoading}
@@ -601,7 +629,7 @@ export default function ToolPage() {
           <APITabContent
             tools={processedTools}
             onSelectTool={openDetail}
-            onRefreshTools={refreshToolData}
+            onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={apiCatalogEntries}
             catalogCategories={catalogCategories}
             catalogLoading={catalogLoading}
@@ -615,7 +643,7 @@ export default function ToolPage() {
               searchQuery={searchQuery}
               selectedToolName={selectedTool?.name}
               onSelectTool={openDetail}
-              onRefreshTools={refreshToolData}
+              onRefreshTools={refreshToolDataAfterMutation}
             />
             <Pagination
               currentPage={currentPage}
@@ -696,17 +724,25 @@ export default function ToolPage() {
           onTest={handleTest}
           onDelete={async (name) => {
             try {
-              await toolAPI.delete(name);
+              const { data: deleteResult } = await toolAPI.delete(name);
               setSelectedTool(null);
               setTestResult(null);
+              if (deleteResult.status === 'partial') {
+                toast.warning(
+                  t('alert.deletePartialTitle'),
+                  deleteResult.errors?.join('; ') || deleteResult.message,
+                );
+              }
               await handleRefresh();
-            } catch (err: any) {
-              alert(t('alert.deleteFailed', { error: err.response?.data?.detail || err.message }));
+            } catch (err: unknown) {
+              alert(t('alert.deleteFailed', {
+                error: extractErrorMessage(err, t('alert.unknownError')),
+              }));
             }
           }}
           onEnabledChange={(name, newEnabled) => {
             setSelectedTool((prev) => prev ? { ...prev, enabled: newEnabled } : prev);
-            void refreshToolData();
+            void refreshToolDataAfterMutation();
           }}
         />
       )}

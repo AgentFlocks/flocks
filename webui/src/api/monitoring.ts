@@ -14,6 +14,7 @@ export interface MetricsSnapshot {
   messageRate: number | null;
   toolCallRate: number | null;
   errorRate: number | null;
+  toolParseFailureRate: number | null;
   avgResponseTime: number | null;
   activeRequests: number | null;
 }

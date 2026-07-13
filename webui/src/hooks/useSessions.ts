@@ -350,9 +350,26 @@ export function useSessionMessages(sessionId?: string) {
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeSessionIdRef = useRef(sessionId);
+  const firstPageRequestIdRef = useRef(0);
+  const firstPageInFlightRequestIdRef = useRef<number | null>(null);
+  const olderPageRequestIdRef = useRef(0);
+  const olderPageInFlightRequestIdRef = useRef<number | null>(null);
 
   const fetchMessages = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || activeSessionIdRef.current !== sessionId) return;
+
+    const requestSessionId = sessionId;
+    const requestId = ++firstPageRequestIdRef.current;
+    firstPageInFlightRequestIdRef.current = requestId;
+    // A fresh first page invalidates pagination based on an older snapshot.
+    olderPageRequestIdRef.current += 1;
+    olderPageInFlightRequestIdRef.current = null;
+    setLoadingOlder(false);
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === requestSessionId
+      && firstPageRequestIdRef.current === requestId
+    );
     
     try {
       setLoading(true);
@@ -363,19 +380,44 @@ export function useSessionMessages(sessionId?: string) {
         params: { page: true, limit: MESSAGE_PAGE_SIZE, include_archived: true },
       });
       markMeasure('session:messages:first-page', startMark);
+      if (!isCurrentRequest()) return;
       const { messages: messagesData, hasMore, nextBefore } = transformMessageResponse(response.data);
       setMessages(prev => mergeLatestFetchedMessages(prev, messagesData));
       setHasMore(hasMore);
       setNextBefore(nextBefore);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch messages');
+      if (isCurrentRequest()) {
+        setError(err.message || 'Failed to fetch messages');
+      }
     } finally {
-      setLoading(false);
+      if (firstPageInFlightRequestIdRef.current === requestId) {
+        firstPageInFlightRequestIdRef.current = null;
+      }
+      if (isCurrentRequest()) {
+        setLoading(false);
+      }
     }
   }, [sessionId]);
 
   const loadOlder = useCallback(async () => {
-    if (!sessionId || !hasMore || !nextBefore || loadingOlder) return;
+    if (
+      !sessionId
+      || activeSessionIdRef.current !== sessionId
+      || firstPageInFlightRequestIdRef.current !== null
+      || olderPageInFlightRequestIdRef.current !== null
+      || !hasMore
+      || !nextBefore
+    ) return;
+
+    const requestSessionId = sessionId;
+    const requestId = ++olderPageRequestIdRef.current;
+    olderPageInFlightRequestIdRef.current = requestId;
+    const firstPageRequestId = firstPageRequestIdRef.current;
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === requestSessionId
+      && olderPageRequestIdRef.current === requestId
+      && firstPageRequestIdRef.current === firstPageRequestId
+    );
 
     try {
       setLoadingOlder(true);
@@ -391,24 +433,35 @@ export function useSessionMessages(sessionId?: string) {
         },
       });
       markMeasure('session:messages:older-page', startMark);
+      if (!isCurrentRequest()) return;
       const page = transformMessageResponse(response.data);
       setMessages(prev => prependOlderMessages(prev, page.messages));
       setHasMore(page.hasMore);
       setNextBefore(page.nextBefore);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch older messages');
+      if (isCurrentRequest()) {
+        setError(err.message || 'Failed to fetch older messages');
+      }
     } finally {
-      setLoadingOlder(false);
+      if (olderPageInFlightRequestIdRef.current === requestId) {
+        olderPageInFlightRequestIdRef.current = null;
+      }
+      if (isCurrentRequest()) {
+        setLoadingOlder(false);
+      }
     }
-  }, [hasMore, loadingOlder, nextBefore, sessionId]);
+  }, [hasMore, nextBefore, sessionId]);
 
   // Reset state synchronously before paint when session changes
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
+    activeSessionIdRef.current = sessionId;
     setMessages([]);
     setError(null);
     setHasMore(false);
     setNextBefore(null);
+    olderPageInFlightRequestIdRef.current = null;
+    setLoadingOlder(false);
     if (sessionId) {
       setLoading(true);
     } else {

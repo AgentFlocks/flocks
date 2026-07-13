@@ -121,4 +121,92 @@ describe('useSharedResource', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(resource.getSnapshot().data).toBe('second');
   });
+
+  it('preserves fallback data but rejects an explicit strict fetch', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce('ready')
+      .mockRejectedValueOnce(new Error('reload failed'));
+    const resource = createSharedResource<string>({
+      initialData: 'initial',
+      fetcher,
+      fallbackDataOnError: (previous) => previous,
+    });
+
+    await resource.fetch();
+    resource.invalidate();
+
+    await expect(resource.fetch({
+      force: true,
+      silent: true,
+      rejectOnError: true,
+    })).rejects.toThrow('reload failed');
+    expect(resource.getSnapshot()).toMatchObject({
+      data: 'ready',
+      error: 'reload failed',
+      loading: false,
+    });
+  });
+
+  it.each(['lenient-first', 'strict-first'] as const)(
+    'keeps per-caller error semantics when sharing an in-flight request (%s)',
+    async (order) => {
+      let rejectRequest: (error: Error) => void = () => {};
+      const fetcher = vi.fn(() => new Promise<string>((_resolve, reject) => {
+        rejectRequest = reject;
+      }));
+      const resource = createSharedResource<string>({
+        initialData: 'previous',
+        fetcher,
+        fallbackDataOnError: (previous) => previous,
+      });
+
+      const first = order === 'strict-first'
+        ? resource.fetch({ rejectOnError: true })
+        : resource.fetch();
+      const second = order === 'strict-first'
+        ? resource.fetch()
+        : resource.fetch({ rejectOnError: true });
+      const strictRequest = order === 'strict-first' ? first : second;
+      const lenientRequest = order === 'strict-first' ? second : first;
+
+      rejectRequest(new Error('shared request failed'));
+
+      await expect(strictRequest).rejects.toThrow('shared request failed');
+      await expect(lenientRequest).resolves.toBe('previous');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('runs a queued strict revalidation after an obsolete request fails', async () => {
+    const requests: Array<{
+      resolve: (value: string) => void;
+      reject: (error: Error) => void;
+    }> = [];
+    const fetcher = vi.fn(() => new Promise<string>((resolve, reject) => {
+      requests.push({ resolve, reject });
+    }));
+    const resource = createSharedResource<string>({
+      initialData: 'initial',
+      fetcher,
+    });
+
+    const obsoleteRequest = resource.fetch({ rejectOnError: true });
+    resource.invalidate();
+    const revalidation = resource.fetch({
+      force: true,
+      silent: true,
+      rejectOnError: true,
+    });
+
+    requests[0].reject(new Error('obsolete request failed'));
+    await expect(obsoleteRequest).rejects.toThrow('obsolete request failed');
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+
+    requests[1].resolve('fresh');
+    await expect(revalidation).resolves.toBe('fresh');
+    expect(resource.getSnapshot()).toMatchObject({
+      data: 'fresh',
+      error: null,
+    });
+  });
 });

@@ -562,6 +562,9 @@
 
   "alert": {
     "refreshFailed": "刷新失败: {{error}}",
+    "refreshFailedTitle": "工具刷新失败",
+    "refreshPartialTitle": "工具刷新完成，但存在警告",
+    "refreshPartialDefault": "部分刷新阶段出现错误，当前可用工具列表已更新。",
     "mcpAddSuccess": "MCP 服务添加成功",
     "addFailed": "添加失败: {{error}}",
     "mcpNameRequired": "请输入 MCP 服务名称",
@@ -573,6 +576,7 @@
     "confirmDeleteCred": "确定要删除凭证吗？",
     "credDeleted": "凭证已删除",
     "deleteFailed": "删除失败: {{error}}",
+    "deletePartialTitle": "工具已删除，但清理过程存在警告",
     "unknownError": "未知错误",
     "fillAllRequired": "请填写所有必填字段",
     "configFailed": "配置失败: {{error}}",

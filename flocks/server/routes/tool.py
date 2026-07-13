@@ -17,6 +17,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.permission.next import DeniedError, PermissionNext
 from flocks.tool.registry import (
     ToolRegistry,
+    ToolRefreshError,
     ToolInfo,
     ToolSchema,
     ToolResult,
@@ -187,7 +188,7 @@ def _invalidate_tool_summary_cache() -> None:
 
 
 def _tool_summary_cache_current_key() -> tuple[int, tuple[str, ...]]:
-    return ToolRegistry.revision(), tuple(ToolRegistry.all_tool_ids())
+    return ToolRegistry.snapshot_identity()
 
 
 def _get_tool_summary_items() -> List[ToolListIndexItem]:
@@ -1138,9 +1139,11 @@ async def execute_batch(request: BatchExecuteRequest):
 
 class RefreshResponse(BaseModel):
     """Tool refresh response"""
-    status: str = Field(..., description="Operation status")
+    status: Literal["success", "partial", "error"] = Field(..., description="Operation status")
     tool_count: int = Field(..., description="Total registered tool count after refresh")
     message: str = Field("", description="Human-readable summary")
+    stages: Dict[str, Literal["success", "error"]] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
 
 
 @router.post(
@@ -1159,20 +1162,24 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
     ToolRegistry.init()
 
     errors: list[str] = []
+    stages: dict[str, Literal["success", "error"]] = {}
 
-    # 1. Reload generated tools (generated/)
-    try:
-        ToolRegistry.refresh_dynamic_tools()
-    except Exception as e:
-        log.error("tools.refresh.dynamic_error", {"error": str(e)})
-        errors.append(f"dynamic: {e}")
-
-    # 2. Reload plugin tools (api/, python/) — unregisters stale entries first
-    try:
-        ToolRegistry.refresh_plugin_tools()
-    except Exception as e:
-        log.error("tools.refresh.plugin_error", {"error": str(e)})
-        errors.append(f"plugin: {e}")
+    for stage, refresh in (
+        ("dynamic", ToolRegistry.refresh_dynamic_tools),
+        ("plugin", ToolRegistry.refresh_plugin_tools),
+    ):
+        try:
+            refresh()
+            stages[stage] = "success"
+        except ToolRefreshError as exc:
+            stages[stage] = "error"
+            stage_errors = [f"{stage}: {error}" for error in exc.errors]
+            errors.extend(stage_errors)
+            log.error(f"tools.refresh.{stage}_error", {"errors": exc.errors})
+        except Exception as exc:
+            stages[stage] = "error"
+            errors.append(f"{stage}: {exc}")
+            log.error(f"tools.refresh.{stage}_error", {"error": str(exc)})
 
     _invalidate_tool_summary_cache()
     tool_count = len(ToolRegistry.all_tool_ids())
@@ -1181,17 +1188,23 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
         "errors": len(errors),
     })
 
-    if errors:
-        return RefreshResponse(
-            status="partial",
-            tool_count=tool_count,
-            message=f"Refreshed with {len(errors)} error(s): {'; '.join(errors)}",
-        )
+    failed_stages = sum(status == "error" for status in stages.values())
+    if failed_stages == 0:
+        outcome: Literal["success", "partial", "error"] = "success"
+        message = f"All tools refreshed successfully ({tool_count} tools registered)"
+    elif failed_stages == len(stages):
+        outcome = "error"
+        message = f"Tool refresh failed: {'; '.join(errors)}"
+    else:
+        outcome = "partial"
+        message = f"Tool refresh completed with errors: {'; '.join(errors)}"
 
     return RefreshResponse(
-        status="success",
+        status=outcome,
         tool_count=tool_count,
-        message=f"All tools refreshed successfully ({tool_count} tools registered)",
+        message=message,
+        stages=stages,
+        errors=errors,
     )
 
 
@@ -1526,13 +1539,38 @@ async def delete_tool(name: str, _admin: object = Depends(require_admin)):
             detail=f"Plugin tool not found: {name}",
         )
 
-    # Refresh plugin tools so stale decorator-registered python tools are removed too.
-    ToolRegistry.refresh_plugin_tools()
+    # The file deletion is already committed at this point. Keep the Hub
+    # installation record consistent even when the in-memory refresh fails.
+    cleanup_errors: List[str] = []
+    try:
+        ToolRegistry.refresh_plugin_tools()
+    except Exception as e:
+        refresh_error = str(e)
+        cleanup_errors.append(f"registry refresh: {refresh_error}")
+        log.warning("tool.delete.refresh_failed", {
+            "error": refresh_error,
+            "name": name,
+        })
     _invalidate_tool_summary_cache()
 
     from flocks.hub import local as hub_local
 
-    hub_local.remove_installed_record("tool", name)
+    try:
+        hub_local.remove_installed_record("tool", name)
+    except Exception as e:
+        hub_error = str(e)
+        cleanup_errors.append(f"Hub record cleanup: {hub_error}")
+        log.warning("tool.delete.hub_cleanup_failed", {
+            "error": hub_error,
+            "name": name,
+        })
+
+    if cleanup_errors:
+        return {
+            "status": "partial",
+            "message": f"Tool {name} deleted, but cleanup was incomplete",
+            "errors": cleanup_errors,
+        }
 
     return {"status": "success", "message": f"Tool {name} deleted"}
 

@@ -121,6 +121,122 @@ describe('useTools', () => {
     expect(listMock).toHaveBeenCalledTimes(2);
   });
 
+  it('reports a plugin refresh failure after reloading the visible tool list', async () => {
+    listMock
+      .mockResolvedValueOnce({
+        data: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+      })
+      .mockResolvedValueOnce({
+        data: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+      });
+    refreshMock.mockRejectedValue(new Error('plugin refresh failed'));
+
+    const { result } = renderHook(() => useTools());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let caught: unknown;
+    await act(async () => {
+      try {
+        await result.current.refetch();
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(caught).toEqual(new Error('plugin refresh failed'));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(result.current.tools).toHaveLength(1);
+  });
+
+  it('returns a partial refresh outcome and keeps successfully loaded tools', async () => {
+    listMock
+      .mockResolvedValueOnce({
+        data: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+      })
+      .mockResolvedValueOnce({
+        data: [
+          { name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true },
+          { name: 'tool-beta', description: 'beta tool', category: 'custom', source: 'custom', enabled: true },
+        ],
+      });
+    const partialResult = {
+      status: 'partial' as const,
+      tool_count: 2,
+      message: 'plugin: broken manifest',
+    };
+    refreshMock.mockResolvedValue({ data: partialResult });
+
+    const { result } = renderHook(() => useTools());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let outcome;
+    await act(async () => {
+      outcome = await result.current.refetch();
+    });
+
+    expect(outcome).toEqual(partialResult);
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(result.current.tools.map((tool) => tool.name)).toEqual(['tool-alpha', 'tool-beta']);
+  });
+
+  it('returns an HTTP 200 error outcome without rejecting', async () => {
+    listMock.mockResolvedValue({ data: [] });
+    const errorResult = {
+      status: 'error' as const,
+      tool_count: 0,
+      message: 'all refresh stages failed',
+    };
+    refreshMock.mockResolvedValue({ data: errorResult });
+
+    const { result } = renderHook(() => useTools());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await expect(result.current.refetch()).resolves.toEqual(errorResult);
+    expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects when the visible list reload fails and preserves the previous tools', async () => {
+    listMock
+      .mockResolvedValueOnce({
+        data: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+      })
+      .mockRejectedValueOnce(new Error('tool list unavailable'));
+    refreshMock.mockResolvedValue({
+      data: { status: 'success', tool_count: 1, message: 'refreshed' },
+    });
+
+    const { result } = renderHook(() => useTools());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await expect(result.current.refetch()).rejects.toThrow('tool list unavailable');
+    expect(result.current.tools.map((tool) => tool.name)).toEqual(['tool-alpha']);
+    expect(result.current.error).toBe('tool list unavailable');
+  });
+
+  it('preserves both backend details when refresh and visible list reload fail', async () => {
+    listMock
+      .mockResolvedValueOnce({
+        data: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+      })
+      .mockRejectedValueOnce({
+        response: { data: { detail: 'tool list storage unavailable' } },
+        message: 'Request failed with status code 503',
+      });
+    refreshMock.mockRejectedValue({
+      response: { data: { detail: 'plugin registry unavailable' } },
+      message: 'Request failed with status code 500',
+    });
+
+    const { result } = renderHook(() => useTools());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await expect(result.current.refetch()).rejects.toThrow(
+      'Tool refresh failed: plugin registry unavailable; tool list reload failed: tool list storage unavailable',
+    );
+    expect(result.current.tools.map((tool) => tool.name)).toEqual(['tool-alpha']);
+  });
+
   it('shares the initial tool list request across concurrent hook instances', async () => {
     let resolveList: (value: { data: any[] }) => void = () => {};
     listMock.mockReturnValue(new Promise((resolve) => {
@@ -296,6 +412,60 @@ describe('useTools', () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(listMock).not.toHaveBeenCalled();
     expect(listPageMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a paged plugin refresh failure after reloading the visible page', async () => {
+    listPageMock.mockResolvedValue({
+      data: {
+        items: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+        total: 1,
+        offset: 0,
+        limit: 20,
+        facets: emptyFacets,
+      },
+    });
+    refreshMock.mockRejectedValue(new Error('paged refresh failed'));
+
+    const { result } = renderHook(() => useToolPage({ offset: 0, limit: 20 }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let caught: unknown;
+    await act(async () => {
+      try {
+        await result.current.refetch();
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(caught).toEqual(new Error('paged refresh failed'));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+    expect(listPageMock).toHaveBeenCalledTimes(2);
+    expect(result.current.tools).toHaveLength(1);
+  });
+
+  it('rejects when the visible page reload fails and preserves the previous page', async () => {
+    listPageMock
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+          facets: emptyFacets,
+        },
+      })
+      .mockRejectedValueOnce(new Error('visible page unavailable'));
+    refreshMock.mockResolvedValue({
+      data: { status: 'success', tool_count: 1, message: 'refreshed' },
+    });
+
+    const { result } = renderHook(() => useToolPage({ offset: 0, limit: 20 }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await expect(result.current.refetch()).rejects.toThrow('visible page unavailable');
+    expect(result.current.tools.map((tool) => tool.name)).toEqual(['tool-alpha']);
+    expect(result.current.error).toBe('visible page unavailable');
   });
 
   it('marks other cached queries stale and refreshes them when revisited', async () => {

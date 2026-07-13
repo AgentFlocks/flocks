@@ -5,6 +5,7 @@ import {
   type ToolListFacets,
   type ToolListPageParams,
   type ToolListPageResponse,
+  type ToolRefreshResponse,
 } from '@/api/tool';
 import {
   createSharedResource,
@@ -12,6 +13,7 @@ import {
   useSharedResource,
   type SharedResource,
 } from './useSharedResource';
+import { extractErrorMessage } from '@/utils/error';
 
 const TOOL_LIST_STALE_TIME_MS = 5000;
 const TOOL_LIST_MIN_FETCH_INTERVAL_MS = 1000;
@@ -45,7 +47,7 @@ const toolsResource = createSharedResource<Tool[]>({
   getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch tools'),
 });
 
-let toolRefreshInFlight: Promise<void> | null = null;
+let toolRefreshInFlight: Promise<ToolRefreshResponse> | null = null;
 const toolPageResources = new Map<string, SharedResource<ToolListPageResponse>>();
 
 function normalizeToolPageParams(params: ToolListPageParams): Required<ToolListPageParams> {
@@ -95,26 +97,53 @@ function getToolPageResource(params: ToolListPageParams): SharedResource<ToolLis
   return resource;
 }
 
-function refreshToolsResource(): Promise<void> {
+function refreshToolPlugins(): Promise<ToolRefreshResponse> {
   if (toolRefreshInFlight) {
     return toolRefreshInFlight;
   }
 
   toolRefreshInFlight = toolAPI.refresh()
-    .catch(() => {
-      // Best-effort refresh; still update the visible list afterwards.
-    })
-    .then(() => {
-      toolsResource.invalidate();
-      toolPageResources.forEach((resource) => resource.invalidate());
-      return toolsResource.fetch({ force: true, silent: true });
-    })
-    .then(() => undefined)
+    .then((response) => response.data)
     .finally(() => {
       toolRefreshInFlight = null;
     });
 
   return toolRefreshInFlight;
+}
+
+async function refreshToolsResource(
+  fetchVisible: () => Promise<unknown>,
+): Promise<ToolRefreshResponse> {
+  let refreshResult: ToolRefreshResponse | undefined;
+  let refreshError: unknown;
+  try {
+    refreshResult = await refreshToolPlugins();
+  } catch (error) {
+    refreshError = error;
+  }
+
+  toolsResource.invalidate();
+  toolPageResources.forEach((resource) => resource.invalidate());
+  let listError: unknown;
+  try {
+    await fetchVisible();
+  } catch (error) {
+    listError = error;
+  }
+
+  if (refreshError && listError) {
+    throw new Error(
+      `Tool refresh failed: ${extractErrorMessage(refreshError, 'unknown error')}; `
+      + `tool list reload failed: ${extractErrorMessage(listError, 'unknown error')}`,
+    );
+  }
+  if (refreshError) {
+    throw refreshError;
+  }
+  if (listError) {
+    throw listError;
+  }
+  return refreshResult!;
 }
 
 export function __resetToolsResourceForTesting(): void {
@@ -137,7 +166,14 @@ export function useTools() {
   );
   useRefreshOnResume(refreshVisibleList);
 
-  const refetch = useCallback(() => refreshToolsResource(), []);
+  const refetch = useCallback(
+    () => refreshToolsResource(() => toolsResource.fetch({
+      force: true,
+      silent: true,
+      rejectOnError: true,
+    })),
+    [],
+  );
 
   return {
     tools,
@@ -175,24 +211,14 @@ export function useToolPage(params: ToolListPageParams) {
   );
   useRefreshOnResume(refreshVisiblePage);
 
-  const refetch = useCallback(async () => {
-    if (toolRefreshInFlight) {
-      await toolRefreshInFlight;
-    } else {
-      toolRefreshInFlight = toolAPI.refresh()
-        .catch(() => {
-          // Best-effort refresh; still update the visible page afterwards.
-        })
-        .then(() => undefined)
-        .finally(() => {
-          toolRefreshInFlight = null;
-        });
-      await toolRefreshInFlight;
-    }
-    toolPageResources.forEach((pageResource) => pageResource.invalidate());
-    toolsResource.invalidate();
-    await resource.fetch({ force: true, silent: true });
-  }, [resource]);
+  const refetch = useCallback(
+    () => refreshToolsResource(() => resource.fetch({
+      force: true,
+      silent: true,
+      rejectOnError: true,
+    })),
+    [resource],
+  );
 
   return {
     tools: data.items,

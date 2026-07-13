@@ -231,7 +231,7 @@ function useAdaptiveTaskPolling<T extends { status: string }>(
       return hasActive ? Math.min(pollInterval, 4000) : pollInterval;
     };
 
-    let timerId: ReturnType<typeof setTimeout>;
+    let timerId: number;
     const tick = async () => {
       await resource.fetch({ silent: true });
       timerId = window.setTimeout(tick, scheduleDelay());

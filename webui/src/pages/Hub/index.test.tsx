@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import HubPage from './index';
 
-const { hubAPI } = vi.hoisted(() => ({
+const { hubAPI, toastError } = vi.hoisted(() => ({
   hubAPI: {
     catalog: vi.fn(),
     catalogPage: vi.fn(),
@@ -19,6 +19,7 @@ const { hubAPI } = vi.hoisted(() => ({
     files: vi.fn(),
     fileContent: vi.fn(),
   },
+  toastError: vi.fn(),
 }));
 
 vi.mock('@/api/hub', () => ({ hubAPI }));
@@ -30,6 +31,9 @@ vi.mock('@/contexts/ProductNameContext', () => ({
 }));
 vi.mock('@/contexts/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'admin-1', role: 'admin' } }),
+}));
+vi.mock('@/components/common/Toast', () => ({
+  useToast: () => ({ error: toastError }),
 }));
 vi.mock('@/components/common/LoadingSpinner', () => ({
   default: () => <div>loading</div>,
@@ -85,10 +89,12 @@ function catalogPage(items: ReturnType<typeof catalogEntry>[], total = items.len
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function renderHub() {
@@ -264,6 +270,137 @@ describe('HubPage catalog loading', () => {
     expect(screen.queryByText('Initial Entry')).not.toBeInTheDocument();
     expect(hubAPI.catalogPage).toHaveBeenCalledTimes(2);
     expect(hubAPI.catalogPage).toHaveBeenLastCalledWith(expect.objectContaining({ q: 'latest' }));
+  });
+
+  it('shows a user-visible error when a manual refresh fails', async () => {
+    const user = userEvent.setup();
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([catalogEntry('initial-entry', 'Initial Entry')]));
+    hubAPI.refresh.mockRejectedValue(new Error('refresh unavailable'));
+
+    renderHub();
+    expect(await screen.findByText('Initial Entry')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalledWith('Hub refresh failed', 'refresh unavailable');
+    });
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    expect(hubAPI.catalogPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('distinguishes a completed manual refresh from a catalog reload failure', async () => {
+    const user = userEvent.setup();
+    hubAPI.catalogPage
+      .mockResolvedValueOnce(catalogPage([catalogEntry('initial-entry', 'Initial Entry')]))
+      .mockRejectedValueOnce({
+        response: { data: { detail: 'catalog temporarily unavailable' } },
+        message: 'Request failed with status code 503',
+      });
+    hubAPI.refresh.mockResolvedValue({ data: { status: 'success' } });
+
+    renderHub();
+    expect(await screen.findByText('Initial Entry')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalledWith(
+        'Hub refresh completed, but catalog reload failed',
+        'catalog temporarily unavailable',
+      );
+    });
+    expect(toastError).not.toHaveBeenCalledWith('Hub refresh failed', expect.anything());
+    expect(hubAPI.refresh).toHaveBeenCalledTimes(1);
+    expect(hubAPI.catalogPage).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+  });
+
+  it('does not report a stale manual reload failure after the query changes', async () => {
+    const user = userEvent.setup();
+    const staleReload = deferred<ReturnType<typeof catalogPage>>();
+    hubAPI.catalogPage
+      .mockResolvedValueOnce(catalogPage([catalogEntry('initial-entry', 'Initial Entry')]))
+      .mockImplementationOnce(() => staleReload.promise)
+      .mockResolvedValueOnce(catalogPage([catalogEntry('latest-entry', 'Latest Entry')]));
+    hubAPI.refresh.mockResolvedValue({ data: { status: 'success' } });
+
+    renderHub();
+    expect(await screen.findByText('Initial Entry')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(hubAPI.catalogPage).toHaveBeenCalledTimes(2));
+
+    fireEvent.change(
+      screen.getByPlaceholderText('Search plugin name, description, tag, use case'),
+      { target: { value: 'latest' } },
+    );
+    expect(await screen.findByText('Latest Entry')).toBeInTheDocument();
+
+    await act(async () => {
+      staleReload.reject(new Error('obsolete catalog failure'));
+      try {
+        await staleReload.promise;
+      } catch {
+        // The component owns this rejected request.
+      }
+    });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    expect(toastError).not.toHaveBeenCalledWith(
+      'Hub refresh completed, but catalog reload failed',
+      expect.anything(),
+    );
+    expect(screen.getByText('Latest Entry')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['install', 'available', 'Install', 'Install failed'],
+    ['update', 'updateAvailable', 'Update', 'Update failed'],
+    ['uninstall', 'installed', 'Uninstall', 'Uninstall failed'],
+  ] as const)('shows a user-visible error when %s fails', async (action, state, buttonLabel, errorTitle) => {
+    const user = userEvent.setup();
+    const entry = { ...catalogEntry('action-entry', 'Action Entry'), state };
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([entry]));
+    hubAPI[action].mockRejectedValue({
+      response: { data: { detail: `${action} permission denied` } },
+      message: `Request failed with status code 422`,
+    });
+
+    renderHub();
+    await user.click(await screen.findByRole('button', { name: buttonLabel }));
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalledWith(
+        `${errorTitle}: Action Entry`,
+        `${action} permission denied`,
+      );
+    });
+    expect(screen.getByRole('button', { name: buttonLabel })).toBeEnabled();
+    expect(hubAPI.catalogPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report a completed action as failed when the follow-up reload fails', async () => {
+    const user = userEvent.setup();
+    const entry = catalogEntry('action-entry', 'Action Entry');
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([entry]));
+    hubAPI.install.mockResolvedValue({ data: { ...entry, state: 'installed' } });
+    hubAPI.catalog.mockRejectedValue({
+      response: { data: { detail: 'catalog temporarily unavailable' } },
+      message: 'Request failed with status code 503',
+    });
+
+    renderHub();
+    await user.click(await screen.findByRole('button', { name: 'Install' }));
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalledWith(
+        'Action completed, but Hub reload failed: Action Entry',
+        'catalog temporarily unavailable',
+      );
+    });
+    expect(toastError).not.toHaveBeenCalledWith(
+      'Install failed: Action Entry',
+      expect.anything(),
+    );
+    expect(hubAPI.install).toHaveBeenCalledTimes(1);
   });
 
   it('does not let a tree action started under old filters overwrite the latest tree', async () => {

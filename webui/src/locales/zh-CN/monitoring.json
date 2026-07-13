@@ -15,7 +15,8 @@
   "metrics": {
     "messageRate": "消息速率",
     "toolCallRate": "工具调用",
-    "errorRate": "工具解析失败",
+    "errorRate": "系统错误",
+    "toolParseFailureRate": "工具解析失败",
     "avgResponse": "平均响应",
     "activeRequests": "活跃请求"
   },

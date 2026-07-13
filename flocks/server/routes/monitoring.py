@@ -13,7 +13,7 @@ import threading
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from flocks.agent import registry as agent_registry
 from flocks.mcp import MCP
@@ -37,11 +37,30 @@ class SystemStatusResponse(BaseModel):
 
 class MetricsSnapshotResponse(BaseModel):
     timestamp: int
-    messageRate: float | None
-    toolCallRate: float | None
-    errorRate: float | None
-    avgResponseTime: float | None
-    activeRequests: int | None
+    messageRate: float | None = Field(
+        default=None,
+        description="Messages per minute. None because message throughput is not collected yet.",
+    )
+    toolCallRate: float | None = Field(
+        default=None,
+        description="Parsed tool calls per minute.",
+    )
+    errorRate: float | None = Field(
+        default=None,
+        description="System-wide error rate. None until a global error metric is available.",
+    )
+    toolParseFailureRate: float | None = Field(
+        default=None,
+        description="Failed tool-call parses per minute.",
+    )
+    avgResponseTime: float | None = Field(
+        default=None,
+        description="Average response time in milliseconds. None until latency is collected.",
+    )
+    activeRequests: int | None = Field(
+        default=None,
+        description="Active request count. None until request concurrency is collected.",
+    )
 
 
 class PerformanceDataResponse(BaseModel):
@@ -75,14 +94,14 @@ async def _active_agent_count() -> int | None:
 
 async def _mcp_server_statuses() -> tuple[dict[str, str], bool]:
     try:
-        statuses = await MCP.status()
+        statuses, initialized = MCP.status_snapshot()
     except Exception as exc:
         log.warning("monitoring.mcp.status_failed", {"error": str(exc)})
         return {}, False
     return ({
         name: str(info.status.value if hasattr(info.status, "value") else info.status)
         for name, info in statuses.items()
-    }, True)
+    }, initialized)
 
 
 _metrics_sample_lock = threading.Lock()
@@ -131,7 +150,7 @@ def _sample_tool_rates(total_calls: float, failed_calls: float) -> tuple[float |
 async def get_status() -> SystemStatusResponse:
     mcp_servers, mcp_status_available = await _mcp_server_statuses()
     unhealthy_mcp = any(
-        status.lower() in {"error", "failed", "down"}
+        status.strip().lower() not in {"connected", "disabled"}
         for status in mcp_servers.values()
     )
     return SystemStatusResponse(
@@ -149,12 +168,13 @@ async def get_metrics() -> MetricsSnapshotResponse:
     metrics = get_monitor().get_metrics().get("global", {})
     total_calls = float(metrics.get("total_calls") or 0)
     failed_calls = float(metrics.get("failed_parses") or 0)
-    tool_call_rate, error_rate = _sample_tool_rates(total_calls, failed_calls)
+    tool_call_rate, tool_parse_failure_rate = _sample_tool_rates(total_calls, failed_calls)
     return MetricsSnapshotResponse(
         timestamp=_timestamp_ms(),
         messageRate=None,
         toolCallRate=tool_call_rate,
-        errorRate=error_rate,
+        errorRate=None,
+        toolParseFailureRate=tool_parse_failure_rate,
         avgResponseTime=None,
         activeRequests=None,
     )

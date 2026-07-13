@@ -142,6 +142,8 @@ describe('applyMessagePartUpdate', () => {
 describe('updateMessagePart scheduling', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.mocked(client.get).mockReset();
+    vi.mocked(client.get).mockResolvedValue({ data: [] });
     vi.useRealTimers();
   });
 
@@ -314,6 +316,275 @@ describe('updateMessagePart scheduling', () => {
     });
 
     expect(result.current.messages).toHaveLength(0);
+  });
+
+  it('ignores a stale first-page response after switching sessions', async () => {
+    let resolveSessionA: (value: unknown) => void = () => {};
+    let resolveSessionB: (value: unknown) => void = () => {};
+    vi.mocked(client.get).mockImplementation((url: string) => new Promise((resolve) => {
+      if (url.includes('sess-a')) resolveSessionA = resolve;
+      if (url.includes('sess-b')) resolveSessionB = resolve;
+    }) as any);
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionMessages(id),
+      { initialProps: { id: 'sess-a' } },
+    );
+    await act(async () => {});
+
+    rerender({ id: 'sess-b' });
+    await act(async () => {});
+
+    await act(async () => {
+      resolveSessionB({
+        data: [{
+          info: {
+            id: 'msg-b',
+            sessionID: 'sess-b',
+            role: 'assistant',
+            time: { created: 200 },
+          },
+          parts: [],
+        }],
+      });
+    });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+
+    await act(async () => {
+      resolveSessionA({
+        data: [{
+          info: {
+            id: 'msg-a',
+            sessionID: 'sess-a',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [],
+        }],
+      });
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('ignores an older-page response after switching sessions', async () => {
+    let resolveOlderSessionA: (value: unknown) => void = () => {};
+    vi.mocked(client.get).mockImplementation((url: string, config?: any) => {
+      if (url.includes('sess-a') && config?.params?.before) {
+        return new Promise((resolve) => {
+          resolveOlderSessionA = resolve;
+        }) as any;
+      }
+      if (url.includes('sess-a')) {
+        return Promise.resolve({
+          data: {
+            items: [{
+              info: {
+                id: 'msg-a-new',
+                sessionID: 'sess-a',
+                role: 'assistant',
+                time: { created: 200 },
+              },
+              parts: [],
+            }],
+            hasMore: true,
+            nextBefore: 'msg-a-new',
+          },
+        }) as any;
+      }
+      return Promise.resolve({
+        data: [{
+          info: {
+            id: 'msg-b',
+            sessionID: 'sess-b',
+            role: 'assistant',
+            time: { created: 300 },
+          },
+          parts: [],
+        }],
+      }) as any;
+    });
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionMessages(id),
+      { initialProps: { id: 'sess-a' } },
+    );
+    await act(async () => {});
+
+    let olderRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      olderRequest = result.current.loadOlder();
+    });
+
+    rerender({ id: 'sess-b' });
+    await act(async () => {});
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+
+    await act(async () => {
+      resolveOlderSessionA({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-a-old',
+              sessionID: 'sess-a',
+              role: 'user',
+              time: { created: 100 },
+            },
+            parts: [],
+          }],
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+      await olderRequest;
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+    expect(result.current.loadingOlder).toBe(false);
+  });
+
+  it('clears older-page loading when a first-page refetch invalidates it', async () => {
+    let resolveOlderPage: (value: unknown) => void = () => {};
+    let firstPageRequestCount = 0;
+    vi.mocked(client.get).mockImplementation((_url: string, config?: any) => {
+      if (config?.params?.before) {
+        return new Promise((resolve) => {
+          resolveOlderPage = resolve;
+        }) as any;
+      }
+
+      firstPageRequestCount += 1;
+      const messageId = firstPageRequestCount === 1 ? 'msg-current' : 'msg-refreshed';
+      return Promise.resolve({
+        data: {
+          items: [{
+            info: {
+              id: messageId,
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { created: 200 + firstPageRequestCount },
+            },
+            parts: [],
+          }],
+          hasMore: true,
+          nextBefore: messageId,
+        },
+      }) as any;
+    });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let olderRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      olderRequest = result.current.loadOlder();
+    });
+    expect(result.current.loadingOlder).toBe(true);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      'msg-current',
+      'msg-refreshed',
+    ]);
+
+    await act(async () => {
+      resolveOlderPage({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-stale-older',
+              sessionID: 'sess-1',
+              role: 'user',
+              time: { created: 100 },
+            },
+            parts: [],
+          }],
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+      await olderRequest;
+    });
+
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      'msg-current',
+      'msg-refreshed',
+    ]);
+  });
+
+  it('does not start an older-page request while a first-page refetch is pending', async () => {
+    let resolveRefetch: (value: unknown) => void = () => {};
+    let firstPageRequests = 0;
+    let olderPageRequests = 0;
+    vi.mocked(client.get).mockImplementation((_url: string, config?: any) => {
+      if (config?.params?.before) {
+        olderPageRequests += 1;
+        return Promise.resolve({ data: { items: [], hasMore: false, nextBefore: null } }) as any;
+      }
+
+      firstPageRequests += 1;
+      if (firstPageRequests === 1) {
+        return Promise.resolve({
+          data: {
+            items: [{
+              info: {
+                id: 'msg-current',
+                sessionID: 'sess-1',
+                role: 'assistant',
+                time: { created: 200 },
+              },
+              parts: [],
+            }],
+            hasMore: true,
+            nextBefore: 'old-cursor',
+          },
+        }) as any;
+      }
+
+      return new Promise((resolve) => {
+        resolveRefetch = resolve;
+      }) as any;
+    });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let refetchRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      refetchRequest = result.current.refetch();
+    });
+    await act(async () => {
+      await result.current.loadOlder();
+    });
+
+    expect(olderPageRequests).toBe(0);
+
+    await act(async () => {
+      resolveRefetch({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-refreshed',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { created: 300 },
+            },
+            parts: [],
+          }],
+          hasMore: true,
+          nextBefore: 'new-cursor',
+        },
+      });
+      await refetchRequest;
+    });
+
+    expect(result.current.loading).toBe(false);
+    expect(olderPageRequests).toBe(0);
   });
 
   it('replaceMessageText updates the targeted text part by partId', async () => {
@@ -583,6 +854,51 @@ describe('updateMessagePart scheduling', () => {
     expect(client.get).toHaveBeenLastCalledWith('/api/session/sess-1/message', {
       params: { page: true, limit: 50, before: 'msg-new', include_archived: true },
     });
+  });
+
+  it('starts only one older-page request when loadOlder is called twice before rerender', async () => {
+    let resolveOlderPage: (value: unknown) => void = () => {};
+    let olderPageRequests = 0;
+    vi.mocked(client.get).mockImplementation((_url: string, config?: any) => {
+      if (config?.params?.before) {
+        olderPageRequests += 1;
+        return new Promise((resolve) => {
+          resolveOlderPage = resolve;
+        }) as any;
+      }
+
+      return Promise.resolve({
+        data: {
+          items: [],
+          hasMore: true,
+          nextBefore: 'older-cursor',
+        },
+      }) as any;
+    });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let firstRequest: Promise<void> = Promise.resolve();
+    let secondRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      firstRequest = result.current.loadOlder();
+      secondRequest = result.current.loadOlder();
+    });
+
+    expect(olderPageRequests).toBe(1);
+
+    await act(async () => {
+      resolveOlderPage({
+        data: {
+          items: [],
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+      await Promise.all([firstRequest, secondRequest]);
+    });
+    expect(result.current.loadingOlder).toBe(false);
   });
 
 });

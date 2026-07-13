@@ -11,6 +11,7 @@ export interface SharedResourceSnapshot<T> {
 export interface SharedResourceFetchOptions {
   force?: boolean;
   silent?: boolean;
+  rejectOnError?: boolean;
 }
 
 export interface CreateSharedResourceOptions<T> {
@@ -64,9 +65,14 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
   const getErrorMessage = options.getErrorMessage ?? defaultGetErrorMessage;
   const listeners = new Set<() => void>();
 
-  let inFlight: Promise<T> | null = null;
+  type FetchOutcome = {
+    data: T;
+    failed: boolean;
+    error?: unknown;
+  };
+
+  let inFlight: Promise<FetchOutcome> | null = null;
   let inFlightGeneration: number | null = null;
-  let queuedRevalidation: Promise<T> | null = null;
   let generation = 0;
   let lastStartedAt = 0;
   let snapshot: SharedResourceSnapshot<T> = {
@@ -89,6 +95,16 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
     emit();
   };
 
+  const resolveOutcome = (
+    request: Promise<FetchOutcome>,
+    rejectOnError: boolean,
+  ): Promise<T> => request.then((outcome) => {
+    if (rejectOnError && outcome.failed) {
+      throw outcome.error;
+    }
+    return outcome.data;
+  });
+
   const fetch = (fetchOptions: SharedResourceFetchOptions = {}): Promise<T> => {
     const now = Date.now();
     const force = fetchOptions.force === true;
@@ -102,15 +118,9 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
 
     if (inFlight) {
       if (force && inFlightGeneration !== generation) {
-        if (!queuedRevalidation) {
-          queuedRevalidation = inFlight.then(() => {
-            queuedRevalidation = null;
-            return fetch(fetchOptions);
-          });
-        }
-        return queuedRevalidation;
+        return inFlight.then(() => fetch(fetchOptions));
       }
-      return inFlight;
+      return resolveOutcome(inFlight, fetchOptions.rejectOnError === true);
     }
 
     if (!force && recentlyStarted) {
@@ -127,7 +137,7 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
     const request = options.fetcher()
       .then((data) => {
         if (requestGeneration !== generation) {
-          return data;
+          return { data, failed: false };
         }
         updateSnapshot({
           data,
@@ -136,11 +146,13 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
           initialized: true,
           updatedAt: Date.now(),
         });
-        return data;
+        return { data, failed: false };
       })
       .catch((error: unknown) => {
         if (requestGeneration !== generation) {
-          return snapshot.data;
+          // An obsolete request must not mutate the current snapshot, but its
+          // original strict caller still needs the real failure.
+          return { data: snapshot.data, failed: true, error };
         }
         const data = resolveFallbackData(options.fallbackDataOnError, snapshot.data);
         updateSnapshot({
@@ -149,7 +161,7 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
           error: getErrorMessage(error),
           initialized: true,
         });
-        return data;
+        return { data, failed: true, error };
       })
       .finally(() => {
         if (inFlight === request) {
@@ -160,7 +172,7 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
 
     inFlight = request;
     inFlightGeneration = requestGeneration;
-    return request;
+    return resolveOutcome(request, fetchOptions.rejectOnError === true);
   };
 
   return {
@@ -180,7 +192,6 @@ export function createSharedResource<T>(options: CreateSharedResourceOptions<T>)
     resetForTesting: () => {
       inFlight = null;
       inFlightGeneration = null;
-      queuedRevalidation = null;
       generation = 0;
       lastStartedAt = 0;
       snapshot = {
