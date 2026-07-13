@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
@@ -9,7 +9,6 @@ import {
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat from '@/components/common/SessionChat';
 import GuideInfoIcon from '@/components/common/GuideInfoIcon';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import { useSessionChat, type CreateAndSendOptions } from '@/hooks/useSessionChat';
@@ -29,6 +28,15 @@ import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
 const DEFAULT_GROUP_ID = 'default-room';
 const DEVICE_DRAWER_WIDTH = 560;
 const DEVICE_DRAWER_WIDTH_CSS = `${DEVICE_DRAWER_WIDTH}px`;
+const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
+
+function SessionChatFallback() {
+  return (
+    <div className="flex flex-1 min-h-0 items-center justify-center text-gray-400">
+      <LoadingSpinner />
+    </div>
+  );
+}
 
 /** Pull the backend's human-readable error detail (e.g. "机房名称已存在")
  *  out of an axios error, falling back to a generic message. */
@@ -697,171 +705,172 @@ function DeviceAddRexPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <SessionChat
-        sessionId={sessionId}
-        live={!!sessionId}
-        className="flex-1 min-h-0"
-        display={{
-          compact: true,
-          fullWidth: true,
-          collapseIntermediateSteps: true,
-          processGroupsDefaultOpen: false,
-        }}
-        agentName={rexComposerControls.rexAgentName}
-        mentionAgents={rexComposerControls.rexMentionAgents}
-        model={rexComposerControls.rexModel}
-        supportsVision={rexComposerControls.rexSupportsVision}
-        contextWindowTokens={rexComposerControls.rexContextWindowTokens}
-        composerTextareaMinHeight={rexComposerControls.rexComposerTextareaMinHeight}
-        composerTextareaMaxHeight={rexComposerControls.rexComposerTextareaMaxHeight}
-        toolbarSlot={rexComposerControls.rexToolbarSlot}
-        centerToolbarSlot={rexComposerControls.rexCenterToolbarSlot}
-        placeholder={t('wizard.rex.placeholder')}
-        emptyText={t('wizard.rex.pending')}
-        onStreamingDone={() => void detectLatestDraft(true)}
-        welcomeContent={
-          <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
-            <div className="flex max-h-[min(620px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
-              {!showBuiltInTemplates ? (
-                <>
-                  <div className="flex-shrink-0">
-                    <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
-                      <ServerCog className="h-5 w-5" />
+      <Suspense fallback={<SessionChatFallback />}>
+        <LazySessionChat
+          sessionId={sessionId}
+          live={!!sessionId}
+          className="flex-1 min-h-0"
+          display={{
+            compact: true,
+            fullWidth: true,
+            collapseIntermediateSteps: true,
+            processGroupsDefaultOpen: false,
+          }}
+          agentName={rexComposerControls.rexAgentName}
+          mentionAgents={rexComposerControls.rexMentionAgents}
+          model={rexComposerControls.rexModel}
+          supportsVision={rexComposerControls.rexSupportsVision}
+          contextWindowTokens={rexComposerControls.rexContextWindowTokens}
+          composerTextareaMinHeight={rexComposerControls.rexComposerTextareaMinHeight}
+          composerTextareaMaxHeight={rexComposerControls.rexComposerTextareaMaxHeight}
+          toolbarSlot={rexComposerControls.rexToolbarSlot}
+          centerToolbarSlot={rexComposerControls.rexCenterToolbarSlot}
+          placeholder={t('wizard.rex.placeholder')}
+          emptyText={t('wizard.rex.pending')}
+          onStreamingDone={() => void detectLatestDraft(true)}
+          welcomeContent={
+            <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
+              <div className="flex max-h-[min(620px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
+                {!showBuiltInTemplates ? (
+                  <>
+                    <div className="flex-shrink-0">
+                      <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+                        <ServerCog className="h-5 w-5" />
+                      </div>
+                      <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
+                      <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
+                        {t('wizard.guide.subtitle')}
+                      </p>
                     </div>
-                    <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
-                    <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
-                      {t('wizard.guide.subtitle')}
-                    </p>
-                  </div>
 
-                  <div className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
-                    <WorkbenchSection title={t('wizard.guide.customTitle')}>
-                      <WorkbenchAction
-                        label={t('wizard.guide.actions.api')}
-                        description={t('wizard.guide.descriptions.api')}
-                        onClick={() => startGuidedPrompt(t('wizard.guide.prompts.api'))}
-                      />
-                      <WorkbenchAction
-                        label={t('wizard.guide.actions.browser')}
-                        description={t('wizard.guide.descriptions.browser')}
-                        onClick={() => startGuidedPrompt(t('wizard.guide.prompts.browser'))}
-                      />
-                    </WorkbenchSection>
+                    <div className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
+                      <WorkbenchSection title={t('wizard.guide.customTitle')}>
+                        <WorkbenchAction
+                          label={t('wizard.guide.actions.api')}
+                          description={t('wizard.guide.descriptions.api')}
+                          onClick={() => startGuidedPrompt(t('wizard.guide.prompts.api'))}
+                        />
+                        <WorkbenchAction
+                          label={t('wizard.guide.actions.browser')}
+                          description={t('wizard.guide.descriptions.browser')}
+                          onClick={() => startGuidedPrompt(t('wizard.guide.prompts.browser'))}
+                        />
+                      </WorkbenchSection>
 
-                    <WorkbenchSection title={t('wizard.guide.caseTitle')}>
-                      <WorkbenchAction
-                        label={t('wizard.guide.cases.tdp')}
-                        description={t('wizard.guide.descriptions.tdp')}
-                        onClick={() => handleCaseTemplate(['tdp'], t('wizard.guide.prompts.tdp'))}
-                      />
-                      <WorkbenchAction
-                        label={t('wizard.guide.cases.onesec')}
-                        description={t('wizard.guide.descriptions.onesec')}
-                        onClick={() => handleCaseTemplate(['onesec', 'one sec'], t('wizard.guide.prompts.onesec'))}
-                      />
-                      <WorkbenchAction
-                        label={t('wizard.guide.cases.more')}
-                        description={t('wizard.guide.descriptions.more')}
-                        onClick={() => setShowBuiltInTemplates(true)}
-                      />
-                    </WorkbenchSection>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="flex-shrink-0 text-left">
-                    <button
-                      type="button"
-                      onClick={() => setShowBuiltInTemplates(false)}
-                      className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
-                    >
-                      <ChevronLeft className="h-3.5 w-3.5" />
-                      {t('wizard.supportedList.back')}
-                    </button>
-                    <h3 className="text-sm font-semibold text-gray-900">{t('wizard.supportedList.title')}</h3>
-                    <p className="mt-2 text-xs leading-relaxed text-gray-500">{t('wizard.supportedList.subtitle')}</p>
-                  </div>
+                      <WorkbenchSection title={t('wizard.guide.caseTitle')}>
+                        <WorkbenchAction
+                          label={t('wizard.guide.cases.tdp')}
+                          description={t('wizard.guide.descriptions.tdp')}
+                          onClick={() => handleCaseTemplate(['tdp'], t('wizard.guide.prompts.tdp'))}
+                        />
+                        <WorkbenchAction
+                          label={t('wizard.guide.cases.onesec')}
+                          description={t('wizard.guide.descriptions.onesec')}
+                          onClick={() => handleCaseTemplate(['onesec', 'one sec'], t('wizard.guide.prompts.onesec'))}
+                        />
+                        <WorkbenchAction
+                          label={t('wizard.guide.cases.more')}
+                          description={t('wizard.guide.descriptions.more')}
+                          onClick={() => setShowBuiltInTemplates(true)}
+                        />
+                      </WorkbenchSection>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex-shrink-0 text-left">
+                      <button
+                        type="button"
+                        onClick={() => setShowBuiltInTemplates(false)}
+                        className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                        {t('wizard.supportedList.back')}
+                      </button>
+                      <h3 className="text-sm font-semibold text-gray-900">{t('wizard.supportedList.title')}</h3>
+                      <p className="mt-2 text-xs leading-relaxed text-gray-500">{t('wizard.supportedList.subtitle')}</p>
+                    </div>
 
-                  <div className="mt-4 min-h-0 space-y-2 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
-                    {vendorGroups.map(({ vendor, templates: vendorTemplates }) => {
-                      const expanded = expandedVendors.has(vendor.id);
-                      const vendorName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
-                      const integratedCount = vendorTemplates.reduce(
-                        (sum, template) => sum + (instanceCounts[template.storage_key] ?? 0),
-                        0,
-                      );
-                      return (
-                        <section key={vendor.id} className="rounded-lg border border-gray-200 bg-white">
-                          <button
-                            type="button"
-                            onClick={() => toggleVendor(vendor.id)}
-                            className="flex h-10 w-full items-center gap-2 px-3 text-left"
-                            aria-expanded={expanded}
-                          >
-                            <VendorMark vendor={vendor} label={vendorName} />
-                            <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700">{vendorName}</span>
-                            <span className="text-[10px] font-medium text-gray-400">
-                              {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
-                              {integratedCount > 0 ? ` / ${t('wizard.supportedList.integratedCount', { count: integratedCount })}` : ''}
-                            </span>
-                            <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
-                          </button>
-                          {expanded && (
-                            <div className="border-t border-gray-100 px-2 pb-2">
-                              {vendorTemplates.map((tpl) => {
-                                const count = instanceCounts[tpl.storage_key] ?? 0;
-                                const action = templateAction(tpl);
-                                const installing = installingTemplateKey === tpl.storage_key;
-                                const templateMeta = tpl.version ? formatTemplateVersion(tpl.version) : tpl.storage_key;
-                                const stateBadge = tpl.installed
-                                  ? t('wizard.installState.installed')
-                                  : tpl.state === 'updateAvailable'
-                                    ? t('wizard.installState.updateAvailable')
-                                    : tpl.state === 'broken'
-                                      ? t('wizard.installState.brokenShort')
-                                      : t('wizard.installState.available');
-                                return (
-                                  <button
-                                    key={tpl.storage_key}
-                                    type="button"
-                                    disabled={!!installingTemplateKey}
-                                    onClick={() => {
-                                      void handleTemplatePrompt(tpl);
-                                    }}
-                                    title={[tpl.name, tpl.version, tpl.storage_key].filter(Boolean).join(' · ')}
-                                    className="group mt-1.5 flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
-                                  >
-                                    <span className="min-w-0 flex-1">
-                                      <span className="block truncate">{tpl.name}</span>
-                                      <span className="mt-0.5 block truncate text-[10px] font-medium text-gray-400 group-hover:text-rose-400">
-                                        {templateMeta}
+                    <div className="mt-4 min-h-0 space-y-2 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
+                      {vendorGroups.map(({ vendor, templates: vendorTemplates }) => {
+                        const expanded = expandedVendors.has(vendor.id);
+                        const vendorName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
+                        const integratedCount = vendorTemplates.reduce(
+                          (sum, template) => sum + (instanceCounts[template.storage_key] ?? 0),
+                          0,
+                        );
+                        return (
+                          <section key={vendor.id} className="rounded-lg border border-gray-200 bg-white">
+                            <button
+                              type="button"
+                              onClick={() => toggleVendor(vendor.id)}
+                              className="flex h-10 w-full items-center gap-2 px-3 text-left"
+                              aria-expanded={expanded}
+                            >
+                              <VendorMark vendor={vendor} label={vendorName} />
+                              <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700">{vendorName}</span>
+                              <span className="text-[10px] font-medium text-gray-400">
+                                {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
+                                {integratedCount > 0 ? ` / ${t('wizard.supportedList.integratedCount', { count: integratedCount })}` : ''}
+                              </span>
+                              <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                            </button>
+                            {expanded && (
+                              <div className="border-t border-gray-100 px-2 pb-2">
+                                {vendorTemplates.map((tpl) => {
+                                  const count = instanceCounts[tpl.storage_key] ?? 0;
+                                  const action = templateAction(tpl);
+                                  const installing = installingTemplateKey === tpl.storage_key;
+                                  const templateMeta = tpl.version ? formatTemplateVersion(tpl.version) : tpl.storage_key;
+                                  const stateBadge = tpl.installed
+                                    ? t('wizard.installState.installed')
+                                    : tpl.state === 'updateAvailable'
+                                      ? t('wizard.installState.updateAvailable')
+                                      : tpl.state === 'broken'
+                                        ? t('wizard.installState.brokenShort')
+                                        : t('wizard.installState.available');
+                                  return (
+                                    <button
+                                      key={tpl.storage_key}
+                                      type="button"
+                                      disabled={!!installingTemplateKey}
+                                      onClick={() => {
+                                        void handleTemplatePrompt(tpl);
+                                      }}
+                                      title={[tpl.name, tpl.version, tpl.storage_key].filter(Boolean).join(' · ')}
+                                      className="group mt-1.5 flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
+                                    >
+                                      <span className="min-w-0 flex-1">
+                                        <span className="block truncate">{tpl.name}</span>
+                                        <span className="mt-0.5 block truncate text-[10px] font-medium text-gray-400 group-hover:text-rose-400">
+                                          {templateMeta}
+                                        </span>
                                       </span>
-                                    </span>
-                                    <span className="flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium text-gray-400">
-                                      {count > 0 && <span>{t('wizard.instanceCount', { count })}</span>}
-                                      <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
-                                    </span>
-                                    {installing
-                                      ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
-                                      : (
-                                        <GuideInfoIcon
-                                          label={tpl.name}
-                                          description={t('wizard.supportedList.templateTooltip')}
-                                          className="h-4 w-4 text-gray-300 group-hover:text-rose-400"
-                                          interactive={false}
-                                        />
-                                      )}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </section>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
+                                      <span className="flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium text-gray-400">
+                                        {count > 0 && <span>{t('wizard.instanceCount', { count })}</span>}
+                                        <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
+                                      </span>
+                                      {installing
+                                        ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
+                                        : (
+                                          <GuideInfoIcon
+                                            label={tpl.name}
+                                            description={t('wizard.supportedList.templateTooltip')}
+                                            className="h-4 w-4 text-gray-300 group-hover:text-rose-400"
+                                            interactive={false}
+                                          />
+                                        )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </section>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
             </div>
           </div>
         }
@@ -872,6 +881,7 @@ function DeviceAddRexPanel({
           model: modelOverride === undefined ? rexComposerControls.rexModel : modelOverride,
         }) : undefined}
       />
+      </Suspense>
       {detectedAction && (
         <div className="flex flex-shrink-0 items-center justify-between gap-3 border-t border-blue-100 bg-blue-50 px-4 py-2.5">
           <div className="min-w-0 text-sm text-blue-800">

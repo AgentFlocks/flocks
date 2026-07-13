@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback } from 'react';
 import i18n from '@/i18n';
 import {
   webuiContractPagesAPI,
@@ -6,80 +6,75 @@ import {
   type WebUIContractWorkspaceListItem,
 } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
+import { createSharedResource, useRefreshOnResume, useSharedResource } from './useSharedResource';
+
+interface WebUIContractNavResourceData {
+  pages: WebUIContractPageListItem[];
+  workspaces: WebUIContractWorkspaceListItem[];
+}
+
+const WEBUI_CONTRACT_NAV_STALE_TIME_MS = 1000;
+const WEBUI_CONTRACT_NAV_MIN_FETCH_INTERVAL_MS = 1000;
+
+const webuiContractNavResource = createSharedResource<WebUIContractNavResourceData>({
+  initialData: {
+    pages: [],
+    workspaces: [],
+  },
+  staleTimeMs: WEBUI_CONTRACT_NAV_STALE_TIME_MS,
+  minFetchIntervalMs: WEBUI_CONTRACT_NAV_MIN_FETCH_INTERVAL_MS,
+  fetcher: async () => {
+    const [pagesResponse, workspacesResponse] = await Promise.all([
+      webuiContractPagesAPI.list(true),
+      webuiContractPagesAPI.listWorkspaces(true),
+    ]);
+    return {
+      pages: Array.isArray(pagesResponse.data) ? pagesResponse.data : [],
+      workspaces: Array.isArray(workspacesResponse.data) ? workspacesResponse.data : [],
+    };
+  },
+  fallbackDataOnError: {
+    pages: [],
+    workspaces: [],
+  },
+  getErrorMessage: (err) => (
+    err instanceof Error ? err.message : i18n.t('nav.fetchFailed', { ns: 'webuiContractPage' })
+  ),
+});
+
+export function __resetWebUIContractPagesResourceForTesting(): void {
+  webuiContractNavResource.resetForTesting();
+}
 
 export function useWebUIContractPages() {
-  const [pages, setPages] = useState<WebUIContractPageListItem[]>([]);
-  const [workspaces, setWorkspaces] = useState<WebUIContractWorkspaceListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const loadingRef = useRef(false);
-  const lastRefreshRef = useRef(0);
+  const {
+    data,
+    loading,
+    error,
+    refetch,
+  } = useSharedResource(webuiContractNavResource);
 
-  const fetchPages = useCallback(async (silent = false) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    if (!silent) setLoading(true);
-    setError(null);
-    try {
-      const [pagesResponse, workspacesResponse] = await Promise.all([
-        webuiContractPagesAPI.list(true),
-        webuiContractPagesAPI.listWorkspaces(true),
-      ]);
-      setPages(Array.isArray(pagesResponse.data) ? pagesResponse.data : []);
-      setWorkspaces(Array.isArray(workspacesResponse.data) ? workspacesResponse.data : []);
-    } catch (err: unknown) {
-      setPages([]);
-      setWorkspaces([]);
-      setError(err instanceof Error ? err.message : i18n.t('nav.fetchFailed', { ns: 'webuiContractPage' }));
-    } finally {
-      loadingRef.current = false;
-      if (!silent) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void fetchPages();
-  }, [fetchPages]);
-
-  const refreshOnResume = useCallback((force = false) => {
-    const now = Date.now();
-    if (!force && now - lastRefreshRef.current < 1000) return;
-    lastRefreshRef.current = now;
-    void fetchPages(true);
-  }, [fetchPages]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        refreshOnResume(false);
-      }
-    };
-    const onFocus = () => {
-      refreshOnResume(false);
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [refreshOnResume]);
+  const refreshOnResume = useCallback(
+    () => webuiContractNavResource.fetch({ silent: true }),
+    [],
+  );
+  useRefreshOnResume(refreshOnResume);
 
   useSSE({
     url: '/api/event',
     onEvent: useCallback((evt) => {
       if (evt.type === 'contracts.webui.pages.nav_changed') {
-        void fetchPages(true);
+        void webuiContractNavResource.fetch({ force: true, silent: true });
       }
-    }, [fetchPages]),
+    }, []),
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 
   return {
-    pages,
-    workspaces,
+    pages: data.pages,
+    workspaces: data.workspaces,
     loading,
     error,
-    refetch: () => fetchPages(),
+    refetch,
   };
 }

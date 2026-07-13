@@ -1,7 +1,12 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useWorkflows } from './useWorkflow';
+import type { Workflow } from '@/api/workflow';
+import {
+  __getWorkflowResourceCacheSizeForTesting,
+  __resetWorkflowResourcesForTesting,
+  useWorkflows,
+} from './useWorkflow';
 
 const { listMock, getMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
@@ -15,7 +20,7 @@ vi.mock('@/api/workflow', () => ({
   },
 }));
 
-function makeWorkflow() {
+function makeWorkflow(overrides: Partial<Workflow> = {}): Workflow {
   return {
     id: 'wf-1',
     name: 'Workflow One',
@@ -38,12 +43,14 @@ function makeWorkflow() {
       thumbsUp: 0,
       thumbsDown: 0,
     },
+    ...overrides,
   };
 }
 
 describe('useWorkflows', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetWorkflowResourcesForTesting();
   });
 
   it('clears workflows when a silent refetch fails', async () => {
@@ -60,11 +67,14 @@ describe('useWorkflows', () => {
 
     expect(result.current.workflows).toHaveLength(1);
 
+    const futureNow = Date.now() + 6000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(futureNow);
     window.dispatchEvent(new Event('focus'));
 
     await waitFor(() => {
       expect(result.current.workflows).toEqual([]);
     });
+    nowSpy.mockRestore();
 
     expect(result.current.error).toBe('Session expired');
   });
@@ -90,10 +100,50 @@ describe('useWorkflows', () => {
       configurable: true,
       value: 'visible',
     });
+    const futureNow = Date.now() + 6000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(futureNow);
     document.dispatchEvent(new Event('visibilitychange'));
 
     await waitFor(() => {
       expect(result.current.workflows).toHaveLength(2);
     });
+    nowSpy.mockRestore();
+  });
+
+  it('shares workflow list requests across concurrent hook instances with the same filters', async () => {
+    let resolveList: (value: { data: any[] }) => void = () => {};
+    listMock.mockReturnValue(new Promise((resolve) => {
+      resolveList = resolve;
+    }));
+
+    const first = renderHook(() => useWorkflows('default', 'active'));
+    const second = renderHook(() => useWorkflows('default', 'active'));
+
+    expect(listMock).toHaveBeenCalledTimes(1);
+    expect(listMock).toHaveBeenCalledWith({ category: 'default', status: 'active' });
+
+    await act(async () => {
+      resolveList({
+        data: [makeWorkflow()],
+      });
+    });
+
+    await waitFor(() => {
+      expect(first.result.current.loading).toBe(false);
+      expect(second.result.current.loading).toBe(false);
+    });
+
+    expect(first.result.current.workflows).toHaveLength(1);
+    expect(second.result.current.workflows).toHaveLength(1);
+  });
+
+  it('bounds parameterized workflow resources for long-lived sessions', () => {
+    listMock.mockResolvedValue({ data: [] });
+    for (let index = 0; index < 100; index += 1) {
+      const hook = renderHook(() => useWorkflows(`category-${index}`, 'active'));
+      hook.unmount();
+    }
+
+    expect(__getWorkflowResourceCacheSizeForTesting()).toBe(80);
   });
 });

@@ -1059,6 +1059,8 @@ from flocks.server.routes.workspace import router as workspace_router
 from flocks.server.routes.update import router as update_router
 # Log viewing
 from flocks.server.routes.logs import router as logs_router
+from flocks.server.routes.monitoring import router as monitoring_router
+from flocks.server.routes.stats import router as stats_router
 from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
@@ -1120,6 +1122,8 @@ app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"]
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
+app.include_router(stats_router, prefix="/api/stats", tags=["Stats"])
+app.include_router(monitoring_router, prefix="/api/monitoring", tags=["Monitoring"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
@@ -1182,6 +1186,7 @@ app.include_router(misc_router, tags=["Misc"])
 
 # Permission routes (/permission)
 app.include_router(permission_router, prefix="/permission", tags=["Permission"])
+app.include_router(permission_router, prefix="/api/permission", tags=["Permission"])
 
 # Question routes (/question)
 app.include_router(question_router, prefix="/question", tags=["Question"])
