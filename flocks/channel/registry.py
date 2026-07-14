@@ -94,10 +94,12 @@ class ChannelRegistry:
         from flocks.channel.builtin.feishu.channel import FeishuChannel
         from flocks.channel.builtin.telegram.channel import TelegramChannel
         from flocks.channel.builtin.wecom.channel import WeComChannel
+        from flocks.channel.builtin.whatsapp.channel import WhatsAppChannel
         from flocks.channel.builtin.weixin.channel import WeixinChannel
         self.register(FeishuChannel())
         self.register(WeComChannel())
         self.register(TelegramChannel())
+        self.register(WhatsAppChannel())
         self.register(DingTalkChannel())
         self.register(WeixinChannel())
 
