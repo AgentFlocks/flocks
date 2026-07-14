@@ -139,10 +139,15 @@ class EmailChannel(ChannelPlugin):
         while not abort.is_set():
             try:
                 messages = await loop.run_in_executor(None, self._fetch_new_messages)
-                for message in messages:
+                for uid, message in messages:
                     if abort.is_set():
                         break
-                    await on_message(message)
+                    try:
+                        await on_message(message)
+                        self._mark_seen(uid)
+                    except Exception as exc:
+                        log.warning("email.message.dispatch_failed", {"error": str(exc), "uid": uid.decode(errors="replace")})
+                self.mark_connected()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -273,9 +278,9 @@ class EmailChannel(ChannelPlugin):
             except Exception:
                 smtp.close()
 
-    def _fetch_new_messages(self) -> list[InboundMessage]:
+    def _fetch_new_messages(self) -> list[tuple[bytes, InboundMessage]]:
         cfg = self._resolved
-        parsed_messages: list[InboundMessage] = []
+        parsed_messages: list[tuple[bytes, InboundMessage]] = []
         imap = self._connect_imap()
         try:
             imap.login(cfg["address"], cfg["password"])
@@ -287,10 +292,7 @@ class EmailChannel(ChannelPlugin):
             for uid in data[0].split():
                 if uid in self._seen_uids:
                     continue
-                self._seen_uids.add(uid)
-                self._trim_seen_uids()
-
-                status, msg_data = imap.uid("fetch", uid, "(RFC822)")
+                status, msg_data = imap.uid("fetch", uid, "(BODY.PEEK[])")
                 if status != "OK":
                     continue
                 try:
@@ -302,10 +304,21 @@ class EmailChannel(ChannelPlugin):
                     log.warning("email.imap.non_bytes_payload", {"uid": uid.decode(errors="replace")})
                     continue
 
-                message = email_lib.message_from_bytes(raw_email)
-                parsed = self._parse_and_authorize(message, uid.decode(errors="replace"))
-                if parsed is not None:
-                    parsed_messages.append(parsed)
+                try:
+                    message = email_lib.message_from_bytes(raw_email)
+                except Exception:
+                    log.warning("email.imap.parse_failed", {"uid": uid.decode(errors="replace")})
+                    continue
+
+                parsed, should_mark_seen = self._parse_and_authorize_with_tracking(
+                    message,
+                    uid.decode(errors="replace"),
+                )
+                if parsed is None:
+                    if should_mark_seen:
+                        self._mark_seen(uid)
+                    continue
+                parsed_messages.append((uid, parsed))
         finally:
             try:
                 imap.logout()
@@ -318,6 +331,14 @@ class EmailChannel(ChannelPlugin):
         message: email_lib.message.Message,
         uid: str,
     ) -> Optional[InboundMessage]:
+        parsed, _ = self._parse_and_authorize_with_tracking(message, uid)
+        return parsed
+
+    def _parse_and_authorize_with_tracking(
+        self,
+        message: email_lib.message.Message,
+        uid: str,
+    ) -> tuple[Optional[InboundMessage], bool]:
         cfg = self._resolved
         parsed = build_inbound_message(
             message,
@@ -326,25 +347,25 @@ class EmailChannel(ChannelPlugin):
             skip_attachments=bool(cfg["skipAttachments"]),
         )
         if parsed is None:
-            return None
+            return None, False
 
         inbound = parsed.inbound
         sender = inbound.sender_id
         if sender == cfg["address"]:
-            return None
+            return None, True
         if is_automated_sender(sender, dict(message.items())):
-            return None
+            return None, True
 
         allowed = parse_allowed_senders(cfg)
         if not cfg["allowAll"]:
             if not allowed or sender not in allowed:
                 log.debug("email.sender.blocked", {"sender": sender})
-                return None
+                return None, True
 
         if cfg["requireAuthenticatedSender"] and allowed and not cfg["allowAll"]:
             if not cfg["authservId"]:
                 log.warning("email.sender.authserv_id_missing", {"sender": sender})
-                return None
+                return None, True
             authenticated, reason = verify_sender_authentication(
                 message,
                 sender,
@@ -355,7 +376,7 @@ class EmailChannel(ChannelPlugin):
                     "sender": sender,
                     "reason": reason,
                 })
-                return None
+                return None, True
 
         context = {
             "subject": parsed.subject,
@@ -366,7 +387,11 @@ class EmailChannel(ChannelPlugin):
         for key in {parsed.message_id, parsed.inbound.thread_id or "", parsed.inbound.reply_to_id or ""}:
             if key:
                 self._thread_context[key] = context
-        return inbound
+        return inbound, False
+
+    def _mark_seen(self, uid: bytes) -> None:
+        self._seen_uids.add(uid)
+        self._trim_seen_uids()
 
     def _connect_smtp(self) -> smtplib.SMTP:
         cfg = self._resolved

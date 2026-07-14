@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
+import email as email_lib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from unittest.mock import MagicMock
@@ -154,6 +156,17 @@ def test_sender_authentication_rejects_without_authserv_id() -> None:
     msg["Authentication-Results"] = "mx.example.com; dmarc=pass header.from=example.com"
 
     assert verify_sender_authentication(msg, "user@example.com")[0] is False
+
+
+def test_sender_authentication_rejects_subdomain_authserv_id() -> None:
+    msg = MIMEText("hi", "plain", "utf-8")
+    msg["Authentication-Results"] = "evil.mx.example.com; dmarc=pass header.from=example.com"
+
+    assert not verify_sender_authentication(
+        msg,
+        "user@example.com",
+        authserv_id="mx.example.com",
+    )[0]
 
 
 def test_build_resolved_defaults_apply_ssl_and_starttls_modes() -> None:
@@ -407,7 +420,8 @@ def test_fetch_new_messages_skips_malformed_imap_response(monkeypatch: pytest.Mo
     messages = plugin._fetch_new_messages()
 
     assert len(messages) == 1
-    assert messages[0].sender_id == "user@example.com"
+    _, inbound = messages[0]
+    assert inbound.sender_id == "user@example.com"
 
 
 def test_connect_smtp_starttls_fails_when_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -526,3 +540,151 @@ def test_build_inbound_message_sanitizes_attachment_filename() -> None:
     assert ".._" not in parsed.inbound.text
     assert "../" not in parsed.inbound.text
     assert "report" in parsed.inbound.text
+
+
+def test_fetch_new_messages_marks_seen_for_rejected_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowFrom": ["allowed@example.com"],
+        "allowAll": False,
+    })
+
+    fake_imap = MagicMock()
+    monkeypatch.setattr(
+        "flocks.channel.builtin.email.channel.imaplib.IMAP4_SSL",
+        lambda *args, **kwargs: fake_imap,
+    )
+    fake_imap.uid.side_effect = lambda command, *args: (
+        ("OK", [b"1"]) if command == "search" else ("OK", [(b"1 (BODY.PEEK[] {123})", _raw_email(sender="user@example.com", auth_results="mx.example.com; dmarc=pass header.from=example.com"))])
+    )
+
+    messages = plugin._fetch_new_messages()
+
+    assert messages == []
+    assert b"1" in plugin._seen_uids
+
+
+def test_fetch_new_messages_does_not_mark_seen_when_parse_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.uid.side_effect = lambda command, *args: (
+        ("OK", [b"1"]) if command == "search" else ("OK", [(b"1 (BODY.PEEK[] {123})", b"invalid-bytes")])
+    )
+    monkeypatch.setattr(
+        "flocks.channel.builtin.email.channel.imaplib.IMAP4_SSL",
+        lambda *args, **kwargs: fake_imap,
+    )
+    monkeypatch.setattr(
+        "flocks.channel.builtin.email.channel.email_lib.message_from_bytes",
+        lambda _raw: (_ for _ in ()).throw(ValueError("parse error")),
+    )
+
+    messages = plugin._fetch_new_messages()
+
+    assert messages == []
+    assert b"1" not in plugin._seen_uids
+
+
+@pytest.mark.asyncio
+async def test_start_marks_channel_connected_after_successful_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+        "pollIntervalSeconds": 1,
+    })
+    plugin._test_connections = lambda: None
+
+    parsed = build_inbound_message(
+        email_lib.message_from_bytes(
+            _raw_email(
+                sender="user@example.com",
+                auth_results="mx.example.com; dmarc=pass header.from=example.com",
+            )
+        ),
+        uid="1",
+        account_id="default",
+        skip_attachments=True,
+    )
+    assert parsed is not None
+
+    async def on_message(_: InboundMessage) -> None:
+        return None
+
+    async def _delay_set(event: asyncio.Event) -> None:
+        await asyncio.sleep(0.01)
+        event.set()
+
+    monkeypatch.setattr(plugin, "_fetch_new_messages", lambda: [(b"1", parsed.inbound)])
+
+    abort_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.create_task(_delay_set(abort_event))
+
+    await plugin.start({}, on_message, abort_event)
+
+    assert plugin.status.connected is True
+    assert b"1" in plugin._seen_uids
+
+
+@pytest.mark.asyncio
+async def test_start_keeps_uid_unseen_when_dispatch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+        "pollIntervalSeconds": 1,
+    })
+    plugin._test_connections = lambda: None
+
+    parsed = build_inbound_message(
+        email_lib.message_from_bytes(
+            _raw_email(
+                sender="user@example.com",
+                auth_results="mx.example.com; dmarc=pass header.from=example.com",
+            )
+        ),
+        uid="2",
+        account_id="default",
+        skip_attachments=True,
+    )
+    assert parsed is not None
+    messages = [(b"2", parsed.inbound)]
+    monkeypatch.setattr(plugin, "_fetch_new_messages", lambda: messages)
+
+    async def on_message(_: InboundMessage) -> None:
+        raise RuntimeError("dispatch fail")
+
+    async def _delay_set(event: asyncio.Event) -> None:
+        await asyncio.sleep(0.01)
+        event.set()
+
+    abort_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.create_task(_delay_set(abort_event))
+
+    await plugin.start({}, on_message, abort_event)
+
+    assert b"2" not in plugin._seen_uids

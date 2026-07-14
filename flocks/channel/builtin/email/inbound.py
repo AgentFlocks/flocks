@@ -156,6 +156,17 @@ def _domains_aligned(a: str, b: str) -> bool:
     return a == b or a.endswith("." + b) or b.endswith("." + a)
 
 
+def _normalize_authserv_id(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+
+    first = value.split(";", 1)[0].strip()
+    if " " in first:
+        first = first.split(" ", 1)[0].strip()
+    return first.lower().rstrip(".")
+
+
 def verify_sender_authentication(
     msg: email_lib.message.Message,
     from_addr: str,
@@ -170,15 +181,15 @@ def verify_sender_authentication(
     if not headers:
         return False, "no Authentication-Results header"
 
-    normalized_expected = normalize_email_address(authserv_id).lower()
+    normalized_expected = _normalize_authserv_id(authserv_id)
     if not normalized_expected:
         return False, "no authserv-id configured"
 
     trusted = None
     for raw in headers:
         value = " ".join(str(raw).split())
-        serv = value.split(";", 1)[0].strip()
-        if not _domains_aligned(serv, normalized_expected) and serv.lower() != normalized_expected:
+        serv = _normalize_authserv_id(value)
+        if serv != normalized_expected:
             continue
         trusted = value
         break
