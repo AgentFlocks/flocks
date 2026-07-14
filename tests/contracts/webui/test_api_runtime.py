@@ -1,3 +1,7 @@
+import asyncio
+import builtins
+import threading
+
 import pytest
 from fastapi import FastAPI, Request
 from httpx import AsyncClient, ASGITransport
@@ -215,3 +219,61 @@ async def test_api_runtime_blocks_non_local_imports(runtime_store: WebUIPagesSto
     async with AsyncClient(transport=ASGITransport(app=runtime_app), base_url="http://test") as client:
         resp = await client.get("/api/contracts/webui/pages/runtime-page/api/unsafe")
         assert resp.status_code == 500
+
+
+def test_api_runtime_import_guard_does_not_leak_to_other_threads(
+    runtime_store: WebUIPagesStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(builtins, "_flocks_page_import_started", started, raising=False)
+    monkeypatch.setattr(builtins, "_flocks_page_import_release", release, raising=False)
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/routes.yaml",
+        (
+            "routes:\n"
+            "  - method: GET\n"
+            "    path: /waiting\n"
+            "    handler: handlers.waiting\n"
+        ),
+    )
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/handlers.py",
+        (
+            "import builtins\n"
+            "builtins._flocks_page_import_started.set()\n"
+            "builtins._flocks_page_import_release.wait(timeout=2)\n"
+            "def waiting(ctx, request):\n"
+            "    return {'ok': True}\n"
+        ),
+    )
+    runtime = WebUIPageApiRuntime(runtime_store)
+    reload_errors = []
+
+    def _reload_page() -> None:
+        try:
+            asyncio.run(runtime.reload_page("runtime-page"))
+        except Exception as exc:
+            reload_errors.append(exc)
+
+    reload_thread = threading.Thread(target=_reload_page)
+    reload_thread.start()
+    try:
+        assert started.wait(timeout=2)
+        imported = builtins.__import__(
+            "flocks.config.api_versioning",
+            globals(),
+            locals(),
+            ("discover_api_service_descriptors",),
+            0,
+        )
+        assert imported.__name__ == "flocks.config.api_versioning"
+    finally:
+        release.set()
+        reload_thread.join(timeout=2)
+
+    assert not reload_thread.is_alive()
+    assert reload_errors == []
