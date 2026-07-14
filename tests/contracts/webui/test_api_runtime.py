@@ -277,3 +277,75 @@ def test_api_runtime_import_guard_does_not_leak_to_other_threads(
 
     assert not reload_thread.is_alive()
     assert reload_errors == []
+
+
+def test_api_runtime_import_guard_applies_to_page_worker_threads(runtime_store: WebUIPagesStore):
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/routes.yaml",
+        (
+            "routes:\n"
+            "  - method: GET\n"
+            "    path: /worker\n"
+            "    handler: handlers.worker\n"
+        ),
+    )
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/handlers.py",
+        (
+            "import threading\n"
+            "worker_errors = []\n"
+            "def load_external():\n"
+            "    try:\n"
+            "        from flocks.config import api_versioning\n"
+            "    except Exception as exc:\n"
+            "        worker_errors.append(type(exc).__name__)\n"
+            "thread = threading.Thread(target=load_external)\n"
+            "thread.start()\n"
+            "thread.join()\n"
+            "if worker_errors != ['ImportError']:\n"
+            "    raise RuntimeError(f'import guard bypassed: {worker_errors}')\n"
+            "def worker(ctx, request):\n"
+            "    return {'ok': True}\n"
+        ),
+    )
+
+    runtime = WebUIPageApiRuntime(runtime_store)
+
+    asyncio.run(runtime.reload_page("runtime-page"))
+
+
+@pytest.mark.asyncio
+async def test_api_runtime_blocks_non_local_imports_during_handler_execution(
+    runtime_store: WebUIPagesStore,
+    runtime_app: FastAPI,
+):
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/routes.yaml",
+        (
+            "routes:\n"
+            "  - method: GET\n"
+            "    path: /deferred-unsafe\n"
+            "    handler: handlers.deferred_unsafe\n"
+        ),
+    )
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/handlers.py",
+        (
+            "def deferred_unsafe(ctx, request):\n"
+            "    from flocks.config import api_versioning\n"
+            "    return {'path': api_versioning.__file__}\n"
+        ),
+    )
+    runtime = WebUIPageApiRuntime(runtime_store)
+
+    @runtime_app.get("/api/contracts/webui/pages/{page_id}/api/{api_path:path}")
+    async def _dispatch(page_id: str, api_path: str, request: Request):
+        return await runtime.dispatch(page_id, api_path, request, {"role": "admin"})
+
+    async with AsyncClient(transport=ASGITransport(app=runtime_app), base_url="http://test") as client:
+        resp = await client.get("/api/contracts/webui/pages/runtime-page/api/deferred-unsafe")
+        assert resp.status_code == 500

@@ -357,6 +357,28 @@ function fullNumber(value) {
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
+function workflowDenoiseActivity(callCount, delta, generatedAt) {
+  const occurredAt = generatedAt || new Date().toISOString();
+  return {
+    eventId: `workflow-denoise:${callCount}:${occurredAt}`,
+    stage: 'denoise',
+    status: 'completed',
+    occurredAt,
+    triggerSource: 'workflow_stats',
+    statsDelta: delta,
+    workflowCallCount: callCount,
+    sampleCount: delta,
+    alert: {
+      sourceType: 'workflow.db',
+      threatName: '降噪工作流统计更新',
+    },
+    result: {
+      clusterId: `累计 ${fullNumber(callCount)}`,
+      isDuplicate: false,
+    },
+  };
+}
+
 function compactNumber(value) {
   const n = Number(value || 0);
   if (Math.abs(n) >= 100000000) return `${trim(n / 100000000)}亿`;
@@ -373,8 +395,7 @@ function AnimatedNumber({ value, format, tag = 'span', className, duration = 900
 
   useEffect(() => {
     const from = current.current;
-    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    if (!Number.isFinite(target) || from === target || reduceMotion) {
+    if (!Number.isFinite(target) || from === target) {
       current.current = Number.isFinite(target) ? target : 0;
       setDisplay(current.current);
       return undefined;
@@ -621,6 +642,9 @@ function StageCard({ stage, title, value, sub, tone }) {
 function activityResultText(event) {
   if (!event) return '';
   if (event.stage === 'denoise') {
+    if (event.triggerSource === 'workflow_stats') {
+      return `工作流调用 +${fullNumber(event.statsDelta || 1)}`;
+    }
     const count = Math.max(Number(event.sampleCount || 1), 1);
     const result = event.result?.isDuplicate ? '重复告警已收敛' : '保留代表告警';
     return count > 1 ? `${result} × ${count}` : result;
@@ -634,7 +658,10 @@ function activityResultText(event) {
 
 function activitySourceText(event) {
   if (!event) return '';
-  if (event.stage === 'denoise') return event.alert?.sourceType ? String(event.alert.sourceType).toUpperCase() : '新告警';
+  if (event.stage === 'denoise') {
+    if (event.triggerSource === 'workflow_stats') return 'WORKFLOW.DB';
+    return event.alert?.sourceType ? String(event.alert.sourceType).toUpperCase() : '新告警';
+  }
   const source = event.result?.triageSource;
   if (['cache', 'cached'].includes(source)) return '历史研判复用';
   if (['follower', 'follower_reused'].includes(source)) return '同类结论复用';
@@ -688,7 +715,7 @@ function AiCore({ stats, activity }) {
   const denoiseActive = Boolean(activity.denoise.current);
   const triageActive = Boolean(activity.triage.current);
   const activeCount = Number(denoiseActive) + Number(triageActive);
-  const activeEvent = activity.triage.current || activity.denoise.current;
+  const activeEvent = activity.denoise.current || activity.triage.current;
   const activeKind = activeEvent?.stage || '';
   const queueCount = activity.denoise.queue.length + activity.triage.queue.length;
   const coreLabel = activeCount === 2
@@ -697,7 +724,15 @@ function AiCore({ stats, activity }) {
       ? activity.mode === 'surge' ? '降噪洪峰处理中' : activity.mode === 'burst' ? '告警批量降噪中' : '告警降噪中'
       : triageActive ? '告警研判中' : '智能研判核心';
   const taskDuration = activityDuration(activeEvent);
-  const operations = activeKind === 'denoise'
+  const workflowDenoiseActive = activeKind === 'denoise' && activeEvent?.triggerSource === 'workflow_stats';
+  const operations = workflowDenoiseActive
+    ? [
+        '检测 workflow.db 统计更新',
+        `读取降噪调用增量 +${fullNumber(activeEvent?.statsDelta || 1)}`,
+        '同步降噪处理状态',
+        `累计调用 ${fullNumber(activeEvent?.workflowCallCount)}`,
+      ]
+    : activeKind === 'denoise'
     ? [
         `接入 ${activeEvent?.alert?.sourceType || '告警数据'}`,
         '提取请求与网络特征',
@@ -710,12 +745,19 @@ function AiCore({ stats, activity }) {
         '执行风险推理',
         `生成结论：${activeEvent?.result?.verdictLabel || '待确认'}`,
       ];
-  const evidenceItems = activeEvent ? [
-    { label: '攻击源', value: activeEvent.alert?.srcIp || activeEvent.alert?.sourceType || '新告警' },
-    { label: '目标资产', value: activeEvent.alert?.dstIp || '待识别资产' },
-    { label: activeKind === 'denoise' ? '特征' : '攻击路径', value: activeEvent.alert?.requestUri || activeEvent.alert?.threatName || '特征提取中' },
-    { label: activeKind === 'denoise' ? '相似聚类' : '风险判断', value: activeKind === 'denoise' ? `簇 ${activeEvent.result?.clusterId || '--'}` : activityResultText(activeEvent) },
-  ] : [];
+  const evidenceItems = workflowDenoiseActive
+    ? [
+        { label: '数据源', value: 'workflow.db' },
+        { label: '统计字段', value: 'call_count' },
+        { label: '本次增量', value: `+${fullNumber(activeEvent?.statsDelta || 1)}` },
+        { label: '累计调用', value: fullNumber(activeEvent?.workflowCallCount) },
+      ]
+    : activeEvent ? [
+        { label: '攻击源', value: activeEvent.alert?.srcIp || activeEvent.alert?.sourceType || '新告警' },
+        { label: '目标资产', value: activeEvent.alert?.dstIp || '待识别资产' },
+        { label: activeKind === 'denoise' ? '特征' : '攻击路径', value: activeEvent.alert?.requestUri || activeEvent.alert?.threatName || '特征提取中' },
+        { label: activeKind === 'denoise' ? '相似聚类' : '风险判断', value: activeKind === 'denoise' ? `簇 ${activeEvent.result?.clusterId || '--'}` : activityResultText(activeEvent) },
+      ] : [];
   const statusLabel = activity.connection === 'error'
     ? '活动数据等待重连'
     : activeCount
@@ -1468,7 +1510,6 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
       displayedRef.current = exiting;
       setDisplayedTasks(exiting);
       window.clearTimeout(exitTimerRef.current);
-      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       exitTimerRef.current = window.setTimeout(() => {
         const retainedKeys = new Set(displayedRef.current
           .filter((task) => !isExiting(task))
@@ -1480,7 +1521,7 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
         displayedRef.current = filled;
         setDisplayedTasks(filled);
         filterTransitionRef.current = false;
-      }, reduceMotion ? 0 : filterTransition ? 240 : 380);
+      }, filterTransition ? 240 : 380);
       return;
     }
 
@@ -1612,6 +1653,7 @@ export default function Page() {
   const [error, setError] = useState('');
   const [activity, setActivity] = useState(createActivityState);
   const activityCursor = useRef('');
+  const workflowDenoiseCount = useRef(null);
   const statsRequestId = useRef(0);
   const statsPending = useRef(0);
 
@@ -1708,16 +1750,39 @@ export default function Page() {
         if (payload.error) throw new Error(payload.error);
         activityCursor.current = payload.cursor || activityCursor.current;
         if (!stopped) {
-          const incomingEvents = bootstrap ? recentUnseenActivity(payload.recentEvents) : payload.events;
+          const rawIncomingEvents = bootstrap
+            ? recentUnseenActivity(payload.recentEvents)
+            : (payload.events || []);
+          const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
+          const rawCallCount = payload.workflowStats?.callCount;
+          const hasWorkflowCount = rawCallCount !== null
+            && rawCallCount !== undefined
+            && Number.isFinite(Number(rawCallCount));
+          let workflowDelta = 0;
+          if (hasWorkflowCount) {
+            const callCount = Math.max(Math.trunc(Number(rawCallCount)), 0);
+            const previousCallCount = workflowDenoiseCount.current;
+            if (previousCallCount !== null && callCount > previousCallCount) {
+              workflowDelta = callCount - previousCallCount;
+              incomingEvents.push(workflowDenoiseActivity(
+                callCount,
+                workflowDelta,
+                payload.generatedAt,
+              ));
+            }
+            workflowDenoiseCount.current = callCount;
+          }
           setActivity((previous) => enqueueActivity(
             previous,
             incomingEvents,
             payload.generatedAt,
-            payload.recentEvents,
+            bootstrap ? payload.recentEvents : rawIncomingEvents,
             payload.batch,
           ));
           const batch = normalizeActivityBatch(payload.batch);
-          const hasStatsChange = batch.receivedCount > 0 || batch.triageUpdatedCount > 0;
+          const hasStatsChange = workflowDelta > 0
+            || batch.receivedCount > 0
+            || batch.triageUpdatedCount > 0;
           if (payload.cursorReset || hasStatsChange) scheduleStatsRefresh(Boolean(payload.cursorReset));
         }
         retryDelay = ACTIVITY_POLL_MS;
@@ -1799,7 +1864,10 @@ export default function Page() {
     || activity.batch?.triageUpdatedCount
   );
 
-  return h('div', { className: cx('adtd-root command-root', activityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed') }, [
+  return h('div', {
+    className: cx('adtd-root command-root', activityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
+    'data-animations': 'on',
+  }, [
     h('style', { key: 'style' }, CSS),
     h(CommandHeader, { key: 'header', timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
@@ -2614,25 +2682,6 @@ const CSS = `
   from { opacity: 0; transform: translateY(5px) scale(.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .ai-core:before,
-  .ai-sphere,
-  .ai-sphere:before,
-  .ai-sphere:after,
-  .orbit,
-  .energy-ring,
-  .scan-line,
-  .core-particle {
-    animation: none;
-  }
-  .activity-card.activity-active,
-  .activity-active .activity-step,
-  .activity-active .activity-outcome {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-}
 .flow-strip {
   min-height: 54px;
   display: grid;
@@ -3106,27 +3155,6 @@ const CSS = `
 @keyframes gaugePulse {
   0%, 100% { opacity: .82; filter: drop-shadow(0 0 7px rgba(46,230,166,.34)); }
   50% { opacity: 1; filter: drop-shadow(0 0 14px rgba(46,230,166,.68)); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .brand-mark:after,
-  .panel-title i,
-  .source-node.active,
-  .source-track span:after,
-  .spark-line,
-  .flow-strip span,
-  .flow-strip i,
-  .flow-strip i:before,
-  .donut-arc,
-  .donut-arc.active,
-  .radar-grid,
-  .radar-value,
-  .profile-track span:after,
-  .funnel-bar:after,
-  .loop-diagram:before,
-  .loop-node.primary,
-  .gauge-value {
-    animation: none;
-  }
 }
 @media (max-width: 1280px) {
   .screen-grid {
@@ -4089,15 +4117,6 @@ const CSS = `
   50% { filter: brightness(1.2); }
 }
 @keyframes laneResult { to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) {
-  .command-live i,
-  .command-ring,
-  .agent-badge.active,
-  .command-activity-lane.active .command-lane-result,
-  .denoise-running .command-link,
-  .triage-running .command-link { animation: none; }
-  .event-rail-progress-track i { transition: none; }
-}
 @media (max-width: 1360px) {
   .command-header { grid-template-columns: minmax(330px, 1fr) auto minmax(500px, 1fr); gap: 12px; padding: 0 14px; }
   .command-shell { grid-template-columns: minmax(0, 1fr) 292px; }
@@ -4930,36 +4949,10 @@ const CSS = `
     animation-duration: 28s;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .command-logo,
-  .command-link,
-  .command-source i,
-  .merge-node b,
-  .merge-node:before,
-  .outcome-stack .primary,
-  .severity-node,
-  .command-activity-lane,
-  .command-drum-track,
-  .command-drum-focus,
-  .command-drum-scan,
-  .ai-task-progress-value,
-  .command-original-core .ai-core:after,
-  .command-original-core .energy-ring:before,
-  .ai-operation-track,
-  .ai-evidence-card,
-  .outcome-stack .primary.processing,
-  .severity-node.active-target,
-  .severity-node.recent-target,
-  .command-metric-value,
-  .event-rail-item.state-processing,
-  .command-metric .spark-line,
-  .event-update-banner:after,
-  .event-rail-item { animation: none; }
-  .command-drum-track { transform: translateY(-26px); }
-  .ai-operation-track { transform: translateY(0); }
-  .ai-task-progress-value { stroke-dashoffset: 0; }
-  .ai-evidence-card { opacity: 1; }
-  .command-link-dots { animation: none; }
-  .command-flow-particle { display: none; }
+[data-animations="on"],
+[data-animations="on"] *,
+[data-animations="on"] *::before,
+[data-animations="on"] *::after {
+  animation-play-state: running !important;
 }
 `;

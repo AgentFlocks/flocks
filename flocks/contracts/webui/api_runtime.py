@@ -9,7 +9,6 @@ import inspect
 import json
 import sys
 import sysconfig
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +33,6 @@ _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_REQUEST_BODY_BYTES = 1_000_000
 _CLIENT_CLOSED_REQUEST_STATUS = 499
 _STDLIB_DIR = Path(sysconfig.get_paths()["stdlib"]).resolve()
-_IMPORT_GUARD_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -228,22 +226,20 @@ class WebUIPageApiRuntime:
         if spec is None or spec.loader is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="failed to load handlers.py")
         module = importlib.util.module_from_spec(spec)
-        with _IMPORT_GUARD_LOCK:
-            original_import = builtins.__import__
-            guarded_import = self._create_guarded_import(
-                api_root=handlers_path.parent,
-                original_import=original_import,
-            )
-            try:
-                builtins.__import__ = guarded_import  # type: ignore[assignment]
-                spec.loader.exec_module(module)
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"failed to load handlers.py: {exc}",
-                ) from exc
-            finally:
-                builtins.__import__ = original_import  # type: ignore[assignment]
+        guarded_import = self._create_guarded_import(
+            api_root=handlers_path.parent,
+            original_import=builtins.__import__,
+        )
+        page_builtins = dict(vars(builtins))
+        page_builtins["__import__"] = guarded_import
+        module.__dict__["__builtins__"] = page_builtins
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to load handlers.py: {exc}",
+            ) from exc
 
         routes: dict[tuple[str, str], _RouteEntry] = {}
         for item in route_items:
@@ -300,11 +296,8 @@ class WebUIPageApiRuntime:
 
     def _create_guarded_import(self, *, api_root: Path, original_import):
         api_root_resolved = api_root.resolve()
-        owner_thread_id = threading.get_ident()
 
         def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if threading.get_ident() != owner_thread_id:
-                return original_import(name, globals, locals, fromlist, level)
             module = original_import(name, globals, locals, fromlist, level)
             modules_to_check = [module]
             if fromlist:

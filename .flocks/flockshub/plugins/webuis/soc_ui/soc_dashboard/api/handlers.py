@@ -21,7 +21,7 @@ DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
 FACTS_TABLE = "soc_dashboard_alert_facts"
 ACTIVITY_TABLE = "soc_dashboard_activity"
 META_TABLE = "soc_dashboard_meta"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 ACTIVITY_DEFAULT_LIMIT = 20
 ACTIVITY_MAX_LIMIT = 50
 ACTIVITY_WINDOW_MS = 3000
@@ -128,7 +128,7 @@ def _fact_expressions(prefix):
     )
     return (
         f"{prefix}.rowid",
-        f"{prefix}.row_id",
+        f"COALESCE(NULLIF({prefix}.row_id, ''), CAST({prefix}.rowid AS TEXT))",
         f"{prefix}.asset_date",
         f"{prefix}.event_time",
         f"COALESCE(NULLIF({prefix}.source_type, ''), NULLIF({source_type}, ''), "
@@ -159,25 +159,15 @@ def _fact_expressions(prefix):
 def _fact_upsert_sql(prefix):
     columns = ", ".join(_FACT_COLUMNS)
     values = ", ".join(_fact_expressions(prefix))
-    updates = ", ".join(
-        f"{column}=excluded.{column}" for column in _FACT_COLUMNS if column != "alert_row_id"
-    )
-    return (
-        f"INSERT INTO {FACTS_TABLE} ({columns}) VALUES ({values}) "
-        f"ON CONFLICT(alert_row_id) DO UPDATE SET {updates}"
-    )
+    return f"INSERT OR REPLACE INTO {FACTS_TABLE} ({columns}) VALUES ({values})"
 
 
 def _fact_backfill_sql():
     columns = ", ".join(_FACT_COLUMNS)
     values = ", ".join(_fact_expressions("source"))
-    updates = ", ".join(
-        f"{column}=excluded.{column}" for column in _FACT_COLUMNS if column != "alert_row_id"
-    )
     return (
-        f"INSERT INTO {FACTS_TABLE} ({columns}) "
-        f"SELECT {values} FROM {DEFAULT_SQLITE_TABLE} AS source WHERE 1 "
-        f"ON CONFLICT(alert_row_id) DO UPDATE SET {updates}"
+        f"INSERT OR REPLACE INTO {FACTS_TABLE} ({columns}) "
+        f"SELECT {values} FROM {DEFAULT_SQLITE_TABLE} AS source"
     )
 
 
@@ -189,6 +179,52 @@ def _triage_marker(prefix):
         f"(NULLIF({status_value}, '') IS NOT NULL "
         f"OR NULLIF({persisted_value}, '') IS NOT NULL "
         f"OR {report_value} IS NOT NULL)"
+    )
+
+
+def _column_exists(conn, table_name, column_name):
+    return any(
+        str(row[1]) == column_name
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    )
+
+
+def _add_column_if_missing(conn, table_name, column_name, column_definition):
+    if not _column_exists(conn, table_name, column_name):
+        conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+
+
+def _drop_dashboard_triggers(conn):
+    for trigger_name in (
+        "soc_dashboard_fact_insert",
+        "soc_dashboard_fact_update",
+        "soc_dashboard_fact_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+
+
+def _ensure_alert_record_columns(conn):
+    for column_name, column_definition in (
+        ("row_id", "TEXT"),
+        ("record_id", "TEXT"),
+        ("source_file", "TEXT"),
+        ("line_number", "INTEGER"),
+        ("source_type", "TEXT"),
+        ("threat_name", "TEXT"),
+        ("is_duplicate", "INTEGER DEFAULT 0"),
+    ):
+        _add_column_if_missing(
+            conn,
+            DEFAULT_SQLITE_TABLE,
+            column_name,
+            column_definition,
+        )
+    conn.execute(
+        f"UPDATE {DEFAULT_SQLITE_TABLE} "
+        f"SET row_id = CAST(rowid AS TEXT) "
+        f"WHERE row_id IS NULL OR row_id = ''"
     )
 
 
@@ -209,8 +245,10 @@ def _create_dashboard_triggers(conn):
             INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
                 event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
             )
-            SELECT NEW.row_id || ':insert:' || COALESCE({new_persisted}, {new_status}, CAST(NEW.rowid AS TEXT)),
-                   NEW.rowid, NEW.row_id, NEW.asset_date, NEW.event_time, NEW.record_json
+            SELECT COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)) ||
+                       ':insert:' || COALESCE({new_persisted}, {new_status}, CAST(NEW.rowid AS TEXT)),
+                   NEW.rowid, COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)),
+                   NEW.asset_date, NEW.event_time, NEW.record_json
             WHERE {_triage_marker('NEW')};
         END
         """
@@ -225,8 +263,10 @@ def _create_dashboard_triggers(conn):
             INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
                 event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
             )
-            SELECT NEW.row_id || ':update:' || strftime('%s', 'now') || ':' || lower(hex(randomblob(6))),
-                   NEW.rowid, NEW.row_id, NEW.asset_date, NEW.event_time, NEW.record_json
+            SELECT COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)) ||
+                       ':update:' || strftime('%s', 'now') || ':' || lower(hex(randomblob(6))),
+                   NEW.rowid, COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)),
+                   NEW.asset_date, NEW.event_time, NEW.record_json
             WHERE {_triage_marker('NEW')}
               AND NEW.record_json <> OLD.record_json
               AND (
@@ -267,6 +307,8 @@ def _ensure_sqlite_schema():
             ).fetchone()
             if not exists:
                 return False
+            _drop_dashboard_triggers(conn)
+            _ensure_alert_record_columns(conn)
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_alert_records_asset_event "
                 f"ON {DEFAULT_SQLITE_TABLE}(asset_date, event_time)"
@@ -276,6 +318,22 @@ def _ensure_sqlite_schema():
                 f"ON {DEFAULT_SQLITE_TABLE}(event_time)"
             )
             conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_alert_records_asset_date "
+                f"ON {DEFAULT_SQLITE_TABLE}(asset_date)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_alert_records_source_type "
+                f"ON {DEFAULT_SQLITE_TABLE}(source_type)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_alert_records_threat_name "
+                f"ON {DEFAULT_SQLITE_TABLE}(threat_name)"
+            )
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_records_row_id "
+                f"ON {DEFAULT_SQLITE_TABLE}(row_id)"
+            )
+            conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {META_TABLE} (
                     meta_key TEXT PRIMARY KEY,
@@ -283,6 +341,12 @@ def _ensure_sqlite_schema():
                 )
                 """
             )
+            version_row = conn.execute(
+                f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
+            ).fetchone()
+            needs_rebuild = not version_row or str(version_row[0]) != SCHEMA_VERSION
+            if needs_rebuild:
+                conn.execute(f"DROP TABLE IF EXISTS {FACTS_TABLE}")
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {FACTS_TABLE} (
@@ -348,10 +412,7 @@ def _ensure_sqlite_schema():
                 f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_activity_time "
                 f"ON {ACTIVITY_TABLE}(event_time, activity_id)"
             )
-            version_row = conn.execute(
-                f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
-            ).fetchone()
-            if not version_row or str(version_row[0]) != SCHEMA_VERSION:
+            if needs_rebuild:
                 conn.execute(_fact_backfill_sql())
                 persisted = _json_value("source", "_triage_persisted_at")
                 status_value = _json_value("source", "triage_status")
@@ -360,17 +421,19 @@ def _ensure_sqlite_schema():
                     INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
                         event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
                     )
-                    SELECT source.row_id || ':bootstrap:' ||
+                    SELECT COALESCE(NULLIF(source.row_id, ''), CAST(source.rowid AS TEXT)) || ':bootstrap:' ||
                            COALESCE({persisted}, {status_value}, CAST(source.rowid AS TEXT)),
-                           source.rowid, source.row_id, source.asset_date,
+                           source.rowid,
+                           COALESCE(NULLIF(source.row_id, ''), CAST(source.rowid AS TEXT)),
+                           source.asset_date,
                            source.event_time, source.record_json
                     FROM {DEFAULT_SQLITE_TABLE} AS source
                     WHERE {_triage_marker('source')}
                     """
                 )
                 conn.execute(
-                    f"INSERT INTO {META_TABLE}(meta_key, meta_value) VALUES('schema_version', ?) "
-                    f"ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value",
+                    f"INSERT OR REPLACE INTO {META_TABLE}(meta_key, meta_value) "
+                    f"VALUES('schema_version', ?)",
                     (SCHEMA_VERSION,),
                 )
             _create_dashboard_triggers(conn)
@@ -473,6 +536,25 @@ def _get_workflow_call_count(
             return cached["value"] if cached else empty
 
 
+def _get_workflow_progress(workflow_name: str) -> dict:
+    unavailable = {"callCount": None}
+    if not WORKFLOW_DB.is_file():
+        return unavailable
+
+    try:
+        with sqlite3.connect(WORKFLOW_DB) as conn:
+            row = conn.execute(
+                "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
+                (workflow_name,),
+            ).fetchone()
+    except Exception:
+        return unavailable
+
+    if row is None:
+        return {"callCount": 0}
+    return {"callCount": max(_safe_int(row[0]), 0)}
+
+
 SOURCE_DEFS = [
     ("ndr", "NDR", ("ndr", "tdp", "network")),
     ("edr", "HIDS", ("edr", "hids", "linux")),
@@ -517,6 +599,7 @@ async def get_activity(ctx, request):
 
 
 def _get_activity(params):
+    workflow_stats = _get_workflow_progress("stream_alert_denoise")
     _ensure_sqlite_schema()
     _maybe_prune_activity()
     settings = _sqlite_settings()
@@ -531,7 +614,13 @@ def _get_activity(params):
     limit = max(1, min(_safe_int(params.get("limit") or ACTIVITY_DEFAULT_LIMIT), ACTIVITY_MAX_LIMIT))
 
     if not db_path.is_file():
-        return _activity_response([], 0, "", cursor_reset=bool(raw_cursor))
+        return _activity_response(
+            [],
+            0,
+            "",
+            cursor_reset=bool(raw_cursor),
+            workflow_stats=workflow_stats,
+        )
 
     cursor = _decode_activity_cursor(raw_cursor) if raw_cursor else None
     cursor_reset = bool(raw_cursor and cursor is None)
@@ -556,6 +645,7 @@ def _get_activity(params):
                     latest_activity_id,
                     cursor_reset=cursor_reset,
                     recent_events=recent_events,
+                    workflow_stats=workflow_stats,
                 )
 
             last_row_id = max(_safe_int(cursor.get("lastRowId")), 0)
@@ -575,7 +665,7 @@ def _get_activity(params):
             )
     except Exception as exc:
         return {
-            **_activity_response([], 0, ""),
+            **_activity_response([], 0, "", workflow_stats=workflow_stats),
             "error": f"activity query failed: {exc}",
         }
 
@@ -595,6 +685,7 @@ def _get_activity(params):
             latest_activity_id,
             cursor_reset=cursor_reset,
             batch=batch,
+            workflow_stats=workflow_stats,
         ),
         "overflowCount": overflow_count,
     }
@@ -608,6 +699,7 @@ def _activity_response(
     cursor_reset=False,
     recent_events=None,
     batch=None,
+    workflow_stats=None,
 ):
     return {
         "cursor": _encode_activity_cursor(last_row_id, last_activity_id),
@@ -617,6 +709,7 @@ def _activity_response(
         "overflowCount": 0,
         "batch": batch or _empty_activity_batch(),
         "cursorReset": cursor_reset,
+        "workflowStats": workflow_stats or {"callCount": None},
     }
 
 
