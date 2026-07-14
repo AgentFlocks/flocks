@@ -14,6 +14,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate
+from flocks.channel.media_filename import sanitize_filename
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -94,6 +95,14 @@ class EmailChannel(ChannelPlugin):
             return "Invalid email address"
         if cfg["imapPort"] <= 0 or cfg["smtpPort"] <= 0:
             return "IMAP/SMTP ports must be positive integers"
+        if cfg["imapSecurity"] not in {"ssl", "starttls", "insecure"}:
+            return "IMAP security must be one of: ssl, starttls, insecure"
+        if cfg["smtpSecurity"] not in {"ssl", "starttls", "insecure"}:
+            return "SMTP security must be one of: ssl, starttls, insecure"
+        if cfg["imapSecurity"] == "insecure" and not cfg["allowInsecureConnections"]:
+            return "IMAP insecure mode requires allowInsecureConnections=true"
+        if cfg["smtpSecurity"] == "insecure" and not cfg["allowInsecureConnections"]:
+            return "SMTP insecure mode requires allowInsecureConnections=true"
         allowed = parse_allowed_senders(cfg)
         if not cfg["allowAll"] and not allowed:
             return "Email channel requires allowFrom or allowAll=true"
@@ -240,7 +249,7 @@ class EmailChannel(ChannelPlugin):
 
     def _test_connections(self) -> None:
         cfg = self._resolved
-        imap = imaplib.IMAP4_SSL(cfg["imapHost"], cfg["imapPort"], timeout=30)
+        imap = self._connect_imap()
         try:
             imap.login(cfg["address"], cfg["password"])
             imap.select("INBOX")
@@ -267,7 +276,7 @@ class EmailChannel(ChannelPlugin):
     def _fetch_new_messages(self) -> list[InboundMessage]:
         cfg = self._resolved
         parsed_messages: list[InboundMessage] = []
-        imap = imaplib.IMAP4_SSL(cfg["imapHost"], cfg["imapPort"], timeout=30)
+        imap = self._connect_imap()
         try:
             imap.login(cfg["address"], cfg["password"])
             imap.select("INBOX")
@@ -362,7 +371,7 @@ class EmailChannel(ChannelPlugin):
     def _connect_smtp(self) -> smtplib.SMTP:
         cfg = self._resolved
         context = ssl.create_default_context()
-        if int(cfg["smtpPort"]) == 465:
+        if cfg["smtpSecurity"] == "ssl":
             return smtplib.SMTP_SSL(
                 cfg["smtpHost"],
                 int(cfg["smtpPort"]),
@@ -374,12 +383,33 @@ class EmailChannel(ChannelPlugin):
             int(cfg["smtpPort"]),
             timeout=SMTP_CONNECT_TIMEOUT,
         )
-        try:
-            smtp.starttls(context=context)
-        except Exception:
-            smtp.close()
-            raise
+        if cfg["smtpSecurity"] == "starttls":
+            code, response = smtp.starttls(context=context)
+            if code != 220:
+                smtp.close()
+                raise RuntimeError(f"SMTP STARTTLS not available: {response}")
         return smtp
+
+    def _connect_imap(self) -> imaplib.IMAP4:
+        cfg = self._resolved
+        context = ssl.create_default_context()
+        if cfg["imapSecurity"] == "ssl":
+            return imaplib.IMAP4_SSL(
+                cfg["imapHost"],
+                int(cfg["imapPort"]),
+                timeout=30,
+                ssl_context=context,
+            )
+
+        imap = imaplib.IMAP4(cfg["imapHost"], int(cfg["imapPort"]), timeout=30)
+        if cfg["imapSecurity"] != "starttls":
+            return imap
+
+        code, response = imap.starttls(ssl_context=context)
+        if code != "OK":
+            imap.close()
+            raise RuntimeError(f"IMAP STARTTLS not available: {response}")
+        return imap
 
     def _send_email(
         self,
@@ -417,9 +447,11 @@ class EmailChannel(ChannelPlugin):
                 part = MIMEBase("application", "octet-stream")
                 part.set_payload(handle.read())
             encoders.encode_base64(part)
+            safe_name = sanitize_filename(attachment_path.name, fallback="attachment")
             part.add_header(
                 "Content-Disposition",
-                f"attachment; filename={attachment_path.name}",
+                "attachment",
+                filename=safe_name,
             )
             msg.attach(part)
 

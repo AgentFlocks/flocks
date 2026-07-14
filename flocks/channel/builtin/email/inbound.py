@@ -9,6 +9,7 @@ from email.header import decode_header
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage
+from flocks.channel.media_filename import sanitize_filename
 
 from .config import normalize_email_address
 
@@ -126,6 +127,7 @@ def attachment_summaries(
             continue
         filename = part.get_filename()
         filename = decode_header_value(filename) if filename else "attachment"
+        filename = sanitize_filename(filename, fallback="attachment")
         summaries.append(f"{filename} ({content_type})")
     return summaries
 
@@ -168,13 +170,16 @@ def verify_sender_authentication(
     if not headers:
         return False, "no Authentication-Results header"
 
+    normalized_expected = normalize_email_address(authserv_id).lower()
+    if not normalized_expected:
+        return False, "no authserv-id configured"
+
     trusted = None
     for raw in headers:
         value = " ".join(str(raw).split())
-        if authserv_id:
-            serv = value.split(";", 1)[0].strip().lower()
-            if not _domains_aligned(serv, authserv_id) and serv != authserv_id.lower():
-                continue
+        serv = value.split(";", 1)[0].strip()
+        if not _domains_aligned(serv, normalized_expected) and serv.lower() != normalized_expected:
+            continue
         trusted = value
         break
     if trusted is None:

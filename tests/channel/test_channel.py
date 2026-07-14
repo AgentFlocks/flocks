@@ -1423,7 +1423,7 @@ class TestMediaFilenameHelpers:
     def test_sanitize_filename_removes_path_separators(self):
         from flocks.channel.media_filename import sanitize_filename
 
-        assert sanitize_filename("../report.bin") == ".._report.bin"
+        assert sanitize_filename("../report.bin") == "report.bin"
 
 
 # ------------------------------------------------------------------

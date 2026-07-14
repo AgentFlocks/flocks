@@ -135,8 +135,11 @@ interface EmailChannelConfig {
   password?: string;
   imapHost?: string;
   imapPort?: number;
+  imapSecurity?: 'ssl' | 'starttls' | 'insecure';
   smtpHost?: string;
   smtpPort?: number;
+  smtpSecurity?: 'ssl' | 'starttls' | 'insecure';
+  allowInsecureConnections?: boolean;
   pollIntervalSeconds?: number;
   allowFrom?: string[];
   allowAll?: boolean;
@@ -220,12 +223,15 @@ function defaultEmailConfig(): EmailChannelConfig {
   return {
     enabled: false,
     imapPort: 993,
+    imapSecurity: 'ssl',
     smtpPort: 587,
+    smtpSecurity: 'starttls',
+    allowInsecureConnections: false,
     pollIntervalSeconds: 15,
     allowFrom: [],
     allowAll: false,
     skipExistingOnStart: true,
-    skipAttachments: false,
+    skipAttachments: true,
     requireAuthenticatedSender: true,
     defaultSubject: 'Flocks Agent',
   };
@@ -397,6 +403,37 @@ function NumberInput({
       onChange={(e) => onChange(Number(e.target.value))}
       className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
     />
+  );
+}
+
+function DatalistInput({
+  value,
+  onChange,
+  options,
+  placeholder,
+  listId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  placeholder?: string;
+  listId: string;
+}) {
+  return (
+    <>
+      <input
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
+      />
+      <datalist id={listId}>
+        {options.map((item) => (
+          <option value={item} key={item} />
+        ))}
+      </datalist>
+    </>
   );
 }
 
@@ -1475,10 +1512,29 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
 
       <Section title={t('email.servers')} description={t('email.serversDesc')}>
         <FieldRow label={t('email.imapHost')} required hint={t('email.imapHostHint')}>
-          <TextInput
+          <DatalistInput
             value={config.imapHost ?? ''}
             onChange={(v) => set('imapHost', v || undefined)}
             placeholder="imap.gmail.com"
+            options={[
+              'imap.gmail.com',
+              'imap.mail.yahoo.com',
+              'imap.mail.qq.com',
+              'imap.163.com',
+              'outlook.office365.com',
+            ]}
+            listId="email-imap-host-list"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
+          <Select
+            value={config.imapSecurity ?? 'ssl'}
+            onChange={(v) => set('imapSecurity', v as EmailChannelConfig['imapSecurity'])}
+            options={[
+              { value: 'ssl', label: t('email.securitySsl') },
+              { value: 'starttls', label: t('email.securityStarttls') },
+              { value: 'insecure', label: t('email.securityInsecure') },
+            ]}
           />
         </FieldRow>
         <FieldRow label={t('email.imapPort')} hint={t('email.imapPortHint')}>
@@ -1489,10 +1545,29 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
           />
         </FieldRow>
         <FieldRow label={t('email.smtpHost')} required hint={t('email.smtpHostHint')}>
-          <TextInput
+          <DatalistInput
             value={config.smtpHost ?? ''}
             onChange={(v) => set('smtpHost', v || undefined)}
             placeholder="smtp.gmail.com"
+            options={[
+              'smtp.gmail.com',
+              'smtp.office365.com',
+              'smtp.163.com',
+              'smtp.mail.qq.com',
+              'smtp-mail.outlook.com',
+            ]}
+            listId="email-smtp-host-list"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>
+          <Select
+            value={config.smtpSecurity ?? 'starttls'}
+            onChange={(v) => set('smtpSecurity', v as EmailChannelConfig['smtpSecurity'])}
+            options={[
+              { value: 'ssl', label: t('email.securitySsl') },
+              { value: 'starttls', label: t('email.securityStarttls') },
+              { value: 'insecure', label: t('email.securityInsecure') },
+            ]}
           />
         </FieldRow>
         <FieldRow label={t('email.smtpPort')} hint={t('email.smtpPortHint')}>
@@ -1528,15 +1603,24 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
             label={t('email.requireAuthenticatedSenderLabel')}
           />
         </FieldRow>
-        <FieldRow
-          label={t('email.authservId')}
-          required={(config.requireAuthenticatedSender ?? true) && !(config.allowAll ?? false)}
-          hint={t('email.authservIdHint')}
-        >
-          <TextInput
-            value={config.authservId ?? ''}
-            onChange={(v) => set('authservId', v || undefined)}
-            placeholder={t('email.optional')}
+        {config.requireAuthenticatedSender && (
+          <FieldRow
+            label={t('email.authservId')}
+            required={(config.requireAuthenticatedSender ?? true) && !(config.allowAll ?? false)}
+            hint={t('email.authservIdHint')}
+          >
+            <TextInput
+              value={config.authservId ?? ''}
+              onChange={(v) => set('authservId', v || undefined)}
+              placeholder={t('email.optional')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('email.allowInsecureConnections')} hint={t('email.allowInsecureConnectionsHint')}>
+          <Toggle
+            checked={config.allowInsecureConnections ?? false}
+            onChange={(v) => set('allowInsecureConnections', v)}
+            label={t('email.allowInsecureConnectionsLabel')}
           />
         </FieldRow>
       </Section>
@@ -1573,9 +1657,9 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
             label={t('email.skipExistingOnStartLabel')}
           />
         </FieldRow>
-        <FieldRow label={t('email.skipAttachments')} hint={t('email.skipAttachmentsHint')}>
+          <FieldRow label={t('email.skipAttachments')} hint={t('email.skipAttachmentsHint')}>
           <Toggle
-            checked={config.skipAttachments ?? false}
+            checked={config.skipAttachments ?? true}
             onChange={(v) => set('skipAttachments', v)}
             label={t('email.skipAttachmentsLabel')}
           />

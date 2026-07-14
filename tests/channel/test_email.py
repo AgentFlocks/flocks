@@ -130,7 +130,11 @@ def test_sender_authentication_accepts_dmarc_pass() -> None:
     msg = MIMEText("hi", "plain", "utf-8")
     msg["Authentication-Results"] = "mx.example.com; dmarc=pass header.from=example.com"
 
-    assert verify_sender_authentication(msg, "user@example.com")[0] is True
+    assert verify_sender_authentication(
+        msg,
+        "user@example.com",
+        authserv_id="mx.example.com",
+    )[0] is True
 
 
 def test_sender_authentication_uses_only_trusted_authserv_id() -> None:
@@ -143,6 +147,56 @@ def test_sender_authentication_uses_only_trusted_authserv_id() -> None:
         "user@example.com",
         authserv_id="mx.example.com",
     )[0] is False
+
+
+def test_sender_authentication_rejects_without_authserv_id() -> None:
+    msg = MIMEText("hi", "plain", "utf-8")
+    msg["Authentication-Results"] = "mx.example.com; dmarc=pass header.from=example.com"
+
+    assert verify_sender_authentication(msg, "user@example.com")[0] is False
+
+
+def test_build_resolved_defaults_apply_ssl_and_starttls_modes() -> None:
+    cfg = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "imapPort": 143,
+        "smtpPort": 465,
+    })
+
+    assert cfg["imapSecurity"] == "starttls"
+    assert cfg["smtpSecurity"] == "ssl"
+
+
+def test_custom_ports_require_explicit_security_mode() -> None:
+    plugin = EmailChannel()
+    assert (
+        plugin.validate_config({
+            "address": "agent@example.com",
+            "password": "pw",
+            "imapHost": "imap.example.com",
+            "smtpHost": "smtp.example.com",
+            "imapPort": 1143,
+            "smtpPort": 1993,
+        })
+        == "IMAP security must be one of: ssl, starttls, insecure"
+    )
+
+
+def test_validate_insecure_requires_explicit_risk_confirmation() -> None:
+    plugin = EmailChannel()
+    assert plugin.validate_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "imapPort": 1143,
+        "smtpPort": 1993,
+        "imapSecurity": "insecure",
+        "smtpSecurity": "insecure",
+    }) == "IMAP insecure mode requires allowInsecureConnections=true"
 
     trusted_pass = MIMEText("hi", "plain", "utf-8")
     trusted_pass["Authentication-Results"] = "attacker.example; dmarc=fail header.from=example.com"
@@ -354,3 +408,121 @@ def test_fetch_new_messages_skips_malformed_imap_response(monkeypatch: pytest.Mo
 
     assert len(messages) == 1
     assert messages[0].sender_id == "user@example.com"
+
+
+def test_connect_smtp_starttls_fails_when_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+
+        def starttls(self, context=None):
+            self.started = True
+            return 421, b"not-supported"
+
+        def login(self, *_args, **_kwargs):
+            pass
+
+        def send_message(self, _msg):
+            pass
+
+        def quit(self):
+            pass
+
+        def close(self):
+            pass
+
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "smtpSecurity": "starttls",
+        "smtpPort": 587,
+    })
+    fake = FakeSMTP()
+    monkeypatch.setattr("flocks.channel.builtin.email.channel.smtplib.SMTP", lambda *args, **kwargs: fake)
+
+    with pytest.raises(RuntimeError, match="SMTP STARTTLS not available"):
+        plugin._connect_smtp()
+
+
+def test_connect_imap_insecure_does_not_call_starttls(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeIMAP:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+
+        def starttls(self, ssl_context=None):
+            self.started = True
+            return ("OK", b"")
+
+        def close(self):
+            pass
+
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "imapSecurity": "insecure",
+        "imapPort": 1143,
+        "allowInsecureConnections": True,
+    })
+    plugin._resolved["smtpSecurity"] = "starttls"
+    plugin._resolved["smtpPort"] = 587
+    fake = FakeIMAP()
+    monkeypatch.setattr("flocks.channel.builtin.email.channel.imaplib.IMAP4", lambda *args, **kwargs: fake)
+
+    conn = plugin._connect_imap()
+    assert conn is fake
+    assert fake.started is False
+
+
+def test_connect_imap_starttls_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeIMAP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def starttls(self, ssl_context=None):
+            return ("NO", b"not supported")
+
+        def close(self):
+            pass
+
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "imapSecurity": "starttls",
+        "imapPort": 143,
+        "smtpSecurity": "starttls",
+        "smtpPort": 587,
+    })
+    monkeypatch.setattr("flocks.channel.builtin.email.channel.imaplib.IMAP4", FakeIMAP)
+
+    with pytest.raises(RuntimeError, match="IMAP STARTTLS not available"):
+        plugin._connect_imap()
+
+
+def test_build_inbound_message_sanitizes_attachment_filename() -> None:
+    from email.mime.multipart import MIMEMultipart
+
+    msg = MIMEMultipart()
+    msg["From"] = "User <user@example.com>"
+    msg["Subject"] = "Case"
+    msg["Message-ID"] = "<m1@example.com>"
+    msg.attach(MIMEText("See attachment", "plain", "utf-8"))
+
+    attachment = MIMEText("payload", "plain", "utf-8")
+    attachment.add_header("Content-Disposition", 'attachment; filename="../../report.exe"')
+    msg.attach(attachment)
+
+    parsed = build_inbound_message(msg, uid="1", account_id="default", skip_attachments=False)
+
+    assert parsed is not None
+    assert ".._" not in parsed.inbound.text
+    assert "../" not in parsed.inbound.text
+    assert "report" in parsed.inbound.text
