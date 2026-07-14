@@ -140,7 +140,12 @@ def _matches_allow_from(msg: InboundMessage, allow_from: list[str]) -> bool:
         try:
             from flocks.channel.builtin.whatsapp.config import matches_identifier
 
-            return matches_identifier(msg.sender_id, allow_from)
+            aliases = [msg.sender_id]
+            if isinstance(msg.raw, dict):
+                raw_aliases = msg.raw.get("senderAliases")
+                if isinstance(raw_aliases, list):
+                    aliases.extend(str(alias) for alias in raw_aliases if str(alias).strip())
+            return matches_identifier(aliases, allow_from)
         except Exception:
             log.warning("allowlist.whatsapp_match_failed", {"sender": msg.sender_id})
     return msg.sender_id in allow_from

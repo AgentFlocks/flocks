@@ -1059,10 +1059,10 @@ class TestMultimodalInput:
 # =====================================================================
 
 class TestCheckAllowlist:
-    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1", channel_id="test"):
+    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1", channel_id="test", raw=None):
         return InboundMessage(
             channel_id=channel_id, account_id="acc", message_id="m1",
-            sender_id=sender_id, chat_type=chat_type,
+            sender_id=sender_id, chat_type=chat_type, raw=raw,
         )
 
     def test_dm_open_allows_all(self):
@@ -1107,6 +1107,16 @@ class TestCheckAllowlist:
         from flocks.channel.inbound.dispatcher import _check_allowlist
         cfg = ChannelConfig(allow_from=["25482795991095@lid"])
         msg = self._make_msg(channel_id="whatsapp", chat_type=ChatType.GROUP, sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_sender_aliases(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["8618803405095"])
+        msg = self._make_msg(
+            channel_id="whatsapp",
+            sender_id="25482795991095",
+            raw={"senderAliases": ["25482795991095@lid", "8618803405095@s.whatsapp.net"]},
+        )
         assert _check_allowlist(msg, cfg) is True
 
 

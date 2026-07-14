@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage
 
-from .config import coerce_str, normalize_jid, strip_jid
+from .config import coerce_str, identifier_aliases, normalize_jid, strip_jid
 
 
 def _first_media(event: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
@@ -37,6 +37,8 @@ def _resolve_mentioned(event: dict[str, Any], text: str) -> tuple[bool, str]:
 def build_inbound_message(event: dict[str, Any], account_id: str = "default") -> Optional[InboundMessage]:
     chat_id = normalize_jid(coerce_str(event.get("chatId")))
     sender_id = normalize_jid(coerce_str(event.get("senderId")) or chat_id)
+    sender_alt_id = normalize_jid(coerce_str(event.get("senderAltId")))
+    chat_alt_id = normalize_jid(coerce_str(event.get("chatAltId")))
     message_id = coerce_str(event.get("messageId"))
     if not chat_id or not message_id:
         return None
@@ -51,6 +53,9 @@ def build_inbound_message(event: dict[str, Any], account_id: str = "default") ->
     sender_name = coerce_str(event.get("senderName")) or None
 
     mentioned, mention_text = _resolve_mentioned(event, text)
+    sender_aliases = identifier_aliases(sender_id, sender_alt_id, event.get("senderAliases"))
+    chat_aliases = identifier_aliases(chat_id, chat_alt_id, event.get("chatAliases"))
+    raw = {**event, "senderAliases": sender_aliases, "chatAliases": chat_aliases}
 
     return InboundMessage(
         channel_id="whatsapp",
@@ -67,6 +72,5 @@ def build_inbound_message(event: dict[str, Any], account_id: str = "default") ->
         thread_id=None,
         mentioned=mentioned,
         mention_text=mention_text,
-        raw=event,
+        raw=raw,
     )
-

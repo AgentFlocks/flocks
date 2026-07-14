@@ -553,12 +553,22 @@ class WhatsAppChannel(ChannelPlugin):
                 return False
             if self._dm_policy == "open":
                 return True
-            return matches_identifier(msg.sender_id, self._allow_from)
+            sender_aliases = []
+            if isinstance(msg.raw, dict):
+                raw_aliases = msg.raw.get("senderAliases")
+                if isinstance(raw_aliases, list):
+                    sender_aliases = raw_aliases
+            return matches_identifier([msg.sender_id, *sender_aliases], self._allow_from)
         if self._group_policy == "disabled":
             return False
         if self._group_policy == "open":
             return True
-        return matches_identifier(msg.chat_id, self._group_allow_from)
+        chat_aliases = []
+        if isinstance(msg.raw, dict):
+            raw_aliases = msg.raw.get("chatAliases")
+            if isinstance(raw_aliases, list):
+                chat_aliases = raw_aliases
+        return matches_identifier([msg.chat_id, *chat_aliases], self._group_allow_from)
 
     def _passes_group_trigger(self, msg: InboundMessage) -> bool:
         if self._group_trigger == "all":

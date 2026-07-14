@@ -8,6 +8,7 @@ import pytest
 from flocks.channel.base import ChatType, OutboundContext
 from flocks.channel.builtin.whatsapp.channel import WhatsAppChannel
 from flocks.channel.builtin.whatsapp.config import (
+    identifier_aliases,
     matches_identifier,
     normalize_jid,
     parse_target,
@@ -57,8 +58,18 @@ def test_strip_jid_and_allowlist_alias_matching():
     assert strip_jid("15551234567@s.whatsapp.net") == "15551234567"
     assert matches_identifier("15551234567@s.whatsapp.net", ["+15551234567"])
     assert matches_identifier("abc123@lid", ["abc123"])
+    assert matches_identifier(["25482795991095@lid", "8618803405095@s.whatsapp.net"], ["8618803405095"])
     assert matches_identifier("120363001234@g.us", ["120363001234@g.us"])
     assert not matches_identifier("15550000000@s.whatsapp.net", ["15551234567"])
+
+
+def test_identifier_aliases_preserves_lid_and_phone_aliases():
+    assert identifier_aliases("25482795991095@lid", "8618803405095@s.whatsapp.net") == [
+        "25482795991095@lid",
+        "25482795991095",
+        "8618803405095@s.whatsapp.net",
+        "8618803405095",
+    ]
 
 
 def test_build_inbound_dm_message():
@@ -78,6 +89,33 @@ def test_build_inbound_dm_message():
     assert msg.chat_id == "15551234567@s.whatsapp.net"
     assert msg.text == "hello"
     assert msg.message_id == "15551234567@s.whatsapp.net:m1"
+
+
+def test_build_inbound_message_preserves_sender_alt_aliases():
+    msg = build_inbound_message({
+        "messageId": "m1",
+        "chatId": "25482795991095@lid",
+        "chatAltId": "8618803405095@s.whatsapp.net",
+        "senderId": "25482795991095@lid",
+        "senderAltId": "8618803405095@s.whatsapp.net",
+        "body": "hello",
+        "isGroup": False,
+    })
+
+    assert msg is not None
+    assert msg.sender_id == "25482795991095"
+    assert msg.raw["senderAliases"] == [
+        "25482795991095@lid",
+        "25482795991095",
+        "8618803405095@s.whatsapp.net",
+        "8618803405095",
+    ]
+    assert msg.raw["chatAliases"] == [
+        "25482795991095@lid",
+        "25482795991095",
+        "8618803405095@s.whatsapp.net",
+        "8618803405095",
+    ]
 
 
 def test_build_inbound_group_mention_message():
@@ -115,6 +153,22 @@ def test_build_inbound_media_message(tmp_path: Path):
     assert msg is not None
     assert msg.media_url == str(media)
     assert msg.media_mime == "image/jpeg"
+
+
+def test_whatsapp_channel_allowlist_matches_sender_alt_alias():
+    channel = WhatsAppChannel()
+    channel._dm_policy = "allowlist"  # type: ignore[attr-defined]
+    channel._allow_from = ["8618803405095"]  # type: ignore[attr-defined]
+    msg = build_inbound_message({
+        "messageId": "m1",
+        "chatId": "25482795991095@lid",
+        "senderId": "25482795991095@lid",
+        "senderAltId": "8618803405095@s.whatsapp.net",
+        "body": "hello",
+    })
+
+    assert msg is not None
+    assert channel._is_allowed(msg) is True  # type: ignore[attr-defined]
 
 
 def test_validate_config_requires_valid_mode_and_pairing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

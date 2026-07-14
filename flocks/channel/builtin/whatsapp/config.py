@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 DEFAULT_BRIDGE_PORT = 3100
 DEFAULT_TEXT_BATCH_DELAY_SECONDS = 3.0
@@ -101,6 +101,28 @@ def strip_jid(value: str) -> str:
     return raw.lstrip("+")
 
 
+def identifier_aliases(*values: Any) -> list[str]:
+    """Return stable WhatsApp identity aliases while preserving order."""
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            items: Iterable[Any] = value
+        else:
+            items = (value,)
+        for item in items:
+            raw = coerce_str(item)
+            if not raw:
+                continue
+            normalized = normalize_jid(raw)
+            stripped = strip_jid(normalized)
+            for alias in (raw, normalized, stripped):
+                if alias and alias not in seen:
+                    aliases.append(alias)
+                    seen.add(alias)
+    return aliases
+
+
 def parse_target(raw: str) -> str:
     value = coerce_str(raw)
     for prefix in ("whatsapp:", "wa:", "user:", "group:"):
@@ -110,14 +132,14 @@ def parse_target(raw: str) -> str:
     return normalize_jid(value)
 
 
-def matches_identifier(candidate: str, allowed: list[str]) -> bool:
+def matches_identifier(candidate: str | list[str], allowed: list[str]) -> bool:
     if not allowed:
         return False
     if "*" in allowed:
         return True
-    aliases = {candidate, normalize_jid(candidate), strip_jid(candidate)}
+    aliases = set(identifier_aliases(candidate))
     for entry in allowed:
-        aliases_for_entry = {entry, normalize_jid(entry), strip_jid(entry)}
+        aliases_for_entry = set(identifier_aliases(entry))
         if aliases & aliases_for_entry:
             return True
     return False
