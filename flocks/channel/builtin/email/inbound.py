@@ -9,6 +9,7 @@ from email.header import decode_header
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage
+from flocks.channel.media_filename import sanitize_filename
 
 from .config import normalize_email_address
 
@@ -28,7 +29,7 @@ _AUTOMATED_HEADERS = {
 
 _AUTH_METHOD_RE = re.compile(r"\b(dmarc|dkim|spf)\s*=\s*([a-z]+)", re.IGNORECASE)
 _AUTH_PROP_RE = re.compile(
-    r"\b(header\.from|header\.d|smtp\.mailfrom|smtp\.from|envelope-from)\s*=\s*([^\s;]+)",
+    r"\b(header\.from|header\.d|smtp\.mailfrom|smtp\.helo|smtp\.from|envelope-from)\s*=\s*([^\s;]+)",
     re.IGNORECASE,
 )
 
@@ -126,6 +127,7 @@ def attachment_summaries(
             continue
         filename = part.get_filename()
         filename = decode_header_value(filename) if filename else "attachment"
+        filename = sanitize_filename(filename, fallback="attachment")
         summaries.append(f"{filename} ({content_type})")
     return summaries
 
@@ -168,13 +170,16 @@ def verify_sender_authentication(
     if not headers:
         return False, "no Authentication-Results header"
 
+    normalized_expected = normalize_email_address(authserv_id).lower()
+    if not normalized_expected:
+        return False, "no authserv-id configured"
+
     trusted = None
     for raw in headers:
         value = " ".join(str(raw).split())
-        if authserv_id:
-            serv = value.split(";", 1)[0].strip().lower()
-            if not _domains_aligned(serv, authserv_id) and serv != authserv_id.lower():
-                continue
+        serv = value.split(";", 1)[0].strip()
+        if not _domains_aligned(serv, normalized_expected) and serv.lower() != normalized_expected:
+            continue
         trusted = value
         break
     if trusted is None:
@@ -183,19 +188,34 @@ def verify_sender_authentication(
     methods = {m.lower(): r.lower() for m, r in _AUTH_METHOD_RE.findall(trusted)}
     props = {p.lower(): v.strip().strip('"') for p, v in _AUTH_PROP_RE.findall(trusted)}
 
+    visible_from_domain = _domain_of(props.get("header.from", "")) or from_domain
+    if not _domains_aligned(visible_from_domain, from_domain):
+        return False, "authentication failed (header.from misaligned)"
+
+    aligned_methods: list[str] = []
+
     if methods.get("dmarc") == "pass":
-        return True, "dmarc=pass"
+        if props.get("header.from") and _domains_aligned(_domain_of(props.get("header.from", "")), from_domain):
+            aligned_methods.append("dmarc")
 
     if methods.get("spf") == "pass":
-        spf_domain = _domain_of(props.get("smtp.mailfrom", "")) or props.get("smtp.from", "") or props.get("envelope-from", "")
-        spf_domain = _domain_of(spf_domain) if "@" in spf_domain else spf_domain
-        if _domains_aligned(spf_domain, from_domain):
-            return True, "spf=pass aligned"
+        spf_domain = (
+            _domain_of(props.get("smtp.mailfrom", ""))
+            or _domain_of(props.get("smtp.helo", ""))
+            or _domain_of(props.get("smtp.from", ""))
+            or _domain_of(props.get("envelope-from", ""))
+        )
+        if _domains_aligned(spf_domain, visible_from_domain):
+            aligned_methods.append("spf")
 
     if methods.get("dkim") == "pass":
-        dkim_domain = props.get("header.d", "") or _domain_of(props.get("header.from", ""))
-        if _domains_aligned(dkim_domain, from_domain):
-            return True, "dkim=pass aligned"
+        dkim_domain = _domain_of(props.get("header.d", ""))
+        if dkim_domain and _domains_aligned(dkim_domain, visible_from_domain):
+            aligned_methods.append("dkim")
+
+    if aligned_methods:
+        method_text = ", ".join(aligned_methods)
+        return True, f"authenticated ({method_text})"
 
     return False, f"authentication failed ({trusted[:120]})"
 

@@ -40,6 +40,27 @@ def coerce_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def coerce_security_mode(value: Any) -> str:
+    mode = coerce_str(value).lower().strip()
+    if mode in {"ssl", "starttls", "insecure"}:
+        return mode
+    return ""
+
+
+def default_security(port: int, protocol: str) -> str:
+    if protocol == "imap":
+        if port == 993:
+            return "ssl"
+        if port == 143:
+            return "starttls"
+    elif protocol == "smtp":
+        if port == 465:
+            return "ssl"
+        if port == 587:
+            return "starttls"
+    return ""
+
+
 def normalize_email_address(raw: str) -> str:
     value = coerce_str(raw).lower()
     if value.startswith("mailto:"):
@@ -76,14 +97,25 @@ def is_valid_email(raw: str) -> bool:
 
 def resolved_config(config: dict[str, Any]) -> dict[str, Any]:
     """Return normalized Email channel config with defaults applied."""
+    imap_port = coerce_int(config.get("imapPort") or config.get("imap_port"), 993)
+    smtp_port = coerce_int(config.get("smtpPort") or config.get("smtp_port"), 587)
+    imap_security = coerce_security_mode(config.get("imapSecurity") or config.get("imap_security"))
+    smtp_security = coerce_security_mode(config.get("smtpSecurity") or config.get("smtp_security"))
+    if not imap_security:
+        imap_security = default_security(imap_port, "imap")
+    if not smtp_security:
+        smtp_security = default_security(smtp_port, "smtp")
+
     return {
         **config,
         "address": normalize_email_address(coerce_str(config.get("address"))),
         "password": coerce_str(config.get("password")),
         "imapHost": coerce_str(config.get("imapHost") or config.get("imap_host")),
-        "imapPort": coerce_int(config.get("imapPort") or config.get("imap_port"), 993),
+        "imapPort": imap_port,
+        "imapSecurity": imap_security,
         "smtpHost": coerce_str(config.get("smtpHost") or config.get("smtp_host")),
-        "smtpPort": coerce_int(config.get("smtpPort") or config.get("smtp_port"), 587),
+        "smtpPort": smtp_port,
+        "smtpSecurity": smtp_security,
         "pollIntervalSeconds": max(
             coerce_int(
                 config.get("pollIntervalSeconds") or config.get("pollInterval") or config.get("poll_interval"),
@@ -92,8 +124,9 @@ def resolved_config(config: dict[str, Any]) -> dict[str, Any]:
             5,
         ),
         "skipExistingOnStart": coerce_bool(config.get("skipExistingOnStart"), True),
-        "skipAttachments": coerce_bool(config.get("skipAttachments"), False),
+        "skipAttachments": coerce_bool(config.get("skipAttachments"), True),
         "allowAll": coerce_bool(config.get("allowAll"), False),
+        "allowInsecureConnections": coerce_bool(config.get("allowInsecureConnections"), False),
         "requireAuthenticatedSender": coerce_bool(
             config.get("requireAuthenticatedSender"),
             True,

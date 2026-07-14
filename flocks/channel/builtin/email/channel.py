@@ -26,6 +26,7 @@ from flocks.channel.base import (
     InboundMessage,
     OutboundContext,
 )
+from flocks.channel.media_filename import sanitize_filename
 from flocks.utils.log import Log
 
 from .config import (
@@ -43,6 +44,71 @@ from .inbound import (
 log = Log.create(service="channel.email")
 
 SMTP_CONNECT_TIMEOUT = 30
+
+
+def _create_ipv4_connection(
+    host: str,
+    port: int,
+    timeout: float,
+    source_address: Any = None,
+) -> socket.socket:
+    """Create an SMTP socket using IPv4 addresses only."""
+    last_error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in socket.getaddrinfo(
+        host,
+        port,
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+    ):
+        sock = socket.socket(family, socktype, proto)
+        sock.settimeout(timeout)
+        try:
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"No IPv4 address found for {host}:{port}")
+
+
+class _IPv4SMTP(smtplib.SMTP):
+    def _get_socket(self, host, port, timeout):  # type: ignore[override]
+        return _create_ipv4_connection(
+            host,
+            port,
+            timeout,
+            source_address=self.source_address,
+        )
+
+
+class _IPv4SMTP_SSL(smtplib.SMTP_SSL):
+    def _get_socket(self, host, port, timeout):  # type: ignore[override]
+        raw_sock = _create_ipv4_connection(
+            host,
+            port,
+            timeout,
+            source_address=self.source_address,
+        )
+        return self.context.wrap_socket(
+            raw_sock,
+            server_hostname=getattr(self, "_host", host),
+        )
+
+
+def _send_imap_id(imap: imaplib.IMAP4) -> None:
+    """Best-effort RFC 2971 IMAP ID command for providers such as NetEase."""
+    try:
+        imap.xatom(
+            "ID",
+            '("name" "flocks" "version" "0" "vendor" "Flocks" '
+            '"support-email" "noreply@flocks.local")',
+        )
+    except Exception as exc:
+        log.debug("email.imap.id_unsupported", {"error": str(exc)})
 
 
 class EmailChannel(ChannelPlugin):
@@ -94,6 +160,14 @@ class EmailChannel(ChannelPlugin):
             return "Invalid email address"
         if cfg["imapPort"] <= 0 or cfg["smtpPort"] <= 0:
             return "IMAP/SMTP ports must be positive integers"
+        if cfg["imapSecurity"] not in {"ssl", "starttls", "insecure"}:
+            return "IMAP security must be one of: ssl, starttls, insecure"
+        if cfg["smtpSecurity"] not in {"ssl", "starttls", "insecure"}:
+            return "SMTP security must be one of: ssl, starttls, insecure"
+        if cfg["imapSecurity"] == "insecure" and not cfg["allowInsecureConnections"]:
+            return "IMAP insecure mode requires allowInsecureConnections=true"
+        if cfg["smtpSecurity"] == "insecure" and not cfg["allowInsecureConnections"]:
+            return "SMTP insecure mode requires allowInsecureConnections=true"
         allowed = parse_allowed_senders(cfg)
         if not cfg["allowAll"] and not allowed:
             return "Email channel requires allowFrom or allowAll=true"
@@ -125,11 +199,13 @@ class EmailChannel(ChannelPlugin):
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._test_connections)
+        self.mark_connected()
 
         abort = abort_event or asyncio.Event()
         while not abort.is_set():
             try:
                 messages = await loop.run_in_executor(None, self._fetch_new_messages)
+                self.mark_connected()
                 for message in messages:
                     if abort.is_set():
                         break
@@ -240,9 +316,10 @@ class EmailChannel(ChannelPlugin):
 
     def _test_connections(self) -> None:
         cfg = self._resolved
-        imap = imaplib.IMAP4_SSL(cfg["imapHost"], cfg["imapPort"], timeout=30)
+        imap = self._connect_imap()
         try:
             imap.login(cfg["address"], cfg["password"])
+            _send_imap_id(imap)
             imap.select("INBOX")
             if cfg["skipExistingOnStart"]:
                 status, data = imap.uid("search", None, "ALL")
@@ -267,9 +344,10 @@ class EmailChannel(ChannelPlugin):
     def _fetch_new_messages(self) -> list[InboundMessage]:
         cfg = self._resolved
         parsed_messages: list[InboundMessage] = []
-        imap = imaplib.IMAP4_SSL(cfg["imapHost"], cfg["imapPort"], timeout=30)
+        imap = self._connect_imap()
         try:
             imap.login(cfg["address"], cfg["password"])
+            _send_imap_id(imap)
             imap.select("INBOX")
             status, data = imap.uid("search", None, "UNSEEN")
             if status != "OK" or not data or not data[0]:
@@ -278,25 +356,36 @@ class EmailChannel(ChannelPlugin):
             for uid in data[0].split():
                 if uid in self._seen_uids:
                     continue
-                self._seen_uids.add(uid)
-                self._trim_seen_uids()
 
                 status, msg_data = imap.uid("fetch", uid, "(RFC822)")
                 if status != "OK":
                     continue
                 try:
                     raw_email = msg_data[0][1]
+                    if not isinstance(raw_email, (bytes, bytearray)):
+                        log.warning("email.imap.non_bytes_payload", {"uid": uid.decode(errors="replace")})
+                        continue
+
+                    message = email_lib.message_from_bytes(raw_email)
+                    parsed = self._parse_and_authorize(
+                        message,
+                        uid.decode(errors="replace"),
+                    )
                 except (IndexError, TypeError):
                     log.warning("email.imap.malformed_response", {"uid": uid.decode(errors="replace")})
                     continue
-                if not isinstance(raw_email, (bytes, bytearray)):
-                    log.warning("email.imap.non_bytes_payload", {"uid": uid.decode(errors="replace")})
+                except Exception as exc:
+                    log.warning("email.imap.parse_message_failed", {
+                        "uid": uid.decode(errors="replace"),
+                        "error": str(exc),
+                    })
                     continue
 
-                message = email_lib.message_from_bytes(raw_email)
-                parsed = self._parse_and_authorize(message, uid.decode(errors="replace"))
                 if parsed is not None:
                     parsed_messages.append(parsed)
+
+                self._seen_uids.add(uid)
+                self._trim_seen_uids()
         finally:
             try:
                 imap.logout()
@@ -362,24 +451,73 @@ class EmailChannel(ChannelPlugin):
     def _connect_smtp(self) -> smtplib.SMTP:
         cfg = self._resolved
         context = ssl.create_default_context()
-        if int(cfg["smtpPort"]) == 465:
-            return smtplib.SMTP_SSL(
-                cfg["smtpHost"],
-                int(cfg["smtpPort"]),
+        host = cfg["smtpHost"]
+        port = int(cfg["smtpPort"])
+
+        def connect_once(*, ipv4_only: bool = False) -> smtplib.SMTP:
+            smtp_cls = _IPv4SMTP if ipv4_only else smtplib.SMTP
+            smtp_ssl_cls = _IPv4SMTP_SSL if ipv4_only else smtplib.SMTP_SSL
+            if cfg["smtpSecurity"] == "ssl":
+                return smtp_ssl_cls(
+                    host,
+                    port,
+                    timeout=SMTP_CONNECT_TIMEOUT,
+                    context=context,
+                )
+            smtp = smtp_cls(
+                host,
+                port,
                 timeout=SMTP_CONNECT_TIMEOUT,
-                context=context,
             )
-        smtp = smtplib.SMTP(
-            cfg["smtpHost"],
-            int(cfg["smtpPort"]),
-            timeout=SMTP_CONNECT_TIMEOUT,
-        )
+            if cfg["smtpSecurity"] != "starttls":
+                return smtp
+            try:
+                code, response = smtp.starttls(context=context)
+            except Exception:
+                smtp.close()
+                raise
+            if code != 220:
+                smtp.close()
+                raise RuntimeError(f"SMTP STARTTLS not available: {response}")
+            return smtp
+
         try:
-            smtp.starttls(context=context)
+            return connect_once()
+        except (socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
+            if isinstance(exc, ssl.SSLError):
+                raise
+            return connect_once(ipv4_only=True)
+
+    def _connect_imap(self) -> imaplib.IMAP4:
+        cfg = self._resolved
+        context = ssl.create_default_context()
+        if cfg["imapSecurity"] == "ssl":
+            return imaplib.IMAP4_SSL(
+                cfg["imapHost"],
+                int(cfg["imapPort"]),
+                timeout=30,
+                ssl_context=context,
+            )
+
+        imap = imaplib.IMAP4(cfg["imapHost"], int(cfg["imapPort"]), timeout=30)
+        if cfg["imapSecurity"] != "starttls":
+            return imap
+
+        try:
+            code, response = imap.starttls(ssl_context=context)
         except Exception:
-            smtp.close()
+            imap.close()
             raise
-        return smtp
+        if isinstance(code, (bytes, bytearray)):
+            code = code.decode("ascii", errors="ignore")
+        if isinstance(response, (bytes, bytearray)):
+            response = response.decode("ascii", errors="ignore")
+        code = str(code or "").strip().upper()
+        response = str(response or "").strip()
+        if code != "OK":
+            imap.close()
+            raise RuntimeError(f"IMAP STARTTLS not available: {response}")
+        return imap
 
     def _send_email(
         self,
@@ -417,9 +555,11 @@ class EmailChannel(ChannelPlugin):
                 part = MIMEBase("application", "octet-stream")
                 part.set_payload(handle.read())
             encoders.encode_base64(part)
+            safe_name = sanitize_filename(attachment_path.name, fallback="attachment")
             part.add_header(
                 "Content-Disposition",
-                f"attachment; filename={attachment_path.name}",
+                "attachment",
+                filename=safe_name,
             )
             msg.attach(part)
 
