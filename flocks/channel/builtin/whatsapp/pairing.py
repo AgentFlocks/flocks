@@ -14,7 +14,7 @@ from typing import Optional
 
 from flocks.utils.log import Log
 
-from .bridge_runtime import ensure_bridge_deps
+from .bridge_runtime import NODE_USE_BUNDLED_CA_OPTION, append_node_options, ensure_bridge_deps
 from .config import default_bridge_dir, default_session_path, find_executable
 
 log = Log.create(service="channel.whatsapp.pairing")
@@ -160,6 +160,7 @@ async def start_pairing(
 
         pairing_id = uuid.uuid4().hex
         env = os.environ.copy()
+        append_node_options(env, NODE_USE_BUNDLED_CA_OPTION)
         env.setdefault("FLOCKS_WHATSAPP_PAIR_TIMEOUT_MS", "120000")
 
         proc = await asyncio.create_subprocess_exec(

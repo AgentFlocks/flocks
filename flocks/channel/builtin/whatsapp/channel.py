@@ -48,7 +48,7 @@ from .config import (
     matches_identifier,
     parse_target,
 )
-from .bridge_runtime import config_hash, ensure_bridge_deps, file_hash
+from .bridge_runtime import NODE_USE_BUNDLED_CA_OPTION, append_node_options, config_hash, ensure_bridge_deps, file_hash
 from .format import format_for_whatsapp
 from .inbound import build_inbound_message
 
@@ -411,6 +411,7 @@ class WhatsAppChannel(ChannelPlugin):
         self._bridge_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._bridge_log_fh = open(self._bridge_log_path, "a", encoding="utf-8")
         env = os.environ.copy()
+        append_node_options(env, NODE_USE_BUNDLED_CA_OPTION)
         env["FLOCKS_WHATSAPP_MEDIA_DIR"] = str(self._media_cache_dir)
         env["FLOCKS_WHATSAPP_BRIDGE_TOKEN"] = self._bridge_token
         env["FLOCKS_WHATSAPP_CONFIG_HASH"] = self._bridge_config_hash()
