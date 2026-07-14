@@ -169,17 +169,19 @@ class SessionTitle:
                                 "providerToolsEnabled": False,
                             },
                         })
+                        hook_output = getattr(llm_before_ctx, "output", None) or {}
                         title_messages, provider_options = apply_hook_request_output(
                             title_messages,
                             provider_options,
-                            llm_before_ctx.output or {},
+                            hook_output,
                         )
-                        replacements = stream_text_replacements_from_hook_output(llm_before_ctx.output or {})
+                        replacements = stream_text_replacements_from_hook_output(hook_output)
                 except Exception as hook_err:
-                    log.debug("title.llm_before_hook.error", {
+                    log.error("title.llm_before_hook.error", {
                         "session_id": session_id,
                         "error": str(hook_err),
                     })
+                    raise RuntimeError("title llm_before hook failed; request was not sent") from hook_err
 
                 provider_options.setdefault("max_tokens", 50)
                 async for chunk in provider.chat_stream(

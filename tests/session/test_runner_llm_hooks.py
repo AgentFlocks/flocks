@@ -248,6 +248,134 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_call_llm_blocks_provider_when_llm_before_hook_fails(monkeypatch: pytest.MonkeyPatch):
+    runner = _make_runner("ses_runner_llm_before_fail_closed")
+    assistant_msg = SimpleNamespace(id="msg_assistant_before_fail")
+    agent = SimpleNamespace(name="rex")
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(side_effect=lambda stage, _metadata=None: stage == runner_mod.HookStage.LLM_BEFORE),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "run_llm_before",
+        AsyncMock(side_effect=RuntimeError("redaction unavailable")),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "langfuse_is_active",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
+        _FakeToolAccumulator,
+    )
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            raise AssertionError("provider must not be called when llm_before fails")
+
+    with pytest.raises(RuntimeError, match="request was not sent"):
+        await runner._call_llm(
+            provider=_Provider(),
+            messages=[ChatMessage(role="user", content="email alice@example.com")],
+            tools=[],
+            agent=agent,
+            assistant_msg=assistant_msg,
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypatch: pytest.MonkeyPatch):
+    runner = _make_runner("ses_runner_langfuse_redacted")
+    assistant_msg = SimpleNamespace(id="msg_assistant_langfuse_redacted")
+    agent = SimpleNamespace(name="rex")
+    generation_inputs: list[list[dict[str, object]]] = []
+    trace_inputs: list[dict[str, object]] = []
+
+    async def _before(payload):
+        raw_messages = payload["request"]["messages"]
+        assert raw_messages[0]["content"] == "email alice@example.com"
+        return SimpleNamespace(
+            output={
+                "request": {
+                    **payload["request"],
+                    "messages": [{"role": "user", "content": "email [[V_EMAIL_1]]"}],
+                    "providerOptions": {},
+                },
+                "redaction": {
+                    "streamTextReplacements": [
+                        {"placeholder": "[[V_EMAIL_1]]", "value": "alice@example.com"}
+                    ],
+                },
+            }
+        )
+
+    def _trace_scope(**kwargs):
+        trace_inputs.append(kwargs["input"])
+        return SimpleNamespace(observation="trace")
+
+    def _generation_scope(**kwargs):
+        generation_inputs.append(kwargs["input"])
+        return SimpleNamespace(observation="generation")
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(side_effect=lambda stage, _metadata=None: stage == runner_mod.HookStage.LLM_BEFORE),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "run_llm_before",
+        AsyncMock(side_effect=_before),
+    )
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: True)
+    monkeypatch.setattr(runner_mod, "trace_scope", _trace_scope)
+    monkeypatch.setattr(runner_mod, "generation_scope", _generation_scope)
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
+        _FakeToolAccumulator,
+    )
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            assert kwargs["messages"][0].content == "email [[V_EMAIL_1]]"
+
+            async def _gen():
+                yield SimpleNamespace(delta="done", finish_reason="stop")
+
+            return _gen()
+
+    result = await runner._call_llm(
+        provider=_Provider(),
+        messages=[ChatMessage(role="user", content="email alice@example.com")],
+        tools=[],
+        agent=agent,
+        assistant_msg=assistant_msg,
+    )
+
+    assert result.action == "stop"
+    assert generation_inputs
+    assert trace_inputs
+    assert "alice@example.com" not in str(generation_inputs)
+    assert "alice@example.com" not in str(trace_inputs)
+    assert "[[V_EMAIL_1]]" in str(generation_inputs)
+
+
+@pytest.mark.asyncio
 async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_error")
     assistant_msg = SimpleNamespace(id="msg_assistant_error")

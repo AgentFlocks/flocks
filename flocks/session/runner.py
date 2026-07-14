@@ -2542,64 +2542,8 @@ class SessionRunner:
         reasoning_id_counter = 0
         stream_finish_reason: Optional[str] = None
 
-        # -- Observability: create trace & generation scopes (safe no-op when
-        # Langfuse is unconfigured).  All observability calls are wrapped in
-        # try/except so they never break the core session flow.
         trace_ctx = None
         generation_ctx = None
-        if langfuse_is_active():
-            try:
-                input_preview = []
-                for _msg in messages[-12:]:
-                    _mc = _msg.content or ""
-                    input_preview.append(
-                        {"role": _msg.role, "chars": len(_mc), "preview": _mc[:240]}
-                    )
-
-                trace_tags = [
-                    f"session:{self.session.id}",
-                    f"step:{self._step}",
-                    f"session_step:{self.session.id}:{self._step}",
-                    f"agent:{agent.name}",
-                    f"provider:{self.provider_id}",
-                ]
-                trace_ctx = trace_scope(
-                    name="SessionRunner.step",
-                    session_id=self.session.id,
-                    tags=trace_tags,
-                    input={
-                        "step": self._step,
-                        "message_count": len(messages),
-                        "tool_count": len(tools),
-                        "last_user_preview": next(
-                            ((m.content or "")[:280] for m in reversed(messages) if m.role == "user"),
-                            "",
-                        ),
-                    },
-                    metadata={
-                        "provider_id": self.provider_id,
-                        "model_id": self.model_id,
-                        "agent": agent.name,
-                        "workspace": self.session.directory,
-                    },
-                )
-                generation_ctx = generation_scope(
-                    parent=trace_ctx.observation,
-                    name="LLM.generate",
-                    model=self.model_id,
-                    input=input_preview,
-                    metadata={
-                        "provider_id": self.provider_id,
-                        "session_id": self.session.id,
-                        "step": self._step,
-                        "tool_names": [t.get("function", {}).get("name", "") for t in tools][:50],
-                    },
-                )
-                processor._langfuse_generation = generation_ctx.observation
-            except Exception as exc:
-                log.debug("runner.observability.init_failed", {"error": str(exc)})
-                trace_ctx = None
-                generation_ctx = None
         
         # Validate messages - ensure we have at least one non-system message
         non_system_messages = [m for m in messages if m.role != "system"]
@@ -2692,7 +2636,7 @@ class SessionRunner:
             try:
                 hook_started_at = time.perf_counter()
                 llm_before_ctx = await HookPipeline.run_llm_before(llm_before_hook_input)
-                hook_output = llm_before_ctx.output or {}
+                hook_output = getattr(llm_before_ctx, "output", None) or {}
                 replacements = stream_text_replacements_from_hook_output(hook_output)
                 if replacements:
                     stream_text_rewriter = StreamingTextReplacementBuffer(replacements)
@@ -2715,7 +2659,66 @@ class SessionRunner:
                     tool_count=len(tools),
                 )
             except Exception as exc:
-                log.debug("runner.hook.llm_before.error", {"error": str(exc)})
+                log.error("runner.hook.llm_before.error", {"error": str(exc)})
+                raise RuntimeError("LLM before-hook failed; request was not sent") from exc
+
+        # -- Observability: create trace & generation scopes after llm_before,
+        # so previews use the same redacted messages that will be sent to the provider.
+        # All observability calls are wrapped in try/except so they never break
+        # the core session flow.
+        if langfuse_is_active():
+            try:
+                input_preview = []
+                for _msg in messages[-12:]:
+                    _mc = _msg.content or ""
+                    input_preview.append(
+                        {"role": _msg.role, "chars": len(_mc), "preview": _mc[:240]}
+                    )
+
+                trace_tags = [
+                    f"session:{self.session.id}",
+                    f"step:{self._step}",
+                    f"session_step:{self.session.id}:{self._step}",
+                    f"agent:{agent.name}",
+                    f"provider:{self.provider_id}",
+                ]
+                trace_ctx = trace_scope(
+                    name="SessionRunner.step",
+                    session_id=self.session.id,
+                    tags=trace_tags,
+                    input={
+                        "step": self._step,
+                        "message_count": len(messages),
+                        "tool_count": len(tools),
+                        "last_user_preview": next(
+                            ((m.content or "")[:280] for m in reversed(messages) if m.role == "user"),
+                            "",
+                        ),
+                    },
+                    metadata={
+                        "provider_id": self.provider_id,
+                        "model_id": self.model_id,
+                        "agent": agent.name,
+                        "workspace": self.session.directory,
+                    },
+                )
+                generation_ctx = generation_scope(
+                    parent=trace_ctx.observation,
+                    name="LLM.generate",
+                    model=self.model_id,
+                    input=input_preview,
+                    metadata={
+                        "provider_id": self.provider_id,
+                        "session_id": self.session.id,
+                        "step": self._step,
+                        "tool_names": [t.get("function", {}).get("name", "") for t in tools][:50],
+                    },
+                )
+                processor._langfuse_generation = generation_ctx.observation
+            except Exception as exc:
+                log.debug("runner.observability.init_failed", {"error": str(exc)})
+                trace_ctx = None
+                generation_ctx = None
 
         llm_call_started_at = time.perf_counter()
         first_chunk_logged = False

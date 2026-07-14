@@ -204,18 +204,20 @@ async def _llm_chat_with_timeout(
                         "providerToolsEnabled": False,
                     },
                 })
+                hook_output = getattr(llm_before_ctx, "output", None) or {}
                 messages, provider_options = apply_hook_request_output(
                     messages,
                     provider_options,
-                    llm_before_ctx.output or {},
+                    hook_output,
                 )
-                replacements = stream_text_replacements_from_hook_output(llm_before_ctx.output or {})
+                replacements = stream_text_replacements_from_hook_output(hook_output)
         except Exception as hook_err:
-            log.debug("compaction.llm_before_hook.error", {
+            log.error("compaction.llm_before_hook.error", {
                 "session_id": session_id,
                 "purpose": purpose,
                 "error": str(hook_err),
             })
+            raise RuntimeError("compaction llm_before hook failed; request was not sent") from hook_err
 
     provider_options.setdefault("max_tokens", max_tokens)
     response = await asyncio.wait_for(

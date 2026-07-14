@@ -191,6 +191,41 @@ class TestGenerateTitleAfterFirstMessage:
         mock_update.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_falls_back_without_provider_call_when_llm_before_hook_fails(self):
+        """A failing llm_before hook blocks title provider calls and uses local fallback."""
+        from flocks.session.lifecycle.title import SessionTitle
+        from flocks.hooks.pipeline import HookPipeline
+
+        question = "Contact alice@example.com about the alert"
+        mock_session = _make_session()
+        msg, part = _make_user_msg(question)
+        mock_provider = MagicMock()
+        mock_provider.chat_stream = MagicMock(side_effect=AssertionError("provider must not be called"))
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patch.object(HookPipeline, "has_stage_handlers", new=AsyncMock(return_value=True)),
+            patch.object(HookPipeline, "run_llm_before", new=AsyncMock(side_effect=RuntimeError("hook boom"))),
+        ):
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert title == SessionTitle._generate_simple_title(question)
+        mock_provider.chat_stream.assert_not_called()
+        mock_update.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_publishes_sse_event_when_callback_provided(self):
         """SSE event is published when event_publish_callback is given (Web path)."""
         from flocks.session.lifecycle.title import SessionTitle
