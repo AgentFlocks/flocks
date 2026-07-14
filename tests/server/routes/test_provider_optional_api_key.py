@@ -25,6 +25,7 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch):
     so credentials calls remain hermetic and never write to disk.
     """
     fake_secrets = MagicMock()
+    fake_secrets.get.return_value = None
     runtime_provider = MagicMock()
     runtime_provider._client = None
 
@@ -124,6 +125,63 @@ class TestOptionalApiKey:
         assert excinfo.value.status_code == 400
         assert excinfo.value.detail == "API key required"
         patched_runtime["secrets"].set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_strict_provider_blank_key_preserves_existing_stored_secret(
+        self, patched_runtime
+    ):
+        """Editing non-secret settings must not require or rewrite the saved key."""
+        patched_runtime["secrets"].get.side_effect = lambda key: {
+            "openai_llm_key": "sk-existing-secret",
+        }.get(key)
+
+        result = await provider_routes.set_provider_credentials(
+            "openai",
+            provider_routes.ProviderCredentialRequest(
+                base_url="https://new.example.com/v1",
+            ),
+        )
+
+        assert result["success"] is True
+        patched_runtime["secrets"].set.assert_not_called()
+        provider_routes.ConfigWriter.update_provider_field.assert_called_once_with(
+            "openai", "options.baseURL", "https://new.example.com/v1"
+        )
+        configured = patched_runtime["provider"].configure.call_args.args[0]
+        assert configured.api_key == "sk-existing-secret"
+        assert configured.base_url == "https://new.example.com/v1"
+
+    @pytest.mark.asyncio
+    async def test_strict_provider_blank_key_preserves_existing_inline_secret(
+        self, patched_runtime, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Legacy inline keys are reused without copying them into the secret store."""
+        monkeypatch.setattr(
+            provider_routes.ConfigWriter,
+            "get_provider_raw",
+            lambda _provider_id: {
+                "options": {
+                    "apiKey": "inline-existing-secret",
+                    "baseURL": "https://old.example.com/v1",
+                }
+            },
+        )
+
+        result = await provider_routes.set_provider_credentials(
+            "openai",
+            provider_routes.ProviderCredentialRequest(
+                api_key="",
+                base_url="https://new.example.com/v1",
+            ),
+        )
+
+        assert result["success"] is True
+        patched_runtime["secrets"].set.assert_not_called()
+        provider_routes.ConfigWriter.update_provider_field.assert_called_once_with(
+            "openai", "options.baseURL", "https://new.example.com/v1"
+        )
+        configured = patched_runtime["provider"].configure.call_args.args[0]
+        assert configured.api_key == "inline-existing-secret"
 
     @pytest.mark.asyncio
     async def test_sentinel_logged_with_explicit_marker_not_naive_mask(
@@ -334,7 +392,7 @@ class TestGetCredentialsHidesPlaceholder:
         assert response.base_url == "http://internal/v1"
 
     @pytest.mark.asyncio
-    async def test_real_api_key_still_returned_and_masked(
+    async def test_real_api_key_is_only_returned_masked(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         fake_secrets = MagicMock()
@@ -353,7 +411,7 @@ class TestGetCredentialsHidesPlaceholder:
 
         response = await provider_routes.get_provider_credentials("openai")
 
-        assert response.api_key == "sk-real-secret-1234567890"
+        assert response.api_key is None
         assert response.api_key_masked is not None
         assert response.api_key_masked != "sk-real-secret-1234567890"
         assert response.has_credential is True

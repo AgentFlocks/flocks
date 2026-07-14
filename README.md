@@ -6,11 +6,10 @@
 
 <p align="center">
   <a href="https://agentflocks.github.io/flocks-docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
-  <a href="https://github.com/AgentFlocks/flocks/releases"><img alt="Release" src="https://img.shields.io/badge/release-v2026.6.18-f06f2f?style=for-the-badge"></a>
+  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
 </p>
 
 <p align="center">
-  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/lang-English-e33f44?style=for-the-badge"></a>
   <a href="README_zh.md"><img alt="Chinese" src="https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-e33f44?style=for-the-badge"></a>
 </p>
@@ -125,10 +124,9 @@ flocks restart
 flocks stop
 ```
 
-The default service URLs are:
-- Backend API: `http://127.0.0.1:8000` by default
-- WebUI: `http://127.0.0.1:5173` by default
-- Remote access configurable via `flocks start --webui-host <ip>`
+The default service address is:
+- Flocks WebUI: `http://127.0.0.1:5173`
+- Remote access configurable via `flocks start --host <ip>`
 
 Flocks CLI usage: `flocks --help`
 
@@ -213,16 +211,13 @@ sudo chown -R <uid>:<gid> ~/.flocks
 
 ### 4.3 Remote Access to Flocks Service
 ```bash
-__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=<your_domain> \
-flocks start --webui-host 0.0.0.0
-# windows powershell
-# $env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="your_domain"; flocks start --webui-host 0.0.0.0
+flocks start --host 0.0.0.0
 ```
 If remote access from a virtual machine fails, please specify the host as the virtual machine's IP.
 
-The WebUI now defaults to same-origin `/api` proxy mode even when the backend
-binds to a non-loopback IP. This keeps browser cookies and SSE on a single
-origin, which is the safest choice for LAN access and reverse proxies.
+The WebUI and API share the same service address and port. API requests use the
+same-origin `/api` path, keeping browser cookies and SSE on a single origin for
+LAN access and reverse-proxy deployments.
 
 Only enable direct browser-to-backend URLs when you explicitly need them:
 

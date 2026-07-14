@@ -1042,17 +1042,6 @@ def _is_running_status_response(response: httpx.Response) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "running"
 
 
-def _is_healthy_status_response(response: httpx.Response) -> bool:
-    """Return True when the backend health endpoint reports healthy."""
-    if response.status_code != 200:
-        return False
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    return isinstance(payload, dict) and payload.get("status") == "healthy"
-
-
 def wait_for_http(
     urls: Sequence[str],
     name: str,
@@ -1084,10 +1073,6 @@ class _StdoutConsole:
     def print(self, *args, **_kwargs) -> None:
         sys.stdout.write(" ".join(str(arg) for arg in args) + "\n")
         sys.stdout.flush()
-
-
-def _backend_health_url(host: str, port: int) -> str:
-    return f"http://{_format_host_for_url(access_host(host))}:{port}/api/health"
 
 
 def _terminate_process(
