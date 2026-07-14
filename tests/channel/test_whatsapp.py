@@ -13,6 +13,7 @@ from flocks.channel.builtin.whatsapp.config import (
     parse_target,
     strip_jid,
 )
+from flocks.channel.builtin.whatsapp.bridge_runtime import NODE_USE_BUNDLED_CA_OPTION, append_node_options
 from flocks.channel.builtin.whatsapp.inbound import build_inbound_message
 from flocks.channel.builtin.whatsapp import pairing
 from flocks.channel.registry import ChannelRegistry
@@ -204,6 +205,55 @@ def test_bridge_identity_requires_matching_session_and_config(tmp_path: Path):
     assert channel._bridge_identity_matches(mismatched, script) is False  # type: ignore[attr-defined]
 
 
+def test_append_node_options_preserves_existing_and_dedupes():
+    env = {"NODE_OPTIONS": "--trace-warnings"}
+    append_node_options(env, NODE_USE_BUNDLED_CA_OPTION)
+
+    assert env["NODE_OPTIONS"] == "--trace-warnings --use-bundled-ca"
+
+    append_node_options(env, NODE_USE_BUNDLED_CA_OPTION)
+
+    assert env["NODE_OPTIONS"] == "--trace-warnings --use-bundled-ca"
+
+
+@pytest.mark.asyncio
+async def test_channel_bridge_process_uses_bundled_ca_node_option(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.js").write_text("console.log('bridge')", encoding="utf-8")
+
+    channel = WhatsAppChannel()
+    channel._bridge_dir = bridge_dir  # type: ignore[attr-defined]
+    channel._session_path = tmp_path / "session"  # type: ignore[attr-defined]
+    channel._media_cache_dir = tmp_path / "media"  # type: ignore[attr-defined]
+    captured_env: dict[str, str] = {}
+
+    async def fake_reuse(script: Path) -> bool:
+        return False
+
+    async def fake_wait(script: Path) -> None:
+        return None
+
+    class FakePopen:
+        def __init__(self, *args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+
+    monkeypatch.setenv("NODE_OPTIONS", "--trace-warnings")
+    monkeypatch.setattr(channel, "_reuse_or_stop_existing_bridge", fake_reuse)
+    monkeypatch.setattr(channel, "_wait_for_bridge", fake_wait)
+    monkeypatch.setattr("flocks.channel.builtin.whatsapp.channel.find_executable", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("flocks.channel.builtin.whatsapp.channel.subprocess.Popen", FakePopen)
+
+    await channel._start_bridge()  # type: ignore[attr-defined]
+    if channel._bridge_log_fh:  # type: ignore[attr-defined]
+        channel._bridge_log_fh.close()  # type: ignore[attr-defined]
+
+    assert captured_env["NODE_OPTIONS"] == "--trace-warnings --use-bundled-ca"
+
+
 @pytest.mark.asyncio
 async def test_pairing_rejects_running_session_after_dependency_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
@@ -291,6 +341,7 @@ async def test_pairing_reset_session_backs_up_existing_credentials(
     session = tmp_path / "session"
     session.mkdir()
     (session / "creds.json").write_text("old", encoding="utf-8")
+    captured_env: dict[str, str] = {}
 
     class FakeStream:
         async def readline(self) -> bytes:
@@ -310,6 +361,7 @@ async def test_pairing_reset_session_backs_up_existing_credentials(
             pass
 
     async def fake_create_subprocess_exec(*args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
         return FakeProcess()
 
     async def fake_ensure(path: Path) -> None:
@@ -318,6 +370,7 @@ async def test_pairing_reset_session_backs_up_existing_credentials(
     monkeypatch.setattr(pairing, "find_executable", lambda name: "/usr/bin/node")
     monkeypatch.setattr(pairing, "ensure_bridge_deps", fake_ensure)
     monkeypatch.setattr(pairing.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setenv("NODE_OPTIONS", "--trace-warnings")
 
     session_info = await pairing.start_pairing(
         session_path=str(session),
@@ -330,6 +383,7 @@ async def test_pairing_reset_session_backs_up_existing_credentials(
     assert (backups[0] / "creds.json").read_text(encoding="utf-8") == "old"
     assert session.exists()
     assert not (session / "creds.json").exists()
+    assert captured_env["NODE_OPTIONS"] == "--trace-warnings --use-bundled-ca"
 
     await pairing.cancel_pairing(session_info.id)
 

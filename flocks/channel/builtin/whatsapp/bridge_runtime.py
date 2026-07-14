@@ -6,11 +6,14 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .config import coerce_int
+
+NODE_USE_BUNDLED_CA_OPTION = "--use-bundled-ca"
 
 
 def file_hash(path: Path) -> str:
@@ -23,6 +26,19 @@ def file_hash(path: Path) -> str:
 def config_hash(values: dict[str, Any]) -> str:
     payload = json.dumps(values, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def append_node_options(env: dict[str, str], *options: str) -> None:
+    raw = str(env.get("NODE_OPTIONS") or "").strip()
+    try:
+        current = shlex.split(raw) if raw else []
+    except ValueError:
+        current = raw.split()
+
+    additions = [option for option in options if option and option not in current]
+    if not additions:
+        return
+    env["NODE_OPTIONS"] = " ".join([part for part in [raw, *additions] if part]).strip()
 
 
 async def ensure_bridge_deps(bridge_dir: Path) -> None:
