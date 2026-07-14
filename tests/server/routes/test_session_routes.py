@@ -66,6 +66,80 @@ class TestSessionCRUD:
         assert resp.json()["category"] == "workflow"
 
     @pytest.mark.asyncio
+    async def test_create_session_with_api_token_is_ownerless(self, client: AsyncClient):
+        """Sessions created by API-token clients remain manageable by WebUI admins."""
+        resp = await client.post("/api/session", json={"title": "TUI Session"})
+
+        assert resp.status_code == status.HTTP_200_OK
+        session = await Session.get_by_id(resp.json()["id"])
+        assert session is not None
+        assert session.owner_user_id is None
+        assert session.owner_username is None
+
+    @pytest.mark.asyncio
+    async def test_create_session_with_local_user_keeps_owner(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Browser-authenticated sessions remain private to their local user."""
+        from flocks.server.routes import session as session_routes
+
+        user = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+
+        resp = await client.post("/api/session", json={"title": "WebUI Session"})
+
+        assert resp.status_code == status.HTTP_200_OK
+        session = await Session.get_by_id(resp.json()["id"])
+        assert session is not None
+        assert session.owner_user_id == user.id
+        assert session.owner_username == user.username
+
+    @pytest.mark.asyncio
+    async def test_webui_admin_can_manage_api_token_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A WebUI admin can list, continue, rename, and delete a TUI session."""
+        from flocks.server.routes import session as session_routes
+
+        create_resp = await client.post("/api/session", json={"title": "TUI Session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+
+        admin = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true"},
+        )
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert session_id in {session["id"] for session in list_resp.json()}
+
+        message_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Continue from WebUI"}],
+                "noReply": True,
+            },
+        )
+        assert message_resp.status_code == status.HTTP_200_OK
+
+        rename_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"title": "Renamed in WebUI"},
+        )
+        assert rename_resp.status_code == status.HTTP_200_OK
+        assert rename_resp.json()["title"] == "Renamed in WebUI"
+
+        delete_resp = await client.delete(f"/api/session/{session_id}")
+        assert delete_resp.status_code == status.HTTP_200_OK
+        assert delete_resp.json() is True
+
+    @pytest.mark.asyncio
     async def test_get_session_includes_persisted_goal(self, client: AsyncClient):
         """GET /api/session/{id} hydrates persisted goal state for the WebUI."""
         from flocks.session.goal import GoalManager
