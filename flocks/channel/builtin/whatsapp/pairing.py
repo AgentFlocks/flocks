@@ -36,6 +36,7 @@ class PairingSession:
 
 _sessions: dict[str, PairingSession] = {}
 _active_session_paths: set[str] = set()
+_active_session_paths_lock = asyncio.Lock()
 
 
 def _session_key(path: Path) -> str:
@@ -131,43 +132,52 @@ async def start_pairing(
     script = bridge_root / "bridge.js"
     if not script.exists():
         raise RuntimeError(f"WhatsApp bridge script not found: {script}")
-    await ensure_bridge_deps(bridge_root)
 
     sess = Path(session_path).expanduser() if session_path else default_session_path()
     key = _session_key(sess)
-    if key in _active_session_paths:
-        raise RuntimeError("WhatsApp pairing is already running for this session")
-    pid_file = sess / "bridge.pid"
+
+    async with _active_session_paths_lock:
+        if key in _active_session_paths:
+            raise RuntimeError("WhatsApp pairing is already running for this session")
+        _active_session_paths.add(key)
+
     try:
-        pid = int(pid_file.read_text(encoding="utf-8").strip().splitlines()[0])
-        if _pid_exists(pid):
-            raise RuntimeError("WhatsApp channel is already running for this session; stop it before pairing")
-    except FileNotFoundError:
-        pass
-    except ValueError:
-        pass
+        await ensure_bridge_deps(bridge_root)
 
-    if reset_session:
-        _backup_session_dir(sess)
-    sess.mkdir(parents=True, exist_ok=True)
+        pid_file = sess / "bridge.pid"
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip().splitlines()[0])
+            if _pid_exists(pid):
+                raise RuntimeError("WhatsApp channel is already running for this session; stop it before pairing")
+        except FileNotFoundError:
+            pass
+        except ValueError:
+            pass
 
-    pairing_id = uuid.uuid4().hex
-    env = os.environ.copy()
-    env.setdefault("FLOCKS_WHATSAPP_PAIR_TIMEOUT_MS", "120000")
+        if reset_session:
+            _backup_session_dir(sess)
+        sess.mkdir(parents=True, exist_ok=True)
 
-    proc = await asyncio.create_subprocess_exec(
-        node,
-        str(script),
-        "--pair-only",
-        "--pair-json",
-        "--session",
-        str(sess),
-        cwd=str(bridge_root),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
-    )
-    _active_session_paths.add(key)
+        pairing_id = uuid.uuid4().hex
+        env = os.environ.copy()
+        env.setdefault("FLOCKS_WHATSAPP_PAIR_TIMEOUT_MS", "120000")
+
+        proc = await asyncio.create_subprocess_exec(
+            node,
+            str(script),
+            "--pair-only",
+            "--pair-json",
+            "--session",
+            str(sess),
+            cwd=str(bridge_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+    except Exception:
+        _active_session_paths.discard(key)
+        raise
+
     pairing = PairingSession(
         id=pairing_id,
         session_path=sess,

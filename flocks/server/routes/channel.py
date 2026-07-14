@@ -401,8 +401,6 @@ async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
     from flocks.channel.builtin.whatsapp.pairing import start_pairing
 
     try:
-        if default_manager.is_channel_running("whatsapp"):
-            await default_manager.stop_channel("whatsapp")
         pairing = await start_pairing(
             session_path=req.sessionPath,
             bridge_dir=req.bridgeDir,

@@ -1680,6 +1680,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
             options={[
               { value: 'allowlist', label: t('whatsapp.dmPolicyAllowlist') },
               { value: 'open', label: t('whatsapp.dmPolicyOpen') },
+              { value: 'disabled', label: t('whatsapp.dmPolicyDisabled') },
             ]}
           />
         </FieldRow>
@@ -2346,9 +2347,6 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
         } else if (ch.id === 'whatsapp') {
           const whatsappCfg = { ...defaultWhatsAppConfig(), ...saved };
-          if (whatsappCfg.dmPolicy === 'disabled') {
-            whatsappCfg.dmPolicy = 'open';
-          }
           if (whatsappCfg.sessionPath) {
             try {
               const sessionRes = await client.get('/api/channel/whatsapp/session-status', {

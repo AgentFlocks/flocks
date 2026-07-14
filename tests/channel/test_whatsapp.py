@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -226,6 +227,57 @@ async def test_pairing_rejects_running_session_after_dependency_bootstrap(
         await pairing.start_pairing(session_path=str(session), bridge_dir=str(bridge_dir))
 
     assert calls == [bridge_dir]
+
+
+@pytest.mark.asyncio
+async def test_pairing_rejects_concurrent_same_session_before_dependency_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.js").write_text("console.log('bridge')", encoding="utf-8")
+    session = tmp_path / "session"
+    entered_ensure = asyncio.Event()
+    release_ensure = asyncio.Event()
+
+    class FakeStream:
+        async def readline(self) -> bytes:
+            return b""
+
+    class FakeProcess:
+        stdout = FakeStream()
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess()
+
+    async def fake_ensure(path: Path) -> None:
+        entered_ensure.set()
+        await release_ensure.wait()
+
+    monkeypatch.setattr(pairing, "find_executable", lambda name: "/usr/bin/node")
+    monkeypatch.setattr(pairing, "ensure_bridge_deps", fake_ensure)
+    monkeypatch.setattr(pairing.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    first = asyncio.create_task(pairing.start_pairing(session_path=str(session), bridge_dir=str(bridge_dir)))
+    await entered_ensure.wait()
+
+    with pytest.raises(RuntimeError, match="already running"):
+        await pairing.start_pairing(session_path=str(session), bridge_dir=str(bridge_dir))
+
+    release_ensure.set()
+    session_info = await first
+    await pairing.cancel_pairing(session_info.id)
 
 
 @pytest.mark.asyncio
