@@ -23,7 +23,20 @@ const EMPTY_STATS = {
   generatedAt: '',
   latencyMs: 0,
   sourceStatus: { workflowRoot: '', denoise: [], triage: [], denoiseFiles: [], triageFiles: [], missing: [] },
-  denoise: { totalRaw: 0, totalUnique: 0, duplicates: 0, duplicateRate: 0, uniqueRate: 0, files: 0, parseErrors: 0 },
+  denoise: {
+    totalRaw: 0,
+    totalNormalized: 0,
+    afterFilter: 0,
+    totalUnique: 0,
+    filterRemoved: 0,
+    dedupRemoved: 0,
+    duplicates: 0,
+    duplicateRate: 0,
+    dedupRate: 0,
+    uniqueRate: 0,
+    files: 0,
+    parseErrors: 0,
+  },
   triage: {
     totalRecords: 0,
     newTriaged: 0,
@@ -338,17 +351,24 @@ function refreshLabel(value) {
 }
 
 function mergeStats(raw) {
+  const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
+  const processedTotal = Math.max(Number(denoise.totalRaw || 0), 0);
+  denoise.totalNormalized = processedTotal;
   return {
     ...EMPTY_STATS,
     ...(raw || {}),
     sourceStatus: { ...EMPTY_STATS.sourceStatus, ...((raw || {}).sourceStatus || {}) },
-    denoise: { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) },
+    denoise,
     triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
     pipeline: { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) },
     closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
     timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
+    sources: [
+      { key: 'ndr', label: 'NDR', value: processedTotal, rate: processedTotal > 0 ? 1 : 0, active: processedTotal > 0 },
+      { key: 'other', label: '其他接入', value: 0, rate: 0, active: false },
+    ],
   };
 }
 
@@ -357,7 +377,15 @@ function fullNumber(value) {
   return new Intl.NumberFormat('zh-CN').format(n);
 }
 
-function workflowDenoiseActivity(callCount, delta, generatedAt) {
+function workflowDenoiseActivity(callCount, delta, generatedAt, workflowEvent) {
+  if (workflowEvent) {
+    return {
+      ...workflowEvent,
+      eventId: `workflow-playback:${callCount}:${workflowEvent.eventId}`,
+      statsDelta: delta,
+      workflowCallCount: callCount,
+    };
+  }
   const occurredAt = generatedAt || new Date().toISOString();
   return {
     eventId: `workflow-denoise:${callCount}:${occurredAt}`,
@@ -367,6 +395,7 @@ function workflowDenoiseActivity(callCount, delta, generatedAt) {
     triggerSource: 'workflow_stats',
     statsDelta: delta,
     workflowCallCount: callCount,
+    hiddenFromQueue: true,
     sampleCount: delta,
     alert: {
       sourceType: 'workflow.db',
@@ -542,9 +571,9 @@ function SourceColumn({ stats }) {
       ]),
     ]),
     h(Panel, { key: 'efficiency', title: '降噪效率', meta: '压缩收益' }, h('div', { className: 'side-summary' }, [
-      h(SummaryTile, { key: 'dup', label: '重复压缩', value: pct(stats.denoise.duplicateRate), sub: `${compactNumber(stats.denoise.duplicates)} 条收敛`, tone: 'green' }),
+      h(SummaryTile, { key: 'dup', label: '降噪收敛', value: pct(stats.denoise.duplicateRate), sub: `${compactNumber(stats.denoise.duplicates)} 条过滤/收敛`, tone: 'green' }),
       h(SummaryTile, { key: 'unique', label: '唯一留存', value: pct(stats.denoise.uniqueRate), sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, tone: 'cyan' }),
-      h(SummaryTile, { key: 'batch', label: '样例批次', value: compactNumber(stats.denoise.files), sub: '资产目录命中', tone: 'violet' }),
+      h(SummaryTile, { key: 'batch', label: '工作流批次', value: compactNumber(stats.denoise.files), sub: '当前时间范围', tone: 'violet' }),
     ])),
   ]);
 }
@@ -642,6 +671,9 @@ function StageCard({ stage, title, value, sub, tone }) {
 function activityResultText(event) {
   if (!event) return '';
   if (event.stage === 'denoise') {
+    if (event.triggerSource === 'workflow_execution') {
+      return `原始 ${fullNumber(event.result?.rawCount)} → 留存 ${fullNumber(event.result?.uniqueCount)} · 降噪 ${pct(event.result?.reductionRate)}`;
+    }
     if (event.triggerSource === 'workflow_stats') {
       return `工作流调用 +${fullNumber(event.statsDelta || 1)}`;
     }
@@ -659,7 +691,7 @@ function activityResultText(event) {
 function activitySourceText(event) {
   if (!event) return '';
   if (event.stage === 'denoise') {
-    if (event.triggerSource === 'workflow_stats') return 'WORKFLOW.DB';
+    if (['workflow_stats', 'workflow_execution'].includes(event.triggerSource)) return 'WORKFLOW.DB';
     return event.alert?.sourceType ? String(event.alert.sourceType).toUpperCase() : '新告警';
   }
   const source = event.result?.triageSource;
@@ -676,7 +708,7 @@ function ActivityStageCard({ kind, lane, stats }) {
       stage: kind === 'denoise' ? '阶段一' : '阶段二',
       title: kind === 'denoise' ? '智能降噪' : '智能研判',
       value: kind === 'denoise' ? stats.denoise.totalUnique : stats.triage.totalRecords,
-      sub: kind === 'denoise' ? `重复压缩 ${pct(stats.denoise.duplicateRate)}` : `缓存复用 ${pct(stats.triage.cacheRate)}`,
+      sub: kind === 'denoise' ? `降噪收敛 ${pct(stats.denoise.duplicateRate)}` : `缓存复用 ${pct(stats.triage.cacheRate)}`,
       tone: kind === 'denoise' ? 'green' : 'violet',
     });
   }
@@ -724,8 +756,17 @@ function AiCore({ stats, activity }) {
       ? activity.mode === 'surge' ? '降噪洪峰处理中' : activity.mode === 'burst' ? '告警批量降噪中' : '告警降噪中'
       : triageActive ? '告警研判中' : '智能研判核心';
   const taskDuration = activityDuration(activeEvent);
-  const workflowDenoiseActive = activeKind === 'denoise' && activeEvent?.triggerSource === 'workflow_stats';
-  const operations = workflowDenoiseActive
+  const workflowDenoiseActive = activeKind === 'denoise'
+    && ['workflow_stats', 'workflow_execution'].includes(activeEvent?.triggerSource);
+  const workflowExecutionActive = workflowDenoiseActive && activeEvent?.triggerSource === 'workflow_execution';
+  const operations = workflowExecutionActive
+    ? [
+        `接入原始告警 ${fullNumber(activeEvent?.result?.rawCount)}`,
+        `完成标准化 ${fullNumber(activeEvent?.result?.normalizedCount)}`,
+        `过滤与收敛 ${fullNumber(activeEvent?.result?.reducedCount)}`,
+        `留存研判告警 ${fullNumber(activeEvent?.result?.uniqueCount)}`,
+      ]
+    : workflowDenoiseActive
     ? [
         '检测 workflow.db 统计更新',
         `读取降噪调用增量 +${fullNumber(activeEvent?.statsDelta || 1)}`,
@@ -745,7 +786,14 @@ function AiCore({ stats, activity }) {
         '执行风险推理',
         `生成结论：${activeEvent?.result?.verdictLabel || '待确认'}`,
       ];
-  const evidenceItems = workflowDenoiseActive
+  const evidenceItems = workflowExecutionActive
+    ? [
+        { label: '原始告警', value: fullNumber(activeEvent?.result?.rawCount) },
+        { label: '过滤数量', value: fullNumber(activeEvent?.result?.filterRemovedCount) },
+        { label: '去重数量', value: fullNumber(activeEvent?.result?.duplicateCount) },
+        { label: '降噪率', value: pct(activeEvent?.result?.reductionRate) },
+      ]
+    : workflowDenoiseActive
     ? [
         { label: '数据源', value: 'workflow.db' },
         { label: '统计字段', value: 'call_count' },
@@ -1340,9 +1388,9 @@ function CommandGraph({ stats, activity }) {
       h('i', { key: 'port' }),
     ]))),
     h('div', { className: 'merge-node', key: 'merge' }, [
-      h(AnimatedNumber, { tag: 'b', value: stats.denoise.totalRaw, duration: 1100, key: 'value' }),
+      h(AnimatedNumber, { tag: 'b', value: stats.denoise.totalNormalized, duration: 1100, key: 'value' }),
       h('span', { key: 'label' }, '汇聚告警'),
-      h('small', { key: 'sub' }, `收敛 ${compactNumber(stats.denoise.duplicates)}`),
+      h('small', { key: 'sub' }, `过滤 ${compactNumber(stats.denoise.filterRemoved)} · 去重 ${compactNumber(stats.denoise.dedupRemoved)}`),
     ]),
     h('div', { className: 'command-core command-original-core', key: 'core' }, [
       h(AiCore, { stats, activity, key: 'sphere' }),
@@ -1379,7 +1427,7 @@ function CommandMetrics({ stats }) {
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
-    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条重复告警已收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
+    h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
     h(CommandMetric, { label: '平均研判时间', value: stats.triage.avgTriageMs, format: (value) => formatDurationMs(value), sub: `${compactNumber(stats.triage.totalRecords)} 条已完成研判`, values: stats.timeline.triageTotal, color: '#ff674d', key: 'mtta' }),
   ]);
 }
@@ -1412,7 +1460,7 @@ function buildEventQueueTasks(activity, timeFilter) {
     ...activity.triage.queue,
     activity.denoise.current,
     activity.triage.current,
-  ].filter((event) => event?.eventId && eventMatchesTimeFilter(event, timeFilter));
+  ].filter((event) => event?.eventId && !event.hiddenFromQueue && eventMatchesTimeFilter(event, timeFilter));
   const taskByKey = new Map();
   for (const event of allEvents) {
     const key = activityTaskKey(event);
@@ -1440,7 +1488,7 @@ function buildEventQueueTasks(activity, timeFilter) {
     } else if (denoiseState === 'waiting') {
       state = 'waiting';
       stage = 'denoise';
-    } else if (!task.triage && task.denoise && !task.denoise.result?.isDuplicate) {
+    } else if (!task.triage && task.denoise && task.denoise.status !== 'failed' && !task.denoise.result?.isDuplicate) {
       state = 'waiting';
       stage = 'triage';
     }
@@ -1610,9 +1658,11 @@ function CommandEventRail({ activity, timeFilter, collapsed, onToggle }) {
       const stateLabel = task.state === 'processing'
         ? '处理中'
         : '等待处理';
-      const detail = task.state === 'processing'
-        ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
-        : '等待 AI 处理';
+      const detail = event?.triggerSource === 'workflow_execution'
+        ? `原始 ${fullNumber(event.result?.rawCount)} · 留存 ${fullNumber(event.result?.uniqueCount)} · 降噪 ${pct(event.result?.reductionRate)}`
+        : task.state === 'processing'
+          ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
+          : '等待 AI 处理';
       return h('article', {
         className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`),
         key: task.key,
@@ -1653,7 +1703,7 @@ export default function Page() {
   const [error, setError] = useState('');
   const [activity, setActivity] = useState(createActivityState);
   const activityCursor = useRef('');
-  const workflowDenoiseCount = useRef(null);
+  const workflowProgressByFilter = useRef(new Map());
   const statsRequestId = useRef(0);
   const statsPending = useRef(0);
 
@@ -1718,6 +1768,7 @@ export default function Page() {
     let statsTimer = 0;
     let lastStatsRefreshAt = 0;
     let retryDelay = ACTIVITY_POLL_MS;
+    const workflowFilterKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
     activityCursor.current = '';
     setActivity(createActivityState());
 
@@ -1744,7 +1795,7 @@ export default function Page() {
       try {
         const params = bootstrap || !activityCursor.current
           ? { bootstrap: 'latest', ...timeFilterParams(timeFilter) }
-          : { cursor: activityCursor.current, limit: 40 };
+          : { cursor: activityCursor.current, limit: 40, ...timeFilterParams(timeFilter) };
         const response = await getApi().page.get('/activity', { params });
         const payload = response.data || {};
         if (payload.error) throw new Error(payload.error);
@@ -1754,33 +1805,46 @@ export default function Page() {
             ? recentUnseenActivity(payload.recentEvents)
             : (payload.events || []);
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
+          const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
           const rawCallCount = payload.workflowStats?.callCount;
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
             && Number.isFinite(Number(rawCallCount));
           let workflowDelta = 0;
+          let workflowChanged = false;
           if (hasWorkflowCount) {
             const callCount = Math.max(Math.trunc(Number(rawCallCount)), 0);
-            const previousCallCount = workflowDenoiseCount.current;
-            if (previousCallCount !== null && callCount > previousCallCount) {
-              workflowDelta = callCount - previousCallCount;
+            const latestStartedAt = Math.max(Math.trunc(Number(payload.workflowStats?.latestStartedAt || 0)), 0);
+            const previousProgress = workflowProgressByFilter.current.get(workflowFilterKey);
+            workflowChanged = Boolean(previousProgress) && (
+              callCount > previousProgress.callCount
+              || latestStartedAt > previousProgress.latestStartedAt
+            );
+            if (workflowChanged) {
+              workflowDelta = Math.max(callCount - previousProgress.callCount, 1);
               incomingEvents.push(workflowDenoiseActivity(
                 callCount,
                 workflowDelta,
                 payload.generatedAt,
+                workflowEvents[0],
               ));
             }
-            workflowDenoiseCount.current = callCount;
+            workflowProgressByFilter.current.set(workflowFilterKey, { callCount, latestStartedAt });
           }
+          const incomingRecentEvents = bootstrap
+            ? [...(payload.recentEvents || []), ...workflowEvents]
+            : workflowChanged
+              ? [...rawIncomingEvents, ...workflowEvents]
+              : rawIncomingEvents;
           setActivity((previous) => enqueueActivity(
             previous,
             incomingEvents,
             payload.generatedAt,
-            bootstrap ? payload.recentEvents : rawIncomingEvents,
+            incomingRecentEvents,
             payload.batch,
           ));
           const batch = normalizeActivityBatch(payload.batch);
-          const hasStatsChange = workflowDelta > 0
+          const hasStatsChange = workflowChanged
             || batch.receivedCount > 0
             || batch.triageUpdatedCount > 0;
           if (payload.cursorReset || hasStatsChange) scheduleStatsRefresh(Boolean(payload.cursorReset));

@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -153,7 +154,8 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
 
     payload = handlers._get_activity({"bootstrap": "latest"})
 
-    assert payload["workflowStats"] == {"callCount": 42}
+    assert payload["workflowStats"] == {"callCount": 42, "latestStartedAt": 0}
+    assert payload["workflowEvents"] == []
     assert payload["events"] == []
 
     with sqlite3.connect(workflow_db) as conn:
@@ -164,7 +166,8 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
         conn.commit()
 
     assert handlers._get_activity({"bootstrap": "latest"})["workflowStats"] == {
-        "callCount": 43
+        "callCount": 43,
+        "latestStartedAt": 0,
     }
 
 
@@ -172,4 +175,218 @@ def test_soc_dashboard_workflow_progress_marks_unavailable_database(tmp_path: Pa
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = tmp_path / "missing-workflow.db"
 
-    assert handlers._get_workflow_progress("stream_alert_denoise") == {"callCount": None}
+    assert handlers._get_workflow_progress("stream_alert_denoise") == {
+        "callCount": None,
+        "latestStartedAt": None,
+    }
+
+
+def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path: Path):
+    start_time = 1783987200
+    end_time = start_time + 3600
+    asset_date = datetime.fromtimestamp(start_time).strftime("%Y-%m-%d")
+    soc_db = tmp_path / "soc.db"
+    with sqlite3.connect(soc_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL,
+                is_duplicate INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        for offset, is_duplicate in ((60, 0), (120, 1)):
+            conn.execute(
+                "INSERT INTO alert_records(record_json, asset_date, event_time, is_duplicate) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    json.dumps({"_source_type": "soc"}),
+                    asset_date,
+                    start_time + offset,
+                    is_duplicate,
+                ),
+            )
+        conn.commit()
+
+    workflow_db = tmp_path / "workflow.db"
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_params TEXT NOT NULL,
+                output_results TEXT NOT NULL,
+                started_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
+            ("stream_alert_denoise", 20, 19, 1, (start_time + 300) * 1000),
+        )
+
+        def insert_execution(
+            execution_id,
+            started_at,
+            raw,
+            normalized,
+            filtered,
+            unique,
+            source,
+            threat,
+            *,
+            summarized_source_counts=False,
+            empty_output=False,
+        ):
+            source_counts = (
+                {"_type": "dict", "keys": [source, "skyeye"]}
+                if summarized_source_counts
+                else {source: normalized}
+            )
+            output = {
+                "unique_alerts": [{"threat_name": threat, "_source_type": source}],
+                "stats": {
+                    "raw_count": raw,
+                    "normalized_count": normalized,
+                    "after_filter_count": filtered,
+                    "after_dedup_count": unique,
+                    "filter_removed_count": max(normalized - filtered, 0),
+                    "dedup_removed_count": max(filtered - unique, 0),
+                    "normalize_type_counts": source_counts,
+                    "lsh_total_clusters": 3,
+                },
+            }
+            conn.execute(
+                "INSERT INTO workflow_executions VALUES (?, ?, 'success', ?, ?, ?)",
+                (
+                    execution_id,
+                    "stream_alert_denoise",
+                    json.dumps({"source_log_type": source}),
+                    json.dumps({} if empty_output else output),
+                    started_at * 1000,
+                ),
+            )
+
+        insert_execution("outside", start_time - 60, 100, 100, 90, 80, "tdp", "Outside")
+        insert_execution(
+            "first",
+            start_time + 100,
+            10,
+            9,
+            8,
+            6,
+            "tdp",
+            "SQL injection",
+            summarized_source_counts=True,
+            empty_output=True,
+        )
+        insert_execution("second", start_time + 200, 5, 5, 5, 4, "skyeye", "Malware")
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = soc_db
+    handlers.WORKFLOW_DB = workflow_db
+    handlers._schema_ready.clear()
+
+    stats = handlers._get_stats(
+        {"startTime": str(start_time), "endTime": str(end_time), "force": "1"}
+    )
+
+    expected_denoise = {
+        "totalRaw": 2,
+        "totalNormalized": 2,
+        "afterFilter": 2,
+        "totalUnique": 1,
+        "filterRemoved": 0,
+        "dedupRemoved": 1,
+        "duplicates": 1,
+    }
+    assert {
+        key: stats["denoise"][key]
+        for key in expected_denoise
+    } == expected_denoise
+    assert stats["denoise"]["duplicateRate"] == 0.5
+    assert stats["denoise"]["dedupRate"] == 0.5
+    assert stats["pipeline"]["raw"] == 2
+    assert stats["pipeline"]["unique"] == 1
+    assert sum(stats["timeline"]["denoiseRaw"]) == 2
+    assert sum(stats["timeline"]["denoiseUnique"]) == 1
+    assert stats["sourceStatus"]["workflowStats"]["callCount"] == 2
+    assert {source["key"]: source["value"] for source in stats["sources"]} == {
+        "ndr": 2,
+        "edr": 0,
+        "waf": 0,
+        "ids": 0,
+        "cloud": 0,
+        "vuln": 0,
+        "other": 0,
+    }
+
+    activity = handlers._get_activity(
+        {
+            "bootstrap": "latest",
+            "startTime": str(start_time),
+            "endTime": str(end_time),
+        }
+    )
+    assert activity["workflowStats"] == {
+        "callCount": 2,
+        "latestStartedAt": (start_time + 200) * 1000,
+    }
+    assert [event["alert"]["threatName"] for event in activity["workflowEvents"]] == [
+        "Malware",
+        "降噪批次 · 原始 0 条",
+    ]
+
+    events = handlers._get_workflow_recent_events(
+        "stream_alert_denoise",
+        start_time,
+        end_time,
+    )
+    assert [event["alert"]["threatName"] for event in events] == [
+        "Malware",
+        "降噪批次 · 原始 0 条",
+    ]
+    assert events[0]["result"]["rawCount"] == 5
+    assert events[0]["result"]["uniqueCount"] == 4
+
+    narrowed = handlers._get_stats(
+        {
+            "startTime": str(start_time + 150),
+            "endTime": str(end_time),
+            "force": "1",
+        }
+    )
+    assert narrowed["denoise"]["totalRaw"] == 1
+    assert narrowed["denoise"]["totalUnique"] == 0
+    assert narrowed["denoise"]["duplicateRate"] == 1
+
+    no_workflow_calls = handlers._get_stats(
+        {
+            "startTime": str(start_time + 50),
+            "endTime": str(start_time + 90),
+            "force": "1",
+        }
+    )
+    assert no_workflow_calls["denoise"]["totalRaw"] == 0
+    assert no_workflow_calls["denoise"]["totalUnique"] == 1
+    assert no_workflow_calls["denoise"]["duplicateRate"] == 0
+    assert next(
+        source["value"] for source in no_workflow_calls["sources"] if source["key"] == "ndr"
+    ) == 0

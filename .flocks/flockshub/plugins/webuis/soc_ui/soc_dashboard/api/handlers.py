@@ -463,7 +463,117 @@ def _maybe_prune_activity():
         _activity_pruned_at = now
 
 
-def _get_workflow_call_count(
+def _safe_json_object(value):
+    try:
+        parsed = json.loads(value or "{}")
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _workflow_metric_value(stats, key, fallback=0):
+    value = stats.get(key)
+    return max(_safe_int(fallback if value is None else value), 0)
+
+
+def _workflow_alert_preview(output):
+    for key in ("unique_alerts", "enriched_alerts"):
+        value = output.get(key)
+        if isinstance(value, dict):
+            value = value.get("preview")
+        if isinstance(value, list):
+            return next((item for item in value if isinstance(item, dict)), {})
+    return {}
+
+
+def _workflow_execution_metrics(output_text, input_text=""):
+    output = _safe_json_object(output_text)
+    inputs = _safe_json_object(input_text)
+    stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
+    raw_count = _workflow_metric_value(stats, "raw_count")
+    normalized_count = _workflow_metric_value(stats, "normalized_count", raw_count)
+    after_filter_count = _workflow_metric_value(
+        stats,
+        "after_filter_count",
+        normalized_count,
+    )
+    unique_count = _workflow_metric_value(
+        stats,
+        "after_dedup_count",
+        after_filter_count,
+    )
+    filter_removed_count = _workflow_metric_value(
+        stats,
+        "filter_removed_count",
+        max(normalized_count - after_filter_count, 0),
+    )
+    duplicate_count = _workflow_metric_value(
+        stats,
+        "dedup_removed_count",
+        max(after_filter_count - unique_count, 0),
+    )
+    reduced_count = max(raw_count - unique_count, filter_removed_count + duplicate_count, 0)
+
+    source_counts = {}
+    raw_source_counts = stats.get("normalize_type_counts")
+    if isinstance(raw_source_counts, dict) and raw_source_counts.get("_type") != "dict":
+        source_counts = {
+            _norm(key): max(_safe_int(value), 0)
+            for key, value in raw_source_counts.items()
+            if max(_safe_int(value), 0) > 0
+        }
+    preview = _workflow_alert_preview(output)
+    source_type = _norm(
+        preview.get("_source_type")
+        or inputs.get("source_log_type")
+        or output.get("source_log_type")
+        or output.get("input_mode")
+    )
+    if not source_counts and normalized_count > 0:
+        source_counts[source_type] = normalized_count
+
+    return {
+        "rawCount": raw_count,
+        "normalizedCount": normalized_count,
+        "afterFilterCount": after_filter_count,
+        "uniqueCount": unique_count,
+        "filterRemovedCount": filter_removed_count,
+        "duplicateCount": duplicate_count,
+        "reducedCount": reduced_count,
+        "reductionRate": _ratio(reduced_count, raw_count),
+        "dedupRate": _ratio(duplicate_count, after_filter_count),
+        "clusterCount": _workflow_metric_value(stats, "lsh_total_clusters"),
+        "sourceCounts": source_counts,
+        "sourceType": source_type,
+        "preview": preview,
+    }
+
+
+def _empty_workflow_denoise_stats():
+    return {
+        "callCount": 0,
+        "successCount": 0,
+        "errorCount": 0,
+        "earliestStartedAt": 0,
+        "latestStartedAt": 0,
+        "rawCount": 0,
+        "normalizedCount": 0,
+        "afterFilterCount": 0,
+        "uniqueCount": 0,
+        "filterRemovedCount": 0,
+        "duplicateCount": 0,
+        "reducedCount": 0,
+        "reductionRate": 0,
+        "dedupRate": 0,
+        "sourceCounts": {},
+        "seriesRaw": [],
+        "seriesUnique": [],
+        "timelineLabels": [],
+        "timelineWindow": "",
+    }
+
+
+def _get_workflow_denoise_stats(
     workflow_name: str,
     start_time: int = 0,
     end_time: int = 0,
@@ -471,7 +581,7 @@ def _get_workflow_call_count(
     force: bool = False,
 ) -> dict:
     now = time.time()
-    cache_key = f"{workflow_name}:{start_time or 0}:{end_time or 0}"
+    cache_key = f"denoise:{workflow_name}:{start_time or 0}:{end_time or 0}"
 
     with _cache_lock:
         cached = _workflow_stats_cache.get(cache_key)
@@ -479,50 +589,58 @@ def _get_workflow_call_count(
             _workflow_stats_cache.move_to_end(cache_key)
             return cached["value"]
 
-    empty = {"callCount": 0, "dupCount": 0, "uniqueCount": 0}
+    empty = _empty_workflow_denoise_stats()
     if not WORKFLOW_DB.is_file():
         return empty
 
     try:
+        query = (
+            "SELECT status, started_at FROM workflow_executions "
+            "WHERE workflow_id = ?"
+        )
+        query_params = [workflow_name]
         if start_time > 0 and end_time > 0:
-            start = int(start_time * 1000)
-            end = int(end_time * 1000)
-            with sqlite3.connect(WORKFLOW_DB) as conn:
-                rows = conn.execute(
-                    """
-                    SELECT output_results
-                    FROM workflow_executions
-                    WHERE workflow_id = ? AND started_at >= ? AND started_at <= ?
-                    """,
-                    (workflow_name, start, end),
-                ).fetchall()
-            dup_count = 0
-            unique_count = 0
-            for (output_text,) in rows:
-                try:
-                    output = json.loads(output_text or "{}")
-                except Exception:
-                    output = {}
-                stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
-                raw = _safe_int(stats.get("raw_count"))
-                if "after_dedup_count" in stats and stats.get("after_dedup_count") is not None:
-                    unique_count += _safe_int(stats.get("after_dedup_count"))
-                else:
-                    unique_count += raw
-                if output.get("is_duplicate") is True:
-                    dup_count += 1
-            result_dict = {
-                "callCount": len(rows),
-                "dupCount": dup_count,
-                "uniqueCount": unique_count,
-            }
-        else:
-            with sqlite3.connect(WORKFLOW_DB) as conn:
-                row = conn.execute(
-                    "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
-                    (workflow_name,),
-                ).fetchone()
-            result_dict = {"callCount": _safe_int(row[0] if row else 0), "dupCount": 0, "uniqueCount": 0}
+            query += " AND started_at >= ? AND started_at <= ?"
+            query_params.extend((int(start_time * 1000), int(end_time * 1000)))
+        query += " ORDER BY started_at"
+        with sqlite3.connect(WORKFLOW_DB) as conn:
+            rows = conn.execute(query, query_params).fetchall()
+
+        result_dict = _empty_workflow_denoise_stats()
+        processed_total = len(rows)
+        if processed_total:
+            result_dict.update(
+                {
+                    "callCount": processed_total,
+                    "successCount": sum(
+                        1 for status, _ in rows if str(status).lower() == "success"
+                    ),
+                    "errorCount": sum(
+                        1 for status, _ in rows if str(status).lower() != "success"
+                    ),
+                    "earliestStartedAt": _safe_int(rows[0][1]),
+                    "latestStartedAt": _safe_int(rows[-1][1]),
+                    "rawCount": processed_total,
+                    "normalizedCount": processed_total,
+                    "afterFilterCount": processed_total,
+                    "sourceCounts": {"ndr": processed_total},
+                }
+            )
+            first_started = _safe_int(rows[0][1]) // 1000
+            last_started = _safe_int(rows[-1][1]) // 1000
+            bucket_start, bucket_seconds, bucket_count, labels, window = _timeline_spec(
+                [],
+                start_time or first_started,
+                end_time or max(last_started, first_started),
+            )
+            series_raw = [0] * bucket_count
+            for _, started_at in rows:
+                index = int(((_safe_int(started_at) // 1000) - bucket_start) / bucket_seconds)
+                if 0 <= index < bucket_count:
+                    series_raw[index] += 1
+            result_dict["seriesRaw"] = series_raw
+            result_dict["timelineLabels"] = labels
+            result_dict["timelineWindow"] = window
 
         with _cache_lock:
             _workflow_stats_cache[cache_key] = {"updatedAt": now, "value": result_dict}
@@ -536,23 +654,105 @@ def _get_workflow_call_count(
             return cached["value"] if cached else empty
 
 
-def _get_workflow_progress(workflow_name: str) -> dict:
-    unavailable = {"callCount": None}
+def _get_workflow_progress(
+    workflow_name: str,
+    start_time: int = 0,
+    end_time: int = 0,
+) -> dict:
+    unavailable = {"callCount": None, "latestStartedAt": None}
     if not WORKFLOW_DB.is_file():
         return unavailable
 
     try:
         with sqlite3.connect(WORKFLOW_DB) as conn:
-            row = conn.execute(
-                "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
-                (workflow_name,),
-            ).fetchone()
+            if start_time > 0 and end_time > 0:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(MAX(started_at), 0) "
+                    "FROM workflow_executions "
+                    "WHERE workflow_id = ? AND started_at >= ? AND started_at <= ?",
+                    (workflow_name, int(start_time * 1000), int(end_time * 1000)),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
+                    (workflow_name,),
+                ).fetchone()
     except Exception:
         return unavailable
 
     if row is None:
-        return {"callCount": 0}
-    return {"callCount": max(_safe_int(row[0]), 0)}
+        return {"callCount": 0, "latestStartedAt": 0}
+    return {
+        "callCount": max(_safe_int(row[0]), 0),
+        "latestStartedAt": max(_safe_int(row[1] if len(row) > 1 else 0), 0),
+    }
+
+
+def _get_workflow_recent_events(
+    workflow_name: str,
+    start_time: int = 0,
+    end_time: int = 0,
+    limit: int = 10,
+) -> list:
+    if not WORKFLOW_DB.is_file():
+        return []
+    query = (
+        "SELECT id, status, started_at, output_results, input_params "
+        "FROM workflow_executions WHERE workflow_id = ?"
+    )
+    query_params = [workflow_name]
+    if start_time > 0 and end_time > 0:
+        query += " AND started_at >= ? AND started_at <= ?"
+        query_params.extend((int(start_time * 1000), int(end_time * 1000)))
+    query += " ORDER BY started_at DESC LIMIT ?"
+    query_params.append(max(1, min(_safe_int(limit), 10)))
+    try:
+        with sqlite3.connect(WORKFLOW_DB) as conn:
+            rows = conn.execute(query, query_params).fetchall()
+    except Exception:
+        return []
+
+    events = []
+    for execution_id, status, started_at, output_text, input_text in rows:
+        metrics = _workflow_execution_metrics(output_text, input_text)
+        preview = metrics["preview"]
+        raw_count = metrics["rawCount"]
+        unique_count = metrics["uniqueCount"]
+        threat_name = str(
+            preview.get("threat_name")
+            or preview.get("_threat_type")
+            or preview.get("threat_type")
+            or f"降噪批次 · 原始 {raw_count} 条"
+        )
+        events.append(
+            {
+                "eventId": f"workflow-execution:{execution_id}",
+                "stage": "denoise",
+                "status": "completed" if str(status).lower() == "success" else "failed",
+                "occurredAt": datetime.fromtimestamp(
+                    _safe_int(started_at) / 1000
+                ).astimezone().isoformat(timespec="seconds"),
+                "triggerSource": "workflow_execution",
+                "sampleCount": max(unique_count, 1),
+                "alert": {
+                    "id": str(preview.get("id") or execution_id),
+                    "sourceType": metrics["sourceType"],
+                    "threatName": threat_name,
+                    "srcIp": preview.get("sip") or preview.get("src_ip"),
+                    "dstIp": preview.get("dip") or preview.get("dst_ip"),
+                },
+                "result": {
+                    "isDuplicate": unique_count <= 0,
+                    "clusterId": str(metrics["clusterCount"] or "--"),
+                    **{
+                        key: value
+                        for key, value in metrics.items()
+                        if key not in {"preview", "sourceCounts", "sourceType"}
+                    },
+                },
+            }
+        )
+    return events
 
 
 SOURCE_DEFS = [
@@ -599,7 +799,6 @@ async def get_activity(ctx, request):
 
 
 def _get_activity(params):
-    workflow_stats = _get_workflow_progress("stream_alert_denoise")
     _ensure_sqlite_schema()
     _maybe_prune_activity()
     settings = _sqlite_settings()
@@ -609,6 +808,16 @@ def _get_activity(params):
         params.get("endTime"),
     )
     start_time, end_time = time_window or (0, 0)
+    workflow_stats = _get_workflow_progress(
+        "stream_alert_denoise",
+        start_time,
+        end_time,
+    )
+    workflow_events = _get_workflow_recent_events(
+        "stream_alert_denoise",
+        start_time,
+        end_time,
+    )
     raw_cursor = str(params.get("cursor") or "").strip()
     bootstrap = str(params.get("bootstrap") or "").strip().lower() == "latest"
     limit = max(1, min(_safe_int(params.get("limit") or ACTIVITY_DEFAULT_LIMIT), ACTIVITY_MAX_LIMIT))
@@ -620,6 +829,7 @@ def _get_activity(params):
             "",
             cursor_reset=bool(raw_cursor),
             workflow_stats=workflow_stats,
+            workflow_events=workflow_events,
         )
 
     cursor = _decode_activity_cursor(raw_cursor) if raw_cursor else None
@@ -646,6 +856,7 @@ def _get_activity(params):
                     cursor_reset=cursor_reset,
                     recent_events=recent_events,
                     workflow_stats=workflow_stats,
+                    workflow_events=workflow_events,
                 )
 
             last_row_id = max(_safe_int(cursor.get("lastRowId")), 0)
@@ -665,7 +876,13 @@ def _get_activity(params):
             )
     except Exception as exc:
         return {
-            **_activity_response([], 0, "", workflow_stats=workflow_stats),
+            **_activity_response(
+                [],
+                0,
+                "",
+                workflow_stats=workflow_stats,
+                workflow_events=workflow_events,
+            ),
             "error": f"activity query failed: {exc}",
         }
 
@@ -686,6 +903,7 @@ def _get_activity(params):
             cursor_reset=cursor_reset,
             batch=batch,
             workflow_stats=workflow_stats,
+            workflow_events=workflow_events,
         ),
         "overflowCount": overflow_count,
     }
@@ -700,6 +918,7 @@ def _activity_response(
     recent_events=None,
     batch=None,
     workflow_stats=None,
+    workflow_events=None,
 ):
     return {
         "cursor": _encode_activity_cursor(last_row_id, last_activity_id),
@@ -709,7 +928,8 @@ def _activity_response(
         "overflowCount": 0,
         "batch": batch or _empty_activity_batch(),
         "cursorReset": cursor_reset,
-        "workflowStats": workflow_stats or {"callCount": None},
+        "workflowStats": workflow_stats or {"callCount": None, "latestStartedAt": None},
+        "workflowEvents": workflow_events or [],
     }
 
 
@@ -1109,18 +1329,50 @@ def _get_stats(params):
         denoise_files = asset_denoise_files
     triage_files = asset_triage_files or asset_denoise_files
 
-    workflow_stats = _get_workflow_call_count(
+    workflow_stats = _get_workflow_denoise_stats(
         "stream_alert_denoise",
         range_start_time,
         range_end_time,
         force=force_refresh,
     )
     denoise = _read_denoise(denoise_files, workflow_stats.get("callCount", 0))
+    soc_unique_count = denoise["totalUnique"]
+    soc_unique_series = denoise["seriesUnique"]
+    timeline_labels = workflow_stats["timelineLabels"] or denoise.get("_timelineLabels", [])
+    timeline_window = workflow_stats["timelineWindow"] or denoise.get("_timelineWindow", "")
+    workflow_series_raw = workflow_stats["seriesRaw"]
+    if not workflow_series_raw and soc_unique_series:
+        workflow_series_raw = [0] * len(soc_unique_series)
+    processed_total = workflow_stats["callCount"]
+    reduced_count = max(processed_total - soc_unique_count, 0)
+    reduction_rate = _ratio(reduced_count, processed_total)
+    denoise.update(
+        {
+            "totalRaw": processed_total,
+            "totalNormalized": processed_total,
+            "afterFilter": processed_total,
+            "totalUnique": soc_unique_count,
+            "filterRemoved": 0,
+            "dedupRemoved": reduced_count,
+            "duplicates": reduced_count,
+            "duplicateRate": reduction_rate,
+            "dedupRate": reduction_rate,
+            "uniqueRate": _ratio(min(soc_unique_count, processed_total), processed_total),
+            "files": processed_total,
+            "sourceCounter": Counter(workflow_stats["sourceCounts"]),
+            "seriesRaw": workflow_series_raw,
+            "seriesUnique": soc_unique_series,
+            "_timelineLabels": timeline_labels,
+            "_timelineWindow": timeline_window,
+            "workflowCallCount": processed_total,
+            "dataSource": "workflow.db.workflow_stats + soc.db.unique",
+        }
+    )
     triage = _read_triage(triage_files)
     if denoise.get("_seriesTriage") is not None:
         triage["seriesTotal"] = denoise["_seriesTriage"]
         triage["seriesAttack"] = denoise["_seriesAttack"]
-    sources = _build_sources(denoise["sourceCounter"] or triage["sourceCounter"])
+    sources = _build_sources(denoise["sourceCounter"])
     closed_loop = _build_closed_loop(triage)
     pipeline = _build_pipeline(denoise, triage)
     available_dates = _available_asset_dates()
@@ -2016,7 +2268,7 @@ def _build_closed_loop(triage):
 
 
 def _build_pipeline(denoise, triage):
-    raw = denoise.get("workflowCallCount") or denoise["totalRaw"]
+    raw = denoise["totalRaw"]
     unique = denoise["totalUnique"]
     triage_total = triage["totalRecords"]
     attack_total = triage["attackTotal"]
