@@ -231,6 +231,7 @@ def _ensure_alert_record_columns(conn):
 
 def _create_dashboard_triggers(conn):
     insert_fact = _fact_upsert_sql("NEW")
+    new_row_key = _fact_expressions("NEW")[1]
     new_persisted = _json_value("NEW", "_triage_persisted_at")
     old_persisted = _json_value("OLD", "_triage_persisted_at")
     new_status = _json_value("NEW", "triage_status")
@@ -260,6 +261,8 @@ def _create_dashboard_triggers(conn):
         AFTER UPDATE OF row_id, asset_date, event_time, source_type, threat_name, is_duplicate, record_json
         ON {DEFAULT_SQLITE_TABLE}
         BEGIN
+            DELETE FROM {FACTS_TABLE}
+            WHERE alert_row_id = NEW.rowid OR row_key = {new_row_key};
             {insert_fact};
             INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
                 event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
@@ -616,7 +619,8 @@ def _workflow_execution_metrics(output_text, input_text=""):
     output = _safe_json_object(output_text)
     inputs = _safe_json_object(input_text)
     stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
-    metrics_available = any(
+    duplicate_flag_available = isinstance(output.get("is_duplicate"), bool)
+    metrics_available = duplicate_flag_available or any(
         stats.get(key) is not None
         for key in (
             "raw_count",
@@ -647,6 +651,18 @@ def _workflow_execution_metrics(output_text, input_text=""):
         "dedup_removed_count",
         max(after_filter_count - unique_count, 0),
     )
+    is_duplicate = output.get("is_duplicate") is True
+    if (
+        is_duplicate
+        and raw_count == 1
+        and after_filter_count == 1
+        and unique_count == 1
+        and duplicate_count == 0
+    ):
+        # Older streaming executions only counted duplicates within the current
+        # one-alert batch, even when cross-batch state marked it as duplicate.
+        unique_count = 0
+        duplicate_count = 1
     reduced_count = (
         max(raw_count - unique_count, filter_removed_count + duplicate_count, 0)
         if metrics_available
@@ -686,7 +702,7 @@ def _workflow_execution_metrics(output_text, input_text=""):
         "reductionRate": _ratio(reduced_count, raw_count) if metrics_available else 0,
         "dedupRate": _ratio(duplicate_count, after_filter_count) if metrics_available else 0,
         "clusterCount": _workflow_metric_value(stats, "lsh_total_clusters"),
-        "isDuplicate": output.get("is_duplicate") is True,
+        "isDuplicate": is_duplicate,
         "sourceCounts": source_counts,
         "sourceType": source_type,
         "preview": preview,

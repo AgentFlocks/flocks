@@ -87,7 +87,43 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     handlers._schema_ready.clear()
     assert handlers._ensure_sqlite_schema() is True
 
+    updated_first_record = {
+        **first_record,
+        "_triage_persisted_at": "2026-07-14T13:02:00",
+        "triage_report": "# Updated report",
+    }
     with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO alert_records (
+                row_id, record_id, asset_date, source_file, line_number,
+                event_time, source_type, threat_name, is_duplicate, record_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(row_id) DO UPDATE SET
+                record_id=excluded.record_id,
+                asset_date=excluded.asset_date,
+                source_file=excluded.source_file,
+                line_number=excluded.line_number,
+                event_time=excluded.event_time,
+                source_type=excluded.source_type,
+                threat_name=excluded.threat_name,
+                is_duplicate=excluded.is_duplicate,
+                record_json=excluded.record_json
+            """,
+            (
+                "1",
+                "1",
+                "2026-07-14",
+                "triage-replay.jsonl",
+                1,
+                1784014800,
+                "tdp",
+                "SQL injection",
+                0,
+                json.dumps(updated_first_record),
+            ),
+        )
+        conn.commit()
         columns = {row[1] for row in conn.execute("PRAGMA table_info(alert_records)")}
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(alert_records)")}
         facts = conn.execute(
@@ -104,6 +140,10 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         schema_version = conn.execute(
             "SELECT meta_value FROM soc_dashboard_meta WHERE meta_key='schema_version'"
         ).fetchone()[0]
+        updated_fact = conn.execute(
+            "SELECT triage_persisted_at, verdict FROM soc_dashboard_alert_facts "
+            "WHERE row_key = '1'"
+        ).fetchone()
 
     assert {
         "row_id",
@@ -127,6 +167,7 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         (2, "2", "hids", "Malware download", 1),
     ]
     assert "COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT))" in trigger_sql
+    assert updated_fact == ("2026-07-14T13:02:00", "attack")
     assert schema_version == "2"
 
 
@@ -179,6 +220,57 @@ def test_soc_dashboard_workflow_progress_marks_unavailable_database(tmp_path: Pa
         "callCount": None,
         "latestStartedAt": None,
     }
+
+
+def test_soc_dashboard_corrects_legacy_single_alert_duplicate_metrics():
+    handlers = _load_dashboard_handlers()
+    output = {
+        "stats": {
+            "raw_count": 1,
+            "normalized_count": 1,
+            "after_filter_count": 1,
+            "after_dedup_count": 1,
+            "dedup_removed_count": 0,
+        },
+        "is_duplicate": True,
+    }
+
+    metrics = handlers._workflow_execution_metrics(json.dumps(output))
+
+    assert metrics["uniqueCount"] == 0
+    assert metrics["duplicateCount"] == 1
+    assert metrics["reducedCount"] == 1
+    assert metrics["reductionRate"] == 1
+    assert metrics["dedupRate"] == 1
+
+    flag_only_metrics = handlers._workflow_execution_metrics(
+        json.dumps({"is_duplicate": True})
+    )
+
+    assert flag_only_metrics["metricsAvailable"] is True
+    assert flag_only_metrics["rawCount"] == 1
+    assert flag_only_metrics["uniqueCount"] == 0
+    assert flag_only_metrics["duplicateCount"] == 1
+    assert flag_only_metrics["reductionRate"] == 1
+
+    output["is_duplicate"] = False
+    first_seen_metrics = handlers._workflow_execution_metrics(json.dumps(output))
+
+    assert first_seen_metrics["uniqueCount"] == 1
+    assert first_seen_metrics["duplicateCount"] == 0
+    assert first_seen_metrics["reductionRate"] == 0
+
+    output["is_duplicate"] = True
+    output["stats"].update(
+        raw_count=2,
+        normalized_count=2,
+        after_filter_count=2,
+        after_dedup_count=2,
+    )
+    batch_metrics = handlers._workflow_execution_metrics(json.dumps(output))
+
+    assert batch_metrics["uniqueCount"] == 2
+    assert batch_metrics["duplicateCount"] == 0
 
 
 def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path: Path):
@@ -415,7 +507,9 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         "降噪批次 · 原始 1 条",
     ]
     assert events[0]["result"]["rawCount"] == 1
-    assert events[0]["result"]["uniqueCount"] == 1
+    assert events[0]["result"]["uniqueCount"] == 0
+    assert events[0]["result"]["duplicateCount"] == 1
+    assert events[0]["result"]["reductionRate"] == 1
     assert events[0]["result"]["isDuplicate"] is True
     assert events[0]["alert"]["srcIp"] == "10.10.10.10"
 
