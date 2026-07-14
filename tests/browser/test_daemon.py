@@ -1,3 +1,4 @@
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -279,6 +280,26 @@ def test_get_ws_url_skips_open_non_cdp_port_and_uses_next_candidate(tmp_path, mo
     monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:2222/devtools/browser/healthy"
+
+
+def test_get_ws_url_uses_devtools_active_port_path_when_version_endpoint_returns_404(tmp_path, monkeypatch) -> None:
+    profile = tmp_path / "chrome"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text(
+        "9222\n/devtools/browser/current\n",
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(url: str, timeout: float):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.delenv("BU_CDP_URL", raising=False)
+    monkeypatch.setattr(daemon, "profile_dirs", lambda: [profile])
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(daemon.time, "sleep", lambda _seconds: pytest.fail("404 response must not be retried"))
+
+    assert daemon.get_ws_url() == "ws://127.0.0.1:9222/devtools/browser/current"
 
 
 def test_load_env_uses_shared_loader_for_existing_files(tmp_path, monkeypatch) -> None:

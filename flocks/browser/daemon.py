@@ -9,6 +9,7 @@ import socket
 import sys
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -116,15 +117,20 @@ async def _silent(coro) -> None:
         pass
 
 
-def _local_cdp_ws_url(port: int) -> str:
-    """Return a validated local browser WebSocket URL discovered over HTTP."""
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
-        payload = json.loads(response.read())
-    if not isinstance(payload, dict):
-        raise ValueError("invalid CDP version response")
-    websocket_url = payload.get("webSocketDebuggerUrl")
-    if not isinstance(websocket_url, str):
-        raise ValueError("invalid webSocketDebuggerUrl")
+def _local_cdp_ws_url(port: int, devtools_path: str | None = None) -> str:
+    """Return a validated local browser WebSocket URL from profile metadata."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
+            payload = json.loads(response.read())
+        if not isinstance(payload, dict):
+            raise ValueError("invalid CDP version response")
+        websocket_url = payload.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str):
+            raise ValueError("invalid webSocketDebuggerUrl")
+    except urllib.error.HTTPError:
+        if not devtools_path or not devtools_path.startswith("/"):
+            raise
+        websocket_url = f"ws://127.0.0.1:{port}{devtools_path}"
     parsed = urllib.parse.urlparse(websocket_url)
     if (
         parsed.scheme not in {"ws", "wss"}
@@ -172,13 +178,13 @@ def get_ws_url() -> str:
         except ValueError:
             profile_errors.append(f"{base}: invalid DevToolsActivePort")
             continue
-        profile_candidates.append((base, port_number))
+        profile_candidates.append((base, port_number, path.strip()))
 
     deadline = time.time() + 30
     while profile_candidates:
-        for base, port in profile_candidates:
+        for base, port, devtools_path in profile_candidates:
             try:
-                return _local_cdp_ws_url(port)
+                return _local_cdp_ws_url(port, devtools_path)
             except (OSError, ValueError, json.JSONDecodeError) as error:
                 profile_errors.append(f"{base}: 127.0.0.1:{port} ({error})")
         if time.time() >= deadline:
