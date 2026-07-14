@@ -237,8 +237,27 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
             """
         )
         conn.execute(
+            """
+            CREATE TABLE soc_dashboard_workflow_stats_samples (
+                workflow_id TEXT NOT NULL,
+                sampled_at INTEGER NOT NULL,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (workflow_id, sampled_at)
+            )
+            """
+        )
+        conn.execute(
             "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
-            ("stream_alert_denoise", 20, 19, 1, (start_time + 300) * 1000),
+            ("stream_alert_denoise", 100, 99, 1, (start_time + 200) * 1000),
+        )
+        conn.executemany(
+            "INSERT INTO soc_dashboard_workflow_stats_samples VALUES (?, ?, ?, ?, ?)",
+            [
+                ("stream_alert_denoise", (start_time + 100) * 1000, 60, 60, 0),
+                ("stream_alert_denoise", (start_time + 200) * 1000, 100, 99, 1),
+            ],
         )
 
         def insert_execution(
@@ -297,6 +316,38 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
             empty_output=True,
         )
         insert_execution("second", start_time + 200, 5, 5, 5, 4, "skyeye", "Malware")
+        duplicate_input = {
+            "syslog_message": {
+                "app_name": "tdp",
+                "message": json.dumps(
+                    {
+                        "id": "syslog-duplicate",
+                        "net_real_src_ip": "10.10.10.10",
+                        "net_dest_ip": "192.168.10.10",
+                        "threat_name": "Syslog duplicate",
+                    }
+                ),
+            }
+        }
+        duplicate_output = {
+            "unique_alerts": {
+                "_type": "list",
+                "count": 1,
+                "preview": [{"_type": "dict", "keys": ["id", "threat_name"]}],
+            },
+            "stats": {
+                "raw_count": 1,
+                "normalized_count": 1,
+                "after_filter_count": 1,
+                "after_dedup_count": 1,
+                "dedup_removed_count": 0,
+            },
+            "is_duplicate": True,
+        }
+        conn.execute(
+            "UPDATE workflow_executions SET input_params = ?, output_results = ? WHERE id = ?",
+            (json.dumps(duplicate_input), json.dumps(duplicate_output), "second"),
+        )
         conn.commit()
 
     handlers = _load_dashboard_handlers()
@@ -309,27 +360,27 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     )
 
     expected_denoise = {
-        "totalRaw": 2,
-        "totalNormalized": 2,
-        "afterFilter": 2,
+        "totalRaw": 100,
+        "totalNormalized": 100,
+        "afterFilter": 100,
         "totalUnique": 1,
         "filterRemoved": 0,
-        "dedupRemoved": 1,
-        "duplicates": 1,
+        "dedupRemoved": 99,
+        "duplicates": 99,
     }
     assert {
         key: stats["denoise"][key]
         for key in expected_denoise
     } == expected_denoise
-    assert stats["denoise"]["duplicateRate"] == 0.5
-    assert stats["denoise"]["dedupRate"] == 0.5
-    assert stats["pipeline"]["raw"] == 2
+    assert stats["denoise"]["duplicateRate"] == 0.99
+    assert stats["denoise"]["dedupRate"] == 0.99
+    assert stats["pipeline"]["raw"] == 100
     assert stats["pipeline"]["unique"] == 1
-    assert sum(stats["timeline"]["denoiseRaw"]) == 2
+    assert sum(stats["timeline"]["denoiseRaw"]) == 100
     assert sum(stats["timeline"]["denoiseUnique"]) == 1
-    assert stats["sourceStatus"]["workflowStats"]["callCount"] == 2
+    assert stats["sourceStatus"]["workflowStats"]["callCount"] == 100
     assert {source["key"]: source["value"] for source in stats["sources"]} == {
-        "ndr": 2,
+        "ndr": 100,
         "edr": 0,
         "waf": 0,
         "ids": 0,
@@ -346,12 +397,12 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         }
     )
     assert activity["workflowStats"] == {
-        "callCount": 2,
+        "callCount": 100,
         "latestStartedAt": (start_time + 200) * 1000,
     }
     assert [event["alert"]["threatName"] for event in activity["workflowEvents"]] == [
-        "Malware",
-        "降噪批次 · 原始 0 条",
+        "Syslog duplicate",
+        "降噪批次 · 原始 1 条",
     ]
 
     events = handlers._get_workflow_recent_events(
@@ -360,11 +411,13 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         end_time,
     )
     assert [event["alert"]["threatName"] for event in events] == [
-        "Malware",
-        "降噪批次 · 原始 0 条",
+        "Syslog duplicate",
+        "降噪批次 · 原始 1 条",
     ]
-    assert events[0]["result"]["rawCount"] == 5
-    assert events[0]["result"]["uniqueCount"] == 4
+    assert events[0]["result"]["rawCount"] == 1
+    assert events[0]["result"]["uniqueCount"] == 1
+    assert events[0]["result"]["isDuplicate"] is True
+    assert events[0]["alert"]["srcIp"] == "10.10.10.10"
 
     narrowed = handlers._get_stats(
         {
@@ -373,7 +426,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
             "force": "1",
         }
     )
-    assert narrowed["denoise"]["totalRaw"] == 1
+    assert narrowed["denoise"]["totalRaw"] == 40
     assert narrowed["denoise"]["totalUnique"] == 0
     assert narrowed["denoise"]["duplicateRate"] == 1
 

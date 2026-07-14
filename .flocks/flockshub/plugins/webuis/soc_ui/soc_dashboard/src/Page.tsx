@@ -672,7 +672,7 @@ function activityResultText(event) {
   if (!event) return '';
   if (event.stage === 'denoise') {
     if (event.triggerSource === 'workflow_execution') {
-      return `原始 ${fullNumber(event.result?.rawCount)} → 留存 ${fullNumber(event.result?.uniqueCount)} · 降噪 ${pct(event.result?.reductionRate)}`;
+      return '';
     }
     if (event.triggerSource === 'workflow_stats') {
       return `工作流调用 +${fullNumber(event.statsDelta || 1)}`;
@@ -717,6 +717,7 @@ function ActivityStageCard({ kind, lane, stats }) {
   const steps = kind === 'denoise' ? ['告警接入', '特征提取', '相似聚类', '降噪结果'] : ['证据提取', '情报关联', 'AI 推理', '生成结论'];
   const endpoint = [event.alert?.srcIp, event.alert?.dstIp].filter(Boolean).join(' → ');
   const duration = activityDuration(event);
+  const outcome = activityResultText(event);
   return h('div', {
     key: event.eventId,
     className: cx('stage-card', 'activity-card', kind === 'denoise' ? 'stage-green' : 'stage-violet', active && 'activity-active', event.status === 'failed' && 'activity-failed'),
@@ -736,10 +737,10 @@ function ActivityStageCard({ kind, lane, stats }) {
       key: step,
       style: active ? { animationDelay: `${Math.round(index * duration * 0.18)}ms` } : undefined,
     }, [h('i', { key: 'dot' }), step]))),
-    h('div', {
+    outcome ? h('div', {
       className: cx('activity-outcome', event.status === 'failed' && 'failed'),
       key: 'outcome',
-    }, activityResultText(event)),
+    }, outcome) : null,
   ]);
 }
 
@@ -1319,6 +1320,7 @@ function CommandActivityLane({ kind, lane }) {
   const eventTitle = event?.alert?.threatName
     ? `${event.alert.threatName}${sampleCount > 1 ? ` × ${sampleCount}` : ''}`
     : '等待新告警进入';
+  const resultText = event ? activityResultText(event) : '自动巡检 · 等待任务';
   return h('div', {
     className: cx('command-activity-lane', `lane-${kind}`, active && 'active'),
     style: {
@@ -1332,11 +1334,11 @@ function CommandActivityLane({ kind, lane }) {
         h('b', { key: 'status' }, status),
       ]),
       h('strong', { title: eventTitle, key: 'title' }, eventTitle),
-      h('div', {
+      resultText ? h('div', {
         className: cx('command-lane-result', !event && 'idle'),
         style: active ? { animationDelay: `${Math.round(duration * 0.65)}ms` } : undefined,
         key: 'result',
-      }, event ? activityResultText(event) : '自动巡检 · 等待任务'),
+      }, resultText) : null,
     ]),
     h('div', { className: 'command-drum-shell', 'aria-label': steps.join('、'), key: 'drum' }, [
       h('div', { className: 'command-drum-caption', key: 'caption' }, [
@@ -1659,7 +1661,7 @@ function CommandEventRail({ activity, timeFilter, collapsed, onToggle }) {
         ? '处理中'
         : '等待处理';
       const detail = event?.triggerSource === 'workflow_execution'
-        ? `原始 ${fullNumber(event.result?.rawCount)} · 留存 ${fullNumber(event.result?.uniqueCount)} · 降噪 ${pct(event.result?.reductionRate)}`
+        ? event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
         : task.state === 'processing'
           ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
           : '等待 AI 处理';

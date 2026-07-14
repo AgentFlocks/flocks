@@ -31,6 +31,7 @@ ACTIVITY_RETENTION_ROWS = 100_000
 ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
+WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
 
 _workflow_stats_cache: OrderedDict = OrderedDict()
 _CACHE_TTL: float = 30.0
@@ -471,6 +472,108 @@ def _safe_json_object(value):
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0):
+    stats_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_stats'"
+    ).fetchone()
+    if not stats_exists:
+        return None
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
+    }
+    success_expr = "success_count" if "success_count" in columns else "0"
+    error_expr = "error_count" if "error_count" in columns else "0"
+    updated_expr = "updated_at" if "updated_at" in columns else "0"
+    current = conn.execute(
+        f"SELECT call_count, {success_expr}, {error_expr}, {updated_expr} "
+        "FROM workflow_stats WHERE workflow_id = ?",
+        (workflow_name,),
+    ).fetchone()
+    if current is None:
+        return None
+
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {WORKFLOW_SNAPSHOT_TABLE} (
+            workflow_id   TEXT NOT NULL,
+            sampled_at    INTEGER NOT NULL,
+            call_count    INTEGER NOT NULL,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            error_count   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (workflow_id, sampled_at)
+        )
+        """
+    )
+    last = conn.execute(
+        f"SELECT sampled_at, call_count, success_count, error_count "
+        f"FROM {WORKFLOW_SNAPSHOT_TABLE} WHERE workflow_id = ? "
+        "ORDER BY sampled_at DESC LIMIT 1",
+        (workflow_name,),
+    ).fetchone()
+    current_count = max(_safe_int(current[0]), 0)
+    success_count = max(_safe_int(current[1]), 0)
+    error_count = max(_safe_int(current[2]), 0)
+    if last is None or (current_count, success_count, error_count) != tuple(last[1:4]):
+        stats_updated_at = _safe_int(current[3]) or int(time.time() * 1000)
+        sampled_at = stats_updated_at - (stats_updated_at % 60000)
+        if last is not None and sampled_at <= _safe_int(last[0]):
+            sampled_at = _safe_int(last[0])
+            conn.execute(
+                f"UPDATE {WORKFLOW_SNAPSHOT_TABLE} "
+                "SET call_count = ?, success_count = ?, error_count = ? "
+                "WHERE workflow_id = ? AND sampled_at = ?",
+                (current_count, success_count, error_count, workflow_name, sampled_at),
+            )
+        else:
+            conn.execute(
+                f"INSERT INTO {WORKFLOW_SNAPSHOT_TABLE} "
+                "(workflow_id, sampled_at, call_count, success_count, error_count) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (workflow_name, sampled_at, current_count, success_count, error_count),
+            )
+        conn.commit()
+        last = (sampled_at, current_count, success_count, error_count)
+
+    if not (start_time > 0 and end_time > 0):
+        sampled_at = max(_safe_int(current[3]), _safe_int(last[0] if last else 0))
+        return [(current_count, success_count, error_count, sampled_at)] if current_count else []
+
+    start_ms = int(start_time * 1000)
+    end_ms = int(end_time * 1000)
+    previous = conn.execute(
+        f"SELECT call_count, success_count, error_count "
+        f"FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at < ? "
+        "ORDER BY sampled_at DESC LIMIT 1",
+        (workflow_name, start_ms),
+    ).fetchone()
+    rows = conn.execute(
+        f"SELECT sampled_at, call_count, success_count, error_count "
+        f"FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at <= ? "
+        "ORDER BY sampled_at",
+        (workflow_name, start_ms, end_ms),
+    ).fetchall()
+    previous_counts = tuple(previous) if previous is not None else (0, 0, 0)
+    deltas = []
+    for sampled_at, call_count, sample_success, sample_error in rows:
+        current_counts = (
+            max(_safe_int(call_count), 0),
+            max(_safe_int(sample_success), 0),
+            max(_safe_int(sample_error), 0),
+        )
+        delta_counts = tuple(
+            current_value - previous_value
+            if current_value >= previous_value
+            else current_value
+            for current_value, previous_value in zip(current_counts, previous_counts)
+        )
+        if delta_counts[0] > 0:
+            deltas.append((*delta_counts, _safe_int(sampled_at)))
+        previous_counts = current_counts
+    return deltas
+
+
 def _workflow_metric_value(stats, key, fallback=0):
     value = stats.get(key)
     return max(_safe_int(fallback if value is None else value), 0)
@@ -482,7 +585,30 @@ def _workflow_alert_preview(output):
         if isinstance(value, dict):
             value = value.get("preview")
         if isinstance(value, list):
-            return next((item for item in value if isinstance(item, dict)), {})
+            return next(
+                (
+                    item
+                    for item in value
+                    if isinstance(item, dict) and item.get("_type") != "dict"
+                ),
+                {},
+            )
+    return {}
+
+
+def _workflow_input_preview(inputs):
+    syslog_message = inputs.get("syslog_message") or inputs.get("syslog")
+    if isinstance(syslog_message, dict):
+        message = syslog_message.get("message")
+        if isinstance(message, str):
+            parsed = _safe_json_object(message)
+            if parsed:
+                return parsed
+    alerts = inputs.get("alerts") or inputs.get("alert_list")
+    if isinstance(alerts, dict):
+        alerts = alerts.get("data")
+    if isinstance(alerts, list):
+        return next((item for item in alerts if isinstance(item, dict)), {})
     return {}
 
 
@@ -490,7 +616,16 @@ def _workflow_execution_metrics(output_text, input_text=""):
     output = _safe_json_object(output_text)
     inputs = _safe_json_object(input_text)
     stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
-    raw_count = _workflow_metric_value(stats, "raw_count")
+    metrics_available = any(
+        stats.get(key) is not None
+        for key in (
+            "raw_count",
+            "normalized_count",
+            "after_filter_count",
+            "after_dedup_count",
+        )
+    )
+    raw_count = _workflow_metric_value(stats, "raw_count", 1)
     normalized_count = _workflow_metric_value(stats, "normalized_count", raw_count)
     after_filter_count = _workflow_metric_value(
         stats,
@@ -512,7 +647,11 @@ def _workflow_execution_metrics(output_text, input_text=""):
         "dedup_removed_count",
         max(after_filter_count - unique_count, 0),
     )
-    reduced_count = max(raw_count - unique_count, filter_removed_count + duplicate_count, 0)
+    reduced_count = (
+        max(raw_count - unique_count, filter_removed_count + duplicate_count, 0)
+        if metrics_available
+        else 0
+    )
 
     source_counts = {}
     raw_source_counts = stats.get("normalize_type_counts")
@@ -522,17 +661,21 @@ def _workflow_execution_metrics(output_text, input_text=""):
             for key, value in raw_source_counts.items()
             if max(_safe_int(value), 0) > 0
         }
-    preview = _workflow_alert_preview(output)
+    preview = _workflow_alert_preview(output) or _workflow_input_preview(inputs)
+    syslog_message = inputs.get("syslog_message") or inputs.get("syslog")
+    syslog_app = syslog_message.get("app_name") if isinstance(syslog_message, dict) else ""
     source_type = _norm(
         preview.get("_source_type")
         or inputs.get("source_log_type")
         or output.get("source_log_type")
         or output.get("input_mode")
+        or syslog_app
     )
     if not source_counts and normalized_count > 0:
         source_counts[source_type] = normalized_count
 
     return {
+        "metricsAvailable": metrics_available,
         "rawCount": raw_count,
         "normalizedCount": normalized_count,
         "afterFilterCount": after_filter_count,
@@ -540,9 +683,10 @@ def _workflow_execution_metrics(output_text, input_text=""):
         "filterRemovedCount": filter_removed_count,
         "duplicateCount": duplicate_count,
         "reducedCount": reduced_count,
-        "reductionRate": _ratio(reduced_count, raw_count),
-        "dedupRate": _ratio(duplicate_count, after_filter_count),
+        "reductionRate": _ratio(reduced_count, raw_count) if metrics_available else 0,
+        "dedupRate": _ratio(duplicate_count, after_filter_count) if metrics_available else 0,
         "clusterCount": _workflow_metric_value(stats, "lsh_total_clusters"),
+        "isDuplicate": output.get("is_duplicate") is True,
         "sourceCounts": source_counts,
         "sourceType": source_type,
         "preview": preview,
@@ -594,50 +738,64 @@ def _get_workflow_denoise_stats(
         return empty
 
     try:
-        query = (
-            "SELECT status, started_at FROM workflow_executions "
-            "WHERE workflow_id = ?"
-        )
-        query_params = [workflow_name]
-        if start_time > 0 and end_time > 0:
-            query += " AND started_at >= ? AND started_at <= ?"
-            query_params.extend((int(start_time * 1000), int(end_time * 1000)))
-        query += " ORDER BY started_at"
         with sqlite3.connect(WORKFLOW_DB) as conn:
-            rows = conn.execute(query, query_params).fetchall()
+            sample_deltas = _workflow_stats_sample_deltas(
+                conn,
+                workflow_name,
+                start_time,
+                end_time,
+            )
+            if sample_deltas is None:
+                query = (
+                    "SELECT status, started_at FROM workflow_executions "
+                    "WHERE workflow_id = ?"
+                )
+                query_params = [workflow_name]
+                if start_time > 0 and end_time > 0:
+                    query += " AND started_at >= ? AND started_at <= ?"
+                    query_params.extend((int(start_time * 1000), int(end_time * 1000)))
+                query += " ORDER BY started_at"
+                execution_rows = conn.execute(query, query_params).fetchall()
+                samples = [
+                    (
+                        1,
+                        1 if str(status).lower() == "success" else 0,
+                        0 if str(status).lower() == "success" else 1,
+                        _safe_int(started_at),
+                    )
+                    for status, started_at in execution_rows
+                ]
+            else:
+                samples = sample_deltas
 
         result_dict = _empty_workflow_denoise_stats()
-        processed_total = len(rows)
+        processed_total = sum(call_count for call_count, _, _, _ in samples)
         if processed_total:
             result_dict.update(
                 {
                     "callCount": processed_total,
-                    "successCount": sum(
-                        1 for status, _ in rows if str(status).lower() == "success"
-                    ),
-                    "errorCount": sum(
-                        1 for status, _ in rows if str(status).lower() != "success"
-                    ),
-                    "earliestStartedAt": _safe_int(rows[0][1]),
-                    "latestStartedAt": _safe_int(rows[-1][1]),
+                    "successCount": sum(success_count for _, success_count, _, _ in samples),
+                    "errorCount": sum(error_count for _, _, error_count, _ in samples),
+                    "earliestStartedAt": samples[0][3],
+                    "latestStartedAt": samples[-1][3],
                     "rawCount": processed_total,
                     "normalizedCount": processed_total,
                     "afterFilterCount": processed_total,
                     "sourceCounts": {"ndr": processed_total},
                 }
             )
-            first_started = _safe_int(rows[0][1]) // 1000
-            last_started = _safe_int(rows[-1][1]) // 1000
+            first_started = samples[0][3] // 1000
+            last_started = samples[-1][3] // 1000
             bucket_start, bucket_seconds, bucket_count, labels, window = _timeline_spec(
                 [],
                 start_time or first_started,
                 end_time or max(last_started, first_started),
             )
             series_raw = [0] * bucket_count
-            for _, started_at in rows:
-                index = int(((_safe_int(started_at) // 1000) - bucket_start) / bucket_seconds)
+            for call_count, _, _, started_at in samples:
+                index = int(((started_at // 1000) - bucket_start) / bucket_seconds)
                 if 0 <= index < bucket_count:
-                    series_raw[index] += 1
+                    series_raw[index] += call_count
             result_dict["seriesRaw"] = series_raw
             result_dict["timelineLabels"] = labels
             result_dict["timelineWindow"] = window
@@ -666,12 +824,30 @@ def _get_workflow_progress(
     try:
         with sqlite3.connect(WORKFLOW_DB) as conn:
             if start_time > 0 and end_time > 0:
-                row = conn.execute(
-                    "SELECT COUNT(*), COALESCE(MAX(started_at), 0) "
-                    "FROM workflow_executions "
-                    "WHERE workflow_id = ? AND started_at >= ? AND started_at <= ?",
-                    (workflow_name, int(start_time * 1000), int(end_time * 1000)),
-                ).fetchone()
+                sample_deltas = _workflow_stats_sample_deltas(
+                    conn,
+                    workflow_name,
+                    start_time,
+                    end_time,
+                )
+                if sample_deltas is None:
+                    row = conn.execute(
+                        "SELECT COUNT(*), COALESCE(MAX(started_at), 0) "
+                        "FROM workflow_executions "
+                        "WHERE workflow_id = ? AND started_at >= ? AND started_at <= ?",
+                        (workflow_name, int(start_time * 1000), int(end_time * 1000)),
+                    ).fetchone()
+                else:
+                    latest_row = conn.execute(
+                        "SELECT COALESCE(MAX(started_at), 0) FROM workflow_executions "
+                        "WHERE workflow_id = ? AND started_at >= ? AND started_at <= ?",
+                        (workflow_name, int(start_time * 1000), int(end_time * 1000)),
+                    ).fetchone()
+                    latest_sample = sample_deltas[-1][3] if sample_deltas else 0
+                    row = (
+                        sum(max(_safe_int(item[0]), 0) for item in sample_deltas),
+                        max(_safe_int(latest_row[0] if latest_row else 0), _safe_int(latest_sample)),
+                    )
             else:
                 row = conn.execute(
                     "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
@@ -738,11 +914,11 @@ def _get_workflow_recent_events(
                     "id": str(preview.get("id") or execution_id),
                     "sourceType": metrics["sourceType"],
                     "threatName": threat_name,
-                    "srcIp": preview.get("sip") or preview.get("src_ip"),
-                    "dstIp": preview.get("dip") or preview.get("dst_ip"),
+                    "srcIp": preview.get("sip") or preview.get("src_ip") or preview.get("net_real_src_ip"),
+                    "dstIp": preview.get("dip") or preview.get("dst_ip") or preview.get("net_dest_ip"),
                 },
                 "result": {
-                    "isDuplicate": unique_count <= 0,
+                    "isDuplicate": metrics["isDuplicate"],
                     "clusterId": str(metrics["clusterCount"] or "--"),
                     **{
                         key: value
@@ -1365,7 +1541,7 @@ def _get_stats(params):
             "_timelineLabels": timeline_labels,
             "_timelineWindow": timeline_window,
             "workflowCallCount": processed_total,
-            "dataSource": "workflow.db.workflow_stats + soc.db.unique",
+            "dataSource": "workflow.db.workflow_stats.call_count + soc.db.unique",
         }
     )
     triage = _read_triage(triage_files)
