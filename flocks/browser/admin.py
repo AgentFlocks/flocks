@@ -232,20 +232,32 @@ def ensure_daemon(
         }
         paths = ipc.runtime_paths(effective_name)
         paths.ensure_root()
-        with paths.log.open("ab", buffering=0) as daemon_log:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "flocks.browser.daemon"],
-                env=merged_env,
-                stdout=daemon_log,
-                stderr=subprocess.STDOUT,
-                **ipc.spawn_kwargs(),
-            )
+
+        def spawn_daemon():
+            with paths.log.open("ab", buffering=0) as daemon_log:
+                return subprocess.Popen(
+                    [sys.executable, "-m", "flocks.browser.daemon"],
+                    env=merged_env,
+                    stdout=daemon_log,
+                    stderr=subprocess.STDOUT,
+                    **ipc.spawn_kwargs(),
+                )
+
+        proc = spawn_daemon()
         deadline = time.time() + wait
         while time.time() < deadline:
             if daemon_alive(effective_name):
                 return
             return_code = proc.poll()
-            if return_code is not None and return_code != ipc.LOCK_BUSY_EXIT_CODE:
+            if return_code == ipc.LOCK_BUSY_EXIT_CODE:
+                retry_lock = ipc.DaemonLock(effective_name)
+                if retry_lock.acquire():
+                    retry_lock.release()
+                    proc = spawn_daemon()
+                else:
+                    time.sleep(0.2)
+                continue
+            if return_code is not None:
                 break
             time.sleep(0.2)
         msg = _log_tail(effective_name) or ""

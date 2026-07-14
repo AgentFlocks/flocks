@@ -153,6 +153,42 @@ def test_daemon_protocol_probe_rejects_old_managed_tab_protocol(monkeypatch) -> 
     assert not admin._daemon_has_current_protocol()
 
 
+def test_ensure_daemon_retries_after_lock_holder_exits_without_endpoint(tmp_path, monkeypatch) -> None:
+    spawned = []
+
+    class FakeProcess:
+        def __init__(self, return_code):
+            self.return_code = return_code
+
+        def poll(self):
+            return self.return_code
+
+    class FakeLock:
+        def __init__(self, name):
+            assert name == "retry-session"
+
+        def acquire(self):
+            return True
+
+        def release(self):
+            pass
+
+    def fake_popen(*args, **kwargs):
+        spawned.append((args, kwargs))
+        return FakeProcess(admin.ipc.LOCK_BUSY_EXIT_CODE if len(spawned) == 1 else None)
+
+    daemon_states = iter([False, True])
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "endpoint_reachable", lambda name: False)
+    monkeypatch.setattr(admin.ipc, "DaemonLock", FakeLock)
+    monkeypatch.setattr(admin, "daemon_alive", lambda name: next(daemon_states))
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    admin.ensure_daemon(wait=1.0, name="retry-session")
+
+    assert len(spawned) == 2
+
+
 def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
     monkeypatch.setattr(admin, "_install_mode", lambda: "git")
