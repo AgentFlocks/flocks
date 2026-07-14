@@ -760,7 +760,19 @@ function AiCore({ stats, activity }) {
   const workflowDenoiseActive = activeKind === 'denoise'
     && ['workflow_stats', 'workflow_execution'].includes(activeEvent?.triggerSource);
   const workflowExecutionActive = workflowDenoiseActive && activeEvent?.triggerSource === 'workflow_execution';
-  const operations = workflowExecutionActive
+  const workflowMetricsAvailable = workflowExecutionActive && activeEvent?.result?.metricsAvailable;
+  const alertName = activeEvent?.alert?.threatName || '未知告警';
+  const alertSource = activeEvent?.alert?.sourceType || '未知来源';
+  const sourceAddress = activeEvent?.alert?.srcIp || '待识别';
+  const targetAddress = activeEvent?.alert?.dstIp || '待识别';
+  const operations = workflowExecutionActive && !workflowMetricsAvailable
+    ? [
+        `接入告警 ${alertName}`,
+        `识别来源 ${alertSource}`,
+        `关联资产 ${sourceAddress} → ${targetAddress}`,
+        '等待可用降噪结果',
+      ]
+    : workflowExecutionActive
     ? [
         `接入原始告警 ${fullNumber(activeEvent?.result?.rawCount)}`,
         `完成标准化 ${fullNumber(activeEvent?.result?.normalizedCount)}`,
@@ -787,7 +799,14 @@ function AiCore({ stats, activity }) {
         '执行风险推理',
         `生成结论：${activeEvent?.result?.verdictLabel || '待确认'}`,
       ];
-  const evidenceItems = workflowExecutionActive
+  const evidenceItems = workflowExecutionActive && !workflowMetricsAvailable
+    ? [
+        { label: '告警名称', value: alertName },
+        { label: '来源类型', value: alertSource },
+        { label: '源地址', value: sourceAddress },
+        { label: '目标地址', value: targetAddress },
+      ]
+    : workflowExecutionActive
     ? [
         { label: '原始告警', value: fullNumber(activeEvent?.result?.rawCount) },
         { label: '过滤数量', value: fullNumber(activeEvent?.result?.filterRemovedCount) },
@@ -796,10 +815,10 @@ function AiCore({ stats, activity }) {
       ]
     : workflowDenoiseActive
     ? [
-        { label: '数据源', value: 'workflow.db' },
-        { label: '统计字段', value: 'call_count' },
         { label: '本次增量', value: `+${fullNumber(activeEvent?.statsDelta || 1)}` },
-        { label: '累计调用', value: fullNumber(activeEvent?.workflowCallCount) },
+        { label: '累计处理', value: fullNumber(activeEvent?.workflowCallCount) },
+        { label: '处理模式', value: activity.mode === 'surge' ? '洪峰' : activity.mode === 'burst' ? '批量' : '实时' },
+        { label: '当前队列', value: fullNumber(queueCount) },
       ]
     : activeEvent ? [
         { label: '攻击源', value: activeEvent.alert?.srcIp || activeEvent.alert?.sourceType || '新告警' },
@@ -4717,10 +4736,10 @@ const CSS = `
 .command-original-core .energy-ring { width: 292px; }
 .command-original-core .energy-ring.ring-b { width: 350px; }
 .command-original-core .scan-line { height: 280px; }
-.command-original-core .ai-evidence-card.evidence-1 { top: 23%; left: -10%; }
-.command-original-core .ai-evidence-card.evidence-2 { top: 23%; right: -10%; }
-.command-original-core .ai-evidence-card.evidence-3 { bottom: 23%; left: -12%; }
-.command-original-core .ai-evidence-card.evidence-4 { right: -12%; bottom: 23%; }
+.command-original-core .ai-evidence-card.evidence-1 { top: 10%; left: 0; }
+.command-original-core .ai-evidence-card.evidence-2 { top: 10%; right: 0; }
+.command-original-core .ai-evidence-card.evidence-3 { bottom: 10%; left: 0; }
+.command-original-core .ai-evidence-card.evidence-4 { right: 0; bottom: 10%; }
 .command-original-core .ai-core:after {
   content: "";
   position: absolute;
