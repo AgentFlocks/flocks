@@ -103,6 +103,35 @@ function normalizeJid(value) {
   return String(value).replace(/:\d+@/, '@');
 }
 
+function stripJid(value) {
+  const jid = normalizeJid(value);
+  if (!jid) return '';
+  if (jid.includes('@')) return jid.split('@', 1)[0].split(':', 1)[0];
+  return jid.replace(/^\+/, '');
+}
+
+function jidAliases(...values) {
+  const aliases = [];
+  const seen = new Set();
+  const add = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) add(item);
+      return;
+    }
+    if (!value) return;
+    const raw = String(value).trim();
+    if (!raw) return;
+    for (const alias of [raw, normalizeJid(raw), stripJid(raw)]) {
+      if (alias && !seen.has(alias)) {
+        aliases.push(alias);
+        seen.add(alias);
+      }
+    }
+  };
+  for (const value of values) add(value);
+  return aliases;
+}
+
 function splitLongMessage(message, limit = 4096) {
   const text = String(message || '');
   if (!text) return [];
@@ -192,7 +221,18 @@ async function cacheInboundMedia(msg, mediaInfo) {
   }
 }
 
-function buildBridgeEvent({ msg, chatId, senderId, isGroup, body, mediaInfo, mediaPath, fromOwner }) {
+function buildBridgeEvent({
+  msg,
+  chatId,
+  chatAltId,
+  senderId,
+  senderAltId,
+  isGroup,
+  body,
+  mediaInfo,
+  mediaPath,
+  fromOwner,
+}) {
   const content = getMessageContent(msg);
   const contextInfo = content.extendedTextMessage?.contextInfo
     || content.imageMessage?.contextInfo
@@ -210,7 +250,11 @@ function buildBridgeEvent({ msg, chatId, senderId, isGroup, body, mediaInfo, med
   return {
     messageId: msg.key.id || '',
     chatId,
+    chatAltId,
     senderId,
+    senderAltId,
+    senderAliases: jidAliases(senderId, senderAltId),
+    chatAliases: jidAliases(chatId, chatAltId),
     senderName: msg.pushName || '',
     isGroup,
     body,
@@ -272,7 +316,11 @@ async function startSocket() {
     for (const msg of messages || []) {
       if (!msg?.message) continue;
       const chatId = normalizeJid(msg.key.remoteJid);
-      const senderId = normalizeJid(msg.key.participant || chatId);
+      const chatAltId = normalizeJid(msg.key.remoteJidAlt || '');
+      const participantId = normalizeJid(msg.key.participant || '');
+      const participantAltId = normalizeJid(msg.key.participantAlt || '');
+      const senderId = normalizeJid(participantId || chatId);
+      const senderAltId = normalizeJid(participantAltId || (!chatId.endsWith('@g.us') ? chatAltId : ''));
       const isGroup = chatId.endsWith('@g.us');
       const fromMe = Boolean(msg.key.fromMe);
 
@@ -296,7 +344,9 @@ async function startSocket() {
       const event = buildBridgeEvent({
         msg,
         chatId,
+        chatAltId,
         senderId,
+        senderAltId,
         isGroup,
         body,
         mediaInfo,
