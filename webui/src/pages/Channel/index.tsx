@@ -152,14 +152,56 @@ interface EmailChannelConfig {
 }
 
 const EMAIL_HOST_PRESETS = [
-  { id: 'gmail', label: 'Gmail', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' },
-  { id: 'outlook', label: 'Outlook / Microsoft 365', imapHost: 'outlook.office365.com', smtpHost: 'smtp.office365.com' },
-  { id: 'qq', label: 'QQ Mail', imapHost: 'imap.qq.com', smtpHost: 'smtp.qq.com' },
-  { id: 'netease-163', label: 'NetEase 163', imapHost: 'imap.163.com', smtpHost: 'smtp.163.com' },
-  { id: 'netease-126', label: 'NetEase 126', imapHost: 'imap.126.com', smtpHost: 'smtp.126.com' },
-  { id: 'tencent-exmail', label: 'Tencent Exmail', imapHost: 'imap.exmail.qq.com', smtpHost: 'smtp.exmail.qq.com' },
-  { id: 'aliyun', label: 'Alibaba Mail', imapHost: 'imap.aliyun.com', smtpHost: 'smtp.aliyun.com' },
-  { id: 'yahoo', label: 'Yahoo Mail', imapHost: 'imap.mail.yahoo.com', smtpHost: 'smtp.mail.yahoo.com' },
+  {
+    id: 'gmail',
+    label: 'Gmail',
+    domains: ['gmail.com', 'googlemail.com'],
+    imapHost: 'imap.gmail.com',
+    smtpHost: 'smtp.gmail.com',
+  },
+  {
+    id: 'outlook',
+    label: 'Outlook / Microsoft 365',
+    domains: ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'],
+    imapHost: 'outlook.office365.com',
+    smtpHost: 'smtp.office365.com',
+  },
+  { id: 'qq', label: 'QQ Mail', domains: ['qq.com'], imapHost: 'imap.qq.com', smtpHost: 'smtp.qq.com' },
+  {
+    id: 'netease-163',
+    label: 'NetEase 163',
+    domains: ['163.com'],
+    imapHost: 'imap.163.com',
+    smtpHost: 'smtp.163.com',
+  },
+  {
+    id: 'netease-126',
+    label: 'NetEase 126',
+    domains: ['126.com'],
+    imapHost: 'imap.126.com',
+    smtpHost: 'smtp.126.com',
+  },
+  {
+    id: 'tencent-exmail',
+    label: 'Tencent Exmail',
+    domains: ['exmail.qq.com'],
+    imapHost: 'imap.exmail.qq.com',
+    smtpHost: 'smtp.exmail.qq.com',
+  },
+  {
+    id: 'aliyun',
+    label: 'Alibaba Mail',
+    domains: ['aliyun.com'],
+    imapHost: 'imap.aliyun.com',
+    smtpHost: 'smtp.aliyun.com',
+  },
+  {
+    id: 'yahoo',
+    label: 'Yahoo Mail',
+    domains: ['yahoo.com', 'ymail.com'],
+    imapHost: 'imap.mail.yahoo.com',
+    smtpHost: 'smtp.mail.yahoo.com',
+  },
 ];
 
 const EMAIL_IMAP_HOST_OPTIONS = EMAIL_HOST_PRESETS.map((entry) => ({
@@ -171,6 +213,40 @@ const EMAIL_SMTP_HOST_OPTIONS = EMAIL_HOST_PRESETS.map((entry) => ({
   value: entry.smtpHost,
   label: entry.label,
 }));
+
+function normalizeEmailHost(raw: string | undefined): string {
+  return (raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .split('/')[0]
+    .split(':')[0];
+}
+
+function getEmailDomain(raw: string | undefined): string {
+  const normalized = (raw ?? '').trim().toLowerCase();
+  const atIndex = normalized.lastIndexOf('@');
+  if (atIndex < 0) return '';
+  return normalized.slice(atIndex + 1);
+}
+
+function getEmailHostPreset(address: string | undefined) {
+  const domain = getEmailDomain(address);
+  if (!domain) return undefined;
+  return EMAIL_HOST_PRESETS.find((entry) => entry.domains.includes(domain));
+}
+
+function isEmailHostMismatch(
+  address: string | undefined,
+  host: string | undefined,
+  protocol: 'imap' | 'smtp'
+): boolean {
+  const preset = getEmailHostPreset(address);
+  const normalizedHost = normalizeEmailHost(host);
+  if (!preset || !normalizedHost) return false;
+  const expectedHost = protocol === 'imap' ? preset.imapHost : preset.smtpHost;
+  return normalizedHost !== expectedHost;
+}
 
 interface WeixinChannelConfig {
   enabled: boolean;
@@ -1628,6 +1704,9 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
       onChange({ ...config, [key]: value }),
     [config, onChange]
   );
+  const emailHostPreset = getEmailHostPreset(config.address);
+  const showImapHostWarning = isEmailHostMismatch(config.address, config.imapHost, 'imap');
+  const showSmtpHostWarning = isEmailHostMismatch(config.address, config.smtpHost, 'smtp');
 
   return (
     <>
@@ -1656,6 +1735,11 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
             placeholder="imap.gmail.com"
             options={EMAIL_IMAP_HOST_OPTIONS}
           />
+          {showImapHostWarning && emailHostPreset && (
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
+              {t('email.imapHostMismatchWarning', { expectedHost: emailHostPreset.imapHost })}
+            </p>
+          )}
         </FieldRow>
         <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
           <Select
@@ -1682,6 +1766,11 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
             placeholder="smtp.gmail.com"
             options={EMAIL_SMTP_HOST_OPTIONS}
           />
+          {showSmtpHostWarning && emailHostPreset && (
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
+              {t('email.smtpHostMismatchWarning', { expectedHost: emailHostPreset.smtpHost })}
+            </p>
+          )}
         </FieldRow>
         <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>
           <Select
