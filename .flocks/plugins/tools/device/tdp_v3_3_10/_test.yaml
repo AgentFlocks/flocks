@@ -39,15 +39,6 @@ fixtures:
       params: {}
       assert:
         success: true
-    - label: "List custom rules"
-      label_cn: "查询自定义规则列表"
-      tags: [configuration, rules]
-      params:
-        action: custom_rule_list
-        cur_page: 1
-        page_size: 20
-      assert:
-        success: true
 
   tdp_incident_list:
     - label: "Search incidents (page 1)"
@@ -152,16 +143,6 @@ fixtures:
       label_cn: "查询外部入侵攻击概览（最近 24 小时）"
       tags: [smoke, threats]
       params: {}
-
-  tdp_threat_monitor_list:
-    - label: "List real-time threats (last 24 hours)"
-      label_cn: "查询威胁实时监控列表（最近 24 小时）"
-      tags: [smoke, threats]
-      params:
-        cur_page: 1
-        page_size: 20
-      assert:
-        success: true
 
   tdp_login_weakpwd_list:
     - label: "List weak-password login risks (page 1)"

@@ -11,15 +11,7 @@ from httpx import AsyncClient
 from flocks.auth.context import AuthUser
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
-from flocks.tool.registry import (
-    ParameterType,
-    Tool,
-    ToolCategory,
-    ToolInfo,
-    ToolParameter,
-    ToolRegistry,
-    ToolResult,
-)
+from flocks.tool.registry import Tool, ToolCategory, ToolInfo, ToolRegistry, ToolResult
 
 
 @contextmanager
@@ -27,7 +19,6 @@ def _temporary_tool(tool: Tool) -> Iterator[None]:
     ToolRegistry.init()
     existing = ToolRegistry._tools.get(tool.info.name)
     ToolRegistry.register(tool)
-    _clear_tool_summary_cache()
     try:
         yield
     finally:
@@ -36,13 +27,6 @@ def _temporary_tool(tool: Tool) -> Iterator[None]:
             ToolRegistry._tools[tool.info.name] = existing
         else:
             ToolRegistry._tools.pop(tool.info.name, None)
-        _clear_tool_summary_cache()
-
-
-def _clear_tool_summary_cache() -> None:
-    from flocks.server.routes import tool as tool_routes
-
-    tool_routes._invalidate_tool_summary_cache()
 
 
 class _FakeSessionUser:
@@ -402,118 +386,3 @@ class TestToolRouteSecurity:
         assert kwargs["session_id"] == session_id
         assert kwargs["metadata"]["messageID"] == message_id
         assert kwargs["tool"] == {"name": "http_batch_named_tool"}
-
-
-class TestToolListPageRoute:
-    @pytest.mark.asyncio
-    async def test_list_page_searches_server_side_and_omits_parameter_payload(self, client: AsyncClient):
-        async def handler(ctx, text: str) -> ToolResult:
-            return ToolResult(success=True, output=f"{text}:{ctx.session_id}")
-
-        tool = Tool(
-            info=ToolInfo(
-                name="page_unique_alpha_tool",
-                description="Needle Alpha paginated search tool",
-                category=ToolCategory.CUSTOM,
-                source="plugin_py",
-                parameters=[
-                    ToolParameter(
-                        name="text",
-                        type=ParameterType.STRING,
-                        description="Text to echo",
-                    )
-                ],
-            ),
-            handler=handler,
-        )
-        api_tool = Tool(
-            info=ToolInfo(
-                name="page_unique_alpha_api_tool",
-                description="Needle Alpha paginated API tool",
-                category=ToolCategory.CUSTOM,
-                source="api",
-                provider="page-api-provider",
-            ),
-            handler=handler,
-        )
-
-        with _temporary_tool(tool), _temporary_tool(api_tool):
-            response = await client.get(
-                "/api/tools/page",
-                params={"q": "needle alpha", "source": "plugin_py", "offset": 0, "limit": 20},
-            )
-            detail = await client.get("/api/tools/page_unique_alpha_tool")
-
-        assert response.status_code == 200, response.text
-        payload = response.json()
-        assert payload["total"] == 1
-        assert payload["offset"] == 0
-        assert payload["limit"] == 20
-        assert payload["facets"]["source"]["plugin_py"] == 1
-        assert payload["facets"]["source"]["api"] == 1
-        assert payload["facets"]["source_groups"]["api"] == 1
-        assert payload["items"][0]["name"] == "page_unique_alpha_tool"
-        assert payload["items"][0]["parameters"] == []
-        assert payload["items"][0]["parameters_count"] == 1
-
-        assert detail.status_code == 200, detail.text
-        assert len(detail.json()["parameters"]) == 1
-
-    @pytest.mark.asyncio
-    async def test_list_page_reuses_lightweight_summary_cache(
-        self,
-        client: AsyncClient,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        from flocks.server.routes import tool as tool_routes
-
-        async def handler(ctx) -> ToolResult:
-            return ToolResult(success=True, output=ctx.session_id)
-
-        tool = Tool(
-            info=ToolInfo(
-                name="page_summary_cache_unique_tool",
-                description="NeedlePageSummaryCacheUnique",
-                category=ToolCategory.CUSTOM,
-                source="plugin_py",
-            ),
-            handler=handler,
-        )
-
-        original_build_tool_index_item = tool_routes._build_tool_index_item
-        index_builds = 0
-
-        def counted_build_tool_index_item(tool_info):
-            nonlocal index_builds
-            index_builds += 1
-            return original_build_tool_index_item(tool_info)
-
-        monkeypatch.setattr(tool_routes, "_build_tool_index_item", counted_build_tool_index_item)
-
-        with _temporary_tool(tool):
-            first = await client.get(
-                "/api/tools/page",
-                params={"q": "needlepagesummarycacheunique", "limit": 25},
-            )
-            first_builds = index_builds
-            second = await client.get(
-                "/api/tools/page",
-                params={"q": "needlepagesummarycacheunique", "source": "plugin_py", "limit": 25},
-            )
-            second_builds = index_builds
-
-            tool_routes._invalidate_tool_summary_cache()
-            third = await client.get(
-                "/api/tools/page",
-                params={"q": "needlepagesummarycacheunique", "limit": 25},
-            )
-
-        assert first.status_code == 200, first.text
-        assert second.status_code == 200, second.text
-        assert third.status_code == 200, third.text
-        assert first.json()["total"] == 1
-        assert second.json()["total"] == 1
-        assert third.json()["total"] == 1
-        assert first_builds > 0
-        assert second_builds == first_builds
-        assert index_builds > second_builds

@@ -4,14 +4,12 @@ import userEvent from '@testing-library/user-event';
 
 import MCPTabContent from './MCPTabContent';
 
-const { listAllToolPages, mcpAPI, mcpDetailProps } = vi.hoisted(() => ({
-  listAllToolPages: vi.fn(),
+const { mcpAPI } = vi.hoisted(() => ({
   mcpAPI: {
     list: vi.fn(),
     catalogInstall: vi.fn(),
     connect: vi.fn(),
   },
-  mcpDetailProps: vi.fn(),
 }));
 
 vi.mock('@/api/mcp', () => ({
@@ -19,7 +17,6 @@ vi.mock('@/api/mcp', () => ({
 }));
 
 vi.mock('@/api/tool', () => ({
-  listAllToolPages,
   toolAPI: {
     test: vi.fn(),
   },
@@ -34,15 +31,7 @@ vi.mock('@/components/common/EmptyState', () => ({
 }));
 
 vi.mock('./ServiceDetailPanel', () => ({
-  MCPServerDetailPanel: (props: { serverTools: Array<{ name: string }> }) => {
-    mcpDetailProps(props);
-    return (
-      <div>
-        detail-panel
-        {props.serverTools.map((tool) => <span key={tool.name}>{tool.name}</span>)}
-      </div>
-    );
-  },
+  MCPServerDetailPanel: () => <div>detail-panel</div>,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -80,7 +69,6 @@ describe('MCPTabContent', () => {
       },
     });
     mcpAPI.connect.mockResolvedValue({ data: true });
-    listAllToolPages.mockResolvedValue([]);
   });
 
   it('collects credentials and env vars before installing protected catalog entries', async () => {
@@ -156,62 +144,5 @@ describe('MCPTabContent', () => {
 
     expect(onConfiguredChange).toHaveBeenCalledWith('panther');
     expect(onRefreshTools).toHaveBeenCalled();
-  });
-
-  it('loads the complete tool list when a server detail drawer opens', async () => {
-    const user = userEvent.setup();
-    mcpAPI.list.mockResolvedValue({
-      data: [
-        {
-          name: 'server-a',
-          status: 'connected',
-          tools: [],
-          resources: [],
-          tools_count: 2,
-          resources_count: 0,
-        },
-      ],
-    });
-    listAllToolPages.mockResolvedValue([
-      {
-        name: 'complete-tool',
-        description: 'Loaded beyond the current page',
-        category: 'custom',
-        source: 'mcp',
-        source_name: 'server-a',
-        enabled: true,
-      },
-    ]);
-
-    render(
-      <MCPTabContent
-        tools={[]}
-        searchQuery=""
-        onSelectTool={vi.fn()}
-        onRefreshTools={vi.fn().mockResolvedValue(undefined)}
-        catalogEntries={[]}
-        catalogCategories={{}}
-        catalogLoading={false}
-        configuredIds={new Set(['server-a'])}
-        onConfiguredChange={vi.fn()}
-      />,
-    );
-
-    await user.click(await screen.findByText('server-a'));
-
-    await waitFor(() => {
-      expect(listAllToolPages).toHaveBeenCalledWith({
-        source: 'mcp',
-        sourceName: 'server-a',
-        sortBy: 'name',
-        sortDir: 'asc',
-      });
-    });
-    expect(await screen.findByText('complete-tool')).toBeInTheDocument();
-    expect(mcpDetailProps).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        serverTools: [expect.objectContaining({ name: 'complete-tool' })],
-      }),
-    );
   });
 });

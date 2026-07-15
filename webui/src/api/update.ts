@@ -52,16 +52,11 @@ export interface UpdateProgress {
 // API
 // ======================================================================
 
-export const checkUpdate = async (
-  locale?: string,
-  edition?: UpdateEdition,
-  force?: boolean,
-): Promise<VersionInfo> => {
+export const checkUpdate = async (locale?: string, edition?: UpdateEdition): Promise<VersionInfo> => {
   const response = await client.get<VersionInfo>('/api/update/check', {
     params: {
       ...(locale ? { locale } : {}),
       ...(edition ? { edition } : {}),
-      ...(force ? { force: true } : {}),
     },
   });
   return response.data;

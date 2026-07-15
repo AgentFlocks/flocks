@@ -1,6 +1,6 @@
 [project]
 name = "flocks"
-version = "v2026.7.15"
+version = "v2026.7.8"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "Flocks Team", email = "team@example.com"}
@@ -109,11 +109,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["flocks"]
-artifacts = [
-    "flocks/channel/builtin/whatsapp/bridge/*.js",
-    "flocks/channel/builtin/whatsapp/bridge/package.json",
-    "flocks/channel/builtin/whatsapp/bridge/package-lock.json",
-]
 
 [tool.ruff]
 line-length = 120

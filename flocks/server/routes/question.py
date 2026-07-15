@@ -9,13 +9,9 @@ Provides /question endpoints for handling agent questions to user.
 
 from typing import Dict, List, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from flocks.auth.context import AuthUser
-from flocks.server.auth import require_user
-from flocks.session.policy import SessionPolicy
-from flocks.session.session import Session
 from flocks.utils.log import Log
 
 
@@ -80,21 +76,6 @@ def clear_request_state(request_id: str) -> None:
     _request_rejected.discard(request_id)
 
 
-async def _require_question_session_access(
-    session_id: str,
-    user: AuthUser,
-    *,
-    write: bool,
-) -> None:
-    session = await Session.get_by_id(session_id)
-    if session is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    allowed = SessionPolicy.can_write(session, user) if write else SessionPolicy.can_read(session, user)
-    if not allowed:
-        detail = "Only the session owner can answer questions" if write else "Session access denied"
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
-
-
 async def reject_session_questions(session_id: str) -> int:
     """Reject all pending question requests for a session.
 
@@ -145,11 +126,7 @@ def has_pending_questions(session_id: str) -> bool:
     summary="List pending questions for a session",
     description="Return all unanswered Question requests for the given session",
 )
-async def get_pending_question_requests(
-    session_id: str,
-    user: AuthUser = Depends(require_user),
-) -> List[Dict[str, Any]]:
-    await _require_question_session_access(session_id, user, write=False)
+async def get_pending_question_requests(session_id: str) -> List[Dict[str, Any]]:
     return list_question_requests(session_id)
 
 
@@ -161,16 +138,9 @@ async def get_pending_question_requests(
 async def reply_question_request(
     request_id: str,
     request: QuestionRequestReply,
-    user: AuthUser = Depends(require_user),
 ) -> Dict[str, Any]:
-    question_request = _question_requests.get(request_id)
-    if question_request is None:
+    if request_id not in _question_requests:
         raise HTTPException(status_code=404, detail="Question request not found")
-    await _require_question_session_access(
-        question_request.get("sessionID", ""),
-        user,
-        write=True,
-    )
 
     log.info("question.request.reply", {
         "request_id": request_id,
@@ -180,6 +150,7 @@ async def reply_question_request(
 
     try:
         from flocks.server.routes.event import publish_event
+        question_request = _question_requests[request_id]
         await publish_event("question.replied", {
             "sessionID": question_request.get("sessionID", ""),
             "requestID": request_id,
@@ -188,7 +159,7 @@ async def reply_question_request(
     except Exception as e:
         log.error("question.replied.event.failed", {"error": str(e)})
 
-    _question_requests.pop(request_id, None)
+    del _question_requests[request_id]
     return {"success": True}
 
 
@@ -197,24 +168,16 @@ async def reply_question_request(
     summary="Reject question request",
     description="Reject a QuestionRequest (user doesn't want to answer)",
 )
-async def reject_question_request(
-    request_id: str,
-    user: AuthUser = Depends(require_user),
-) -> Dict[str, bool]:
-    question_request = _question_requests.get(request_id)
-    if question_request is None:
+async def reject_question_request(request_id: str) -> Dict[str, bool]:
+    if request_id not in _question_requests:
         raise HTTPException(status_code=404, detail="Question request not found")
-    await _require_question_session_access(
-        question_request.get("sessionID", ""),
-        user,
-        write=True,
-    )
 
     log.info("question.request.reject", {"request_id": request_id})
     _request_rejected.add(request_id)
 
     try:
         from flocks.server.routes.event import publish_event
+        question_request = _question_requests[request_id]
         await publish_event("question.rejected", {
             "sessionID": question_request.get("sessionID", ""),
             "requestID": request_id,
@@ -222,7 +185,7 @@ async def reject_question_request(
     except Exception as e:
         log.error("question.rejected.event.failed", {"error": str(e)})
 
-    _question_requests.pop(request_id, None)
+    del _question_requests[request_id]
     return {"success": True}
 
 

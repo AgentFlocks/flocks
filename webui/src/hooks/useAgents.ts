@@ -1,76 +1,66 @@
-import { useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { agentAPI, Agent } from '@/api/agent';
-import { createSharedResource, useRefreshOnResume, useSharedResource } from './useSharedResource';
-
-const AGENT_LIST_STALE_TIME_MS = 5000;
-const AGENT_REFRESH_MIN_INTERVAL_MS = 1000;
-
-const agentsResource = createSharedResource<Agent[]>({
-  initialData: [],
-  staleTimeMs: AGENT_LIST_STALE_TIME_MS,
-  minFetchIntervalMs: AGENT_REFRESH_MIN_INTERVAL_MS,
-  fetcher: async () => {
-    const response = await agentAPI.list();
-    return Array.isArray(response.data) ? response.data : [];
-  },
-  fallbackDataOnError: [],
-  getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch agents'),
-});
-
-let agentRefreshInFlight: Promise<void> | null = null;
-let lastAgentRefreshAt = 0;
-
-function refreshAgentsResource(): Promise<void> {
-  const now = Date.now();
-
-  if (agentRefreshInFlight) {
-    return agentRefreshInFlight;
-  }
-
-  if (now - lastAgentRefreshAt < AGENT_REFRESH_MIN_INTERVAL_MS) {
-    return Promise.resolve();
-  }
-
-  lastAgentRefreshAt = now;
-  agentRefreshInFlight = agentAPI.refresh()
-    .catch(() => {
-      // Best-effort: if refresh fails, still try to fetch the latest list.
-    })
-    .then(() => agentsResource.fetch({ force: true, silent: true }))
-    .then(() => undefined)
-    .finally(() => {
-      agentRefreshInFlight = null;
-    });
-
-  return agentRefreshInFlight;
-}
-
-export function __resetAgentsResourceForTesting(): void {
-  agentsResource.resetForTesting();
-  agentRefreshInFlight = null;
-  lastAgentRefreshAt = 0;
-}
 
 export function useAgents() {
-  const {
-    data: agents,
-    loading,
-    error,
-    refetch: fetchAgents,
-  } = useSharedResource(agentsResource);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const lastRefreshRef = useRef(0);
 
-  const refreshAndFetch = useCallback(() => refreshAgentsResource(), []);
-  useRefreshOnResume(refreshAndFetch);
+  const fetchAgents = useCallback(async (showLoading = true) => {
+    try {
+      if (showLoading) setLoading(true);
+      setError(null);
+      const response = await agentAPI.list();
+      setAgents(Array.isArray(response.data) ? response.data : []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch agents');
+      setAgents([]);
+    } finally {
+      if (showLoading) setLoading(false);
+    }
+  }, []);
 
-  const refetch = useCallback(
-    (showLoading = true) => fetchAgents({ silent: !showLoading }),
-    [fetchAgents],
-  );
+  const refreshAndFetch = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastRefreshRef.current < 1000) return;
+    lastRefreshRef.current = now;
+
+    try {
+      await agentAPI.refresh();
+    } catch {
+      // Best-effort: if refresh fails, still try to fetch the latest list.
+    }
+
+    await fetchAgents(false);
+  }, [fetchAgents]);
+
+  useEffect(() => {
+    void fetchAgents();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshAndFetch();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      void refreshAndFetch();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [fetchAgents, refreshAndFetch]);
 
   return {
     agents,
     loading,
     error,
-    refetch,
+    refetch: (showLoading = true) => fetchAgents(showLoading),
   };
 }

@@ -15,15 +15,13 @@
   "metrics": {
     "messageRate": "Message Rate",
     "toolCallRate": "Tool Calls",
-    "errorRate": "System Errors",
-    "toolParseFailureRate": "Tool Parse Failures",
+    "errorRate": "Error Rate",
     "avgResponse": "Avg Response",
     "activeRequests": "Active Requests"
   },
   "llmPerformance": "LLM Response Time",
   "toolPerformance": "Tool Execution Time",
   "noData": "No data",
-  "unavailable": "No data",
   "calls": "calls",
   "errors": "errors",
   "performanceTrend": "Performance Trend",

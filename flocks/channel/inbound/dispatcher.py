@@ -135,22 +135,6 @@ class MessageDedup:
 # Allowlist / authorisation check
 # =====================================================================
 
-def _matches_allow_from(msg: InboundMessage, allow_from: list[str]) -> bool:
-    if msg.channel_id == "whatsapp":
-        try:
-            from flocks.channel.builtin.whatsapp.config import matches_identifier
-
-            aliases = [msg.sender_id]
-            if isinstance(msg.raw, dict):
-                raw_aliases = msg.raw.get("senderAliases")
-                if isinstance(raw_aliases, list):
-                    aliases.extend(str(alias) for alias in raw_aliases if str(alias).strip())
-            return matches_identifier(aliases, allow_from)
-        except Exception:
-            log.warning("allowlist.whatsapp_match_failed", {"sender": msg.sender_id})
-    return msg.sender_id in allow_from
-
-
 def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
     """Return True if the message is allowed through.
 
@@ -172,12 +156,12 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
             if not allow_from:
                 log.debug("allowlist.dm_blocked_no_list", {"sender": msg.sender_id})
                 return False
-            return _matches_allow_from(msg, allow_from)
+            return msg.sender_id in allow_from
         if dm_policy == "pairing":
             return True
         return True
 
-    if allow_from and not _matches_allow_from(msg, allow_from):
+    if allow_from and msg.sender_id not in allow_from:
         log.debug("allowlist.group_blocked", {
             "sender": msg.sender_id, "chat_id": msg.chat_id,
         })

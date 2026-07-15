@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ListTodo, Play, RotateCcw, XCircle, Trash2,
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import SessionChat from '@/components/common/SessionChat';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { useTaskExecutions } from '@/hooks/useTasks';
@@ -15,15 +16,6 @@ import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
-const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
-
-function SessionChatFallback() {
-  return (
-    <div className="flex flex-1 min-h-0 items-center justify-center text-gray-400">
-      <LoadingSpinner />
-    </div>
-  );
-}
 
 export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
@@ -241,7 +233,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(new Set());
   };
 
-  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
+  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner /></div>;
   if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
 
   return (
@@ -462,20 +454,18 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
         {isWorkflowExecution ? (
           <QueuedWorkflowDetail task={task} emptyText={emptyText} />
         ) : (
-          <Suspense fallback={<SessionChatFallback />}>
-            <LazySessionChat
-              sessionId={sessionId}
-              live={shouldStreamSession}
-              hideInput
-              emptyText={emptyText}
-              className="flex-1 min-h-0"
-              onSSEEvent={(event) => {
-                if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
-                  onRefresh?.();
-                }
-              }}
-            />
-          </Suspense>
+          <SessionChat
+            sessionId={sessionId}
+            live={shouldStreamSession}
+            hideInput
+            emptyText={emptyText}
+            className="flex-1 min-h-0"
+            onSSEEvent={(event) => {
+              if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
+                onRefresh?.();
+              }
+            }}
+          />
         )}
       </div>
     </>

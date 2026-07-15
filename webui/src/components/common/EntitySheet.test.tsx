@@ -178,14 +178,14 @@ describe('EntitySheet', () => {
       expect(screen.getByText('Form content')).toBeInTheDocument();
     });
 
-    it('defaults Rex workbench process details collapsed like workflow workbenches', async () => {
+    it('defaults Rex workbench process details collapsed like workflow workbenches', () => {
       render(
         <EntitySheet {...defaultProps} initialTab="rex">
           <div>Form content</div>
         </EntitySheet>,
       );
 
-      expect(await screen.findByTestId('session-chat')).toHaveAttribute(
+      expect(screen.getByTestId('session-chat')).toHaveAttribute(
         'data-display',
         JSON.stringify({ collapseIntermediateSteps: true, processGroupsDefaultOpen: false }),
       );

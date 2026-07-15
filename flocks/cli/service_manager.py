@@ -838,8 +838,6 @@ def port_is_in_use(port: int, listeners: Sequence[int] | None = None) -> bool:
     current_listeners = list(listeners) if listeners is not None else port_owner_pids(port)
     if current_listeners:
         return True
-    if sys.platform == "win32":
-        return not _bind_port_available(port)
     if _port_owner_lookup_available():
         return False
     return not _bind_port_available(port)
@@ -1044,6 +1042,17 @@ def _is_running_status_response(response: httpx.Response) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "running"
 
 
+def _is_healthy_status_response(response: httpx.Response) -> bool:
+    """Return True when the backend health endpoint reports healthy."""
+    if response.status_code != 200:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "healthy"
+
+
 def wait_for_http(
     urls: Sequence[str],
     name: str,
@@ -1075,6 +1084,10 @@ class _StdoutConsole:
     def print(self, *args, **_kwargs) -> None:
         sys.stdout.write(" ".join(str(arg) for arg in args) + "\n")
         sys.stdout.flush()
+
+
+def _backend_health_url(host: str, port: int) -> str:
+    return f"http://{_format_host_for_url(access_host(host))}:{port}/api/health"
 
 
 def _terminate_process(
@@ -2171,7 +2184,7 @@ def _run_windows_netstat(port: int) -> str:
         return ""
     target = f":{port}"
     lines = []
-    for line in (completed.stdout or "").splitlines():
+    for line in completed.stdout.splitlines():
         if "LISTENING" not in line.upper():
             continue
         if target not in line:

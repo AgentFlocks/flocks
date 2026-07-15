@@ -1,10 +1,9 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
-import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
-import SessionPage, { getVisibleSessionGroupItems, groupSessionsByDate } from './index';
+import SessionPage from './index';
 
 const {
   client,
@@ -108,7 +107,6 @@ vi.mock('@/components/common/SessionChat', () => ({
     initialMessage,
     initialDisplayText,
     onCreateAndSend,
-    onSSEEvent,
     agentName,
     model,
     display,
@@ -139,7 +137,6 @@ vi.mock('@/components/common/SessionChat', () => ({
       modelOverride?: unknown,
       options?: { displayText?: string },
     ) => Promise<unknown> | unknown;
-    onSSEEvent?: (event: { type: string; properties?: Record<string, unknown> }) => void;
   }) {
     const [input, setInput] = React.useState('');
     return (
@@ -164,15 +161,6 @@ vi.mock('@/components/common/SessionChat', () => ({
         <div data-testid="mock-chat-input">{input}</div>
         <button type="button" onClick={() => void onCreateAndSend?.('hello from empty session', [], agentName)}>
           mock-create-and-send
-        </button>
-        <button
-          type="button"
-          onClick={() => onSSEEvent?.({
-            type: 'session.updated',
-            properties: { id: 'session-1', title: 'Updated Session' },
-          })}
-        >
-          mock-session-updated
         </button>
       </div>
     );
@@ -260,75 +248,9 @@ function renderSessionPage(
   );
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
-
-describe('session sidebar grouping helpers', () => {
-  it('groups sessions by updated date and applies search filtering', () => {
-    const now = new Date(2026, 6, 9, 12, 0, 0);
-    const makeSession = (id: string, title: string, updated: number) => ({
-      ...session,
-      id,
-      title,
-      time: { ...session.time, updated },
-    });
-
-    const groups = groupSessionsByDate([
-      makeSession('today', 'Today Investigation', new Date(2026, 6, 9, 9).getTime()),
-      makeSession('yesterday', 'Yesterday Work', new Date(2026, 6, 8, 9).getTime()),
-      makeSession('earlier', 'Old Investigation', new Date(2026, 5, 1, 9).getTime()),
-    ], 'investigation', now);
-
-    expect(groups.map((group) => [group.key, group.items.map((item) => item.id)])).toEqual([
-      ['today', ['today']],
-      ['earlier', ['earlier']],
-    ]);
-  });
-
-  it('limits collapsed older groups and reports hidden count', () => {
-    const group = {
-      key: 'thisWeek' as const,
-      labelKey: 'groupThisWeek',
-      items: Array.from({ length: 7 }, (_, index) => ({
-        ...session,
-        id: `session-${index}`,
-        title: `Session ${index}`,
-      })),
-    };
-
-    expect(getVisibleSessionGroupItems({
-      group,
-      expanded: false,
-      searching: false,
-    })).toMatchObject({
-      visibleItems: group.items.slice(0, 5),
-      hiddenCount: 2,
-      limit: 5,
-    });
-
-    expect(getVisibleSessionGroupItems({
-      group,
-      expanded: false,
-      searching: true,
-    })).toMatchObject({
-      visibleItems: group.items,
-      hiddenCount: 0,
-      limit: Infinity,
-    });
-  });
-});
-
 describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    __resetChatModelResourcesForTesting();
     localStorage.clear();
     sessionStorage.clear();
 
@@ -412,34 +334,6 @@ describe('SessionPage session actions menu', () => {
     });
     expect(updateSessionTitle).toHaveBeenCalledWith('session-1', 'Renamed Session');
     expect(sessionApi.update).toHaveBeenCalledTimes(1);
-  });
-
-  it('coalesces bursty session.updated events into one sidebar refetch', () => {
-    vi.useFakeTimers();
-    try {
-      renderSessionPage();
-
-      const emitSessionUpdated = screen.getByRole('button', { name: 'mock-session-updated' });
-      act(() => {
-        emitSessionUpdated.click();
-        emitSessionUpdated.click();
-      });
-
-      expect(updateSessionTitle).toHaveBeenCalledTimes(2);
-      expect(refetchSessions).not.toHaveBeenCalled();
-
-      act(() => {
-        vi.advanceTimersByTime(499);
-      });
-      expect(refetchSessions).not.toHaveBeenCalled();
-
-      act(() => {
-        vi.advanceTimersByTime(1);
-      });
-      expect(refetchSessions).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it('downloads session data as CLI-compatible JSON', async () => {
@@ -796,7 +690,6 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('keeps a selected session that is valid but missing from the current list', async () => {
-    const request = deferred<typeof session & { canWrite: boolean }>();
     useSessions.mockReturnValue({
       sessions: [],
       loading: false,
@@ -807,28 +700,17 @@ describe('SessionPage session actions menu', () => {
       removeSessions,
       addSession,
     });
-    sessionApi.get.mockReturnValue(request.promise);
-    const fetchedSession = {
+    sessionApi.get.mockResolvedValue({
       ...session,
       id: 'session-missing-from-list',
       title: 'Fetched Session',
       canWrite: false,
-    };
+    });
 
     renderSessionPage('/sessions?session=session-missing-from-list');
 
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
-    });
-    expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
-    expect(screen.getByText('loading-spinner')).toBeInTheDocument();
-
-    await act(async () => {
-      request.resolve(fetchedSession);
-      await request.promise;
-    });
-
-    await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-missing-from-list');
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-hide-input', 'true');
     });
@@ -852,27 +734,6 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
       expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
-    });
-  });
-
-  it('drops a URL initial message when the target session no longer exists', async () => {
-    const user = userEvent.setup();
-    const message = 'Do not send this to another session';
-    sessionApi.get.mockRejectedValue({ response: { status: 404 } });
-
-    renderSessionPage(`/sessions?session=session-deleted&message=${encodeURIComponent(message)}`);
-
-    await waitFor(() => {
-      expect(sessionApi.get).toHaveBeenCalledWith('session-deleted');
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
-    });
-
-    await user.click(screen.getByText('Original Session'));
-
-    await waitFor(() => {
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
     });
   });
 

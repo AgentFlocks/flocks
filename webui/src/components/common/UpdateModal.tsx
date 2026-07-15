@@ -53,21 +53,13 @@ function formatBytes(value?: number | null): string {
 
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
-  forceInitialCheck?: boolean;
   edition?: UpdateEdition;
   canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
 }
 
-export default function UpdateModal({
-  initialInfo,
-  forceInitialCheck = false,
-  edition = 'flocks',
-  canUpgrade = true,
-  onClose,
-  onDismiss,
-}: UpdateModalProps) {
+export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrade = true, onClose, onDismiss }: UpdateModalProps) {
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
@@ -91,11 +83,11 @@ export default function UpdateModal({
     setRestarting(val);
   };
 
-  const fetchVersion = useCallback(async (force = false) => {
+  const fetchVersion = useCallback(async () => {
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language, edition, force);
+      const data = await checkUpdate(i18n.language, edition);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -107,9 +99,9 @@ export default function UpdateModal({
 
   useEffect(() => {
     if (!initialInfo) {
-      void fetchVersion(forceInitialCheck);
+      fetchVersion();
     }
-  }, [fetchVersion, forceInitialCheck, initialInfo]);
+  }, [fetchVersion, initialInfo]);
 
   const handleUpgrade = useCallback(async () => {
     if (!info?.has_update) return;
@@ -415,7 +407,7 @@ export default function UpdateModal({
 
           <div className="flex items-center gap-2 px-4 pb-4">
             <button
-              onClick={() => void fetchVersion(true)}
+              onClick={fetchVersion}
               disabled={checking}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >

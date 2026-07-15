@@ -1,6 +1,23 @@
 from flocks.browser import admin
 
 
+class FakeSocket:
+    def __init__(self, response=b'{"target_id":"target-1","session_id":"session-1","page":null}\n'):
+        self.response = response
+        self.closed = False
+        self.sent = b""
+
+    def sendall(self, data):
+        self.sent += data
+
+    def recv(self, _size):
+        output, self.response = self.response, b""
+        return output
+
+    def close(self):
+        self.closed = True
+
+
 def test_local_chrome_mode_is_false_when_env_provides_remote_cdp() -> None:
     assert not admin._is_local_chrome_mode({"BU_CDP_WS": "ws://example.test/devtools/browser/1"})
 
@@ -57,21 +74,21 @@ def test_generic_remote_debugging_message_triggers_prompt() -> None:
     assert admin._needs_chrome_remote_debugging_prompt(msg)
 
 
-def test_daemon_endpoint_names_discovers_default_and_named_sessions(tmp_path, monkeypatch) -> None:
+def test_daemon_endpoint_names_with_bu_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    browser_dir = tmp_path / "browser"
-    browser_dir.mkdir()
-    (browser_dir / "bu.sock").touch()
-    (browser_dir / "bu-session-xyz.sock").touch()
-    (browser_dir / "bu-stale.pid").touch()
+    monkeypatch.setattr(admin.ipc, "BU_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    monkeypatch.setattr(admin, "NAME", "session-xyz")
+    (tmp_path / "bu.sock").touch()
 
-    assert admin._daemon_endpoint_names() == ["default", "session-xyz", "stale"]
+    assert admin._daemon_endpoint_names() == ["session-xyz"]
 
 
-def test_daemon_endpoint_names_returns_empty_when_runtime_dir_is_missing(tmp_path, monkeypatch) -> None:
+def test_daemon_endpoint_names_with_bu_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "BU_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    monkeypatch.setattr(admin, "NAME", "session-xyz")
 
     assert admin._daemon_endpoint_names() == []
 
@@ -79,43 +96,36 @@ def test_daemon_endpoint_names_returns_empty_when_runtime_dir_is_missing(tmp_pat
 def test_active_browser_connections_counts_only_healthy_daemons(monkeypatch) -> None:
     monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "stale", "remote"])
 
-    def fake_request(name, payload, timeout=1.0):
-        assert payload == {"meta": "connection_status"}
+    def fake_connect(name, timeout=1.0):
         if name == "stale":
             raise ConnectionRefusedError()
         if name == "remote":
-            return {"error": "no close frame received or sent"}
-        return {"target_id": "target-1", "session_id": "session-1", "page": None}
+            return FakeSocket(b'{"error":"no close frame received or sent"}\n')
+        return FakeSocket()
 
-    monkeypatch.setattr(admin.ipc, "request", fake_request)
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
     assert admin.active_browser_connections() == 1
 
 
 def test_active_browser_connections_skips_daemons_reporting_cdp_disconnected(monkeypatch) -> None:
     monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "stale"])
 
-    def fake_request(name, payload, timeout=1.0):
-        assert payload == {"meta": "connection_status"}
+    def fake_connect(name, timeout=1.0):
         if name == "stale":
-            return {"error": "cdp_disconnected"}
-        return {"target_id": "target-1", "session_id": "session-1", "page": None}
+            return FakeSocket(b'{"error":"cdp_disconnected"}\n')
+        return FakeSocket()
 
-    monkeypatch.setattr(admin.ipc, "request", fake_request)
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
     assert admin.active_browser_connections() == 1
 
 
 def test_browser_connections_returns_attached_page(monkeypatch) -> None:
     monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default"])
-    response = {
-        "target_id": "target-1",
-        "session_id": "session-1",
-        "page": {
-            "targetId": "target-1",
-            "title": "Cat - Wikipedia",
-            "url": "https://en.wikipedia.org/wiki/Cat",
-        },
-    }
-    monkeypatch.setattr(admin.ipc, "request", lambda name, payload, timeout=1.0: response)
+    response = (
+        b'{"target_id":"target-1","session_id":"session-1",'
+        b'"page":{"targetId":"target-1","title":"Cat - Wikipedia","url":"https://en.wikipedia.org/wiki/Cat"}}\n'
+    )
+    monkeypatch.setattr(admin.ipc, "connect", lambda name, timeout=1.0: FakeSocket(response))
 
     assert admin.browser_connections() == [
         {
@@ -126,67 +136,34 @@ def test_browser_connections_returns_attached_page(monkeypatch) -> None:
 
 
 def test_stop_all_daemons_restarts_every_visible_endpoint(monkeypatch) -> None:
-    monkeypatch.setattr(admin.lifecycle, "stop_all_daemons", lambda: (["default", "remote_1"], {}))
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "remote_1"])
+    restarted = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
 
     assert admin.stop_all_daemons() == ["default", "remote_1"]
+    assert restarted == ["default", "remote_1"]
 
 
 def test_daemon_protocol_probe_accepts_current_daemon(monkeypatch) -> None:
-    responses = [{"result": {"targetInfos": []}}, {"tabs": []}]
+    responses = [b'{"result":{"targetInfos":[]}}\n', b'{"tabs":[]}\n']
 
-    def fake_request(name, payload, timeout=3.0):
-        return responses.pop(0)
+    def fake_connect(name, timeout=3.0):
+        return FakeSocket(responses.pop(0))
 
-    monkeypatch.setattr(admin.ipc, "request", fake_request)
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
 
     assert admin._daemon_has_current_protocol()
 
 
 def test_daemon_protocol_probe_rejects_old_managed_tab_protocol(monkeypatch) -> None:
-    responses = [{"result": {"targetInfos": []}}, {"error": "'method'"}]
+    responses = [b'{"result":{"targetInfos":[]}}\n', b'{"error":"\'method\'"}\n']
 
-    def fake_request(name, payload, timeout=3.0):
-        return responses.pop(0)
+    def fake_connect(name, timeout=3.0):
+        return FakeSocket(responses.pop(0))
 
-    monkeypatch.setattr(admin.ipc, "request", fake_request)
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
 
     assert not admin._daemon_has_current_protocol()
-
-
-def test_ensure_daemon_retries_after_lock_holder_exits_without_endpoint(tmp_path, monkeypatch) -> None:
-    spawned = []
-
-    class FakeProcess:
-        def __init__(self, return_code):
-            self.return_code = return_code
-
-        def poll(self):
-            return self.return_code
-
-    class FakeLock:
-        def __init__(self, name):
-            assert name == "retry-session"
-
-        def acquire(self):
-            return True
-
-        def release(self):
-            pass
-
-    def fake_popen(*args, **kwargs):
-        spawned.append((args, kwargs))
-        return FakeProcess(admin.ipc.LOCK_BUSY_EXIT_CODE if len(spawned) == 1 else None)
-
-    daemon_states = iter([False, True])
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    monkeypatch.setattr(admin.ipc, "endpoint_reachable", lambda name: False)
-    monkeypatch.setattr(admin.ipc, "DaemonLock", FakeLock)
-    monkeypatch.setattr(admin, "daemon_alive", lambda name: next(daemon_states))
-    monkeypatch.setattr("subprocess.Popen", fake_popen)
-
-    admin.ensure_daemon(wait=1.0, name="retry-session")
-
-    assert len(spawned) == 2
 
 
 def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypatch, capsys) -> None:
@@ -368,9 +345,7 @@ def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch,
 def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch, capsys) -> None:
     monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:19222")
     monkeypatch.setattr(admin, "daemon_alive", lambda: True)
-    monkeypatch.setattr(
-        admin, "_chrome_running", lambda: (_ for _ in ()).throw(AssertionError("should not probe browser"))
-    )
+    monkeypatch.setattr(admin, "_chrome_running", lambda: (_ for _ in ()).throw(AssertionError("should not probe browser")))
     restarted = []
     ensure_calls = []
     monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
@@ -410,7 +385,6 @@ def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatc
     monkeypatch.setattr(admin, "daemon_alive", lambda: True)
     monkeypatch.setattr(admin, "browser_connections", lambda: [])
     monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
-    monkeypatch.setattr(admin, "_probe_cdp_endpoint", lambda _name, _value: (True, "CDP handshake succeeded"))
 
     assert admin.run_doctor() == 0
 
@@ -418,100 +392,6 @@ def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatc
     assert "[ok  ] browser target — configured via BU_CDP_URL" in out
     assert "[ok  ] daemon alive" in out
     assert "next action       attach; run `flocks browser -c 'print(page_info())'` before setup" in out
-
-
-def test_run_doctor_rejects_unreachable_explicit_remote_cdp(monkeypatch, capsys) -> None:
-    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:19222")
-    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
-    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
-    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
-    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
-    monkeypatch.setattr(admin, "browser_connections", lambda: [])
-    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
-    monkeypatch.setattr(
-        admin,
-        "_probe_cdp_endpoint",
-        lambda _name, _value: (False, "connection refused"),
-    )
-
-    assert admin.run_doctor() == 1
-
-    out = capsys.readouterr().out
-    assert "[FAIL] browser target — BU_CDP_URL is unreachable: connection refused" in out
-    assert "next action       fix BU_CDP_URL, then run `flocks browser --setup`" in out
-
-
-def test_probe_cdp_endpoint_rejects_invalid_websocket_url() -> None:
-    assert admin._probe_cdp_endpoint("BU_CDP_WS", "not-a-websocket") == (False, "invalid WebSocket URL")
-
-
-def test_probe_cdp_url_discovers_websocket_and_performs_cdp_handshake(monkeypatch) -> None:
-    sent_messages = []
-
-    class FakeHttpResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            pass
-
-        def read(self) -> bytes:
-            return b'{"webSocketDebuggerUrl":"ws://browser.test/devtools/browser/1"}'
-
-    class FakeWebSocket:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            pass
-
-        def send(self, message: str) -> None:
-            sent_messages.append(message)
-
-        def recv(self, timeout: float) -> str:
-            assert timeout == 3.0
-            return '{"id":1,"result":{"product":"Chrome/1"}}'
-
-    def fake_urlopen(url: str, timeout: float):
-        assert url == "http://browser.test/json/version"
-        assert timeout == 3.0
-        return FakeHttpResponse()
-
-    def fake_websocket_connect(url: str, **kwargs):
-        assert url == "ws://browser.test/devtools/browser/1"
-        assert kwargs == {"open_timeout": 3.0, "close_timeout": 3.0}
-        return FakeWebSocket()
-
-    monkeypatch.setattr(admin.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(admin, "websocket_connect", fake_websocket_connect)
-
-    assert admin._probe_cdp_endpoint("BU_CDP_URL", "http://browser.test") == (
-        True,
-        "CDP handshake succeeded",
-    )
-    assert sent_messages == ['{"id": 1, "method": "Browser.getVersion"}']
-
-
-def test_probe_cdp_websocket_rejects_non_cdp_response(monkeypatch) -> None:
-    class FakeWebSocket:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            pass
-
-        def send(self, _message: str) -> None:
-            pass
-
-        def recv(self, timeout: float) -> str:
-            return "[]"
-
-    monkeypatch.setattr(admin, "websocket_connect", lambda *_args, **_kwargs: FakeWebSocket())
-
-    assert admin._probe_cdp_endpoint("BU_CDP_WS", "ws://browser.test/devtools/browser/1") == (
-        False,
-        "Browser.getVersion returned an invalid response",
-    )
 
 
 def test_chrome_running_on_windows_handles_non_utf8_tasklist_output(monkeypatch) -> None:
