@@ -129,6 +129,28 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
+interface EmailChannelConfig {
+  enabled: boolean;
+  address?: string;
+  password?: string;
+  imapHost?: string;
+  imapPort?: number;
+  imapSecurity?: 'ssl' | 'starttls' | 'insecure';
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSecurity?: 'ssl' | 'starttls' | 'insecure';
+  allowInsecureConnections?: boolean;
+  pollIntervalSeconds?: number;
+  allowFrom?: string[];
+  allowAll?: boolean;
+  skipExistingOnStart?: boolean;
+  skipAttachments?: boolean;
+  requireAuthenticatedSender?: boolean;
+  authservId?: string;
+  defaultSubject?: string;
+  defaultAgent?: string;
+}
+
 interface WeixinChannelConfig {
   enabled: boolean;
   token?: string;
@@ -168,6 +190,7 @@ type ChannelConfig =
   | WeComChannelConfig
   | DingTalkChannelConfig
   | TelegramChannelConfig
+  | EmailChannelConfig
   | WeixinChannelConfig
   | WhatsAppChannelConfig;
 
@@ -213,6 +236,24 @@ function defaultTelegramConfig(): TelegramChannelConfig {
     streaming: false,
     streamingCoalesceMs: 200,
     mentionContextMessages: 0,
+  };
+}
+
+function defaultEmailConfig(): EmailChannelConfig {
+  return {
+    enabled: false,
+    imapPort: 993,
+    imapSecurity: 'ssl',
+    smtpPort: 587,
+    smtpSecurity: 'starttls',
+    allowInsecureConnections: false,
+    pollIntervalSeconds: 15,
+    allowFrom: [],
+    allowAll: false,
+    skipExistingOnStart: true,
+    skipAttachments: true,
+    requireAuthenticatedSender: true,
+    defaultSubject: 'Flocks Agent',
   };
 }
 
@@ -397,6 +438,37 @@ function NumberInput({
       onChange={(e) => onChange(Number(e.target.value))}
       className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
     />
+  );
+}
+
+function DatalistInput({
+  value,
+  onChange,
+  options,
+  placeholder,
+  listId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  placeholder?: string;
+  listId: string;
+}) {
+  return (
+    <>
+      <input
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
+      />
+      <datalist id={listId}>
+        {options.map((item) => (
+          <option value={item} key={item} />
+        ))}
+      </datalist>
+    </>
   );
 }
 
@@ -685,6 +757,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           {channelId === 'dingtalk' && 'Stream'}
           {channelId === 'weixin' && 'Long-Poll'}
           {channelId === 'telegram' && ((config as TelegramChannelConfig).mode === 'webhook' ? 'Webhook' : 'Polling')}
+          {channelId === 'email' && 'IMAP Polling'}
         </span>
       </div>
 
@@ -1438,6 +1511,202 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// Email Config Panel
+// ============================================================================
+
+interface EmailPanelProps {
+  config: EmailChannelConfig;
+  onChange: (c: EmailChannelConfig) => void;
+}
+
+function EmailPanel({ config, onChange }: EmailPanelProps) {
+  const { t } = useTranslation('channel');
+  const set = useCallback(
+    <K extends keyof EmailChannelConfig>(key: K, value: EmailChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  return (
+    <>
+      <Section title={t('email.credentials')} description={t('email.credentialsDesc')}>
+        <FieldRow label={t('email.address')} required hint={t('email.addressHint')}>
+          <TextInput
+            value={config.address ?? ''}
+            onChange={(v) => set('address', v || undefined)}
+            placeholder="agent@example.com"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
+          <SecretInput
+            value={config.password ?? ''}
+            onChange={(v) => set('password', v || undefined)}
+            placeholder="app password"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.servers')} description={t('email.serversDesc')}>
+        <FieldRow label={t('email.imapHost')} required hint={t('email.imapHostHint')}>
+          <DatalistInput
+            value={config.imapHost ?? ''}
+            onChange={(v) => set('imapHost', v || undefined)}
+            placeholder="imap.gmail.com"
+            options={[
+              'imap.gmail.com',
+              'imap.mail.yahoo.com',
+              'imap.mail.qq.com',
+              'imap.163.com',
+              'outlook.office365.com',
+            ]}
+            listId="email-imap-host-list"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
+          <Select
+            value={config.imapSecurity ?? 'ssl'}
+            onChange={(v) => set('imapSecurity', v as EmailChannelConfig['imapSecurity'])}
+            options={[
+              { value: 'ssl', label: t('email.securitySsl') },
+              { value: 'starttls', label: t('email.securityStarttls') },
+              { value: 'insecure', label: t('email.securityInsecure') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.imapPort')} hint={t('email.imapPortHint')}>
+          <NumberInput
+            value={config.imapPort ?? 993}
+            onChange={(v) => set('imapPort', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.smtpHost')} required hint={t('email.smtpHostHint')}>
+          <DatalistInput
+            value={config.smtpHost ?? ''}
+            onChange={(v) => set('smtpHost', v || undefined)}
+            placeholder="smtp.gmail.com"
+            options={[
+              'smtp.gmail.com',
+              'smtp.office365.com',
+              'smtp.163.com',
+              'smtp.mail.qq.com',
+              'smtp-mail.outlook.com',
+            ]}
+            listId="email-smtp-host-list"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>
+          <Select
+            value={config.smtpSecurity ?? 'starttls'}
+            onChange={(v) => set('smtpSecurity', v as EmailChannelConfig['smtpSecurity'])}
+            options={[
+              { value: 'ssl', label: t('email.securitySsl') },
+              { value: 'starttls', label: t('email.securityStarttls') },
+              { value: 'insecure', label: t('email.securityInsecure') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.smtpPort')} hint={t('email.smtpPortHint')}>
+          <NumberInput
+            value={config.smtpPort ?? 587}
+            onChange={(v) => set('smtpPort', v)}
+            min={1}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.accessControl')} description={t('email.accessControlDesc')} defaultOpen={false}>
+        <FieldRow label={t('email.allowAll')} hint={t('email.allowAllHint')}>
+          <Toggle
+            checked={config.allowAll ?? false}
+            onChange={(v) => set('allowAll', v)}
+            label={t('email.allowAllLabel')}
+          />
+        </FieldRow>
+        {!(config.allowAll ?? false) && (
+          <FieldRow label={t('email.allowFrom')} required hint={t('email.allowFromHint')}>
+            <TagsInput
+              value={config.allowFrom ?? []}
+              onChange={(v) => set('allowFrom', v)}
+              placeholder={t('email.allowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('email.requireAuthenticatedSender')} hint={t('email.requireAuthenticatedSenderHint')}>
+          <Toggle
+            checked={config.requireAuthenticatedSender ?? true}
+            onChange={(v) => set('requireAuthenticatedSender', v)}
+            label={t('email.requireAuthenticatedSenderLabel')}
+          />
+        </FieldRow>
+        {config.requireAuthenticatedSender && (
+          <FieldRow
+            label={t('email.authservId')}
+            required={(config.requireAuthenticatedSender ?? true) && !(config.allowAll ?? false)}
+            hint={t('email.authservIdHint')}
+          >
+            <TextInput
+              value={config.authservId ?? ''}
+              onChange={(v) => set('authservId', v || undefined)}
+              placeholder={t('email.optional')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('email.allowInsecureConnections')} hint={t('email.allowInsecureConnectionsHint')}>
+          <Toggle
+            checked={config.allowInsecureConnections ?? false}
+            onChange={(v) => set('allowInsecureConnections', v)}
+            label={t('email.allowInsecureConnectionsLabel')}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.behavior')} description={t('email.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('email.defaultAgent')} hint={t('email.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('email.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.defaultSubject')} hint={t('email.defaultSubjectHint')}>
+          <TextInput
+            value={config.defaultSubject ?? ''}
+            onChange={(v) => set('defaultSubject', v || undefined)}
+            placeholder="Flocks Agent"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.advanced')} description={t('email.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('email.pollIntervalSeconds')} hint={t('email.pollIntervalSecondsHint')}>
+          <NumberInput
+            value={config.pollIntervalSeconds ?? 15}
+            onChange={(v) => set('pollIntervalSeconds', v)}
+            min={5}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.skipExistingOnStart')} hint={t('email.skipExistingOnStartHint')}>
+          <Toggle
+            checked={config.skipExistingOnStart ?? true}
+            onChange={(v) => set('skipExistingOnStart', v)}
+            label={t('email.skipExistingOnStartLabel')}
+          />
+        </FieldRow>
+          <FieldRow label={t('email.skipAttachments')} hint={t('email.skipAttachmentsHint')}>
+          <Toggle
+            checked={config.skipAttachments ?? true}
+            onChange={(v) => set('skipAttachments', v)}
+            label={t('email.skipAttachmentsLabel')}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
+
 // WhatsApp Config Panel
 // ============================================================================
 
@@ -2345,6 +2614,10 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'email') {
+          configs[ch.id] = { ...defaultEmailConfig(), ...saved };
+        } else if (ch.id === 'email') {
+          configs[ch.id] = { ...defaultEmailConfig(), ...saved };
         } else if (ch.id === 'whatsapp') {
           const whatsappCfg = { ...defaultWhatsAppConfig(), ...saved };
           if (whatsappCfg.sessionPath) {
@@ -2360,6 +2633,7 @@ export default function ChannelPage() {
             whatsappCfg._paired = false;
           }
           configs[ch.id] = whatsappCfg;
+
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -2714,6 +2988,12 @@ export default function ChannelPage() {
                       config={selectedConfig as TelegramChannelConfig}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
+                    />
+                  )}
+                  {selectedId === 'email' && (
+                    <EmailPanel
+                      config={selectedConfig as EmailChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('email', cfg)}
                     />
                   )}
                   {selectedId === 'whatsapp' && (
