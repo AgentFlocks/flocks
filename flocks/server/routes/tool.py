@@ -276,7 +276,13 @@ async def _build_http_tool_context(
             from flocks.session.session import Session
 
             session = await Session.get_by_id(session_id)
-            if session and getattr(session, "delegation_context_required", False):
+            if session is None:
+                # The session was verified immediately before this context was
+                # built.  Treat a disappearing record as an authorization
+                # context failure, rather than silently turning a marked
+                # child into a root-like HTTP context.
+                security_context = {"parent_ceiling": {"invalid": True}}
+            elif getattr(session, "delegation_context_required", False):
                 # HTTP execution is a direct ToolRegistry path, so it does
                 # not receive SessionLoop's restoration step.  Restore only
                 # the server-persisted child context; an absent/corrupt record
