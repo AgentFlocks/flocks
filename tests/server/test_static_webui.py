@@ -1,4 +1,3 @@
-import mimetypes
 from pathlib import Path
 
 import pytest
@@ -48,12 +47,10 @@ async def test_static_webui_serves_browser_root(monkeypatch, tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_static_webui_serves_assets_with_immutable_cache(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(_write_dist(tmp_path)))
-    monkeypatch.setattr(mimetypes, "guess_type", lambda *_args, **_kwargs: ("text/plain", None))
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
         response = await client.get("/assets/app.12345678.js")
 
     assert response.status_code == 200
-    assert response.headers["Content-Type"].startswith("application/javascript")
     assert "console.log" in response.text
     assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
 

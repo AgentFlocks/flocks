@@ -22,75 +22,15 @@ export interface ToolFixture {
   has_assertion: boolean;
 }
 
-export type ToolListSortField = 'category' | 'source' | 'source_name' | 'enabled' | 'name';
-export type ToolListSortDir = 'asc' | 'desc';
-
-export interface ToolListPageParams {
-  source?: string;
-  category?: string;
-  sourceName?: string;
-  enabled?: string;
-  q?: string;
-  sortBy?: ToolListSortField;
-  sortDir?: ToolListSortDir;
-  offset?: number;
-  limit?: number;
-}
-
-export interface ToolListFacets {
-  category: Record<string, number>;
-  source: Record<string, number>;
-  source_groups: Record<string, number>;
-  source_name: Record<string, number>;
-  enabled: Record<string, number>;
-}
-
-export interface ToolListPageResponse {
-  items: Tool[];
-  total: number;
-  offset: number;
-  limit: number;
-  facets: ToolListFacets;
-}
-
-export interface ToolRefreshResponse {
-  status: 'success' | 'partial' | 'error';
-  tool_count: number;
-  message: string;
-  stages: Record<string, 'success' | 'error'>;
-  errors: string[];
-}
-
-export interface ToolDeleteResponse {
-  status: 'success' | 'partial';
-  message: string;
-  errors?: string[];
-}
-
 export const toolAPI = {
   list: (params?: { source?: ToolSource; category?: string }) =>
     client.get<Tool[]>('/api/tools', { params }),
-
-  listPage: (params?: ToolListPageParams) =>
-    client.get<ToolListPageResponse>('/api/tools/page', {
-      params: {
-        source: params?.source,
-        category: params?.category,
-        source_name: params?.sourceName,
-        enabled: params?.enabled,
-        q: params?.q,
-        sort_by: params?.sortBy,
-        sort_dir: params?.sortDir,
-        offset: params?.offset,
-        limit: params?.limit,
-      },
-    }),
 
   get: (name: string) =>
     client.get<Tool>(`/api/tools/${name}`),
 
   refresh: () =>
-    client.post<ToolRefreshResponse>('/api/tools/refresh'),
+    client.post('/api/tools/refresh'),
 
   test: (name: string, params: Record<string, any>) =>
     client.post(`/api/tools/${name}/test`, { params }),
@@ -116,28 +56,8 @@ export const toolAPI = {
     client.post<Tool>(`/api/tools/${name}/reset`),
 
   delete: (name: string) =>
-    client.delete<ToolDeleteResponse>(`/api/tools/${name}`),
+    client.delete<{ status: string; message: string }>(`/api/tools/${name}`),
 };
-
-export async function listAllToolPages(params: ToolListPageParams): Promise<Tool[]> {
-  const pageSize = 200;
-  const items: Tool[] = [];
-  let offset = 0;
-
-  while (true) {
-    const response = await toolAPI.listPage({
-      ...params,
-      offset,
-      limit: pageSize,
-    });
-    const pageItems = Array.isArray(response.data.items) ? response.data.items : [];
-    items.push(...pageItems);
-    offset += pageItems.length;
-    if (pageItems.length === 0 || offset >= response.data.total) break;
-  }
-
-  return items;
-}
 
 export const canDirectlyTestTool = (tool: Pick<Tool, 'source'>) =>
   tool.source !== 'builtin';

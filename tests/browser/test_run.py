@@ -46,11 +46,10 @@ def test_state_show_prints_summary_without_daemon() -> None:
     mock_daemon.assert_not_called()
 
 
-def test_state_save_reuses_connected_daemon_and_prints_result() -> None:
+def test_state_save_ensures_daemon_and_prints_result() -> None:
     stdout = StringIO()
     with (
         patch("flocks.browser.run.save_state", return_value={"path": "/tmp/auth-state.json", "cookies": 2}),
-        patch("flocks.browser.run.daemon_browser_connected", return_value=True),
         patch("flocks.browser.run.ensure_daemon") as mock_daemon,
         patch("flocks.browser.run.print_update_banner") as mock_banner,
         patch("sys.stdout", stdout),
@@ -59,18 +58,6 @@ def test_state_save_reuses_connected_daemon_and_prints_result() -> None:
 
     assert '"cookies": 2' in stdout.getvalue()
     mock_banner.assert_called_once()
-    mock_daemon.assert_not_called()
-
-
-def test_state_save_ensures_daemon_when_browser_is_disconnected() -> None:
-    with (
-        patch("flocks.browser.run.save_state", return_value={"path": "/tmp/auth-state.json"}),
-        patch("flocks.browser.run.daemon_browser_connected", return_value=False),
-        patch("flocks.browser.run.ensure_daemon") as mock_daemon,
-        patch("flocks.browser.run.print_update_banner"),
-    ):
-        run.main(["state", "save", "/tmp/auth-state.json"])
-
     mock_daemon.assert_called_once()
 
 
@@ -78,7 +65,7 @@ def test_state_load_passes_optional_flags() -> None:
     stdout = StringIO()
     with (
         patch("flocks.browser.run.load_state", return_value={"finalUrl": "https://example.com"}) as mock_load,
-        patch("flocks.browser.run.ensure_daemon") as mock_daemon,
+        patch("flocks.browser.run.ensure_daemon"),
         patch("flocks.browser.run.print_update_banner"),
         patch("sys.stdout", stdout),
     ):
@@ -98,7 +85,6 @@ def test_state_load_passes_optional_flags() -> None:
         url="https://example.com/dashboard",
         reload=False,
     )
-    mock_daemon.assert_called_once()
     assert '"finalUrl": "https://example.com"' in stdout.getvalue()
 
 

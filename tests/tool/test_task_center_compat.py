@@ -60,20 +60,6 @@ class TestTaskCenterCompatibility:
         assert "action" in schema.properties
         assert "type" not in schema.required
 
-    def test_task_create_schema_mentions_extended_message_channels(self):
-        tool = ToolRegistry.get("schedule_task_create")
-        schema = ToolRegistry.get_schema("schedule_task_create")
-
-        assert tool is not None
-        assert schema is not None
-        text = (
-            tool.info.description
-            + " "
-            + schema.properties["description"]["description"]
-        ).lower()
-        for value in ("telegram", "whatsapp", "email", "channel_type=telegram", "channel_type=whatsapp", "channel_type=email"):
-            assert value in text
-
     def test_task_update_schema_makes_action_optional_and_exposes_trigger_fields(self):
         schema = ToolRegistry.get_schema("schedule_task_update")
 

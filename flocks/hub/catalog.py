@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import platform
 import re
-import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -32,7 +31,6 @@ _LEGACY_REMOVED_PLUGINS: dict[tuple[PluginType, str], dict[str, Optional[str]]] 
 _TOOL_TYPE_DIRS = frozenset({"api", "device", "python", "mcp", "generated"})
 _SKIP_PLUGIN_DIRS = frozenset({"__pycache__"})
 _PATH_SIGNATURE_MISSING = -1
-_CATALOG_ENTRIES_LOCK = threading.Lock()
 
 
 def _read_json(path: Path) -> dict:
@@ -596,86 +594,6 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     }
 
 
-def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
-    signature: list[tuple[str, int, int]] = [_path_signature(local._record_path())]
-
-    for plugin_type in ("skill", "agent", "workflow", "webui", "component"):
-        for scope in ("global", "project"):
-            base = local.install_root(plugin_type, scope)
-            signature.append(_path_signature(base))
-            if not base.is_dir():
-                continue
-            for child in sorted(base.iterdir(), key=lambda item: item.name):
-                if not child.is_dir():
-                    continue
-                signature.append(_path_signature(child))
-                signature.extend(_plugin_manifest_signature(plugin_type, child))
-
-    for scope in ("global", "project"):
-        base = local.install_root("tool", scope)
-        signature.append(_path_signature(base))
-        if not base.is_dir():
-            continue
-        for directory in _iter_tool_plugin_dirs(base):
-            signature.append(_path_signature(directory))
-            signature.extend(_plugin_manifest_signature("tool", directory))
-
-    return tuple(signature)
-
-
-def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
-    root = get_bundled_hub_root()
-    return (
-        _path_signature(root / "index.json"),
-        _path_signature(root / "taxonomy.json"),
-        *_installed_plugins_cache_key(),
-        *_system_plugin_roots_cache_key(),
-        *_bundled_tool_roots_cache_key(),
-    )
-
-
-@lru_cache(maxsize=8)
-def _cached_catalog_entries(
-    _signature: tuple[tuple[str, int, int], ...],
-) -> tuple[HubCatalogEntry, ...]:
-    records = local.load_installed_records()
-    inferred_installs = local.infer_local_installs()
-    entries = [
-        _entry_from_index(item, records, inferred_installs)
-        for item in load_index().plugins
-    ]
-    seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
-    for (system_type, system_id), root in _system_plugin_roots().items():
-        if (system_type, system_id) in seen:
-            continue
-        manifest = _manifest_for_system_root(system_type, system_id, root)
-        if manifest:
-            entries.append(_entry_from_system_manifest(manifest, root))
-            seen.add((system_type, system_id))
-
-    # FlocksHub-bundled tool plugins. The runtime ``ToolRegistry`` only
-    # discovers tools that have been installed into ``<plugins>/tools``,
-    # so the catalog needs an explicit pass to surface bundled-but-not-
-    # yet-installed plugins like ``onesig_v2_5_3_D20250710``. These show
-    # up as ``state="available"`` until the user installs them, at which
-    # point the standard ``records``/``inferred_installs`` flow upgrades
-    # them to ``state="installed"`` (see :func:`_entry_from_bundled_tool`).
-    for (bundled_type, bundled_id), root in _bundled_tool_roots().items():
-        if (bundled_type, bundled_id) in seen:
-            continue
-        manifest = _manifest_for_system_root(bundled_type, bundled_id, root)
-        if manifest:
-            entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
-            seen.add((bundled_type, bundled_id))
-    return tuple(entries)
-
-
-def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
-    signature = _catalog_entries_cache_key()
-    with _CATALOG_ENTRIES_LOCK:
-        return _cached_catalog_entries(signature)
-
-
 def clear_catalog_caches() -> None:
     """Clear Hub filesystem discovery caches after installs or explicit refreshes."""
     load_index.cache_clear()
@@ -683,7 +601,6 @@ def clear_catalog_caches() -> None:
     _manifest_path_lookup.cache_clear()
     _cached_system_plugin_roots.cache_clear()
     _cached_bundled_tool_roots.cache_clear()
-    _cached_catalog_entries.cache_clear()
 
 
 def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
@@ -951,8 +868,7 @@ def _contains_any(values: Iterable[str], selected: Optional[list[str]]) -> bool:
     return any(item.lower() in value_set for item in selected)
 
 
-def filter_catalog_entries(
-    entries: Iterable[HubCatalogEntry],
+def list_catalog(
     *,
     plugin_type: Optional[PluginType] = None,
     category: Optional[list[str]] = None,
@@ -963,6 +879,35 @@ def filter_catalog_entries(
     risk: Optional[list[str]] = None,
     q: Optional[str] = None,
 ) -> list[HubCatalogEntry]:
+    records = local.load_installed_records()
+    inferred_installs = local.infer_local_installs()
+    entries = [
+        _entry_from_index(item, records, inferred_installs)
+        for item in load_index().plugins
+    ]
+    seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
+    for (system_type, system_id), root in _system_plugin_roots().items():
+        if (system_type, system_id) in seen:
+            continue
+        manifest = _manifest_for_system_root(system_type, system_id, root)
+        if manifest:
+            entries.append(_entry_from_system_manifest(manifest, root))
+            seen.add((system_type, system_id))
+
+    # FlocksHub-bundled tool plugins. The runtime ``ToolRegistry`` only
+    # discovers tools that have been installed into ``<plugins>/tools``,
+    # so the catalog needs an explicit pass to surface bundled-but-not-
+    # yet-installed plugins like ``onesig_v2_5_3_D20250710``. These show
+    # up as ``state="available"`` until the user installs them, at which
+    # point the standard ``records``/``inferred_installs`` flow upgrades
+    # them to ``state="installed"`` (see :func:`_entry_from_bundled_tool`).
+    for (bundled_type, bundled_id), root in _bundled_tool_roots().items():
+        if (bundled_type, bundled_id) in seen:
+            continue
+        manifest = _manifest_for_system_root(bundled_type, bundled_id, root)
+        if manifest:
+            entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
+            seen.add((bundled_type, bundled_id))
     query = (q or "").strip().lower()
 
     def keep(entry: HubCatalogEntry) -> bool:
@@ -997,30 +942,6 @@ def filter_catalog_entries(
         return True
 
     return [entry for entry in entries if keep(entry)]
-
-
-def list_catalog(
-    *,
-    plugin_type: Optional[PluginType] = None,
-    category: Optional[list[str]] = None,
-    tags: Optional[list[str]] = None,
-    use_cases: Optional[list[str]] = None,
-    state: Optional[list[str]] = None,
-    trust: Optional[list[str]] = None,
-    risk: Optional[list[str]] = None,
-    q: Optional[str] = None,
-) -> list[HubCatalogEntry]:
-    return filter_catalog_entries(
-        _catalog_entries_snapshot(),
-        plugin_type=plugin_type,
-        category=category,
-        tags=tags,
-        use_cases=use_cases,
-        state=state,
-        trust=trust,
-        risk=risk,
-        q=q,
-    )
 
 
 def category_counts() -> dict:

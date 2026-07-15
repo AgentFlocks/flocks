@@ -51,7 +51,7 @@ load_dedup_file -> concurrent_triage -> summarize
 | 顺序 | 节点 | 做什么 | 下一步 |
 | --- | --- | --- | --- |
 | 1 | load_dedup_file | 一次性读取 stream_alert_denoise 写入的 JSONL 文件。输入优先级：input_paths > input_path > input_date（自动遍历该日所有 dedup_result_*.jsonl）> 当日默认。跳过 file_header 行，输出 enriched_alerts (list[dict])。 | concurrent_triage |
-| 2 | concurrent_triage | Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1），内层 ThreadPoolExecutor(4) 并行 survey / cve_related / cve_info / payload_analysis。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 并行 LLM + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。SOC DB 持久化只接受明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的告警，并通过数据库唯一索引保证跨执行全局唯一；重复 key 只更新研判字段并保留首次事件元数据，持久化失败会使工作流失败。可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。 | summarize |
+| 2 | concurrent_triage | Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1），内层 ThreadPoolExecutor(4) 并行 survey / cve_related / cve_info / payload_analysis。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 并行 LLM + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。所有 enriched_with_triage alerts 默认写入 `~/.flocks/data/soc.db` 的 `alert_records` 表；可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。 | summarize |
 | 3 | summarize | 汇总输出：写 pipeline_summary.md 到 ~/.flocks/workspace/outputs/<today>/artifacts/，暴露 top-risk 告警的 verdict/title/triage_report 作为工作流的 final outputs。 | 工作流最终输出 |
 
 编辑流程结构时，要同时确认节点顺序、边关系、字段映射和最终输出是否仍然一致。
@@ -68,7 +68,7 @@ load_dedup_file -> concurrent_triage -> summarize
 - max_triage_cache_size: 100000
 - persist_triage_output: false
 - triage_output_mode: soc_db
-- _comment_output: 默认只接受明确 is_duplicate=false、包含 dedup_key 且批内首次出现的告警，并由 soc.db 保证 dedup_key 跨执行全局唯一；如需 JSONL，设置 triage_output_mode=jsonl 或 both。
+- _comment_output: 默认写入 ~/.flocks/data/soc.db；如需 JSONL，设置 triage_output_mode=jsonl 或 both；旧参数 persist_triage_output=true 仍会额外写 JSONL。
 - _comment_dedup: 同批次内多条 alert 共享 dedup_key 时只 LLM 研判 1 次（leader），其余 follower 直接复用结果；跨批次/跨进程的复用由 triage_cache.pkl 提供。
 - _comment_cache: 研判缓存位于 ~/.flocks/workspace/workflows/stream_alert_triage/triage_cache.pkl，FIFO LRU，文件锁 + 原子落盘，可跨进程/跨执行复用。dedup_key 即 str...
 
@@ -96,7 +96,7 @@ load_dedup_file -> concurrent_triage -> summarize
 
 ### 4.2 concurrent_triage
 
-职责: Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1），内层 ThreadPoolExecutor(4) 并行 survey / cve_related / cve_info / payload_analysis。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 并行 LLM + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。SOC DB 持久化只接受明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的告警，并通过数据库唯一索引保证跨执行全局唯一；重复 key 只更新研判字段并保留首次事件元数据，持久化失败会使工作流失败。可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。
+职责: Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1），内层 ThreadPoolExecutor(4) 并行 survey / cve_related / cve_info / payload_analysis。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 并行 LLM + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。所有 enriched_with_triage alerts 默认写入 `~/.flocks/data/soc.db` 的 `alert_records` 表；可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。
 
 - 节点类型: Python
 - 输入来源: load_dedup_file

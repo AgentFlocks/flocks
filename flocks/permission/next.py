@@ -238,12 +238,10 @@ class PermissionNext:
             cls._permanent_rules[permission] = "deny"
             await cls._persist_permanent_rule(permission, "deny")
             return
-        if reply in {"allow_session", "deny_session"}:
+        if reply == "allow_session":
             if resolved_session_id not in cls._session_permissions:
                 cls._session_permissions[resolved_session_id] = {}
-            cls._session_permissions[resolved_session_id][permission] = (
-                "allow" if reply == "allow_session" else "deny"
-            )
+            cls._session_permissions[resolved_session_id][permission] = "allow"
             await cls._persist_session_rules(resolved_session_id)
 
     @classmethod
@@ -378,14 +376,11 @@ class PermissionNext:
             cls._permanent_rules[permission] = "deny"
             cls._schedule_persist(cls._persist_permanent_rule(permission, "deny"))
             raise DeniedError([])
-        if reply in {"allow_session", "deny_session"}:
+        if reply == "allow_session":
             if session_id not in cls._session_permissions:
                 cls._session_permissions[session_id] = {}
-            action = "allow" if reply == "allow_session" else "deny"
-            cls._session_permissions[session_id][permission] = action
+            cls._session_permissions[session_id][permission] = "allow"
             cls._schedule_persist(cls._persist_session_rules(session_id))
-            if action == "deny":
-                raise DeniedError([])
             return
 
         raise PermissionError(f"Unknown permission reply: {reply}")

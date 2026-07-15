@@ -139,89 +139,6 @@ async def test_tdp_platform_config_exposes_disposal_log_list():
     assert mock_run.await_args.kwargs["action"] == "disposal_log_list"
 
 
-async def test_tdp_threat_monitor_rejects_partial_or_oversized_time_ranges():
-    module = _load_module("test_tdp_handler_threat_monitor_time_range", _TDP_HANDLER)
-
-    partial = await module.threat_monitor_list(_ctx(), time_from=1700000000)
-    oversized = await module.threat_monitor_list(
-        _ctx(),
-        time_from=1700000000,
-        time_to=1700000000 + 24 * 60 * 60 + 1,
-    )
-
-    assert partial.success is False
-    assert "together" in partial.error
-    assert oversized.success is False
-    assert "24 hours" in oversized.error
-
-
-async def test_tdp_threat_monitor_maps_semantic_filters():
-    module = _load_module("test_tdp_handler_threat_monitor_mapping", _TDP_HANDLER)
-    mock_result = ToolResult(success=True, output={"status": 200})
-
-    with patch.object(module, "_run_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
-        result = await module.threat_monitor_list(
-            _ctx(),
-            time_from=1700000000,
-            time_to=1700003600,
-            sql="threat.type = 'c2'",
-            size=50,
-            assets_group=[1],
-            net_data_type=["attack"],
-            refresh_rate=10,
-            cur_page=3,
-            page_size=25,
-        )
-
-    assert result.success is True
-    api_name, path, payload = _built_json_payload(mock_run)
-    assert api_name == "threat_monitor_list"
-    assert path == "/api/v1/monitor/threat/list"
-    assert payload["condition"] == {
-        "time_from": 1700000000,
-        "time_to": 1700003600,
-        "sql": "threat.type = 'c2'",
-        "size": 50,
-        "assets_group": [1],
-        "net_data_type": ["attack"],
-        "refresh_rate": 10,
-    }
-    assert payload["page"] == {"cur_page": 3, "page_size": 25}
-
-
-async def test_tdp_platform_custom_rule_write_validation():
-    module = _load_module("test_tdp_handler_platform_custom_rule_validation", _TDP_HANDLER)
-
-    missing_add_fields = await module.platform_config(
-        _ctx(),
-        action="custom_rule_add",
-        custom_rule={"threat_name": "Incomplete rule"},
-    )
-    missing_update_suuid = await module.platform_config(
-        _ctx(),
-        action="custom_rule_update",
-        custom_rule={
-            "threat_name": "Rule",
-            "threat_msg": "Message",
-            "threat_severity": 3,
-            "threat_type": "exploit",
-            "threat_result": "success",
-            "directions": ["in"],
-            "body": [{"field": "http.uri", "method": "GET", "content": "/api"}],
-            "attacker": "src",
-            "status": 1,
-        },
-    )
-    missing_delete_ids = await module.platform_config(_ctx(), action="custom_rule_delete")
-
-    assert missing_add_fields.success is False
-    assert "threat_msg" in missing_add_fields.error
-    assert missing_update_suuid.success is False
-    assert "suuid" in missing_update_suuid.error
-    assert missing_delete_ids.success is False
-    assert "suuid list" in missing_delete_ids.error
-
-
 async def test_tdp_policy_ip_reputation_delete_requires_non_empty_ids():
     module = _load_module("test_tdp_handler_policy", _TDP_HANDLER)
 
@@ -845,7 +762,6 @@ def test_tdp_query_yaml_promotes_semantic_top_level_fields():
         "tdp_assets_domain_list.yaml": {"domain_name_or_ip", "has_login_api", "second_level_domain"},
         "tdp_privacy_diagram.yaml": {"itag", "methods", "fuzzy_url_host"},
         "tdp_threat_inbound_attack.yaml": {"severity", "result_list", "keyword"},
-        "tdp_threat_monitor_list.yaml": {"time_from", "time_to", "sql", "assets_group", "cur_page"},
         "tdp_machine_asset_list.yaml": {"time_from", "time_to", "service", "service_class", "application", "keyword"},
         "tdp_mdr_alert_list.yaml": {"section_list", "threat_severity", "keyword"},
         "tdp_cloud_facilities.yaml": {"cloud_vendor", "cloud_instance", "keyword"},
@@ -873,9 +789,6 @@ def test_tdp_platform_yaml_uses_keyword_and_requires_confirmation():
     assert "keyword" in raw["inputSchema"]["properties"]
     assert "device_id" not in raw["inputSchema"]["properties"]
     assert "disposal_log_list" in raw["inputSchema"]["properties"]["action"]["enum"]
-    assert "custom_rule_list" in raw["inputSchema"]["properties"]["action"]["enum"]
-    assert "custom_rule" in raw["inputSchema"]["properties"]
-    assert "custom_rule_ids" in raw["inputSchema"]["properties"]
 
 
 def test_tdp_policy_yaml_requires_confirmation_and_uses_object_ioc_list():

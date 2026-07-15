@@ -18,7 +18,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
-import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
+import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
@@ -28,9 +28,10 @@ import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
+import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
 import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
-import type { Command } from '@/api/skill';
+import { commandAPI, type Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
@@ -49,39 +50,20 @@ import {
   type ImagePartData,
 } from '@/utils/imageUpload';
 import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
-import {
-  buildInstructionDisplayText,
-  fetchSessionChatCommands,
-  getQueuedPromptText,
-  parseInstructionDisplayText,
-  resolveSessionChatSSEAction,
-  shouldForwardSSEEventToParent,
-  type CompactionStage,
-  usePendingQuestions,
-  useSessionContextUsage,
-  useSessionPromptQueue,
-  type PendingQuestion,
-  type PromptDisplayOptions,
-  type SSEChatEvent,
-  type SessionChatDisplay,
-} from '@/features/session-chat';
 
 export { formatSmartTime };
 export type { SSEConnectionStatus };
-export {
-  buildInstructionDisplayText,
-  parseInstructionDisplayText,
-  shouldForwardSSEEventToParent,
-  type PromptDisplayOptions,
-  type SSEChatEvent,
-  type SessionChatDisplay,
-} from '@/features/session-chat';
 
 // ============================================================================
 // Types
 // ============================================================================
 
 export type MergedMessage = Message & { _merged?: boolean };
+
+export interface SSEChatEvent {
+  type: string;
+  properties?: Record<string, any>;
+}
 
 /** Node reference shown above the chat input as a dismissible chip */
 export interface NodeRef {
@@ -108,11 +90,45 @@ export interface ConversationBottomSlotActions {
   hasMessages: boolean;
 }
 
+export interface PromptDisplayOptions {
+  displayText?: string;
+}
+
+const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
+
+export function buildInstructionDisplayText(label: string): string {
+  return `${INSTRUCTION_DISPLAY_PREFIX}${label}`;
+}
+
+export function parseInstructionDisplayText(text: string): string | null {
+  return text.startsWith(INSTRUCTION_DISPLAY_PREFIX)
+    ? text.slice(INSTRUCTION_DISPLAY_PREFIX.length).trim() || null
+    : null;
+}
+
 function getMessagePartDisplayText(part: MessagePart): string {
   const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
   return typeof metadataDisplayText === 'string' && metadataDisplayText
     ? metadataDisplayText
     : part.text || '';
+}
+
+/** Display-related options grouped to reduce prop surface. */
+export interface SessionChatDisplay {
+  /** Compact mode for panels/dialogs (default: true). Set false for full-page. */
+  compact?: boolean;
+  /** Let embedded chats use the full available message width. */
+  fullWidth?: boolean;
+  /** Show copy action on assistant messages */
+  showActions?: boolean;
+  /** Show timestamp below each message */
+  showTimestamp?: boolean;
+  /** Default-collapse intermediate reasoning and tool-process details in embedded panels. */
+  collapseIntermediateSteps?: boolean;
+  /** Initial open state for grouped reasoning/tool-process details. */
+  processGroupsDefaultOpen?: boolean;
+  /** Keep grouped reasoning/tool-process details open while the assistant message is actively streaming. */
+  processGroupsOpenWhileActive?: boolean;
 }
 
 export interface SessionChatProps {
@@ -237,17 +253,6 @@ export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text
   if (!text || INSIGNIFICANT_THINKING_TEXT_RE.test(text)) return '';
   return text;
 }
-
-const StreamingReasoningText = memo(function StreamingReasoningText({
-  content,
-  isStreaming,
-}: {
-  content: string;
-  isStreaming: boolean;
-}) {
-  const displayContent = useStreamingContent(content, isStreaming);
-  return <>{displayContent}</>;
-});
 
 function stringifyToolPayload(value: unknown): string {
   if (value == null) return '';
@@ -703,6 +708,18 @@ export function listUploadedDocumentPaths(items: UploadedDocumentAttachmentLike[
 // don't share a draft, and namespaced to avoid colliding with other features.
 import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
 
+// Backend stages emitted by ``SessionCompaction.process`` /
+// ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
+// Keep in sync with ``flocks/session/lifecycle/compaction/{compaction,summary}.py``.
+type CompactionStage =
+  | 'load'
+  | 'strategy'
+  | 'chunk_done'
+  | 'merge_started'
+  | 'merge_done'
+  | 'summarize_done'
+  | 'complete';
+
 interface CompactionStageEntry {
   stage: CompactionStage;
   data: Record<string, unknown>;
@@ -968,91 +985,6 @@ export function shouldRenderMessage(
   return true;
 }
 
-export interface ChatTimelineItem {
-  message: MergedMessage;
-  isActive: boolean;
-}
-
-export function buildChatTimelineItems({
-  messages,
-  skipIndices,
-  isStreaming,
-}: {
-  messages: MergedMessage[];
-  skipIndices: Set<number>;
-  isStreaming: boolean;
-}): ChatTimelineItem[] {
-  const items: ChatTimelineItem[] = [];
-  for (let index = 0; index < messages.length; index++) {
-    if (skipIndices.has(index)) continue;
-    const message = messages[index];
-    const isActive =
-      isStreaming &&
-      index === messages.length - 1 &&
-      message.role === 'assistant' &&
-      !message.finish;
-    if (!shouldRenderMessage(message, { isActive })) continue;
-    items.push({ message, isActive });
-  }
-  return items;
-}
-
-export function areChatTimelineItemsRenderEqual(
-  prevItems: ChatTimelineItem[],
-  nextItems: ChatTimelineItem[],
-): boolean {
-  if (prevItems.length !== nextItems.length) return false;
-
-  for (let index = 0; index < prevItems.length; index++) {
-    const prev = prevItems[index];
-    const next = nextItems[index];
-    if (prev.isActive !== next.isActive) return false;
-
-    const prevMessage = prev.message;
-    const nextMessage = next.message;
-    if (prevMessage === nextMessage) continue;
-    if (prevMessage.id !== nextMessage.id) return false;
-    if (prevMessage.role !== nextMessage.role) return false;
-    if (prevMessage.finish !== nextMessage.finish) return false;
-    if (prevMessage.error !== nextMessage.error) return false;
-    if (prevMessage.agent !== nextMessage.agent) return false;
-    if (prevMessage.timestamp !== nextMessage.timestamp) return false;
-    if (prevMessage.compacted !== nextMessage.compacted) return false;
-    if (!areChatMessagePartsRenderEqual(prevMessage.parts, nextMessage.parts)) return false;
-  }
-
-  return true;
-}
-
-function useStableChatTimelineSegments(items: ChatTimelineItem[]): {
-  historyItems: ChatTimelineItem[];
-  tailItems: ChatTimelineItem[];
-} {
-  const previousRef = useRef<{
-    historyItems: ChatTimelineItem[];
-    tailItems: ChatTimelineItem[];
-  } | null>(null);
-
-  return useMemo(() => {
-    const tailStart = items.length > 0 && items[items.length - 1].isActive
-      ? items.length - 1
-      : items.length;
-    const nextHistoryItems = tailStart === items.length ? items : items.slice(0, tailStart);
-    const nextTailItems = tailStart === items.length ? [] : items.slice(tailStart);
-    const previous = previousRef.current;
-
-    const historyItems = previous && areChatTimelineItemsRenderEqual(previous.historyItems, nextHistoryItems)
-      ? previous.historyItems
-      : nextHistoryItems;
-    const tailItems = previous && areChatTimelineItemsRenderEqual(previous.tailItems, nextTailItems)
-      ? previous.tailItems
-      : nextTailItems;
-    const next = { historyItems, tailItems };
-    previousRef.current = next;
-    return next;
-  }, [items]);
-}
-
 export function getMessageErrorText(message: Pick<Message, 'error'>): string {
   const error = message.error as any;
   if (!error) return '';
@@ -1173,6 +1105,13 @@ const ALLOWED_UPLOAD_EXTENSIONS = new Set([
 
 function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+function getQueuedPromptText(item: QueuedPrompt): string {
+  if (typeof item.displayText === 'string' && item.displayText) return item.displayText;
+  if (typeof item.display_text === 'string' && item.display_text) return item.display_text;
+  const textPart = item.parts.find((part) => part.type === 'text' && typeof part.text === 'string');
+  return typeof textPart?.text === 'string' ? textPart.text : '';
 }
 
 function getGoalBannerKey(goal: GoalBannerState | null): string {
@@ -1563,23 +1502,11 @@ export default function SessionChat({
   const [compactingMessage, setCompactingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
-  const {
-    items: queuedPrompts,
-    expanded: queueExpanded,
-    setExpanded: setQueueExpanded,
-    editingId: editingQueueId,
-    editingText: editingQueueText,
-    setEditingText: setEditingQueueText,
-    actionId: queueActionId,
-    refresh: fetchPromptQueue,
-    applyItems: applyPromptQueueItems,
-    enqueue: enqueuePrompt,
-    startEdit: startQueuedEdit,
-    cancelEdit: cancelQueuedEdit,
-    saveEdit: saveQueuedEdit,
-    remove: removeQueuedPrompt,
-    runNow: runQueuedPromptNow,
-  } = useSessionPromptQueue(sessionId);
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const [queueExpanded, setQueueExpanded] = useState(true);
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const [editingQueueText, setEditingQueueText] = useState('');
+  const [queueActionId, setQueueActionId] = useState<string | null>(null);
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
@@ -1642,14 +1569,12 @@ export default function SessionChat({
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
   const [editingText, setEditingText] = useState('');
   const [actionMessageId, setActionMessageId] = useState<string | null>(null);
-  const {
-    snapshot: contextUsageSnapshot,
-    refreshing: contextUsageRefreshing,
-    contextWindowTokens: contextUsageWindowTokens,
-    refresh: refreshContextUsage,
-    applyPushSnapshot: applyContextUsagePushSnapshot,
-    stopRefreshing: stopContextUsageRefreshing,
-  } = useSessionContextUsage(sessionId);
+  const [contextUsageSnapshot, setContextUsageSnapshot] = useState<ContextUsageSnapshot | null>(null);
+  const [contextUsageRefreshing, setContextUsageRefreshing] = useState(false);
+  const [contextUsageWindowTokens, setContextUsageWindowTokens] = useState(0);
+  const contextUsageRequestRef = useRef<{ sessionId: string; promise: Promise<void> } | null>(null);
+  const contextUsageRequestSeqRef = useRef(0);
+  const lastContextUsagePushAtRef = useRef(0);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1674,7 +1599,6 @@ export default function SessionChat({
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
-  const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -1684,8 +1608,7 @@ export default function SessionChat({
   const [showCommandDropdown, setShowCommandDropdown] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const commandsLoadedAtRef = useRef(0);
-  const commandsLoadingRef = useRef(false);
+  const commandsLoadedRef = useRef(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
@@ -1715,18 +1638,9 @@ export default function SessionChat({
 
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
-    if (scrollToBottomRafRef.current !== null) return;
-    scrollToBottomRafRef.current = requestAnimationFrame(() => {
-      scrollToBottomRafRef.current = null;
+    requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
     });
-  }, []);
-
-  useEffect(() => () => {
-    if (scrollToBottomRafRef.current !== null) {
-      cancelAnimationFrame(scrollToBottomRafRef.current);
-      scrollToBottomRafRef.current = null;
-    }
   }, []);
 
   const loadOlderMessagesRef = useRef<(() => Promise<void>) | null>(null);
@@ -1805,6 +1719,92 @@ export default function SessionChat({
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
+  const fetchPromptQueue = useCallback(async () => {
+    if (!sessionId) {
+      setQueuedPrompts([]);
+      return;
+    }
+    try {
+      const response = await sessionApi.listPromptQueue(sessionId);
+      setQueuedPrompts(response.items ?? []);
+    } catch (err) {
+      console.warn('[SessionChat] Failed to fetch prompt queue:', err);
+    }
+  }, [sessionId]);
+
+  const refreshContextUsage = useCallback((options?: { clear?: boolean; skipIfFreshMs?: number }) => {
+    if (!sessionId) {
+      setContextUsageSnapshot(null);
+      setContextUsageRefreshing(false);
+      setContextUsageWindowTokens(0);
+      contextUsageRequestSeqRef.current += 1;
+      contextUsageRequestRef.current = null;
+      lastContextUsagePushAtRef.current = 0;
+      return;
+    }
+    if (options?.clear) {
+      setContextUsageSnapshot(null);
+      setContextUsageRefreshing(true);
+      contextUsageRequestSeqRef.current += 1;
+      contextUsageRequestRef.current = null;
+      lastContextUsagePushAtRef.current = 0;
+    } else if (
+      options?.skipIfFreshMs &&
+      Date.now() - lastContextUsagePushAtRef.current < options.skipIfFreshMs
+    ) {
+      return;
+    }
+
+    const existingRequest = contextUsageRequestRef.current;
+    if (existingRequest?.sessionId === sessionId) {
+      return existingRequest.promise;
+    }
+
+    const requestSessionId = sessionId;
+    const requestSeq = contextUsageRequestSeqRef.current;
+    const request = sessionApi.getContextUsage(requestSessionId).then((snapshot) => {
+      if (requestSeq === contextUsageRequestSeqRef.current && snapshot.sessionID === sessionId) {
+        setContextUsageSnapshot(snapshot);
+        if (snapshot.contextWindow && snapshot.contextWindow > 0) {
+          setContextUsageWindowTokens(snapshot.contextWindow);
+        }
+        setContextUsageRefreshing(false);
+      }
+    }).catch((err) => {
+      setContextUsageRefreshing(false);
+      console.warn('[SessionChat] Failed to fetch context usage:', err);
+    }).finally(() => {
+      if (contextUsageRequestRef.current?.promise === request) {
+        contextUsageRequestRef.current = null;
+      }
+    });
+    contextUsageRequestRef.current = { sessionId: requestSessionId, promise: request };
+    return request;
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      void refreshContextUsage({ clear: true });
+      return;
+    }
+    const requestIdle = (window as any).requestIdleCallback as
+      | ((cb: () => void, options?: { timeout?: number }) => number)
+      | undefined;
+    const cancelIdle = (window as any).cancelIdleCallback as
+      | ((id: number) => void)
+      | undefined;
+    if (requestIdle) {
+      const idleId = requestIdle(() => {
+        void refreshContextUsage({ clear: true });
+      }, { timeout: 1500 });
+      return () => cancelIdle?.(idleId);
+    }
+    const timer = window.setTimeout(() => {
+      void refreshContextUsage({ clear: true });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [refreshContextUsage]);
+
   useEffect(() => {
     goalHydrationVersionRef.current += 1;
     const hydrationVersion = goalHydrationVersionRef.current;
@@ -1832,174 +1832,184 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
-      // Forward only global events or events relevant to this chat. The global
-      // stream can be very noisy when multiple sessions run in parallel.
-      if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
+      const { type, properties } = event;
 
-      const action = resolveSessionChatSSEAction(event, sessionId);
+      // Forward events with payload to parent (e.g. session.updated, workflow.updated).
+      // Skip empty events like heartbeats to avoid noisy callbacks.
+      if (properties) onSSEEvent?.(event);
 
-      switch (action.kind) {
-        case 'ignore':
-          return;
-        case 'session-cleared':
-          abortingRef.current = false;
-          sessionBusyRef.current = false;
-          activeToolPartIdsRef.current.clear();
-          abortedMessageIdRef.current = null;
-          suppressStreamingUntilIdleRef.current = false;
-          setIsStreaming(false);
-          setGoalBanner(null);
-          setDismissedGoalKey('');
-          refetch();
-          void refreshContextUsage({ clear: true });
-          return;
-        case 'session-status':
-          if (action.statusType === 'busy') {
-            sessionBusyRef.current = true;
-            if (
-              !abortingRef.current &&
-              !suppressStreamingUntilIdleRef.current
-            ) setIsStreaming(true);
-            setIsCompacting(false);
-            isCompactingRef.current = false;
-          } else if (action.statusType === 'compacting') {
-            sessionBusyRef.current = true;
-            if (
-              !abortingRef.current &&
-              !suppressStreamingUntilIdleRef.current
-            ) setIsStreaming(true);
-            setIsCompacting(true);
-            isCompactingRef.current = true;
-            setCompactingMessage(action.message || t('chat.compacting'));
-            // Reset progress state on each new compaction cycle so a stale
-            // run's stages do not leak into a fresh "Compacting..." panel.
-            setCompactionStages([]);
-          } else if (action.statusType === 'idle') {
-            sessionBusyRef.current = false;
-            suppressStreamingUntilIdleRef.current = false;
-            activeToolPartIdsRef.current.clear();
-            setIsStreaming(false);
-            setIsCompacting(false);
-            isCompactingRef.current = false;
-            setCompactingMessage('');
-            setCompactionStages([]);
-            refetch();
-            void refreshContextUsage({ skipIfFreshMs: 500 });
-          }
-          return;
-        case 'message-updated': {
-          const { info } = action;
-          updateMessage(info);
+      if (!properties || !sessionId) return;
+
+      if (type === 'session.cleared' && properties.sessionID === sessionId) {
+        abortingRef.current = false;
+        sessionBusyRef.current = false;
+        activeToolPartIdsRef.current.clear();
+        abortedMessageIdRef.current = null;
+        suppressStreamingUntilIdleRef.current = false;
+        setContextUsageSnapshot(null);
+        setContextUsageRefreshing(true);
+        setContextUsageWindowTokens(0);
+        setIsStreaming(false);
+        setGoalBanner(null);
+        setDismissedGoalKey('');
+        refetch();
+        void refreshContextUsage({ clear: true });
+      } else if (
+        (type === 'session.status' && properties.sessionID === sessionId)
+        || (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle')
+      ) {
+        const statusType = type === 'session.status' ? properties.status?.type : properties.status;
+        if (statusType === 'busy') {
+          sessionBusyRef.current = true;
           if (
-            info.role === 'assistant' &&
-            (abortingRef.current || suppressStreamingUntilIdleRef.current)
-          ) {
-            if (info.id) {
-              abortedMessageIdRef.current = info.id;
-              markMessageStopped(info.id);
-            }
-            setIsStreaming(false);
-            setSending(false);
-            if (info.finish || info.time?.completed) {
-              void refreshContextUsage();
-            }
-          } else if (info.finish || info.time?.completed) {
-            const shouldRefetch = shouldRefetchFinishedMessage({
-              finishedMessageId: info.id,
-              abortedMessageId: abortedMessageIdRef.current,
-            });
-            // Preserve locally streamed partial text when the user aborts. The
-            // backend never persists in-flight text chunks, so refetching here
-            // would replace the visible partial response with an empty message.
-            if (shouldRefetch) {
-              refetch();
-              if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
-                setIsStreaming(false);
-              }
-            }
-            void refreshContextUsage();
-            abortingRef.current = false;
-            abortedMessageIdRef.current = null;
-          } else if (
-            info.role === 'assistant' &&
-            !info.finish &&
-            !abortingRef.current
-          ) {
-            setIsStreaming(true);
-          }
-          return;
-        }
-        case 'message-part-updated': {
-          const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
-          if (part.id) {
-            if (isActiveToolPart(part)) {
-              activeToolPartIdsRef.current.add(part.id);
-              if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) setIsStreaming(true);
-            } else {
-              activeToolPartIdsRef.current.delete(part.id);
-            }
-          }
-          updateMessagePart(action.part, action.delta);
-          scrollToBottom();
-          return;
-        }
-        case 'question-asked':
-          handleQuestionAsked(action.callID, action.requestId, action.questions as QuestionItem[]);
-          scrollToBottom();
-          return;
-        case 'question-resolved':
-          removeByRequestId(action.requestId);
-          return;
-        case 'compaction-progress':
-          if (action.stage === 'complete' && action.data.result === 'continue') {
-            void refreshContextUsage({ skipIfFreshMs: 500 });
-          }
-          // Single source of truth: append into ``compactionStages`` and let
-          // the progress bar derive ``done/total`` from it via useMemo.
-          // ``chunk_done`` arrives in non-deterministic order under
-          // ``asyncio.gather``; deduplicate by chunk index here so SSE
-          // reconnects / accidental re-deliveries are idempotent.
-          setCompactionStages((prev) => {
-            if (action.stage === 'chunk_done') {
-              const chunkIdx = typeof action.data.chunk === 'number' ? action.data.chunk : undefined;
-              if (chunkIdx !== undefined && prev.some(
-                (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
-              )) {
-                return prev;
-              }
-            }
-            return [...prev, { stage: action.stage, data: action.data, ts: Date.now() }];
-          });
-          return;
-        case 'prompt-queue-updated':
-          applyPromptQueueItems(action.items);
-          return;
-        case 'goal-updated': {
-          const nextGoal = toGoalBannerState(action.goal);
-          if (nextGoal) {
-            goalHydrationVersionRef.current += 1;
-            setGoalBanner(nextGoal);
-            setDismissedGoalKey(readDismissedGoalKey(sessionId));
-          }
-          return;
-        }
-        case 'context-compacted':
-          void refreshContextUsage({ skipIfFreshMs: 500 });
-          return;
-        case 'context-usage-updated':
-          applyContextUsagePushSnapshot(action.snapshot);
-          return;
-        case 'session-error':
+            !abortingRef.current &&
+            !suppressStreamingUntilIdleRef.current
+          ) setIsStreaming(true);
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+        } else if (statusType === 'compacting') {
+          sessionBusyRef.current = true;
+          if (
+            !abortingRef.current &&
+            !suppressStreamingUntilIdleRef.current
+          ) setIsStreaming(true);
+          setIsCompacting(true);
+          isCompactingRef.current = true;
+          setCompactingMessage(properties.status?.message || t('chat.compacting'));
+          // Reset progress state on each new compaction cycle so a stale
+          // run's stages do not leak into a fresh "Compacting..." panel.
+          setCompactionStages([]);
+        } else if (statusType === 'idle') {
+          sessionBusyRef.current = false;
+          suppressStreamingUntilIdleRef.current = false;
+          activeToolPartIdsRef.current.clear();
           setIsStreaming(false);
           setIsCompacting(false);
+          isCompactingRef.current = false;
+          setCompactingMessage('');
           setCompactionStages([]);
-          stopContextUsageRefreshing();
+          refetch();
           void refreshContextUsage({ skipIfFreshMs: 500 });
+        }
+      } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
+        updateMessage(properties.info);
+        if (
+          properties.info.role === 'assistant' &&
+          (abortingRef.current || suppressStreamingUntilIdleRef.current)
+        ) {
+          abortedMessageIdRef.current = properties.info.id;
+          markMessageStopped(properties.info.id);
+          setIsStreaming(false);
+          setSending(false);
+          if (properties.info.finish || properties.info.time?.completed) {
+            void refreshContextUsage();
+          }
+        } else if (properties.info.finish || properties.info.time?.completed) {
+          const shouldRefetch = shouldRefetchFinishedMessage({
+            finishedMessageId: properties.info.id,
+            abortedMessageId: abortedMessageIdRef.current,
+          });
+          // Preserve locally streamed partial text when the user aborts. The
+          // backend never persists in-flight text chunks, so refetching here
+          // would replace the visible partial response with an empty message.
+          if (shouldRefetch) {
+            refetch();
+            if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
+              setIsStreaming(false);
+            }
+          }
+          void refreshContextUsage();
           abortingRef.current = false;
-          sessionBusyRef.current = false;
-          activeToolPartIdsRef.current.clear();
-          onError?.(action.message || t('chat.placeholder'));
-          return;
+          abortedMessageIdRef.current = null;
+        } else if (
+          properties.info.role === 'assistant' &&
+          !properties.info.finish &&
+          !abortingRef.current
+        ) {
+          setIsStreaming(true);
+        }
+      } else if (type === 'message.part.updated' && properties.part?.sessionID === sessionId) {
+        const part = properties.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+        if (part.id) {
+          if (isActiveToolPart(part)) {
+            activeToolPartIdsRef.current.add(part.id);
+            if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) setIsStreaming(true);
+          } else {
+            activeToolPartIdsRef.current.delete(part.id);
+          }
+        }
+        updateMessagePart(properties.part, properties.delta);
+        scrollToBottom();
+      } else if (type === 'question.asked' && properties.sessionID === sessionId) {
+        const callID: string | undefined = properties.tool?.callID;
+        const requestId: string | undefined = properties.id;
+        if (callID && requestId) {
+          handleQuestionAsked(callID, requestId, properties.questions || []);
+          scrollToBottom();
+        }
+      } else if (
+        (type === 'question.replied' || type === 'question.rejected') &&
+        properties.sessionID === sessionId
+      ) {
+        const requestId: string | undefined = properties.requestID;
+        if (requestId) {
+          removeByRequestId(requestId);
+        }
+      } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
+        const stage = properties.stage as CompactionStage | undefined;
+        const data = (properties.data ?? {}) as Record<string, unknown>;
+        if (!stage) return;
+        if (stage === 'complete' && data.result === 'continue') {
+          void refreshContextUsage({ skipIfFreshMs: 500 });
+        }
+        // Single source of truth: append into ``compactionStages`` and let
+        // the progress bar derive ``done/total`` from it via useMemo.
+        // ``chunk_done`` arrives in non-deterministic order under
+        // ``asyncio.gather``; deduplicate by chunk index here so SSE
+        // reconnects / accidental re-deliveries are idempotent.
+        setCompactionStages((prev) => {
+          if (stage === 'chunk_done') {
+            const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
+            if (chunkIdx !== undefined && prev.some(
+              (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
+            )) {
+              return prev;
+            }
+          }
+          return [...prev, { stage, data, ts: Date.now() }];
+        });
+      } else if (type === 'session.prompt_queue.updated' && properties.sessionID === sessionId) {
+        const items = Array.isArray(properties.items) ? properties.items : [];
+        setQueuedPrompts(items as QueuedPrompt[]);
+        if (items.length > 0) setQueueExpanded(true);
+      } else if (type === 'session.goal.updated' && properties.sessionID === sessionId) {
+        const nextGoal = toGoalBannerState(properties as SessionGoalState);
+        if (nextGoal) {
+          goalHydrationVersionRef.current += 1;
+          setGoalBanner(nextGoal);
+          setDismissedGoalKey(readDismissedGoalKey(sessionId));
+        }
+      } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
+        void refreshContextUsage({ skipIfFreshMs: 500 });
+      } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
+        setContextUsageSnapshot(properties as ContextUsageSnapshot);
+        if (typeof properties.contextWindow === 'number' && properties.contextWindow > 0) {
+          setContextUsageWindowTokens(properties.contextWindow);
+        }
+        contextUsageRequestSeqRef.current += 1;
+        contextUsageRequestRef.current = null;
+        lastContextUsagePushAtRef.current = Date.now();
+        setContextUsageRefreshing(false);
+      } else if (type === 'session.error' && properties.sessionID === sessionId) {
+        setIsStreaming(false);
+        setIsCompacting(false);
+        setCompactionStages([]);
+        setContextUsageRefreshing(false);
+        void refreshContextUsage({ skipIfFreshMs: 500 });
+        abortingRef.current = false;
+        sessionBusyRef.current = false;
+        activeToolPartIdsRef.current.clear();
+        onError?.(properties.error?.message || t('chat.placeholder'));
       }
     },
     [
@@ -2008,15 +2018,11 @@ export default function SessionChat({
       updateMessagePart,
       refetch,
       refreshContextUsage,
-      applyContextUsagePushSnapshot,
-      stopContextUsageRefreshing,
       handleQuestionAsked,
       removeByRequestId,
-      applyPromptQueueItems,
       onSSEEvent,
       onError,
       scrollToBottom,
-      t,
     ],
   );
 
@@ -2119,6 +2125,11 @@ export default function SessionChat({
     setCompactionStages([]);
     setGoalBanner(null);
     setDismissedGoalKey('');
+    setQueuedPrompts([]);
+    setEditingQueueId(null);
+    setEditingQueueText('');
+    setQueueActionId(null);
+    setContextUsageWindowTokens(0);
     setMentionRange(null);
     setMentionQuery('');
     setSelectedMentionIndex(0);
@@ -2226,17 +2237,32 @@ export default function SessionChat({
     return () => { if (timer) clearTimeout(timer); };
   }, [isCompacting, sessionId, refetch]);
 
-  /** Lazily load slash commands and periodically revalidate while autocomplete is used. */
+  /** Lazily load slash commands on first use (for autocomplete dropdown). */
   const loadCommandsIfNeeded = useCallback(async (): Promise<void> => {
-    if (commandsLoadingRef.current || Date.now() - commandsLoadedAtRef.current < 5_000) return;
-    commandsLoadingRef.current = true;
+    if (commandsLoadedRef.current) return;
+    commandsLoadedRef.current = true; // Optimistic: prevent concurrent fetches
     try {
-      setCommands(await fetchSessionChatCommands());
-      commandsLoadedAtRef.current = Date.now();
+      const res = await commandAPI.list();
+      const serverCommands = res.data ?? [];
+      // Merge client-side /new command into the autocomplete list
+      setCommands([
+        {
+          name: 'new',
+          canonical_name: 'new',
+          description: 'Create a new session',
+          template: '',
+          hidden: false,
+          aliases: [],
+          visible_surfaces: [],
+          execution_kind: 'session_control',
+          allow_attachments: false,
+          requires_existing_session: false,
+          channel_safe: false,
+        } satisfies Command,
+        ...serverCommands,
+      ]);
     } catch {
-      commandsLoadedAtRef.current = 0;
-    } finally {
-      commandsLoadingRef.current = false;
+      commandsLoadedRef.current = false; // Allow retry on failure
     }
   }, []);
 
@@ -2584,12 +2610,14 @@ export default function SessionChat({
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
     try {
-      await enqueuePrompt({
+      await sessionApi.enqueuePrompt(sessionId, {
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
       });
+      await fetchPromptQueue();
+      setQueueExpanded(true);
     } catch (err: any) {
       const statusCode = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -2876,41 +2904,62 @@ export default function SessionChat({
   }, [isStreaming, markMessageStopped, sending, sessionId]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
-    startQueuedEdit(item);
-  }, [startQueuedEdit]);
+    setEditingQueueId(item.id);
+    setEditingQueueText(getQueuedPromptText(item));
+  }, []);
 
   const handleQueuedEditCancel = useCallback(() => {
-    cancelQueuedEdit();
-  }, [cancelQueuedEdit]);
+    setEditingQueueId(null);
+    setEditingQueueText('');
+  }, []);
 
   const handleQueuedEditSave = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    const text = editingQueueText.trim();
+    if (!text) return;
+    setQueueActionId(item.id);
     try {
-      await saveQueuedEdit(item);
+      await sessionApi.updateQueuedPrompt(sessionId, item.id, text);
+      handleQueuedEditCancel();
+      await fetchPromptQueue();
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.updateFailed'));
+    } finally {
+      setQueueActionId(null);
     }
-  }, [saveQueuedEdit, t, toast]);
+  }, [editingQueueText, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
 
   const handleQueuedRemove = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    setQueueActionId(item.id);
     try {
-      await removeQueuedPrompt(item);
+      await sessionApi.removeQueuedPrompt(sessionId, item.id);
+      if (editingQueueId === item.id) handleQueuedEditCancel();
+      await fetchPromptQueue();
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.removeFailed'));
+    } finally {
+      setQueueActionId(null);
     }
-  }, [removeQueuedPrompt, t, toast]);
+  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
 
   const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    setQueueActionId(item.id);
     try {
-      const didRun = await runQueuedPromptNow(item);
-      if (!didRun) return;
+      await sessionApi.runQueuedPromptNow(sessionId, item.id);
+      if (editingQueueId === item.id) handleQueuedEditCancel();
+      await fetchPromptQueue();
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
       setIsStreaming(true);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
+    } finally {
+      setQueueActionId(null);
     }
-  }, [runQueuedPromptNow, t, toast]);
+  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
 
   // Fire onStreamingDone when isStreaming transitions true → false
   useEffect(() => {
@@ -3101,10 +3150,6 @@ export default function SessionChat({
 
     return { merged, skipIndices };
   }, [messages]);
-  const timelineItems = useMemo(() => (
-    buildChatTimelineItems({ messages: merged, skipIndices, isStreaming })
-  ), [isStreaming, merged, skipIndices]);
-  const { historyItems, tailItems } = useStableChatTimelineSegments(timelineItems);
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
@@ -3165,56 +3210,44 @@ export default function SessionChat({
                 </button>
               </div>
             )}
-            <ChatMessageTimeline
-              items={historyItems}
-              pendingQuestions={pendingQuestions}
-              onQuestionAnswer={handleQuestionAnswer}
-              onQuestionReject={handleQuestionReject}
-              showActions={showActions}
-              showTimestamp={showTimestamp}
-              collapseIntermediateSteps={collapseIntermediateSteps}
-              processGroupsDefaultOpen={processGroupsDefaultOpen}
-              processGroupsOpenWhileActive={processGroupsOpenWhileActive}
-              processGroupOpenState={processGroupOpenState}
-              onProcessGroupOpenChange={handleProcessGroupOpenChange}
-              compact={compact}
-              onCopy={handleCopy}
-              editingMessageId={editingMessageId}
-              editingText={editingText}
-              actionsDisabled={sending || isStreaming}
-              actionMessageId={actionMessageId}
-              onEditStart={beginMessageEdit}
-              onEditChange={setEditingText}
-              onEditCancel={resetEditingState}
-              onEditSave={handleSaveEditedMessage}
-              onEditSend={handleSendEditedUserMessage}
-              onRegenerate={handleRegenerateMessage}
-            />
-            <ChatMessageTimeline
-              items={tailItems}
-              pendingQuestions={pendingQuestions}
-              onQuestionAnswer={handleQuestionAnswer}
-              onQuestionReject={handleQuestionReject}
-              showActions={showActions}
-              showTimestamp={showTimestamp}
-              collapseIntermediateSteps={collapseIntermediateSteps}
-              processGroupsDefaultOpen={processGroupsDefaultOpen}
-              processGroupsOpenWhileActive={processGroupsOpenWhileActive}
-              processGroupOpenState={processGroupOpenState}
-              onProcessGroupOpenChange={handleProcessGroupOpenChange}
-              compact={compact}
-              onCopy={handleCopy}
-              editingMessageId={editingMessageId}
-              editingText={editingText}
-              actionsDisabled={sending || isStreaming}
-              actionMessageId={actionMessageId}
-              onEditStart={beginMessageEdit}
-              onEditChange={setEditingText}
-              onEditCancel={resetEditingState}
-              onEditSave={handleSaveEditedMessage}
-              onEditSend={handleSendEditedUserMessage}
-              onRegenerate={handleRegenerateMessage}
-            />
+            {merged.map((msg, i) => {
+              if (skipIndices.has(i)) return null;
+              const isActiveMessage =
+                isStreaming &&
+                i === merged.length - 1 &&
+                msg.role === 'assistant' &&
+                !msg.finish;
+              if (!shouldRenderMessage(msg, { isActive: isActiveMessage })) return null;
+              return (
+                <ChatMessageBubble
+                  key={msg.id}
+                  message={msg}
+                  isActive={isActiveMessage}
+                  pendingQuestions={pendingQuestions}
+                  onQuestionAnswer={handleQuestionAnswer}
+                  onQuestionReject={handleQuestionReject}
+                  showActions={showActions}
+                  showTimestamp={showTimestamp}
+                  collapseIntermediateSteps={collapseIntermediateSteps}
+                  processGroupsDefaultOpen={processGroupsDefaultOpen}
+                  processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+                  processGroupOpenState={processGroupOpenState}
+                  onProcessGroupOpenChange={handleProcessGroupOpenChange}
+                  compact={compact}
+                  onCopy={handleCopy}
+                  editingMessageId={editingMessageId}
+                  editingText={editingText}
+                  actionsDisabled={sending || isStreaming}
+                  actionMessageId={actionMessageId}
+                  onEditStart={beginMessageEdit}
+                  onEditChange={setEditingText}
+                  onEditCancel={resetEditingState}
+                  onEditSave={handleSaveEditedMessage}
+                  onEditSend={handleSendEditedUserMessage}
+                  onRegenerate={handleRegenerateMessage}
+                />
+              );
+            })}
 
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
@@ -3762,72 +3795,6 @@ export interface ChatMessageBubbleProps {
   onRegenerate?: (messageId: string) => Promise<void>;
 }
 
-interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
-  items: ChatTimelineItem[];
-}
-
-function ChatMessageTimelineInner({
-  items,
-  pendingQuestions,
-  onQuestionAnswer,
-  onQuestionReject,
-  showActions,
-  showTimestamp,
-  collapseIntermediateSteps,
-  processGroupsDefaultOpen,
-  processGroupsOpenWhileActive,
-  processGroupOpenState,
-  onProcessGroupOpenChange,
-  compact,
-  onCopy,
-  editingMessageId,
-  editingText,
-  actionsDisabled,
-  actionMessageId,
-  onEditStart,
-  onEditChange,
-  onEditCancel,
-  onEditSave,
-  onEditSend,
-  onRegenerate,
-}: ChatMessageTimelineProps) {
-  return (
-    <>
-      {items.map(({ message, isActive }) => (
-        <ChatMessageBubble
-          key={message.id}
-          message={message}
-          isActive={isActive}
-          pendingQuestions={pendingQuestions}
-          onQuestionAnswer={onQuestionAnswer}
-          onQuestionReject={onQuestionReject}
-          showActions={showActions}
-          showTimestamp={showTimestamp}
-          collapseIntermediateSteps={collapseIntermediateSteps}
-          processGroupsDefaultOpen={processGroupsDefaultOpen}
-          processGroupsOpenWhileActive={processGroupsOpenWhileActive}
-          processGroupOpenState={processGroupOpenState}
-          onProcessGroupOpenChange={onProcessGroupOpenChange}
-          compact={compact}
-          onCopy={onCopy}
-          editingMessageId={editingMessageId}
-          editingText={editingText}
-          actionsDisabled={actionsDisabled}
-          actionMessageId={actionMessageId}
-          onEditStart={onEditStart}
-          onEditChange={onEditChange}
-          onEditCancel={onEditCancel}
-          onEditSave={onEditSave}
-          onEditSend={onEditSend}
-          onRegenerate={onRegenerate}
-        />
-      ))}
-    </>
-  );
-}
-
-export const ChatMessageTimeline = memo(ChatMessageTimelineInner);
-
 function ProcessGroupDetails({
   defaultOpen,
   open,
@@ -3907,7 +3874,7 @@ function ChatMessageBubbleInner({
   const { t } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
-  const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
+  const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
   // ``window.open`` would land on a blank page. We open an in-app overlay
@@ -4037,10 +4004,7 @@ function ChatMessageBubbleInner({
             if (part.type === 'file') return !!part.url;
             return false;
           };
-          const activeTailPart = isActive
-            ? [...displayParts].reverse().find(isRenderableDisplayPart)
-            : undefined;
-          const renderPart = (part: MessagePart, i: number, isVisible = true) => (
+          const renderPart = (part: MessagePart, i: number) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
             // own `mt-2 first:mt-0`, but since every part lives in its own
@@ -4101,8 +4065,8 @@ function ChatMessageBubbleInner({
                 const thinkingText = getRenderableThinkingText(part);
                 if (!thinkingText) return null;
                 const partKey = part.id || `reasoning-${i}`;
-                const isThinking = part === activeTailPart;
-                const isExpanded = isThinking || getPartExpanded(partKey);
+                const isExpanded = getPartExpanded(partKey);
+                const isThinking = !isReasoningDone;
                 return (
                   // Vertical spacing is provided by the parent part wrapper
                   // (see `otherParts.map` above); keep this container neutral
@@ -4135,12 +4099,9 @@ function ChatMessageBubbleInner({
                         )}
                       </div>
                     </button>
-                    {isExpanded && isVisible && (
+                    {isExpanded && (
                       <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
-                        <StreamingReasoningText
-                          content={thinkingText}
-                          isStreaming={isThinking}
-                        />
+                        {thinkingText}
                       </div>
                     )}
                   </div>
@@ -4185,14 +4146,14 @@ function ChatMessageBubbleInner({
                 )}
               >
                 <div className="border-t border-zinc-200/70 px-2.5 py-2">
-                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen))}
+                  {group.map(({ part, index }) => renderPart(part, index))}
                 </div>
               </ProcessGroupDetails>
             );
           };
           const renderDisplayParts = () => {
             if (!collapseIntermediateSteps || isUser) {
-              return displayParts.map((part, index) => renderPart(part, index));
+              return displayParts.map(renderPart);
             }
             const nodes: React.ReactNode[] = [];
             let processGroup: Array<{ part: MessagePart; index: number }> = [];

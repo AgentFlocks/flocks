@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import asyncio
 from urllib.parse import quote, unquote, urlparse
 
 import pytest
@@ -18,15 +17,6 @@ _MANUAL_REAL_UPGRADE_TARGET_BRANCH = ""
 
 def _request() -> Request:
     return Request({"type": "http", "method": "GET", "path": "/api/update/check", "headers": []})
-
-
-@pytest.fixture(autouse=True)
-def _clear_update_cache():
-    from flocks.server.routes import update as update_routes
-
-    update_routes.clear_update_check_cache()
-    yield
-    update_routes.clear_update_check_cache()
 
 
 def _manual_real_upgrade_branch() -> str:
@@ -134,167 +124,6 @@ async def test_check_version_keeps_flocks_channel_public(monkeypatch: pytest.Mon
     info = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
 
     assert info.current_version == "v2026.5.9"
-
-
-async def test_check_version_reuses_cached_flocks_result(monkeypatch: pytest.MonkeyPatch):
-    from flocks.server.routes import update as update_routes
-    from flocks.updater.models import VersionInfo
-
-    calls = 0
-
-    async def _fake_check_update(**kwargs):
-        nonlocal calls
-        calls += 1
-        assert kwargs == {"locale": "zh-CN", "force_console_manifest": False}
-        return VersionInfo(current_version=f"v{calls}")
-
-    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
-
-    first = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
-    second = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
-    forced = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks", force=True)
-
-    assert calls == 2
-    assert first.current_version == "v1"
-    assert second.current_version == "v1"
-    assert forced.current_version == "v2"
-
-
-async def test_check_version_deduplicates_inflight_requests(monkeypatch: pytest.MonkeyPatch):
-    from flocks.server.routes import update as update_routes
-    from flocks.updater.models import VersionInfo
-
-    calls = 0
-
-    async def _fake_check_update(**kwargs):
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0.01)
-        return VersionInfo(current_version=f"v{calls}")
-
-    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
-
-    results = await asyncio.gather(*[
-        update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
-        for _ in range(5)
-    ])
-
-    assert calls == 1
-    assert [item.current_version for item in results] == ["v1"] * 5
-
-
-async def test_check_version_deduplicates_concurrent_forced_requests(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from flocks.server.routes import update as update_routes
-    from flocks.updater.models import VersionInfo
-
-    calls = 0
-
-    async def _fake_check_update(**kwargs):
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0.01)
-        return VersionInfo(current_version=f"v{calls}")
-
-    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
-
-    results = await asyncio.gather(*[
-        update_routes.check_version(
-            _request(), locale="zh-CN", edition="flocks", force=True
-        )
-        for _ in range(10)
-    ])
-
-    assert calls == 1
-    assert [item.current_version for item in results] == ["v1"] * 10
-
-
-async def test_check_version_keeps_inflight_task_after_cancelled_request(monkeypatch: pytest.MonkeyPatch):
-    from flocks.server.routes import update as update_routes
-    from flocks.updater.models import VersionInfo
-
-    calls = 0
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def _fake_check_update(**kwargs):
-        nonlocal calls
-        calls += 1
-        started.set()
-        await release.wait()
-        return VersionInfo(current_version=f"v{calls}")
-
-    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
-
-    first = asyncio.create_task(update_routes.check_version(_request(), locale="zh-CN", edition="flocks"))
-    second = None
-    try:
-        await started.wait()
-        first.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first
-
-        second = asyncio.create_task(update_routes.check_version(_request(), locale="zh-CN", edition="flocks"))
-        await asyncio.sleep(0)
-        assert calls == 1
-
-        release.set()
-        result = await asyncio.wait_for(second, timeout=1)
-        assert result.current_version == "v1"
-
-        cached = await update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
-        assert cached.current_version == "v1"
-        assert calls == 1
-    finally:
-        release.set()
-        if second is not None and not second.done():
-            await asyncio.wait_for(second, timeout=1)
-
-
-async def test_forced_check_reuses_older_same_key_inflight_request(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from flocks.server.routes import update as update_routes
-    from flocks.updater.models import VersionInfo
-
-    older_started = asyncio.Event()
-    release_older = asyncio.Event()
-    calls = 0
-
-    async def _fake_check_update(**kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            older_started.set()
-            await release_older.wait()
-            return VersionInfo(current_version="v1")
-        return VersionInfo(current_version="v2")
-
-    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
-
-    older = asyncio.create_task(
-        update_routes.check_version(_request(), locale="zh-CN", edition="flocks")
-    )
-    await older_started.wait()
-
-    forced = asyncio.create_task(
-        update_routes.check_version(
-            _request(), locale="zh-CN", edition="flocks", force=True
-        )
-    )
-    await asyncio.sleep(0)
-    assert calls == 1
-
-    release_older.set()
-    assert (await older).current_version == "v1"
-    assert (await forced).current_version == "v1"
-
-    cached = await update_routes.check_version(
-        _request(), locale="zh-CN", edition="flocks"
-    )
-    assert cached.current_version == "v1"
-    assert calls == 1
 
 
 @pytest.mark.skipif(

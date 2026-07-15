@@ -3,20 +3,19 @@ import client from './client';
 export interface SystemStatus {
   status: 'healthy' | 'degraded' | 'down';
   uptime: number;
-  activeSessions: number | null;
-  activeAgents: number | null;
+  activeSessions: number;
+  activeAgents: number;
   mcpServers: Record<string, string>;
   timestamp: number;
 }
 
 export interface MetricsSnapshot {
   timestamp: number;
-  messageRate: number | null;
-  toolCallRate: number | null;
-  errorRate: number | null;
-  toolParseFailureRate: number | null;
-  avgResponseTime: number | null;
-  activeRequests: number | null;
+  messageRate: number;
+  toolCallRate: number;
+  errorRate: number;
+  avgResponseTime: number;
+  activeRequests: number;
 }
 
 export interface PerformanceData {

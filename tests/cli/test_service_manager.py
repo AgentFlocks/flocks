@@ -512,16 +512,6 @@ def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
     assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
 
 
-def test_run_windows_netstat_handles_missing_stdout(monkeypatch) -> None:
-    monkeypatch.setattr(
-        service_manager.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=None),
-    )
-
-    assert service_manager._run_windows_netstat(5173) == ""
-
-
 def test_port_owner_pids_warns_when_no_tool_found(monkeypatch) -> None:
     monkeypatch.setattr(service_manager.sys, "platform", "linux")
     monkeypatch.setattr(service_manager, "which", lambda _name: None)
@@ -537,18 +527,6 @@ def test_port_is_in_use_falls_back_to_bind_when_pid_lookup_unavailable(monkeypat
 
     with pytest.warns(RuntimeWarning, match="退回到 bind 检查"):
         assert service_manager.port_is_in_use(5173) is True
-
-
-@pytest.mark.parametrize(("port_available", "expected"), [(True, False), (False, True)])
-def test_windows_port_is_in_use_confirms_empty_pid_lookup_with_bind(
-    monkeypatch,
-    port_available: bool,
-    expected: bool,
-) -> None:
-    monkeypatch.setattr(service_manager.sys, "platform", "win32")
-    monkeypatch.setattr(service_manager, "_bind_port_available", lambda _port: port_available)
-
-    assert service_manager.port_is_in_use(5173, listeners=[]) is expected
 
 
 def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch) -> None:
@@ -1544,37 +1522,70 @@ def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path:
     assert daemon.backend.pid == 333
 
 
-def test_supervisor_liveness_probe_keeps_backend_healthy(monkeypatch, tmp_path: Path) -> None:
-    """Liveness-only probe: process alive + TCP port open = healthy, no HTTP check needed."""
+def test_supervisor_waits_for_second_backend_health_failure(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     daemon = service_supervisor.SupervisorDaemon(
         service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
+        failure_threshold=2,
     )
     daemon.paths = paths
     daemon.backend.process = _fake_process(111, ["backend"])
 
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def get(self, _url, **_kwargs):
+            return httpx.Response(503, json={"status": "unhealthy"})
+
+    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
     monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
     monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
+    monkeypatch.setattr(
+        service_manager,
+        "_start_backend_process",
+        lambda *_args, **_kwargs: calls.append("start:backend") or _fake_process(333, ["backend-new"]),
+    )
 
     daemon.tick()
     assert calls == []
-    assert daemon.backend.state == "healthy"
+    assert daemon.backend.state == "degraded"
 
     daemon.tick()
-    assert calls == []
-    assert daemon.backend.state == "healthy"
+    assert calls == ["stop:后端", "start:backend"]
 
 
-def test_backend_probe_liveness_only_accepts_alive_process(monkeypatch) -> None:
-    """Liveness-only probe: process alive + TCP port open = healthy regardless of HTTP response."""
+def test_backend_probe_rejects_api_root_when_static_webui_missing(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def get(self, url, **_kwargs):
+            if str(url).endswith("/api/health"):
+                return httpx.Response(200, json={"status": "healthy"})
+            return httpx.Response(200, json={"status": "running"})
+
     monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
+    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
 
     result = service_process.BackendProcessAdapter().probe(_fake_process(111, ["backend"]), "127.0.0.1", 5173)
 
-    assert result.healthy is True
-    assert result.reason == "liveness check passed"
+    assert result.healthy is False
+    assert result.reason == "health status=200, root status=200"
 
 
 def test_supervisor_reports_webui_as_static_endpoint(monkeypatch, tmp_path: Path) -> None:

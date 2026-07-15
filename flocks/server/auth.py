@@ -18,7 +18,6 @@ from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
-API_TOKEN_SERVICE_USER_ID = "api-token-service"
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({
@@ -229,8 +228,8 @@ def _is_valid_api_token(token: Optional[str]) -> bool:
 def _build_api_token_user() -> AuthUser:
     """Synthetic service identity for API token clients."""
     return AuthUser(
-        id=API_TOKEN_SERVICE_USER_ID,
-        username=API_TOKEN_SERVICE_USER_ID,
+        id="api-token-service",
+        username="api-token-service",
         role="admin",
         status="active",
         must_reset_password=False,

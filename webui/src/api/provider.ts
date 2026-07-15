@@ -16,71 +16,6 @@ import type {
   APIServiceMetadata,
 } from '@/types';
 
-const API_SERVICES_LIST_CACHE_TTL_MS = 5000;
-
-function requestApiServicesList() {
-  return client.get<APIServiceSummary[]>('/api/provider/api-services');
-}
-
-type APIServiceListResponse = Awaited<ReturnType<typeof requestApiServicesList>>;
-
-let apiServicesListInFlight: Promise<APIServiceListResponse> | null = null;
-let apiServicesListInFlightGeneration: number | null = null;
-let apiServicesListCache: { response: APIServiceListResponse; updatedAt: number } | null = null;
-let apiServicesListGeneration = 0;
-
-function cloneApiServicesResponse(response: APIServiceListResponse): APIServiceListResponse {
-  const services = Array.isArray(response.data) ? response.data : [];
-  return {
-    ...response,
-    data: services.map((service) => ({ ...service })),
-  };
-}
-
-function invalidateApiServicesListCache(): void {
-  apiServicesListGeneration += 1;
-  apiServicesListCache = null;
-}
-
-function listApiServicesCached(options: { force?: boolean } = {}) {
-  const useCache = !options.force;
-  if (useCache && apiServicesListCache && Date.now() - apiServicesListCache.updatedAt < API_SERVICES_LIST_CACHE_TTL_MS) {
-    return Promise.resolve(cloneApiServicesResponse(apiServicesListCache.response));
-  }
-  if (
-    useCache
-    && apiServicesListInFlight
-    && apiServicesListInFlightGeneration === apiServicesListGeneration
-  ) {
-    return apiServicesListInFlight.then(cloneApiServicesResponse);
-  }
-
-  if (options.force) {
-    invalidateApiServicesListCache();
-  }
-  const requestGeneration = apiServicesListGeneration;
-  const request = requestApiServicesList()
-    .then((response) => {
-      if (requestGeneration === apiServicesListGeneration) {
-        apiServicesListCache = {
-          response: cloneApiServicesResponse(response),
-          updatedAt: Date.now(),
-        };
-      }
-      return response;
-    })
-    .finally(() => {
-      if (apiServicesListInFlight === request) {
-        apiServicesListInFlight = null;
-        apiServicesListInFlightGeneration = null;
-      }
-    });
-  apiServicesListInFlight = request;
-  apiServicesListInFlightGeneration = requestGeneration;
-
-  return request.then(cloneApiServicesResponse);
-}
-
 // ==================== Provider API (Legacy + Enhanced) ====================
 
 export const providerAPI = {
@@ -119,11 +54,7 @@ export const providerAPI = {
     client.get<ProviderCredentials>(`/api/provider/${id}/service-credentials`),
 
   setServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
-    client.post<{ success: boolean; message: string }>(`/api/provider/${id}/service-credentials`, credentials)
-      .then((response) => {
-        invalidateApiServicesListCache();
-        return response;
-      }),
+    client.post<{ success: boolean; message: string }>(`/api/provider/${id}/service-credentials`, credentials),
 
   deleteCredentials: (id: string) =>
     client.delete<{ success: boolean }>(`/api/provider/${id}/credentials`),
@@ -139,25 +70,17 @@ export const providerAPI = {
     ),
 
   // API service status (connectivity)
-  listApiServices: (options?: { force?: boolean }) =>
-    listApiServicesCached(options),
+  listApiServices: () =>
+    client.get<APIServiceSummary[]>('/api/provider/api-services'),
 
   getServiceMetadata: (id: string) =>
     client.get<APIServiceMetadata>(`/api/provider/${id}/metadata`),
 
   updateApiService: (id: string, data: { enabled: boolean; verify_ssl?: boolean }) =>
-    client.patch<APIServiceSummary>(`/api/provider/api-services/${id}`, data)
-      .then((response) => {
-        invalidateApiServicesListCache();
-        return response;
-      }),
+    client.patch<APIServiceSummary>(`/api/provider/api-services/${id}`, data),
 
   deleteApiService: (id: string) =>
-    client.delete<{ success: boolean }>(`/api/provider/api-services/${id}`)
-      .then((response) => {
-        invalidateApiServicesListCache();
-        return response;
-      }),
+    client.delete<{ success: boolean }>(`/api/provider/api-services/${id}`),
 
   getApiServiceStatuses: () =>
     client.get<Record<string, { status: string; message?: string; latency_ms?: number; tool_tested?: string; error?: string; checked_at?: number }>>(
@@ -167,10 +90,7 @@ export const providerAPI = {
   refreshApiServiceStatuses: () =>
     client.post<{ statuses: Record<string, any>; refreshed_at: number }>(
       '/api/provider/api-services/refresh'
-    ).then((response) => {
-      invalidateApiServicesListCache();
-      return response;
-    }),
+    ),
 
   getApiServiceStatus: (id: string) =>
     client.get<{ status: string; message?: string; latency_ms?: number; tool_tested?: string; error?: string; checked_at?: number }>(

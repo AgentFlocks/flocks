@@ -1,4 +1,4 @@
-import type { ToolListFacets } from '@/api/tool';
+import type { Tool } from '@/api/tool';
 
 export interface ToolTabCounts {
   all: number;
@@ -7,16 +7,11 @@ export interface ToolTabCounts {
   local: number;
 }
 
-export function getToolTabCounts(
-  totalTools: number,
-  facets: ToolListFacets,
-  apiEnabledServicesCount: number,
-): ToolTabCounts {
-  const allTools = Object.values(facets.source).reduce((sum, count) => sum + count, 0);
+export function getToolTabCounts(tools: Tool[], apiEnabledServicesCount: number): ToolTabCounts {
   return {
-    all: allTools || totalTools,
-    mcp: facets.source_groups.mcp ?? 0,
+    all: tools.length,
+    mcp: new Set(tools.filter((tool) => tool.source === 'mcp').map((tool) => tool.source_name)).size,
     api: apiEnabledServicesCount,
-    local: facets.source.plugin_py ?? 0,
+    local: tools.filter((tool) => tool.source === 'plugin_py').length,
   };
 }

@@ -11,13 +11,9 @@ Flocks expects:
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from flocks.auth.context import AuthUser
-from flocks.server.auth import require_user
-from flocks.session.policy import SessionPolicy
-from flocks.session.session import Session
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.permission.next import PermissionNext
@@ -123,49 +119,21 @@ async def remove_permission(permission_id: str) -> bool:
     return True
 
 
-async def _can_access_permission_session(
-    session_id: str,
-    user: AuthUser,
-    *,
-    write: bool,
-) -> bool:
-    session = await Session.get_by_id(session_id)
-    if session is None:
-        return False
-    return SessionPolicy.can_write(session, user) if write else SessionPolicy.can_read(session, user)
-
-
-async def _require_permission_session_access(
-    session_id: str,
-    user: AuthUser,
-    *,
-    write: bool,
-) -> None:
-    if not await _can_access_permission_session(session_id, user, write=write):
-        detail = "Only the session owner can reply to permissions" if write else "Permission not found"
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
-
-
 @router.get(
     "",
     response_model=List[PermissionInfo],
     summary="List permissions",
     description="Get all pending permission requests"
 )
-async def list_permissions(
-    user: AuthUser = Depends(require_user),
-) -> List[PermissionInfo]:
+async def list_permissions() -> List[PermissionInfo]:
     """
     List all pending permission requests.
     
     Flocks TUI uses this to display permission prompts.
     """
     pending_infos = await PermissionNext.list_pending_infos()
-    result: List[PermissionInfo] = []
-    for info in pending_infos:
-        if not await _can_access_permission_session(info.session_id, user, write=False):
-            continue
-        result.append(PermissionInfo(
+    return [
+        PermissionInfo(
             id=info.id,
             sessionID=info.session_id,
             messageID=info.metadata.get("messageID", ""),
@@ -175,8 +143,9 @@ async def list_permissions(
             always=info.always,
             metadata=info.metadata,
             time=info.time,
-        ))
-    return result
+        )
+        for info in pending_infos
+    ]
 
 
 @router.get(
@@ -185,15 +154,11 @@ async def list_permissions(
     summary="Get permission",
     description="Get a specific permission request"
 )
-async def get_permission_by_id(
-    permission_id: str,
-    user: AuthUser = Depends(require_user),
-) -> PermissionInfo:
+async def get_permission_by_id(permission_id: str) -> PermissionInfo:
     """Get a specific permission request"""
     info = await PermissionNext.get_pending_info(permission_id)
     if not info:
         raise HTTPException(status_code=404, detail="Permission not found")
-    await _require_permission_session_access(info.session_id, user, write=False)
     return PermissionInfo(
         id=info.id,
         sessionID=info.session_id,
@@ -215,7 +180,6 @@ async def get_permission_by_id(
 async def reply_permission(
     permission_id: str,
     request: PermissionReplyRequest,
-    user: AuthUser = Depends(require_user),
 ) -> Dict[str, bool]:
     """
     Reply to a permission request.
@@ -230,7 +194,6 @@ async def reply_permission(
     info = await PermissionNext.get_pending_info(permission_id)
     if not info:
         raise HTTPException(status_code=404, detail="Permission not found")
-    await _require_permission_session_access(info.session_id, user, write=True)
     
     log.info("permission.reply", {
         "id": permission_id,
@@ -238,13 +201,7 @@ async def reply_permission(
         "always": request.always,
     })
     
-    if request.always:
-        if SessionPolicy.is_admin(user):
-            reply = "always" if request.allow else "never"
-        else:
-            reply = "allow_session" if request.allow else "deny_session"
-    else:
-        reply = "allow" if request.allow else "deny"
+    reply = "always" if request.allow and request.always else "allow" if request.allow else "never" if request.always else "deny"
     await PermissionNext.reply(permission_id, reply, session_id=info.session_id)
     
     return {"success": True}

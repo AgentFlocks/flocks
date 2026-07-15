@@ -370,13 +370,10 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     await flushEffects();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
-    });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_599_749);
+      await vi.advanceTimersByTimeAsync(3_599_999);
     });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
@@ -627,11 +624,7 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
     expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
-    expect(updateModalMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        forceInitialCheck: true,
-      }),
-    );
+    expect(updateModalMock).toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'logout' })).not.toBeInTheDocument();
   });
 
@@ -687,9 +680,6 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     await flushEffects();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
-    });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {

@@ -6,10 +6,11 @@
 
 <p align="center">
   <a href="https://agentflocks.github.io/flocks-docs/"><img alt="文档" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
-  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
+  <a href="https://github.com/AgentFlocks/flocks/releases"><img alt="Release" src="https://img.shields.io/badge/release-v2026.6.18-f06f2f?style=for-the-badge"></a>
 </p>
 
 <p align="center">
+  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
   <a href="README.md"><img alt="English" src="https://img.shields.io/badge/lang-English-e33f44?style=for-the-badge"></a>
   <a href="README_zh.md"><img alt="中文" src="https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-e33f44?style=for-the-badge"></a>
 </p>
@@ -124,8 +125,9 @@ flocks stop
 ```
 
 默认服务地址：
-- Flocks WebUI：`http://127.0.0.1:5173`
-- 远程访问可通过 `flocks start --host <ip>` 配置
+- 后端 API：默认 `http://127.0.0.1:8000`
+- WebUI：默认 `http://127.0.0.1:5173`
+- 远程访问可通过 `flocks start --webui-host <ip>` 配置
 
 更多 CLI 命令使用 `flocks --help`
 
@@ -212,11 +214,14 @@ sudo chown -R <uid>:<gid> ~/.flocks
 
 ### 4.3 远程访问 Flocks 服务
 ```bash
-flocks start --host 0.0.0.0
+__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=<your_domain> \
+flocks start --webui-host 0.0.0.0
+# Windows PowerShell
+# $env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="your_domain"; flocks start --webui-host 0.0.0.0
 ```
 若从虚拟机远程访问失败，请将 host 指定为虚拟机的 IP。
 
-WebUI 与 API 共用同一个服务地址和端口，API 请求使用同源 `/api` 路径。这样浏览器 Cookie 与 SSE 保持在同一源，适用于局域网访问与反向代理场景。
+WebUI 在后端绑定到非回环 IP 时，默认仍使用同源 `/api` 代理模式。这样浏览器 Cookie 与 SSE 保持在同一源，是局域网访问与反向代理场景下更安全的选择。
 
 仅在确实需要浏览器直连后端 URL 时，再显式启用：
 
