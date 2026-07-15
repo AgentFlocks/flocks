@@ -136,6 +136,48 @@ async def test_capability_filter_cannot_add_tool_outside_base_pool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capability_filter_forwards_trusted_tenant_id_without_subject_or_context_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookBase, HookPipeline
+    from flocks.security.capability_pool import filter_capability_pool
+
+    seen_input = {}
+
+    class _CaptureHook(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            seen_input.update(ctx.input)
+            ctx.output["capability_pool"] = {"tools": ["read"]}
+
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("test-capability-filter-tenant", _CaptureHook())
+    try:
+        base = resolve_capability_pool(
+            declared_tools=["read", "bash"],
+            enabled_tools=["read", "bash"],
+        )
+        filtered = await filter_capability_pool(
+            base,
+            context={
+                "subject": {
+                    "subject_id": "user-1",
+                    "tenant_id": "tenant-a",
+                    "subject_secret": "do-not-forward",
+                },
+                "secret": "also-do-not-forward",
+            },
+        )
+    finally:
+        HookPipeline.unregister("test-capability-filter-tenant")
+
+    assert filtered.tools == ("read",)
+    assert seen_input["subject"] == {"subject_id": "user-1", "tenant_id": "tenant-a"}
+    assert "do-not-forward" not in str(seen_input)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("hook_output", [{}, {"tools": "read"}])
 async def test_missing_or_malformed_capability_filter_output_leaves_base_pool_unchanged(
     hook_output,

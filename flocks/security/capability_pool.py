@@ -15,6 +15,7 @@ _SAFE_SUBJECT_KEYS = frozenset(
         "display_name",
         "role",
         "status",
+        "tenant_id",
         "tenant_ids",
         "department",
         "asset_groups",
