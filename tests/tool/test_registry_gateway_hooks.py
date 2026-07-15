@@ -224,6 +224,50 @@ async def test_registry_forwards_tool_policy_constraint_to_hook_payload(
 
 
 @pytest.mark.asyncio
+async def test_registry_forwards_only_sanitized_parent_ceiling_to_hook_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ToolRegistry.init()
+    tool_name = "b4_registry_parent_ceiling"
+    extra = {
+        "parent_ceiling": {
+            "tools": [tool_name, "read"],
+            "permission_mode": "readonly",
+            "secret_scopes": ["read-only"],
+            "token": "must-not-leak",
+        }
+    }
+
+    async def _handler(ctx: ToolContext, value: str) -> ToolResult:
+        return ToolResult(success=True, output=value)
+
+    _register_test_tool(tool_name, _handler)
+    try:
+        run_before = AsyncMock(return_value=SimpleNamespace(output={"decision": {"action": "allow"}}))
+        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
+        monkeypatch.setattr(
+            "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+            AsyncMock(return_value=SimpleNamespace(output={})),
+        )
+        monkeypatch.setattr(registry_mod, "_emit_tool_audit", AsyncMock())
+
+        ctx = ToolContext(session_id="s-b4", message_id="m-b4", extra=extra)
+        result = await ToolRegistry.execute(tool_name, ctx=ctx, value="hello")
+    finally:
+        ToolRegistry.unregister(tool_name)
+
+    assert result.success is True
+    payload = run_before.await_args.args[0]
+    assert payload["parent_ceiling"] == {
+        "tools": [tool_name, "read"],
+        "permission_mode": "readonly",
+        "secret_scopes": ["read-only"],
+    }
+    assert "must-not-leak" not in str(payload)
+    assert ctx.extra == extra
+
+
+@pytest.mark.asyncio
 async def test_registry_returns_pending_metadata_for_approval_mode(monkeypatch: pytest.MonkeyPatch):
     ToolRegistry.init()
     tool_name = "b3_registry_hook_approval_pending"

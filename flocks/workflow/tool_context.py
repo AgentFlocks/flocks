@@ -22,6 +22,7 @@ async def build_workflow_tool_context(
     session_id: Optional[str] = None,
     message_id: Optional[str] = None,
     agent: Optional[str] = None,
+    parent_context: Optional[ToolContext] = None,
     event_publish_callback: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None,
 ) -> ToolContext:
     """Build a real ToolContext for workflow execution.
@@ -86,6 +87,26 @@ async def build_workflow_tool_context(
         )
         effective_message_id = message.id
 
+    delegation_context: dict[str, Any] = {}
+    try:
+        from flocks.security.delegation_context import load_delegation_security_context
+
+        stored_context = await load_delegation_security_context(effective_session_id)
+        if stored_context:
+            delegation_context.update(stored_context)
+    except Exception:
+        # Root/direct workflow execution keeps its existing behavior.  A
+        # marked delegated session will fail closed in SessionLoop/B3.
+        pass
+    if parent_context is not None and isinstance(parent_context.extra, dict):
+        from flocks.security.capability_pool import sanitize_parent_ceiling
+
+        source_ceiling = parent_context.extra.get("_capability_pool")
+        if source_ceiling is None:
+            source_ceiling = parent_context.extra.get("parent_ceiling")
+        if source_ceiling is not None:
+            delegation_context["parent_ceiling"] = sanitize_parent_ceiling(source_ceiling)
+
     subject_payload: dict[str, Any] = {}
     current_subject = get_current_subject()
     if current_subject is not None:
@@ -111,5 +132,6 @@ async def build_workflow_tool_context(
             "main_session_key": effective_session_id,
             "entry": str(subject_payload.get("entry") or "unknown"),
             "subject": subject_payload,
+            **delegation_context,
         },
     )

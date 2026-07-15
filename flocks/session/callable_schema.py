@@ -10,7 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Set
 
-from flocks.security.capability_pool import CapabilityPool, filter_capability_pool
+from flocks.security.capability_pool import (
+    CapabilityPool,
+    build_capability_ceiling,
+    filter_capability_pool,
+    normalize_capability_ceiling,
+)
 from flocks.tool.catalog import get_always_load_tool_names
 from flocks.session.callable_state import (
     get_session_callable_tools,
@@ -23,6 +28,7 @@ from flocks.tool.registry import ToolRegistry
 class CallableSchemaResult:
     tool_infos: List[Any]
     metadata: Dict[str, Any]
+    capability_ceiling: Dict[str, Any]
 
 
 def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], int]:
@@ -95,6 +101,16 @@ async def list_session_callable_tool_infos(
         sorted(effective_callable_names),
         context=capability_context,
     )
+    raw_context = capability_context if isinstance(capability_context, Mapping) else {}
+    if "parent_ceiling" in raw_context:
+        parent_ceiling = normalize_capability_ceiling(raw_context.get("parent_ceiling"))
+        if parent_ceiling is None:
+            capability_pool = CapabilityPool.from_tools([], context=capability_context)
+        else:
+            capability_pool = capability_pool.intersect(
+                CapabilityPool.from_tools(parent_ceiling["tools"], context=capability_context),
+                source="parent_ceiling",
+            )
     filtered_pool = await filter_capability_pool(capability_pool, context=capability_context)
     effective_callable_names = set(filtered_pool.tools)
     callable_tool_names &= effective_callable_names
@@ -116,4 +132,11 @@ async def list_session_callable_tool_infos(
             **metadata,
         })
 
-    return CallableSchemaResult(tool_infos=tool_infos, metadata=metadata)
+    return CallableSchemaResult(
+        tool_infos=tool_infos,
+        metadata=metadata,
+        capability_ceiling=build_capability_ceiling(
+            tools=filtered_pool.tools,
+            context=capability_context,
+        ),
+    )

@@ -109,6 +109,15 @@ def _build_tool_hook_payload(
         # Keep the execution context's ``extra`` untouched while exposing the
         # structured sandbox constraint at the hook contract boundary.
         payload["tool_policy_constraint"] = deepcopy(tool_policy_constraint)
+    if "parent_ceiling" in (ctx.extra or {}):
+        from flocks.security.capability_pool import sanitize_parent_ceiling
+
+        # Parent ceilings are an authorization boundary, so preserve an
+        # explicit invalid marker for B3 while discarding every unknown/raw
+        # field (including secrets) from the hook contract.
+        payload["parent_ceiling"] = sanitize_parent_ceiling(
+            (ctx.extra or {}).get("parent_ceiling")
+        )
     if decision is not None:
         payload["decision"] = dict(decision)
     if permission_checked is not None:

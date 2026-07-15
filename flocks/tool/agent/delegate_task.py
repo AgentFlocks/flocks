@@ -28,8 +28,66 @@ from flocks.skill.skill import Skill
 from flocks.config.config import Config
 from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
+from flocks.security.capability_pool import (
+    _safe_subject,
+    derive_child_capability_ceiling,
+    normalize_capability_ceiling,
+)
+from flocks.security.delegation_context import store_delegation_security_context
 
 log = Log.create(service="tool.delegate_task")
+
+
+async def _build_delegated_security_context(
+    ctx: ToolContext,
+    child_agent_name: str,
+) -> Optional[Dict[str, Any]]:
+    """Create the child-only context from trusted parent execution state."""
+    extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+    parent_ceiling = extra.get("_capability_pool")
+    if parent_ceiling is None:
+        parent_ceiling = extra.get("parent_ceiling")
+    if parent_ceiling is None:
+        # Manual/root calls without an execution ceiling retain legacy OSS
+        # behavior.  They must not create a fake delegated marker.
+        return None
+
+    normalized_parent = normalize_capability_ceiling(parent_ceiling)
+    if normalized_parent is None:
+        return {"parent_ceiling": {"invalid": True}}
+
+    try:
+        from flocks.agent.registry import Agent
+        from flocks.agent.toolset import get_all_enabled_tool_names, resolve_capability_pool
+
+        child_agent = await Agent.get(child_agent_name)
+        declared_tools = getattr(child_agent, "tools", None) if child_agent is not None else None
+        if not isinstance(declared_tools, (list, tuple, set, frozenset)):
+            return {"parent_ceiling": {"invalid": True}}
+        child_pool = resolve_capability_pool(
+            declared_tools,
+            get_all_enabled_tool_names(),
+        )
+        child_ceiling = derive_child_capability_ceiling(
+            normalized_parent,
+            child_tools=child_pool.tools,
+        )
+    except Exception as exc:
+        log.warning("delegate_task.capability_ceiling.build_failed", {
+            "agent": child_agent_name,
+            "error": type(exc).__name__,
+        })
+        child_ceiling = {"invalid": True}
+
+    result: Dict[str, Any] = {"parent_ceiling": child_ceiling}
+    subject = _safe_subject(extra.get("subject"))
+    if subject:
+        result["subject"] = subject
+    for key in ("entry", "permission_mode", "execution_mode", "development_mode"):
+        value = extra.get(key)
+        if isinstance(value, str) and value.strip():
+            result[key] = value.strip()
+    return result
 
 
 async def _subagent_session_permissions(agent_name: str) -> list:
@@ -457,8 +515,11 @@ async def delegate_task_tool(
     parent_session = await Session.get_by_id(ctx.session_id)
     if not parent_session:
         return ToolResult(success=False, error="Parent session not found")
+    if agent_to_use is None:
+        return ToolResult(success=False, error="Delegated agent could not be resolved")
 
-    create_kwargs = dict(
+    delegation_security_context = await _build_delegated_security_context(ctx, agent_to_use)
+    create_kwargs: Dict[str, Any] = dict(
         project_id=parent_session.project_id,
         directory=parent_session.directory,
         title=f"{description} (@{agent_to_use} subagent)",
@@ -467,6 +528,8 @@ async def delegate_task_tool(
         permission=await _subagent_session_permissions(agent_to_use),
         category="task",
     )
+    if delegation_security_context is not None:
+        create_kwargs["delegation_context_required"] = True
     if category_model and category_model.get("providerID") and category_model.get("modelID"):
         create_kwargs.update(
             provider=category_model["providerID"],
@@ -474,6 +537,18 @@ async def delegate_task_tool(
             model_pinned=bool(explicit_model),
         )
     created = await Session.create(**create_kwargs)
+    if delegation_security_context is not None:
+        try:
+            await store_delegation_security_context(created.id, delegation_security_context)
+        except Exception as exc:
+            log.error("delegate_task.capability_ceiling.persist_failed", {
+                "session_id": created.id,
+                "error": type(exc).__name__,
+            })
+            return ToolResult(
+                success=False,
+                error="Unable to establish delegated capability ceiling.",
+            )
     await Message.create(
         session_id=created.id,
         role=MessageRole.USER,
@@ -495,6 +570,7 @@ async def delegate_task_tool(
         callbacks=forwarder.build_callbacks(
             event_publish_callback=ctx.event_publish_callback,
         ),
+        security_context=delegation_security_context,
     )
     tool_result = await format_sync_subagent_result(
         description=description,

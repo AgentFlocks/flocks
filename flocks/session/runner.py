@@ -251,6 +251,7 @@ class SessionRunner:
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
         self._security_context = copy.deepcopy(security_context or {})
+        self._turn_capability_ceiling: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -356,6 +357,7 @@ class SessionRunner:
             event_publish_callback=self.callbacks.event_publish_callback,
             capability_context=capability_context,
         )
+        self._turn_capability_ceiling = copy.deepcopy(result.capability_ceiling)
         return result.tool_infos, dict(result.metadata)
 
     @staticmethod
@@ -2513,6 +2515,14 @@ class SessionRunner:
         except Exception as e:
             log.debug("runner.sandbox_context_init_failed", {"error": str(e)})
 
+        stream_security_context = copy.deepcopy(self._security_context)
+        if self._turn_capability_ceiling is not None:
+            # This pool is internal runtime state.  It is used only when a
+            # tool delegates work; ToolRegistry never forwards it to hooks.
+            stream_security_context["_capability_pool"] = copy.deepcopy(
+                self._turn_capability_ceiling
+            )
+
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
@@ -2529,7 +2539,7 @@ class SessionRunner:
             workspace_dir=self.session.directory,
             langfuse_generation=None,
             step_index=self._step,
-            security_context=self._security_context,
+            security_context=stream_security_context,
         )
         
         # Build provider options (thinking / reasoning / max_tokens)

@@ -6,6 +6,7 @@ installation and structured result reporting.
 """
 
 import asyncio
+from copy import deepcopy
 import json
 import inspect
 import time
@@ -159,7 +160,7 @@ def _create_nested_tool_context(ctx: ToolContext) -> ToolContext:
         message_id=ctx.message_id,
         agent=ctx.agent,
         call_id=ctx.call_id,
-        extra=dict(ctx.extra),
+        extra=deepcopy(ctx.extra),
         abort_event=ctx.abort,
         permission_callback=ctx._permission_callback,
         metadata_callback=None,

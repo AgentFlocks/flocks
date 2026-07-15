@@ -119,6 +119,11 @@ class SessionInfo(BaseModel):
     # Session category: "user" for human-initiated conversations, "task" for task-triggered sessions
     category: str = Field("user", description="Session category: user or task")
 
+    # Server-created delegated sessions require an internal context record.
+    # Keep the marker separate from user-visible metadata so metadata can
+    # never become an authorization source.
+    delegation_context_required: bool = Field(False)
+
     # Legacy fields for backwards compatibility
     metadata: Dict[str, Any] = Field(default_factory=dict)
     status: str = Field("active", description="Session status: active, archived, deleted")

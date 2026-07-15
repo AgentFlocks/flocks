@@ -8,6 +8,8 @@ from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.storage.storage import Storage
 from flocks.workflow.tool_context import build_workflow_tool_context
+from flocks.tool.task.run_workflow import _create_nested_tool_context
+from flocks.tool.registry import ToolContext
 
 
 @pytest.fixture
@@ -86,3 +88,16 @@ async def test_build_workflow_tool_context_reuses_existing_parent_session(
     assert message is not None
     assert message.role == MessageRole.USER
     assert message.agent == "rex-junior"
+
+
+def test_workflow_nested_tool_context_deep_copies_parent_ceiling() -> None:
+    outer = ToolContext(
+        session_id="session-1",
+        message_id="message-1",
+        extra={"parent_ceiling": {"tools": ["read"], "data_domains": ["tenant-a"]}},
+    )
+
+    nested = _create_nested_tool_context(outer)
+    nested.extra["parent_ceiling"]["tools"].append("bash")
+
+    assert outer.extra["parent_ceiling"]["tools"] == ["read"]

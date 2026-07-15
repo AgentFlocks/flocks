@@ -836,6 +836,7 @@ class TestExecuteSubtask:
             provider_id="test-provider",
             model_id="test-model",
             agent_name="rex",
+            security_context={"parent_ceiling": {"tools": ["read"]}},
         )
         last_user = SimpleNamespace(
             id="msg_parent",
@@ -873,6 +874,7 @@ class TestExecuteSubtask:
         tool_ctx = execute_task.await_args.kwargs["ctx"]
         assert tool_ctx.session_id == session_info.id
         assert tool_ctx.message_id == assistant_msg.id
+        assert tool_ctx.extra == {"parent_ceiling": {"tools": ["read"]}}
         assert {k: v for k, v in execute_task.await_args.kwargs.items() if k != "ctx"} == {
             "prompt": "do the thing",
             "description": "test task",

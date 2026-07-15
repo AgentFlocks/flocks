@@ -13,6 +13,7 @@ Ported from original SessionPrompt.loop() pattern.
 """
 
 import asyncio
+import copy
 import inspect
 import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
@@ -376,6 +377,28 @@ class SessionLoop:
         except Exception as _trace_err:
             log.debug("loop.trace_offset.error", {"error": str(_trace_err)})
         
+        try:
+            from flocks.security.delegation_context import resolve_session_security_context
+
+            supplied_security_context = await resolve_session_security_context(
+                session.id,
+                delegation_context_required=bool(
+                    getattr(session, "delegation_context_required", False)
+                ),
+                supplied_context=security_context,
+            )
+        except Exception as exc:
+            log.warning("loop.delegation_context.load_failed", {
+                "session_id": session_id,
+                "error": type(exc).__name__,
+            })
+            # A marked delegated session must never silently lose its ceiling
+            # on a later continuation.  Pro B3 consumes this invalid marker
+            # as a fail-closed decision; OSS also hides all callable tools.
+            supplied_security_context = copy.deepcopy(security_context or {})
+            if getattr(session, "delegation_context_required", False):
+                supplied_security_context["parent_ceiling"] = {"invalid": True}
+
         # Create context
         ctx = LoopContext(
             session=session,
@@ -384,7 +407,7 @@ class SessionLoop:
             agent_name=agent_name or session.agent or "rex",
             session_ctx=session_ctx,
             trace_step_offset=trace_offset,
-            security_context=dict(security_context or {}),
+            security_context=supplied_security_context,
         )
 
         security_subject_token = None
@@ -1645,6 +1668,7 @@ class SessionLoop:
             message_id=assistant_msg.id,
             agent=agent_name,
             abort_event=ctx.abort_event,
+            extra=copy.deepcopy(ctx.security_context),
         )
         
         execution_error: Optional[Exception] = None

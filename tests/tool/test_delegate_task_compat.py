@@ -63,6 +63,55 @@ class TestDelegateTaskTolerance:
         assert "task" not in denied_permissions
 
     @pytest.mark.asyncio
+    async def test_delegate_task_persists_and_forwards_a_narrowed_parent_ceiling(self):
+        parent_session = SimpleNamespace(
+            id="test-session",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+        )
+        child_session = SimpleNamespace(id="ses-child")
+        parent_ceiling = {
+            "tools": ["read"],
+            "permission_mode": "readonly",
+            "data_domains": ["tenant-a"],
+        }
+        with (
+            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
+            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
+            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()),
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
+            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch("flocks.tool.agent.delegate_task._build_delegated_security_context", AsyncMock(return_value={
+                "parent_ceiling": parent_ceiling,
+            })),
+            patch("flocks.tool.agent.delegate_task.store_delegation_security_context", AsyncMock()) as store_context,
+            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                action="stop",
+                error=None,
+                last_message=None,
+            ))) as loop_run,
+        ):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=ToolContext(
+                    session_id="test-session",
+                    message_id="test-message",
+                    agent="rex",
+                    extra={"_capability_pool": {"tools": ["read"], "secret": "must-not-leak"}},
+                ),
+                subagent_type="asset-survey",
+                prompt="Investigate assets",
+            )
+
+        assert result.success is True
+        store_context.assert_awaited_once_with("ses-child", {"parent_ceiling": parent_ceiling})
+        assert loop_run.await_args.kwargs["security_context"] == {"parent_ceiling": parent_ceiling}
+
+    @pytest.mark.asyncio
     async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):
         parent_session = SimpleNamespace(
             id="test-session",
