@@ -569,6 +569,32 @@ def reconstruct_sqlite_candidate(
     }
 
 
+def _sqlite_recover_capability(sqlite_bin: str = "sqlite3") -> tuple[bool, str]:
+    """Return whether *sqlite_bin* was built with support for ``.recover``."""
+
+    try:
+        completed = subprocess.run(
+            [
+                sqlite_bin,
+                ":memory:",
+                "SELECT sqlite_compileoption_used('ENABLE_DBPAGE_VTAB');",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return False, str(exc)
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        return False, detail or f"capability probe exited with {completed.returncode}"
+    if completed.stdout.strip() != "1":
+        return False, "SQLite CLI was built without SQLITE_ENABLE_DBPAGE_VTAB"
+    return True, ""
+
+
 def _run_sqlite_recover(
     candidate_db: Path,
     recover_sql_path: Path,
@@ -576,6 +602,10 @@ def _run_sqlite_recover(
     lost_and_found_table: str,
 ) -> None:
     """Write `sqlite3 .recover` output to a SQL file."""
+
+    supported, reason = _sqlite_recover_capability()
+    if not supported:
+        raise RuntimeError(f"sqlite3 .recover is unavailable: {reason}")
 
     completed = subprocess.run(
         [
@@ -588,7 +618,7 @@ def _run_sqlite_recover(
         text=True,
         encoding="utf-8",
     )
-    if completed.returncode != 0 and not completed.stdout.strip():
+    if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"sqlite3 .recover failed: {stderr or completed.returncode}")
     with _atomic_output_path(recover_sql_path) as temporary_path:

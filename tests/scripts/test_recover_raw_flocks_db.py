@@ -9,6 +9,7 @@ import sqlite3
 import struct
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,15 @@ def load_module():
 
 
 recover_raw_flocks_db = load_module()
+
+
+def _require_sqlite_recover() -> None:
+    sqlite_bin = shutil.which("sqlite3")
+    if sqlite_bin is None:
+        pytest.skip("sqlite3 CLI is required for the recovery integration test")
+    supported, reason = recover_raw_flocks_db._sqlite_recover_capability(sqlite_bin)
+    if not supported:
+        pytest.skip(f"sqlite3 .recover is unavailable: {reason}")
 
 
 def _wal_checksum(data, *, byte_order, state=(0, 0)):
@@ -694,9 +704,38 @@ def test_successful_cli_path_preserves_sidecars_and_compatibility_output(
     assert "removed_sidecars=none\n" in capsys.readouterr().out
 
 
+def test_sqlite_recover_rejects_partial_output_on_failure(tmp_path, monkeypatch):
+    candidate_db = tmp_path / "candidate.db"
+    candidate_db.write_bytes(b"candidate")
+    recover_sql = tmp_path / "recover.sql"
+
+    monkeypatch.setattr(
+        recover_raw_flocks_db,
+        "_sqlite_recover_capability",
+        lambda: (True, ""),
+    )
+    monkeypatch.setattr(
+        recover_raw_flocks_db.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="BEGIN;\n",
+            stderr="sql error: no such table: sqlite_dbpage",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no such table: sqlite_dbpage"):
+        recover_raw_flocks_db._run_sqlite_recover(
+            candidate_db,
+            recover_sql,
+            lost_and_found_table="lost_and_found",
+        )
+
+    assert recover_sql.exists() is False
+
+
 def test_real_recovery_preserves_auth_and_custom_tables(tmp_path, monkeypatch):
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is required for the recovery integration test")
+    _require_sqlite_recover()
 
     data_dir = tmp_path / "live-data"
     data_dir.mkdir()
@@ -794,8 +833,7 @@ def test_real_recovery_preserves_auth_and_custom_tables(tmp_path, monkeypatch):
 
 
 def test_real_wal_recovery_preserves_committed_row(tmp_path, monkeypatch):
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is required for the recovery integration test")
+    _require_sqlite_recover()
 
     data_dir = tmp_path / "live-data"
     data_dir.mkdir()
@@ -863,8 +901,7 @@ def test_real_wal_recovery_preserves_committed_row(tmp_path, monkeypatch):
 
 
 def test_real_recovery_preserves_fts_virtual_table(tmp_path, monkeypatch):
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is required for the recovery integration test")
+    _require_sqlite_recover()
 
     source_db = tmp_path / "fts-source.db"
     with sqlite3.connect(source_db) as db:
