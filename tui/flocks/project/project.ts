@@ -13,6 +13,7 @@ import { BusEvent } from "@/bus/bus-event"
 import { iife } from "@/util/iife"
 import { GlobalBus } from "@/bus/global"
 import { existsSync } from "fs"
+import { randomBytes } from "crypto"
 
 export namespace Project {
   const log = Log.create({ service: "project" })
@@ -43,6 +44,10 @@ export namespace Project {
 
   export const Event = {
     Updated: BusEvent.define("project.updated", Info),
+  }
+
+  function createProjectID() {
+    return `prj_${Date.now().toString(36)}${randomBytes(8).toString("hex")}`
   }
 
   export async function fromDirectory(directory: string) {
@@ -281,6 +286,36 @@ export namespace Project {
       sandboxes: project.sandboxes?.filter((x) => existsSync(x)),
     }))
   }
+
+  export const create = fn(
+    z.object({
+      name: z.string().trim().min(1),
+      worktree: z.string(),
+      icon: Info.shape.icon.optional(),
+    }),
+    async (input) => {
+      const now = Date.now()
+      const result: Info = {
+        id: createProjectID(),
+        worktree: input.worktree,
+        name: input.name,
+        icon: input.icon,
+        sandboxes: [],
+        time: {
+          created: now,
+          updated: now,
+        },
+      }
+      await Storage.write<Info>(["project", result.id], result)
+      GlobalBus.emit("event", {
+        payload: {
+          type: Event.Updated.type,
+          properties: result,
+        },
+      })
+      return result
+    },
+  )
 
   export const update = fn(
     z.object({

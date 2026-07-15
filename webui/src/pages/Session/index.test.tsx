@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
@@ -401,7 +401,7 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
-    const projectLabel = await screen.findByText('Security Project');
+    const projectLabel = await screen.findByText('defaultProjectName');
     expect(screen.getByText('Original Session')).toBeInTheDocument();
     expect(screen.getByText('1')).toBeInTheDocument();
 
@@ -432,16 +432,16 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
-    await screen.findByText('Security Project');
+    await screen.findByText('defaultProjectName');
     expect(screen.getByText('Original Session')).toBeInTheDocument();
     expect(screen.getByText('Legacy Default Session')).toBeInTheDocument();
     expect(screen.getByText('2')).toBeInTheDocument();
     expect(screen.queryByText('project')).not.toBeInTheDocument();
   });
 
-  it('labels the unnamed current project as default', async () => {
+  it('labels the current project as default even when the stored name is the worktree name', async () => {
     client.get.mockImplementation((url: string) => {
-      const currentProject = { id: 'project-1', worktree: '/tmp/project', name: null };
+      const currentProject = { id: 'project-1', worktree: '/tmp/project', name: 'project' };
       if (url === '/api/project/current') {
         return Promise.resolve({ data: currentProject });
       }
@@ -452,6 +452,148 @@ describe('SessionPage session actions menu', () => {
 
     expect(await screen.findByText('defaultProjectName')).toBeInTheDocument();
     expect(screen.queryByText('project')).not.toBeInTheDocument();
+  });
+
+  it('merges historical project rows for the current worktree into default', async () => {
+    client.get.mockImplementation((url: string) => {
+      const currentProject = { id: 'project-1', worktree: '/tmp/project', name: 'project' };
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: currentProject });
+      }
+      return Promise.resolve({
+        data: [
+          currentProject,
+          { id: 'old-project-id', worktree: '/tmp/project', name: 'project' },
+        ],
+      });
+    });
+    useSessions.mockReturnValue({
+      sessions: [
+        session,
+        {
+          ...secondSession,
+          projectID: 'old-project-id',
+          directory: '/tmp/project',
+          title: 'Historical Project Session',
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('defaultProjectName')).toBeInTheDocument();
+    expect(screen.getByText('Historical Project Session')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    expect(screen.queryByText('project')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the first automatic project as default when current project is missing', async () => {
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/project/current') {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      return Promise.resolve({
+        data: [
+          { id: 'project-1', worktree: '/tmp/project', name: 'flocks' },
+          { id: 'old-project-id', worktree: '/tmp/project', name: 'flocks' },
+        ],
+      });
+    });
+    useSessions.mockReturnValue({
+      sessions: [
+        session,
+        {
+          ...secondSession,
+          projectID: 'old-project-id',
+          directory: '/tmp/project',
+          title: 'Old Flocks Project Session',
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('defaultProjectName')).toBeInTheDocument();
+    expect(screen.getByText('Old Flocks Project Session')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    expect(screen.queryByText('flocks')).not.toBeInTheDocument();
+  });
+
+  it('uses the current project as default when the project list is empty', async () => {
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: { id: 'project-1', worktree: '/tmp/flocks', name: null } });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    useSessions.mockReturnValue({
+      sessions: [
+        { ...session, projectID: 'project-1', directory: '/tmp/flocks' },
+        {
+          ...secondSession,
+          projectID: 'old-project-id',
+          directory: '/tmp/flocks',
+          title: 'Old Same Worktree Session',
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('defaultProjectName')).toBeInTheDocument();
+    expect(screen.getByText('Old Same Worktree Session')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    expect(screen.queryByText('flocks')).not.toBeInTheDocument();
+  });
+
+  it('infers the default project from sessions when project metadata is unavailable', async () => {
+    client.get.mockRejectedValue({ response: { status: 404 } });
+    useSessions.mockReturnValue({
+      sessions: [
+        { ...session, projectID: 'project-1', directory: '/tmp/flocks' },
+        {
+          ...secondSession,
+          projectID: 'old-project-id',
+          directory: '/tmp/flocks',
+          title: 'Fallback Same Worktree Session',
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('defaultProjectName')).toBeInTheDocument();
+    expect(screen.getByText('Fallback Same Worktree Session')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    expect(screen.queryByText('flocks')).not.toBeInTheDocument();
   });
 
   it('creates a user-managed project from the sidebar', async () => {
@@ -467,7 +609,7 @@ describe('SessionPage session actions menu', () => {
     });
     client.post.mockImplementation((url: string, payload: Record<string, unknown>) => {
       if (url === '/api/project') {
-        const created = { id: 'project-2', worktree: '/tmp/project', name: payload.name as string };
+        const created = { id: 'prj_project2', worktree: '/tmp/project', name: payload.name as string };
         projectRows = [projectRows[0], created];
         return Promise.resolve({ data: created });
       }
@@ -486,21 +628,105 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('renames a project from the sidebar', async () => {
+  it('keeps a newly created empty project visible while search is active', async () => {
     const user = userEvent.setup();
+    const currentProject = { id: 'project-1', worktree: '/tmp/project', name: 'Security Project' };
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: currentProject });
+      }
+      return Promise.resolve({ data: [currentProject] });
+    });
+    client.post.mockImplementation((url: string, payload: Record<string, unknown>) => {
+      if (url === '/api/project') {
+        const created = { id: 'prj_project2', worktree: '/tmp/project', name: payload.name as string };
+        return Promise.resolve({ data: created });
+      }
+      return Promise.resolve({ data: secondSession });
+    });
 
     renderSessionPage();
 
-    await screen.findByText('Security Project');
-    await user.click(screen.getByRole('button', { name: 'projectDialog.renameTitle' }));
+    await user.type(screen.getByPlaceholderText('filterConversations'), 'nothing matches');
+    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
+    await user.type(screen.getByLabelText('projectDialog.nameLabel'), 'Labs');
+    await user.click(screen.getByRole('button', { name: 'save' }));
+
+    expect(await screen.findByText('Labs')).toBeInTheDocument();
+    expect(screen.getByText('noProjectSessions')).toBeInTheDocument();
+  });
+
+  it('renames a project from the sidebar', async () => {
+    const user = userEvent.setup();
+    client.get.mockImplementation((url: string) => {
+      const currentProject = { id: 'project-1', worktree: '/tmp/project', name: 'project' };
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: currentProject });
+      }
+      return Promise.resolve({
+        data: [
+          currentProject,
+          { id: 'historical-project-id', worktree: '/tmp/labs', name: 'Labs' },
+        ],
+      });
+    });
+
+    renderSessionPage();
+
+    const projectLabel = await screen.findByText('Labs');
+    const projectRow = projectLabel.closest('[class*="group/project"]');
+    expect(projectRow).not.toBeNull();
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectDialog.renameTitle' }));
     const input = screen.getByLabelText('projectDialog.nameLabel');
     await user.clear(input);
     await user.type(input, 'Renamed Project');
     await user.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => {
-      expect(client.patch).toHaveBeenCalledWith('/api/project/project-1', { name: 'Renamed Project' });
+      expect(client.patch).toHaveBeenCalledWith('/api/project/historical-project-id', { name: 'Renamed Project' });
     });
+  });
+
+  it('creates a session from a specific project row', async () => {
+    const user = userEvent.setup();
+    client.get.mockImplementation((url: string) => {
+      const currentProject = { id: 'project-1', worktree: '/tmp/project', name: 'project' };
+      if (url === '/api/project/current') {
+        return Promise.resolve({ data: currentProject });
+      }
+      return Promise.resolve({
+        data: [
+          currentProject,
+          { id: 'prj_project2', worktree: '/tmp/project', name: 'Labs' },
+        ],
+      });
+    });
+    client.post.mockResolvedValue({
+      data: {
+        ...secondSession,
+        id: 'session-labs',
+        projectID: 'prj_project2',
+        title: 'New Session',
+      },
+    });
+
+    renderSessionPage();
+
+    const projectLabel = await screen.findByText('Labs');
+    const projectRow = projectLabel.closest('[class*="group/project"]');
+    expect(projectRow).not.toBeNull();
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+        projectID: 'prj_project2',
+      });
+    });
+    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'session-labs',
+      projectID: 'prj_project2',
+    }));
   });
 
   it('opens the actions menu for a session item', async () => {

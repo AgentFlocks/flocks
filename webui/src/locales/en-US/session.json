@@ -265,6 +265,7 @@
   "projectsSection": "Projects",
   "toggleProject": "Expand or collapse project {{project}}",
   "selectProject": "Select project {{project}}",
+  "createSessionInProject": "New session in project {{project}}",
   "defaultProject": "Default project",
   "defaultProjectName": "Default",
   "noProjectSessions": "No conversations",

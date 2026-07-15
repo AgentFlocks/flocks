@@ -52,6 +52,42 @@ export const ProjectRoutes = lazy(() =>
         return c.json(Instance.project)
       },
     )
+    .post(
+      "/",
+      describeRoute({
+        summary: "Create project",
+        description: "Create a user-managed project for organizing sessions.",
+        operationId: "project.create",
+        responses: {
+          200: {
+            description: "Created project information",
+            content: {
+              "application/json": {
+                schema: resolver(Project.Info),
+              },
+            },
+          },
+          ...errors(400),
+        },
+      }),
+      validator(
+        "json",
+        z.object({
+          name: z.string().trim().min(1),
+          worktree: z.string().optional(),
+          icon: Project.Info.shape.icon.optional(),
+        }),
+      ),
+      async (c) => {
+        const body = c.req.valid("json")
+        const project = await Project.create({
+          name: body.name,
+          worktree: body.worktree ?? Instance.directory,
+          icon: body.icon,
+        })
+        return c.json(project)
+      },
+    )
     .patch(
       "/:projectID",
       describeRoute({

@@ -265,6 +265,7 @@
   "projectsSection": "项目",
   "toggleProject": "展开或收起项目 {{project}}",
   "selectProject": "选择项目 {{project}}",
+  "createSessionInProject": "在项目 {{project}} 中新建会话",
   "defaultProject": "默认项目",
   "defaultProjectName": "默认",
   "noProjectSessions": "暂无会话",
