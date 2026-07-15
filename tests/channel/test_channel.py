@@ -130,8 +130,11 @@ class TestChannelPluginStatus:
     def test_mark_connected(self):
         ch = _StubChannel()
         ch.reset_status("feishu")
+        ch.mark_disconnected(error="timeout")
         ch.mark_connected()
         assert ch.status.connected is True
+        assert ch.status.last_error is None
+        assert ch.status.error_count == 1
 
     def test_mark_disconnected_without_error(self):
         ch = _StubChannel()

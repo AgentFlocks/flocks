@@ -151,6 +151,27 @@ interface EmailChannelConfig {
   defaultAgent?: string;
 }
 
+const EMAIL_HOST_PRESETS = [
+  { id: 'gmail', label: 'Gmail', imapHost: 'imap.gmail.com', smtpHost: 'smtp.gmail.com' },
+  { id: 'outlook', label: 'Outlook / Microsoft 365', imapHost: 'outlook.office365.com', smtpHost: 'smtp.office365.com' },
+  { id: 'qq', label: 'QQ Mail', imapHost: 'imap.qq.com', smtpHost: 'smtp.qq.com' },
+  { id: 'netease-163', label: 'NetEase 163', imapHost: 'imap.163.com', smtpHost: 'smtp.163.com' },
+  { id: 'netease-126', label: 'NetEase 126', imapHost: 'imap.126.com', smtpHost: 'smtp.126.com' },
+  { id: 'tencent-exmail', label: 'Tencent Exmail', imapHost: 'imap.exmail.qq.com', smtpHost: 'smtp.exmail.qq.com' },
+  { id: 'aliyun', label: 'Alibaba Mail', imapHost: 'imap.aliyun.com', smtpHost: 'smtp.aliyun.com' },
+  { id: 'yahoo', label: 'Yahoo Mail', imapHost: 'imap.mail.yahoo.com', smtpHost: 'smtp.mail.yahoo.com' },
+];
+
+const EMAIL_IMAP_HOST_OPTIONS = EMAIL_HOST_PRESETS.map((entry) => ({
+  value: entry.imapHost,
+  label: entry.label,
+}));
+
+const EMAIL_SMTP_HOST_OPTIONS = EMAIL_HOST_PRESETS.map((entry) => ({
+  value: entry.smtpHost,
+  label: entry.label,
+}));
+
 interface WeixinChannelConfig {
   enabled: boolean;
   token?: string;
@@ -333,6 +354,117 @@ function TextInput({
   );
 }
 
+interface HostInputOption {
+  value: string;
+  label: string;
+}
+
+function HostInput({
+  value,
+  onChange,
+  placeholder,
+  options,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  options: HostInputOption[];
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filterValue, setFilterValue] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const normalizedFilter = filterValue.trim().toLowerCase();
+  const visibleOptions = options.filter((option) => {
+    if (!normalizedFilter) return true;
+    return (
+      option.value.toLowerCase().includes(normalizedFilter) ||
+      option.label.toLowerCase().includes(normalizedFilter)
+    );
+  });
+
+  const openAllOptions = () => {
+    if (disabled) return;
+    setFilterValue('');
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const closeOnDocumentClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!target || !containerRef.current?.contains(target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeOnDocumentClick);
+    return () => document.removeEventListener('mousedown', closeOnDocumentClick);
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative">
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(event) => {
+            onChange(event.target.value);
+            setFilterValue(event.target.value);
+            setOpen(true);
+          }}
+          onFocus={openAllOptions}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-50 disabled:text-gray-400"
+        />
+        <button
+          type="button"
+          aria-label="Open host suggestions"
+          disabled={disabled}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            openAllOptions();
+            inputRef.current?.focus();
+          }}
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-gray-400 hover:text-gray-600 disabled:cursor-not-allowed disabled:text-gray-300"
+        >
+          <ChevronDown className="w-4 h-4" />
+        </button>
+      </div>
+
+      {open && !disabled && (
+        <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-[220px] overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
+          {visibleOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-red-50 ${
+                option.value === value ? 'bg-red-50 text-red-700' : 'text-gray-700'
+              }`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onChange(option.value);
+                setFilterValue('');
+                setOpen(false);
+                inputRef.current?.focus();
+              }}
+            >
+              <span className="block font-medium leading-5">{option.value}</span>
+              <span className="block text-xs leading-4 text-gray-400">{option.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SecretInput({
   value,
   onChange,
@@ -441,37 +573,6 @@ function NumberInput({
   );
 }
 
-function DatalistInput({
-  value,
-  onChange,
-  options,
-  placeholder,
-  listId,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  placeholder?: string;
-  listId: string;
-}) {
-  return (
-    <>
-      <input
-        list={listId}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
-      />
-      <datalist id={listId}>
-        {options.map((item) => (
-          <option value={item} key={item} />
-        ))}
-      </datalist>
-    </>
-  );
-}
-
 function TagsInput({
   value,
   onChange,
@@ -567,6 +668,7 @@ const CHANNEL_ICON_SRC: Record<string, string> = {
   wecom: '/channel-wecom.png',
   dingtalk: '/channel-dingtalk.png',
   telegram: '/channel-telegram.png',
+  email: '/channel-email.png',
   weixin: '/channel-weixin.png',
   whatsapp: '/channel-whatsapp.png',
 };
@@ -1548,18 +1650,11 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
 
       <Section title={t('email.servers')} description={t('email.serversDesc')}>
         <FieldRow label={t('email.imapHost')} required hint={t('email.imapHostHint')}>
-          <DatalistInput
+          <HostInput
             value={config.imapHost ?? ''}
             onChange={(v) => set('imapHost', v || undefined)}
             placeholder="imap.gmail.com"
-            options={[
-              'imap.gmail.com',
-              'imap.mail.yahoo.com',
-              'imap.mail.qq.com',
-              'imap.163.com',
-              'outlook.office365.com',
-            ]}
-            listId="email-imap-host-list"
+            options={EMAIL_IMAP_HOST_OPTIONS}
           />
         </FieldRow>
         <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
@@ -1581,18 +1676,11 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
           />
         </FieldRow>
         <FieldRow label={t('email.smtpHost')} required hint={t('email.smtpHostHint')}>
-          <DatalistInput
+          <HostInput
             value={config.smtpHost ?? ''}
             onChange={(v) => set('smtpHost', v || undefined)}
             placeholder="smtp.gmail.com"
-            options={[
-              'smtp.gmail.com',
-              'smtp.office365.com',
-              'smtp.163.com',
-              'smtp.mail.qq.com',
-              'smtp-mail.outlook.com',
-            ]}
-            listId="email-smtp-host-list"
+            options={EMAIL_SMTP_HOST_OPTIONS}
           />
         </FieldRow>
         <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>

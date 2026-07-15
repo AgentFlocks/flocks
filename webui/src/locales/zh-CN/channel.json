@@ -244,7 +244,7 @@
     "address": "邮箱地址",
     "addressHint": "用于接收用户邮件并发送 Agent 回复的邮箱地址。",
     "password": "邮箱密码",
-    "passwordHint": "邮箱密码或应用专用密码。保存时会进入 Flocks 密钥存储。",
+    "passwordHint": "请先在邮箱服务商后台开启 IMAP/SMTP 服务，并填写生成的客户端授权码或应用专用密码；通常不是邮箱登录密码。保存时会进入 Flocks 密钥存储。",
     "servers": "邮件服务器",
     "serversDesc": "配置此通道使用的 IMAP 收件箱和 SMTP 发件服务器。",
     "imapHost": "IMAP 主机",
