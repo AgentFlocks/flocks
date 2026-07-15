@@ -10,6 +10,7 @@
 | 查原始告警日志 | `tdp_log_search` | `search` | `time_from`、`time_to`、`sql` |
 | 查字段聚合统计 | `tdp_log_search` | `terms` | `time_from`、`time_to`、`term` |
 | 查威胁事件列表 | `tdp_incident_list` | `search` | `time_from`、`time_to`；可补 `severity`、`phase`、`result`、`keyword`、分页参数 |
+| 查威胁实时监控列表 | `tdp_threat_monitor_list` | 默认 | 时间范围不超过 24 小时；可补 `sql`、`net_data_type`、`assets_group`、分页参数 |
 | 看事件时间线 / 结果分布 / 攻击者明细 | `tdp_incident_list` | `timeline` / `result_distribution` / `attacker_ip_detail` | 通常先要 `incident_id` |
 | 查外部攻击严重性分布 | `tdp_threat_inbound_attack` | 默认 | `time_from`、`time_to`；可补 `severity`、`result_list`、`keyword` |
 | 查告警主机汇总 / 主机下事件 | `tdp_host_threat_list` | `summary` / `events` | `summary` 可补 `severity`、`direction`、`threat_type`、`keyword`；`events` 至少要 `asset_machine` |
@@ -24,7 +25,7 @@
 | 查 MDR 研判列表 / 指标 | `tdp_mdr_alert_list` | `list` / `indicator` | 常见补时间范围、`section_list`、`threat_severity`、`judge_result_status`、`keyword` |
 | 查系统状态 | `tdp_system_status` | `all` / `core` / `database` 等 | 通常空参 |
 | 下载 PCAP / 恶意文件 | `tdp_pcap_download` / `tdp_file_download` | 默认 | `alert_id + occ_time` 或 `hash` |
-| 管理平台配置 / 策略 | `tdp_platform_config` / `tdp_policy_settings` | 多 action | 写操作，必须先获用户确认 |
+| 管理平台配置 / 自定义规则 / 策略 | `tdp_platform_config` / `tdp_policy_settings` | 多 action | 写操作，必须先获用户确认 |
 
 ## 时间参数注意事项（重点）
 
@@ -109,6 +110,7 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 | 用户实际要查什么 | 推荐 tool | 说明 |
 |---|---|---|
 | 威胁事件 / 攻击事件 / 事件总览 | `tdp_incident_list` / `tdp_threat_inbound_attack` | 事件维度，平台已聚合 |
+| 实时监控 / 威胁监控列表 | `tdp_threat_monitor_list` | 实时威胁监控列表，单次时间范围不得超过 24 小时 |
 | 告警 / 告警日志 / 原始检测记录 | `tdp_log_search` | 告警维度，一条就是一条原始记录 |
 | 告警主机 / 受害主机 / 主机下事件 | `tdp_host_threat_list` | 主机维度，按主机聚合 |
 | 漏洞、弱口令、登录入口、API 风险等 | 对应资产或风险类 tool | 资产/风险维度，不要混进日志查询 |
@@ -117,6 +119,7 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 
 - 提到“告警”“最近一小时告警”“查某 IP 的告警”时，默认优先 `tdp_log_search`
 - 提到“威胁事件”“攻击事件”“看下最近有什么事件”时，优先 `tdp_incident_list`
+- 提到“实时监控”“威胁监控列表”时，优先 `tdp_threat_monitor_list`
 - 提到“哪些主机被打了”“告警主机”“受害主机”时，优先 `tdp_host_threat_list`
 - 用户没说清时，默认把“明细”理解为告警日志，把“总览/聚合”理解为事件
 
@@ -647,6 +650,22 @@ PCAP 下载：
 ```
 
 处置日志可直接走 `tdp_platform_config(action="disposal_log_list")`；handler 会补默认时间范围、分页和 `cts` 倒序。
+
+查询自定义规则：
+
+```json
+{
+  "action": "custom_rule_list",
+  "custom_rule_status": [1],
+  "custom_rule_keyword": "SQL",
+  "cur_page": 1,
+  "page_size": 20
+}
+```
+
+新增、编辑、删除自定义规则分别使用 `custom_rule_add`、`custom_rule_update`、
+`custom_rule_delete`。这些动作会修改检测策略，必须先获得用户明确授权；新增和编辑通过
+`custom_rule` 传完整规则对象，删除通过 `custom_rule_ids` 传规则 `suuid` 列表。
 
 ## 高风险与低风险
 
