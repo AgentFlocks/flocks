@@ -8,8 +8,9 @@ and the function schema exposed to the model for the current turn.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Set
 
+from flocks.security.capability_pool import CapabilityPool, filter_capability_pool
 from flocks.tool.catalog import get_always_load_tool_names
 from flocks.session.callable_state import (
     get_session_callable_tools,
@@ -76,6 +77,7 @@ async def list_session_callable_tool_infos(
     *,
     step: int = 0,
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+    capability_context: Optional[Mapping[str, Any]] = None,
 ) -> CallableSchemaResult:
     callable_tool_names = await get_session_callable_tools(session_id)
     always_load_names = get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
@@ -89,6 +91,14 @@ async def list_session_callable_tool_infos(
         )
 
     effective_callable_names = set(callable_tool_names) | always_load_names
+    capability_pool = CapabilityPool.from_tools(
+        sorted(effective_callable_names),
+        context=capability_context,
+    )
+    filtered_pool = await filter_capability_pool(capability_pool, context=capability_context)
+    effective_callable_names = set(filtered_pool.tools)
+    callable_tool_names &= effective_callable_names
+    always_load_names &= effective_callable_names
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
 
     metadata = {

@@ -345,11 +345,14 @@ class SessionRunner:
         agent: AgentInfo,
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
+        capability_context = copy.deepcopy(self._security_context)
+        capability_context["agent"] = agent.name
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=getattr(agent, "tools", None),
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
+            capability_context=capability_context,
         )
         return result.tool_infos, dict(result.metadata)
 

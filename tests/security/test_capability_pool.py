@@ -51,6 +51,36 @@ async def test_capability_filter_returns_base_pool_when_no_hook_is_registered() 
 
 
 @pytest.mark.asyncio
+async def test_capability_filter_discovers_cold_hooks_before_returning_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookPipeline, HookStage
+    from flocks.security.capability_pool import filter_capability_pool
+
+    discovery = AsyncMock(return_value=False)
+    monkeypatch.setattr(HookPipeline, "has_stage_handlers", discovery)
+    base = resolve_capability_pool(
+        declared_tools=["read"],
+        enabled_tools=["read", "bash"],
+    )
+
+    filtered = await filter_capability_pool(
+        base,
+        context={"entry": "runner", "agent": "rex"},
+    )
+
+    assert filtered == base
+    discovery.assert_awaited_once()
+    stage, hook_input = discovery.await_args.args
+    assert stage == HookStage.CAPABILITY_FILTER
+    assert hook_input["capability_pool"] == base.as_dict()
+    assert hook_input["entry"] == "runner"
+    assert hook_input["agent"] == "rex"
+
+
+@pytest.mark.asyncio
 async def test_capability_filter_cannot_add_tool_outside_base_pool() -> None:
     from flocks.hooks.pipeline import HookBase, HookPipeline, HookStage
     from flocks.security.capability_pool import filter_capability_pool
@@ -143,3 +173,95 @@ async def test_capability_filter_removes_requested_base_tool_and_records_count()
     assert filtered.tools == ("read",)
     assert filtered.filtered_by[-1] == "capability.filter"
     assert filtered.removed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_capability_filters_are_monotonic_across_multiple_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookBase, HookPipeline
+    from flocks.security.capability_pool import filter_capability_pool
+
+    class _RemoveBash(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            ctx.output["capability_pool"] = {"tools": ["read"]}
+
+    class _RestoreBash(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            ctx.output["capability_pool"] = {"tools": ["read", "bash"]}
+
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("test-capability-filter-remove", _RemoveBash(), order=1)
+    HookPipeline.register("test-capability-filter-restore", _RestoreBash(), order=2)
+    try:
+        base = resolve_capability_pool(
+            declared_tools=["read", "bash"],
+            enabled_tools=["read", "bash"],
+        )
+        filtered = await filter_capability_pool(base, context={})
+    finally:
+        HookPipeline.unregister("test-capability-filter-remove")
+        HookPipeline.unregister("test-capability-filter-restore")
+
+    assert filtered.tools == ("read",)
+
+
+@pytest.mark.asyncio
+async def test_capability_stage_records_safe_candidates_in_handler_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookBase, HookPipeline
+
+    class _FirstHook(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            ctx.output["capability_pool"] = {"tools": ["read"], "secret": "omit"}
+
+    class _SecondHook(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            ctx.output["capability_pool"] = {"tools": ["read", "bash"]}
+
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("test-capability-filter-first", _FirstHook(), order=1)
+    HookPipeline.register("test-capability-filter-second", _SecondHook(), order=2)
+    try:
+        hook_context = await HookPipeline.run_capability_filter({})
+    finally:
+        HookPipeline.unregister("test-capability-filter-first")
+        HookPipeline.unregister("test-capability-filter-second")
+
+    assert hook_context.output["capability_filters"] == [
+        {"tools": ["read"]},
+        {"tools": ["read", "bash"]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capability_filter_accepts_mapping_hook_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MappingProxyType
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookBase, HookPipeline
+    from flocks.security.capability_pool import filter_capability_pool
+
+    class _MappingHook(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            ctx.output["capability_pool"] = MappingProxyType({"tools": ["read"]})
+
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("test-capability-filter-mapping", _MappingHook())
+    try:
+        base = resolve_capability_pool(
+            declared_tools=["read", "bash"],
+            enabled_tools=["read", "bash"],
+        )
+        filtered = await filter_capability_pool(base, context={})
+    finally:
+        HookPipeline.unregister("test-capability-filter-mapping")
+
+    assert filtered.tools == ("read",)

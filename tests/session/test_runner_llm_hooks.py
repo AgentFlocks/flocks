@@ -11,6 +11,7 @@ import pytest
 import flocks.session.runner as runner_mod
 from flocks.hooks.pipeline import HookBase, HookPipeline, normalize_tool_decision
 from flocks.provider.provider import ChatMessage
+from flocks.session.callable_schema import CallableSchemaResult
 from flocks.session.runner import SessionRunner
 from flocks.session.session import SessionInfo
 
@@ -46,6 +47,32 @@ def test_runner_construction_deep_copies_security_context() -> None:
     security_context["subject"]["id"] = "changed-after-construction"
 
     assert runner._security_context == {"subject": {"id": "user-1"}}
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_copied_trusted_context_to_callable_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = SessionRunner(
+        session=_make_session("ses_runner_capability_context"),
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        security_context={"subject": {"subject_id": "user-1"}, "entry": "api"},
+    )
+    schema_resolver = AsyncMock(return_value=CallableSchemaResult(tool_infos=[], metadata={}))
+    monkeypatch.setattr(runner_mod, "list_session_callable_tool_infos", schema_resolver)
+    agent = SimpleNamespace(name="rex", tools=["read"])
+
+    await runner._list_callable_tool_infos_for_turn(agent, messages=[])
+
+    capability_context = schema_resolver.await_args.kwargs["capability_context"]
+    assert capability_context == {
+        "subject": {"subject_id": "user-1"},
+        "entry": "api",
+        "agent": "rex",
+    }
+    capability_context["subject"]["subject_id"] = "mutated"
+    assert runner._security_context["subject"]["subject_id"] == "user-1"
 
 
 class _FakeProcessor:

@@ -125,8 +125,7 @@ def _hook_input(pool: CapabilityPool, context: Optional[Mapping[str, Any]]) -> d
     }
 
 
-def _requested_pool(output: Mapping[str, Any], context: Optional[Mapping[str, Any]]) -> Optional[CapabilityPool]:
-    requested = output.get("capability_pool")
+def _requested_pool(requested: Any, context: Optional[Mapping[str, Any]]) -> Optional[CapabilityPool]:
     if not isinstance(requested, Mapping):
         return None
     tools = requested.get("tools")
@@ -135,21 +134,42 @@ def _requested_pool(output: Mapping[str, Any], context: Optional[Mapping[str, An
     return CapabilityPool.from_tools(tools, context=context)
 
 
+def _requested_pools(output: Mapping[str, Any], context: Optional[Mapping[str, Any]]) -> list[CapabilityPool]:
+    candidates = output.get("capability_filters")
+    if isinstance(candidates, list):
+        return [
+            pool
+            for candidate in candidates
+            if (pool := _requested_pool(candidate, context)) is not None
+        ]
+
+    requested_pool = _requested_pool(output.get("capability_pool"), context)
+    return [requested_pool] if requested_pool is not None else []
+
+
 async def filter_capability_pool(
     pool: CapabilityPool,
     *,
     context: Optional[Mapping[str, Any]],
 ) -> CapabilityPool:
     """Apply an optional capability hook without allowing capability expansion."""
-    if not HookPipeline.has_registered_stage_handlers(HookStage.CAPABILITY_FILTER):
+    hook_input = _hook_input(pool, context)
+    try:
+        has_handlers = await HookPipeline.has_stage_handlers(
+            HookStage.CAPABILITY_FILTER,
+            hook_input,
+        )
+    except Exception:
+        return pool
+    if not has_handlers:
         return pool
 
     try:
-        hook_context = await HookPipeline.run_capability_filter(_hook_input(pool, context))
+        hook_context = await HookPipeline.run_capability_filter(hook_input)
     except Exception:
         return pool
 
-    requested_pool = _requested_pool(hook_context.output, context)
-    if requested_pool is None:
-        return pool
-    return pool.intersect(requested_pool, source=HookStage.CAPABILITY_FILTER)
+    filtered_pool = pool
+    for requested_pool in _requested_pools(hook_context.output, context):
+        filtered_pool = filtered_pool.intersect(requested_pool, source=HookStage.CAPABILITY_FILTER)
+    return filtered_pool

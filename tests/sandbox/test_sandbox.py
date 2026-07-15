@@ -415,6 +415,20 @@ class TestToolPolicy:
         assert not is_tool_allowed(policy, "sessions_get")
         assert not is_tool_allowed(policy, "bash")
 
+    def test_glob_allow_intersection_survives_policy_round_trip(self):
+        """allow_layers 不能在持久化后丢失，否则会扩大工具权限."""
+        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
+        from flocks.sandbox.types import SandboxToolPolicy
+
+        policy = resolve_tool_policy(
+            global_allow=["session*"],
+            agent_allow=["*list"],
+        )
+        restored = SandboxToolPolicy.model_validate(policy.model_dump())
+
+        assert is_tool_allowed(restored, "sessions_list")
+        assert not is_tool_allowed(restored, "sessions_get")
+
 
 # ==================== 5. Docker 参数构建测试 ====================
 

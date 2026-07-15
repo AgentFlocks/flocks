@@ -17,7 +17,7 @@ import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Callable, Awaitable, Literal
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Literal, Mapping
 
 from flocks.extensions import FailPolicy, normalize_fail_policy, normalize_timeout
 from flocks.utils.log import Log
@@ -491,6 +491,29 @@ class HookPipeline:
         """Check already-registered hooks without loading plugins on an OSS path."""
         return any(cls._resolve_handler(entry.hook, stage) is not None for entry in cls._hooks)
 
+    @staticmethod
+    def _safe_capability_filter_candidate(value: Any) -> Optional[Dict[str, List[str]]]:
+        """Keep hook filter traces limited to normalized capability names."""
+        if not isinstance(value, Mapping):
+            return None
+        tools = value.get("tools")
+        if not isinstance(tools, (list, tuple, set)):
+            return None
+        if isinstance(tools, set):
+            tools = sorted(tool for tool in tools if isinstance(tool, str))
+
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for tool in tools:
+            if not isinstance(tool, str):
+                continue
+            name = tool.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            normalized.append(name)
+        return {"tools": normalized}
+
     @classmethod
     async def _run_stage(
         cls,
@@ -504,6 +527,8 @@ class HookPipeline:
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
         handler_count = 0
         decision_stage = stage in {HookStage.TOOL_BEFORE, HookStage.ACTION_BEFORE}
+        capability_filter_stage = stage == HookStage.CAPABILITY_FILTER
+        capability_filters: List[Dict[str, List[str]]] = []
         decision_expected = bool(ctx.output.get("policy_engine_present"))
         current_decision = normalize_tool_decision(
             ctx.output,
@@ -517,6 +542,8 @@ class HookPipeline:
             decision_before = _MISSING
             decision_snapshot = _MISSING
             policy_was_expected = decision_expected
+            capability_before = _MISSING
+            capability_snapshot = _MISSING
             if decision_stage:
                 decision_before = ctx.output.get("decision", _MISSING)
                 decision_snapshot = (
@@ -524,6 +551,12 @@ class HookPipeline:
                     if isinstance(decision_before, dict)
                     else decision_before
                 )
+            if capability_filter_stage:
+                capability_before = ctx.output.get("capability_pool", _MISSING)
+                try:
+                    capability_snapshot = deepcopy(capability_before)
+                except Exception:
+                    capability_snapshot = capability_before
             try:
                 timeout_seconds = entry.timeout_seconds
                 if timeout_seconds is None:
@@ -558,6 +591,12 @@ class HookPipeline:
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
+            if capability_filter_stage:
+                capability_after = ctx.output.get("capability_pool", _MISSING)
+                if capability_after is not capability_before or capability_after != capability_snapshot:
+                    capability_candidate = cls._safe_capability_filter_candidate(capability_after)
+                    if capability_candidate is not None:
+                        capability_filters.append(capability_candidate)
             if decision_stage:
                 policy_marker_present = bool(ctx.output.get("policy_engine_present"))
                 active_policy_started = not policy_was_expected and policy_marker_present
@@ -568,16 +607,16 @@ class HookPipeline:
                     or decision_after != decision_snapshot
                 )
                 if active_policy_started and not decision_was_produced:
-                    candidate = normalize_tool_decision(
+                    decision_candidate = normalize_tool_decision(
                         None,
                         decision_expected=True,
                     )
                 else:
-                    candidate = normalize_tool_decision(
+                    decision_candidate = normalize_tool_decision(
                         ctx.output,
                         decision_expected=decision_expected,
                     )
-                decision = merge_tool_decisions(current_decision, candidate)
+                decision = merge_tool_decisions(current_decision, decision_candidate)
                 current_decision = decision
                 ctx.output["decision"] = decision.as_dict()
                 if decision_expected:
@@ -589,6 +628,8 @@ class HookPipeline:
                         "action": decision.action,
                     })
                     break
+        if capability_filter_stage:
+            ctx.output["capability_filters"] = capability_filters
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,

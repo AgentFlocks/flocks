@@ -53,7 +53,7 @@ def resolve_tool_policy(
     agent_deny: Optional[List[str]] = None,
 ) -> SandboxToolPolicy:
     """
-    解析工具策略（agent 覆盖 global）。
+    解析 global 与 agent 工具策略交集（agent 不可扩大 global allow）。
 
     对齐 OpenClaw resolveSandboxToolPolicyForAgent。
     当未配置 allow/deny 时，默认全允许。

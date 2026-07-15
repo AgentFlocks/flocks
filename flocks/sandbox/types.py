@@ -123,8 +123,7 @@ class SandboxToolPolicy(BaseModel):
     )
     allow_layers: Optional[List[List[str]]] = Field(
         default=None,
-        exclude=True,
-        description="内部使用的 allow 交集层；不序列化到 sandbox 配置",
+        description="用于保持 global 与 agent allow 交集的内部层",
     )
 
 
