@@ -1,0 +1,11 @@
+{
+  "id": "asset-mapping",
+  "title": "资产测绘大屏",
+  "route": "/contracts/webui/asset-mapping",
+  "icon": "Globe",
+  "order": 100,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}

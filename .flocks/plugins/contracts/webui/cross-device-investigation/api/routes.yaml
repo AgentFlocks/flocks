@@ -1,0 +1,15 @@
+routes:
+  - method: GET
+    path: /dashboard
+    handler: handlers.get_dashboard
+    timeoutMs: 5000
+
+  - method: GET
+    path: /cases
+    handler: handlers.get_cases
+    timeoutMs: 5000
+
+  - method: GET
+    path: /cases/{id}
+    handler: handlers.get_case
+    timeoutMs: 5000
