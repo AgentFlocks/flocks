@@ -112,6 +112,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["flocks"]
+artifacts = [
+    "flocks/channel/builtin/whatsapp/bridge/*.js",
+    "flocks/channel/builtin/whatsapp/bridge/package.json",
+    "flocks/channel/builtin/whatsapp/bridge/package-lock.json",
+]
 
 [tool.ruff]
 line-length = 120

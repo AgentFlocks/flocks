@@ -81,6 +81,7 @@
     "apiKeyOptional": "（可选，无鉴权网关可留空）",
     "apiKeyOptionalHint": "若 Base URL 指向无需鉴权的内网网关或自建服务，可留空，系统会自动使用占位符。",
     "apiKeyOptionalPlaceholder": "可留空（无鉴权网关）",
+    "apiKeyKeepExisting": "留空以保留现有 API Key",
     "hide": "隐藏",
     "show": "查看",
     "availableModels": "可用模型",

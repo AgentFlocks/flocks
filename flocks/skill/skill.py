@@ -6,6 +6,7 @@ access to skill information. Mirrors original Flocks Skill namespace.
 """
 
 import json
+import asyncio
 import os
 import glob
 import re
@@ -204,6 +205,45 @@ class Skill:
     """
 
     _cache: Optional[Dict[str, SkillInfo]] = None
+    _cache_lock = threading.Lock()
+    _cache_generation = 0
+    _cache_loads: Dict[int, threading.Event] = {}
+
+    @classmethod
+    def _all_sync(cls) -> List[SkillInfo]:
+        """Discover skills once per cache generation without stale refills."""
+        while True:
+            with cls._cache_lock:
+                if cls._cache is not None:
+                    return list(cls._cache.values())
+                generation = cls._cache_generation
+                completion = cls._cache_loads.get(generation)
+                should_discover = completion is None
+                if completion is None:
+                    completion = threading.Event()
+                    cls._cache_loads[generation] = completion
+
+            if not should_discover:
+                completion.wait()
+                continue
+
+            try:
+                discovered = cls._discover()
+            except BaseException:
+                with cls._cache_lock:
+                    cls._cache_loads.pop(generation, None)
+                    completion.set()
+                raise
+
+            with cls._cache_lock:
+                if generation == cls._cache_generation and cls._cache is None:
+                    cls._cache = discovered
+                cls._cache_loads.pop(generation, None)
+                completion.set()
+                if generation == cls._cache_generation and cls._cache is not None:
+                    return list(cls._cache.values())
+            # The cache was invalidated while discovery was running. Repeat
+            # against the new generation instead of publishing stale data.
 
     @classmethod
     def _parse_skill_md(cls, filepath: str, source: Optional[str] = None) -> Optional[SkillInfo]:
@@ -460,10 +500,7 @@ class Skill:
         Returns:
             List of all discovered skills
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        return list(cls._cache.values())
+        return await asyncio.to_thread(cls._all_sync)
 
     @classmethod
     async def list_enabled(cls) -> List[SkillInfo]:
@@ -495,10 +532,8 @@ class Skill:
         Returns:
             SkillInfo or None if not found
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        skill = cls._cache.get(name)
+        skills = await cls.all()
+        skill = next((item for item in skills if item.name == name), None)
         if not skill:
             return None
         return skill
@@ -506,7 +541,9 @@ class Skill:
     @classmethod
     def clear_cache(cls) -> None:
         """Clear the skill cache (for testing or forced refresh)"""
-        cls._cache = None
+        with cls._cache_lock:
+            cls._cache = None
+            cls._cache_generation += 1
         log.info("skill.cache.cleared")
 
     @classmethod

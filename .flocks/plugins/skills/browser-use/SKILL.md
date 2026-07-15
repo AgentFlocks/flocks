@@ -79,7 +79,7 @@ flocks browser --doctor
 2. `cdp-headless` 是唯一例外：先读取 `references/cdp-headless.md` 完成浏览器启动与连接，再读取 `references/cdp-direct.md` 执行通用页面操作。
 3. 在 `cdp-headless` 中，如果当前任务自己启动了专用浏览器实例，必须记录 PID / 日志 / 专用 profile，并只在任务结束或明确放弃后清理自己启动的实例；不要关闭用户提供的远程浏览器。
 4. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
-5. `flocks browser` 的 daemon 文件固定放在 `~/.flocks/browser/`,例如 `bu.sock`、`bu.log`、`bu.pid`、`bu.port`。
+5. `flocks browser` 的 daemon 文件默认放在 `~/.flocks/browser/`（设置 `FLOCKS_ROOT` 时改为 `$FLOCKS_ROOT/browser/`）。默认 session 使用 `bu.*`；命名 session 使用 `bu-<BU_NAME>.*`。`.lock` 是启动互斥文件，可能在 daemon 退出后继续存在，不要手工删除 socket、port、PID 或 lock 文件，应使用 `flocks browser --reload`。
 6. 基础操作能力（打开、观察、点击、输入、滚动、截图、提取、等待、关闭）优先按 `references/cdp-direct.md` 的“基础操作速查”执行
 
 ## 产品经验Skill
