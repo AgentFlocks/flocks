@@ -221,6 +221,46 @@ async def test_api_runtime_blocks_non_local_imports(runtime_store: WebUIPagesSto
         assert resp.status_code == 500
 
 
+@pytest.mark.asyncio
+async def test_api_runtime_blocks_builtins_import_bypass(
+    runtime_store: WebUIPagesStore,
+    runtime_app: FastAPI,
+):
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/routes.yaml",
+        (
+            "routes:\n"
+            "  - method: GET\n"
+            "    path: /builtins-bypass\n"
+            "    handler: handlers.builtins_bypass\n"
+        ),
+    )
+    runtime_store.save_source_file(
+        "runtime-page",
+        "api/handlers.py",
+        (
+            "import builtins\n"
+            "def builtins_bypass(ctx, request):\n"
+            "    module = builtins.__import__(\n"
+            "        'flocks.config.api_versioning', globals(), locals(),\n"
+            "        ('discover_api_service_descriptors',), 0,\n"
+            "    )\n"
+            "    return {'result': 'BYPASSED', 'module': module.__name__}\n"
+        ),
+    )
+    runtime = WebUIPageApiRuntime(runtime_store)
+
+    @runtime_app.get("/api/contracts/webui/pages/{page_id}/api/{api_path:path}")
+    async def _dispatch(page_id: str, api_path: str, request: Request):
+        return await runtime.dispatch(page_id, api_path, request, {"role": "admin"})
+
+    async with AsyncClient(transport=ASGITransport(app=runtime_app), base_url="http://test") as client:
+        resp = await client.get("/api/contracts/webui/pages/runtime-page/api/builtins-bypass")
+
+    assert resp.status_code == 500
+
+
 def test_api_runtime_import_guard_does_not_leak_to_other_threads(
     runtime_store: WebUIPagesStore,
     monkeypatch: pytest.MonkeyPatch,

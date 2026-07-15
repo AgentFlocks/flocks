@@ -211,8 +211,15 @@ def test_soc_db_keeps_one_dedup_key_across_runs_and_preserves_first_event(tmp_pa
 def test_soc_db_schema_migrates_legacy_rows_and_removes_duplicate_keys(tmp_path: Path) -> None:
     ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
     db_path = tmp_path / "legacy-soc.db"
-    first_record = json.dumps({"dedup_key": "legacy-key", "marker": "first"})
-    repeated_record = json.dumps({"dedup_key": "legacy-key", "marker": "repeated"})
+    follower_record = json.dumps(
+        {"dedup_key": "legacy-key", "is_duplicate": True, "marker": "follower"}
+    )
+    first_seen_record = json.dumps(
+        {"dedup_key": "legacy-key", "is_duplicate": False, "marker": "first-seen"}
+    )
+    orphan_duplicate_record = json.dumps(
+        {"dedup_key": "orphan-key", "is_duplicate": True, "marker": "orphan-duplicate"}
+    )
 
     with sqlite3.connect(db_path) as connection:
         connection.execute(
@@ -236,11 +243,18 @@ def test_soc_db_schema_migrates_legacy_rows_and_removes_duplicate_keys(tmp_path:
             INSERT INTO alert_records (
                 row_id, record_id, asset_date, source_file, line_number,
                 event_time, source_type, threat_name, is_duplicate, record_json
-            ) VALUES (?, '', '2026-07-14', ?, 1, ?, '', '', 0, ?)
+            ) VALUES (?, '', '2026-07-14', ?, 1, ?, '', '', ?, ?)
             """,
             [
-                ("first-row", "/source/first.jsonl", 100, first_record),
-                ("repeated-row", "/source/repeated.jsonl", 200, repeated_record),
+                ("follower-row", "/source/follower.jsonl", 100, 1, follower_record),
+                ("first-seen-row", "/source/first-seen.jsonl", 200, 0, first_seen_record),
+                (
+                    "orphan-duplicate-row",
+                    "/source/orphan-duplicate.jsonl",
+                    300,
+                    1,
+                    orphan_duplicate_record,
+                ),
             ],
         )
 
@@ -248,12 +262,75 @@ def test_soc_db_schema_migrates_legacy_rows_and_removes_duplicate_keys(tmp_path:
         connection.commit()
 
         rows = connection.execute(
-            "SELECT row_id, dedup_key, json_extract(record_json, '$.marker') "
+            "SELECT row_id, dedup_key, is_duplicate, json_extract(record_json, '$.marker') "
             "FROM alert_records"
         ).fetchall()
         indexes = {item[1] for item in connection.execute("PRAGMA index_list(alert_records)")}
 
-    assert rows == [("first-row", "legacy-key", "first")]
+    assert rows == [("first-seen-row", "legacy-key", 0, "first-seen")]
+    assert "idx_alert_records_first_seen_dedup_key" in indexes
+
+
+def test_soc_db_schema_removes_duplicate_survivors_from_prior_migration(tmp_path: Path) -> None:
+    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
+    db_path = tmp_path / "previously-migrated-soc.db"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_records (
+                row_id TEXT PRIMARY KEY,
+                record_id TEXT,
+                asset_date TEXT NOT NULL,
+                source_file TEXT NOT NULL,
+                line_number INTEGER NOT NULL,
+                event_time INTEGER,
+                source_type TEXT,
+                threat_name TEXT,
+                dedup_key TEXT,
+                is_duplicate INTEGER NOT NULL DEFAULT 0,
+                record_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO alert_records (
+                row_id, record_id, asset_date, source_file, line_number,
+                event_time, source_type, threat_name, dedup_key,
+                is_duplicate, record_json
+            ) VALUES (?, '', '2026-07-14', ?, 1, ?, '', '', ?, 1, ?)
+            """,
+            [
+                (
+                    "follower-survivor",
+                    "/source/follower.jsonl",
+                    100,
+                    "legacy-key",
+                    json.dumps({"dedup_key": "legacy-key", "is_duplicate": True}),
+                ),
+                (
+                    "orphan-survivor",
+                    "/source/orphan.jsonl",
+                    200,
+                    "orphan-key",
+                    json.dumps({"dedup_key": "orphan-key", "is_duplicate": True}),
+                ),
+            ],
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_alert_records_first_seen_dedup_key "
+            "ON alert_records(dedup_key) "
+            "WHERE dedup_key IS NOT NULL AND dedup_key <> ''"
+        )
+
+        ensure_schema(connection)
+        connection.commit()
+
+        rows = connection.execute("SELECT row_id FROM alert_records").fetchall()
+        indexes = {item[1] for item in connection.execute("PRAGMA index_list(alert_records)")}
+
+    assert rows == []
     assert "idx_alert_records_first_seen_dedup_key" in indexes
 
 
