@@ -28,7 +28,7 @@ from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.utils.monitor import get_monitor
-from flocks.server.auth import require_user
+from flocks.server.auth import API_TOKEN_SERVICE_USER_ID, require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
@@ -37,6 +37,10 @@ log = Log.create(service="session-routes")
 DEFAULT_AGENT = "rex"
 DEFAULT_MESSAGE_PAGE_LIMIT = 50
 _DESCENDANT_ABORT_SCAN_LIMIT = 3
+_CONTEXT_USAGE_CACHE_TTL_SECONDS = 5.0
+_context_usage_cache: Dict[Tuple[str, int], Tuple[float, ContextUsageSnapshot]] = {}
+_context_usage_inflight: Dict[Tuple[str, int], asyncio.Task[ContextUsageSnapshot]] = {}
+_context_usage_cache_lock = asyncio.Lock()
 
 # File extensions that are safe to persist when materialising data-URL uploads.
 # Intentionally narrow: any extension outside this set is rejected to prevent
@@ -44,6 +48,59 @@ _DESCENDANT_ABORT_SCAN_LIMIT = 3
 # extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
+
+
+def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[str, int]:
+    return session_id, int(getattr(session.time, "updated", 0) or 0)
+
+
+async def _build_context_usage_for_cache(
+    key: Tuple[str, int],
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    current_task = asyncio.current_task()
+    try:
+        snapshot = await build_context_usage_snapshot(session_id, session=session)
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is not current_task:
+                return snapshot
+            for cache_key in [item for item in _context_usage_cache if item[0] == session_id and item[1] < key[1]]:
+                _context_usage_cache.pop(cache_key, None)
+            has_newer_cache = any(item[0] == session_id and item[1] > key[1] for item in _context_usage_cache)
+            if not has_newer_cache:
+                _context_usage_cache[key] = (
+                    time.monotonic() + _CONTEXT_USAGE_CACHE_TTL_SECONDS,
+                    snapshot.model_copy(deep=True),
+                )
+        return snapshot
+    finally:
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is current_task:
+                _context_usage_inflight.pop(key, None)
+
+
+async def _cached_context_usage_snapshot(
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    key = _context_usage_cache_key(session_id, session)
+    now = time.monotonic()
+
+    async with _context_usage_cache_lock:
+        cached = _context_usage_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
+        task = _context_usage_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(_build_context_usage_for_cache(key, session_id, session=session))
+            _context_usage_inflight[key] = task
+
+    snapshot = await asyncio.shield(task)
+    return snapshot.model_copy(deep=True)
 
 # =============================================================================
 # Request/Response Models - API Compatible (camelCase)
@@ -527,6 +584,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             )
             for p in request.permission
         ]
+
+    is_api_token_client = current_user.id == API_TOKEN_SERVICE_USER_ID
     
     session = await Session.create(
         project_id=project_id,
@@ -534,7 +593,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         title=request.title,
         parent_id=request.parentID,
         permission=permission,
-        owner_user_id=current_user.id,
+        owner_user_id=None if is_api_token_client else current_user.id,
+        owner_username=None if is_api_token_client else current_user.username,
         **({"category": request.category} if request.category else {}),
     )
 
@@ -549,7 +609,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 "user_name": current_user.username,
                 "username": current_user.username,
                 "session_id": session.id,
-                "owner_user_id": current_user.id,
+                "owner_user_id": session.owner_user_id,
                 "project_id": session.project_id,
             },
         )
@@ -597,7 +657,7 @@ async def get_session_context_usage(sessionID: str, request: Request) -> Context
             detail=f"Session {sessionID} not found",
         )
     _require_session_read_access(session, current_user)
-    snapshot = await build_context_usage_snapshot(sessionID, session=session)
+    snapshot = await _cached_context_usage_snapshot(sessionID, session=session)
     log_route_timing(log, "session.context_usage.complete", started_at=started_at, extra={
         "sessionID": sessionID,
         "source": snapshot.source,

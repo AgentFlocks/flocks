@@ -128,12 +128,15 @@ def _normalize_schedule_task_create_inputs(
         "'一次', '这次', specific date like '明天下午3点', '下周五晚上', '2024-01-15 18:00'\n"
         "Queue-only (use type=queued, no schedule): "
         "'等会', '稍后', '待会', '有空时', '不着急'\n\n"
-        "IMPORTANT — IM session resolution before creating:\n"
-        "If the task involves sending a message to an IM platform "
-        "(企业微信/WeCom、微信/Weixin/WeChat、飞书/Feishu、钉钉/DingTalk), "
+        "IMPORTANT — Messaging channel session resolution before creating:\n"
+        "If the task involves sending a message to a connected messaging channel "
+        "(企业微信/WeCom、微信/Weixin/WeChat、飞书/Feishu、钉钉/DingTalk、"
+        "Telegram、WhatsApp、邮件/Email), "
         "you MUST resolve the target session_id and channel_type with im_send_message(resolve_only=true) "
         "BEFORE calling this tool. "
-        "Use channel_type=wecom for 企业微信 and channel_type=weixin for 微信. "
+        "Use channel_type=wecom for 企业微信, channel_type=weixin for 微信, "
+        "channel_type=telegram for Telegram, channel_type=whatsapp for WhatsApp, "
+        "and channel_type=email for 邮件. "
         "Embed both into description and user_prompt. "
         "If the user cannot provide a session_id, do NOT create the task."
     ),
@@ -150,9 +153,12 @@ def _normalize_schedule_task_create_inputs(
             type=ParameterType.STRING,
             description=(
                 "Detailed task description. "
-                "If the task involves sending a message to an IM platform (WeCom/Weixin/Feishu/DingTalk), "
+                "If the task involves sending a message to a connected messaging channel "
+                "(WeCom/Weixin/Feishu/DingTalk/Telegram/WhatsApp/Email), "
                 "MUST include the resolved channel_type and session_id here. "
-                "Use channel_type=wecom for 企业微信 and channel_type=weixin for 微信. "
+                "Use channel_type=wecom for 企业微信, channel_type=weixin for 微信, "
+                "channel_type=telegram for Telegram, channel_type=whatsapp for WhatsApp, "
+                "and channel_type=email for 邮件. "
                 "Example: '每天早上8点向飞书群发送日报 channel_type=feishu session_id=ses_abc123'"
             ),
             required=True,
