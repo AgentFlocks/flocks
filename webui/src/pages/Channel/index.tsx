@@ -129,6 +129,125 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
+interface EmailChannelConfig {
+  enabled: boolean;
+  address?: string;
+  password?: string;
+  imapHost?: string;
+  imapPort?: number;
+  imapSecurity?: 'ssl' | 'starttls' | 'insecure';
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSecurity?: 'ssl' | 'starttls' | 'insecure';
+  allowInsecureConnections?: boolean;
+  pollIntervalSeconds?: number;
+  allowFrom?: string[];
+  allowAll?: boolean;
+  skipExistingOnStart?: boolean;
+  skipAttachments?: boolean;
+  requireAuthenticatedSender?: boolean;
+  authservId?: string;
+  defaultSubject?: string;
+  defaultAgent?: string;
+}
+
+const EMAIL_HOST_PRESETS = [
+  {
+    id: 'gmail',
+    label: 'Gmail',
+    domains: ['gmail.com', 'googlemail.com'],
+    imapHost: 'imap.gmail.com',
+    smtpHost: 'smtp.gmail.com',
+  },
+  {
+    id: 'outlook',
+    label: 'Outlook / Microsoft 365',
+    domains: ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'],
+    imapHost: 'outlook.office365.com',
+    smtpHost: 'smtp.office365.com',
+  },
+  { id: 'qq', label: 'QQ Mail', domains: ['qq.com'], imapHost: 'imap.qq.com', smtpHost: 'smtp.qq.com' },
+  {
+    id: 'netease-163',
+    label: 'NetEase 163',
+    domains: ['163.com'],
+    imapHost: 'imap.163.com',
+    smtpHost: 'smtp.163.com',
+  },
+  {
+    id: 'netease-126',
+    label: 'NetEase 126',
+    domains: ['126.com'],
+    imapHost: 'imap.126.com',
+    smtpHost: 'smtp.126.com',
+  },
+  {
+    id: 'tencent-exmail',
+    label: 'Tencent Exmail',
+    domains: ['exmail.qq.com'],
+    imapHost: 'imap.exmail.qq.com',
+    smtpHost: 'smtp.exmail.qq.com',
+  },
+  {
+    id: 'aliyun',
+    label: 'Alibaba Mail',
+    domains: ['aliyun.com'],
+    imapHost: 'imap.aliyun.com',
+    smtpHost: 'smtp.aliyun.com',
+  },
+  {
+    id: 'yahoo',
+    label: 'Yahoo Mail',
+    domains: ['yahoo.com', 'ymail.com'],
+    imapHost: 'imap.mail.yahoo.com',
+    smtpHost: 'smtp.mail.yahoo.com',
+  },
+];
+
+const EMAIL_IMAP_HOST_OPTIONS = EMAIL_HOST_PRESETS.map((entry) => ({
+  value: entry.imapHost,
+  label: entry.label,
+}));
+
+const EMAIL_SMTP_HOST_OPTIONS = EMAIL_HOST_PRESETS.map((entry) => ({
+  value: entry.smtpHost,
+  label: entry.label,
+}));
+
+function normalizeEmailHost(raw: string | undefined): string {
+  return (raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .split('/')[0]
+    .split(':')[0];
+}
+
+function getEmailDomain(raw: string | undefined): string {
+  const normalized = (raw ?? '').trim().toLowerCase();
+  const atIndex = normalized.lastIndexOf('@');
+  if (atIndex < 0) return '';
+  return normalized.slice(atIndex + 1);
+}
+
+function getEmailHostPreset(address: string | undefined) {
+  const domain = getEmailDomain(address);
+  if (!domain) return undefined;
+  return EMAIL_HOST_PRESETS.find((entry) => entry.domains.includes(domain));
+}
+
+function isEmailHostMismatch(
+  address: string | undefined,
+  host: string | undefined,
+  protocol: 'imap' | 'smtp'
+): boolean {
+  const preset = getEmailHostPreset(address);
+  const normalizedHost = normalizeEmailHost(host);
+  if (!preset || !normalizedHost) return false;
+  const expectedHost = protocol === 'imap' ? preset.imapHost : preset.smtpHost;
+  return normalizedHost !== expectedHost;
+}
+
 interface WeixinChannelConfig {
   enabled: boolean;
   token?: string;
@@ -144,7 +263,33 @@ interface WeixinChannelConfig {
   dataDir?: string;
 }
 
-type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | WeixinChannelConfig;
+interface WhatsAppChannelConfig {
+  enabled: boolean;
+  mode?: 'bot' | 'self-chat';
+  sessionPath?: string;
+  bridgePort?: number;
+  defaultAgent?: string;
+  dmPolicy?: string;
+  allowFrom?: string[];
+  groupPolicy?: string;
+  groupAllowFrom?: string[];
+  groupTrigger?: string;
+  replyPrefix?: string;
+  textBatchDelaySeconds?: number;
+  sendChunkDelayMs?: number;
+  sendTimeoutMs?: number;
+  mediaCacheDir?: string;
+  _paired?: boolean;
+}
+
+type ChannelConfig =
+  | FeishuChannelConfig
+  | WeComChannelConfig
+  | DingTalkChannelConfig
+  | TelegramChannelConfig
+  | EmailChannelConfig
+  | WeixinChannelConfig
+  | WhatsAppChannelConfig;
 
 function defaultFeishuConfig(): FeishuChannelConfig {
   return {
@@ -191,12 +336,45 @@ function defaultTelegramConfig(): TelegramChannelConfig {
   };
 }
 
+function defaultEmailConfig(): EmailChannelConfig {
+  return {
+    enabled: false,
+    imapPort: 993,
+    imapSecurity: 'ssl',
+    smtpPort: 587,
+    smtpSecurity: 'starttls',
+    allowInsecureConnections: false,
+    pollIntervalSeconds: 15,
+    allowFrom: [],
+    allowAll: false,
+    skipExistingOnStart: true,
+    skipAttachments: true,
+    requireAuthenticatedSender: true,
+    defaultSubject: 'Flocks Agent',
+  };
+}
+
 function defaultWeixinConfig(): WeixinChannelConfig {
   return {
     enabled: false,
     dmPolicy: 'open',
     groupPolicy: 'all',
     sendChunkDelay: 1.5,
+  };
+}
+
+function defaultWhatsAppConfig(): WhatsAppChannelConfig {
+  return {
+    enabled: false,
+    mode: 'bot',
+    dmPolicy: 'allowlist',
+    allowFrom: [],
+    groupPolicy: 'disabled',
+    groupTrigger: 'mention',
+    bridgePort: 3100,
+    textBatchDelaySeconds: 3,
+    sendChunkDelayMs: 300,
+    sendTimeoutMs: 60000,
   };
 }
 
@@ -249,6 +427,117 @@ function TextInput({
       disabled={disabled}
       className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-50 disabled:text-gray-400"
     />
+  );
+}
+
+interface HostInputOption {
+  value: string;
+  label: string;
+}
+
+function HostInput({
+  value,
+  onChange,
+  placeholder,
+  options,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  options: HostInputOption[];
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filterValue, setFilterValue] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const normalizedFilter = filterValue.trim().toLowerCase();
+  const visibleOptions = options.filter((option) => {
+    if (!normalizedFilter) return true;
+    return (
+      option.value.toLowerCase().includes(normalizedFilter) ||
+      option.label.toLowerCase().includes(normalizedFilter)
+    );
+  });
+
+  const openAllOptions = () => {
+    if (disabled) return;
+    setFilterValue('');
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const closeOnDocumentClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!target || !containerRef.current?.contains(target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeOnDocumentClick);
+    return () => document.removeEventListener('mousedown', closeOnDocumentClick);
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative">
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(event) => {
+            onChange(event.target.value);
+            setFilterValue(event.target.value);
+            setOpen(true);
+          }}
+          onFocus={openAllOptions}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-50 disabled:text-gray-400"
+        />
+        <button
+          type="button"
+          aria-label="Open host suggestions"
+          disabled={disabled}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            openAllOptions();
+            inputRef.current?.focus();
+          }}
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-gray-400 hover:text-gray-600 disabled:cursor-not-allowed disabled:text-gray-300"
+        >
+          <ChevronDown className="w-4 h-4" />
+        </button>
+      </div>
+
+      {open && !disabled && (
+        <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-[220px] overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
+          {visibleOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-red-50 ${
+                option.value === value ? 'bg-red-50 text-red-700' : 'text-gray-700'
+              }`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onChange(option.value);
+                setFilterValue('');
+                setOpen(false);
+                inputRef.current?.focus();
+              }}
+            >
+              <span className="block font-medium leading-5">{option.value}</span>
+              <span className="block text-xs leading-4 text-gray-400">{option.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -455,7 +744,9 @@ const CHANNEL_ICON_SRC: Record<string, string> = {
   wecom: '/channel-wecom.png',
   dingtalk: '/channel-dingtalk.png',
   telegram: '/channel-telegram.png',
+  email: '/channel-email.png',
   weixin: '/channel-weixin.png',
+  whatsapp: '/channel-whatsapp.png',
 };
 
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
@@ -644,6 +935,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           {channelId === 'dingtalk' && 'Stream'}
           {channelId === 'weixin' && 'Long-Poll'}
           {channelId === 'telegram' && ((config as TelegramChannelConfig).mode === 'webhook' ? 'Webhook' : 'Polling')}
+          {channelId === 'email' && 'IMAP Polling'}
         </span>
       </div>
 
@@ -1397,6 +1689,549 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// Email Config Panel
+// ============================================================================
+
+interface EmailPanelProps {
+  config: EmailChannelConfig;
+  onChange: (c: EmailChannelConfig) => void;
+}
+
+function EmailPanel({ config, onChange }: EmailPanelProps) {
+  const { t } = useTranslation('channel');
+  const set = useCallback(
+    <K extends keyof EmailChannelConfig>(key: K, value: EmailChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+  const emailHostPreset = getEmailHostPreset(config.address);
+  const showImapHostWarning = isEmailHostMismatch(config.address, config.imapHost, 'imap');
+  const showSmtpHostWarning = isEmailHostMismatch(config.address, config.smtpHost, 'smtp');
+
+  return (
+    <>
+      <Section title={t('email.credentials')} description={t('email.credentialsDesc')}>
+        <FieldRow label={t('email.address')} required hint={t('email.addressHint')}>
+          <TextInput
+            value={config.address ?? ''}
+            onChange={(v) => set('address', v || undefined)}
+            placeholder="agent@example.com"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
+          <SecretInput
+            value={config.password ?? ''}
+            onChange={(v) => set('password', v || undefined)}
+            placeholder="app password"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.servers')} description={t('email.serversDesc')}>
+        <FieldRow label={t('email.imapHost')} required hint={t('email.imapHostHint')}>
+          <HostInput
+            value={config.imapHost ?? ''}
+            onChange={(v) => set('imapHost', v || undefined)}
+            placeholder="imap.gmail.com"
+            options={EMAIL_IMAP_HOST_OPTIONS}
+          />
+          {showImapHostWarning && emailHostPreset && (
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
+              {t('email.imapHostMismatchWarning', { expectedHost: emailHostPreset.imapHost })}
+            </p>
+          )}
+        </FieldRow>
+        <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
+          <Select
+            value={config.imapSecurity ?? 'ssl'}
+            onChange={(v) => set('imapSecurity', v as EmailChannelConfig['imapSecurity'])}
+            options={[
+              { value: 'ssl', label: t('email.securitySsl') },
+              { value: 'starttls', label: t('email.securityStarttls') },
+              { value: 'insecure', label: t('email.securityInsecure') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.imapPort')} hint={t('email.imapPortHint')}>
+          <NumberInput
+            value={config.imapPort ?? 993}
+            onChange={(v) => set('imapPort', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.smtpHost')} required hint={t('email.smtpHostHint')}>
+          <HostInput
+            value={config.smtpHost ?? ''}
+            onChange={(v) => set('smtpHost', v || undefined)}
+            placeholder="smtp.gmail.com"
+            options={EMAIL_SMTP_HOST_OPTIONS}
+          />
+          {showSmtpHostWarning && emailHostPreset && (
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
+              {t('email.smtpHostMismatchWarning', { expectedHost: emailHostPreset.smtpHost })}
+            </p>
+          )}
+        </FieldRow>
+        <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>
+          <Select
+            value={config.smtpSecurity ?? 'starttls'}
+            onChange={(v) => set('smtpSecurity', v as EmailChannelConfig['smtpSecurity'])}
+            options={[
+              { value: 'ssl', label: t('email.securitySsl') },
+              { value: 'starttls', label: t('email.securityStarttls') },
+              { value: 'insecure', label: t('email.securityInsecure') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.smtpPort')} hint={t('email.smtpPortHint')}>
+          <NumberInput
+            value={config.smtpPort ?? 587}
+            onChange={(v) => set('smtpPort', v)}
+            min={1}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.accessControl')} description={t('email.accessControlDesc')} defaultOpen={false}>
+        <FieldRow label={t('email.allowAll')} hint={t('email.allowAllHint')}>
+          <Toggle
+            checked={config.allowAll ?? false}
+            onChange={(v) => set('allowAll', v)}
+            label={t('email.allowAllLabel')}
+          />
+        </FieldRow>
+        {!(config.allowAll ?? false) && (
+          <FieldRow label={t('email.allowFrom')} required hint={t('email.allowFromHint')}>
+            <TagsInput
+              value={config.allowFrom ?? []}
+              onChange={(v) => set('allowFrom', v)}
+              placeholder={t('email.allowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('email.requireAuthenticatedSender')} hint={t('email.requireAuthenticatedSenderHint')}>
+          <Toggle
+            checked={config.requireAuthenticatedSender ?? true}
+            onChange={(v) => set('requireAuthenticatedSender', v)}
+            label={t('email.requireAuthenticatedSenderLabel')}
+          />
+        </FieldRow>
+        {config.requireAuthenticatedSender && (
+          <FieldRow
+            label={t('email.authservId')}
+            required={(config.requireAuthenticatedSender ?? true) && !(config.allowAll ?? false)}
+            hint={t('email.authservIdHint')}
+          >
+            <TextInput
+              value={config.authservId ?? ''}
+              onChange={(v) => set('authservId', v || undefined)}
+              placeholder={t('email.optional')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('email.allowInsecureConnections')} hint={t('email.allowInsecureConnectionsHint')}>
+          <Toggle
+            checked={config.allowInsecureConnections ?? false}
+            onChange={(v) => set('allowInsecureConnections', v)}
+            label={t('email.allowInsecureConnectionsLabel')}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.behavior')} description={t('email.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('email.defaultAgent')} hint={t('email.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('email.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.defaultSubject')} hint={t('email.defaultSubjectHint')}>
+          <TextInput
+            value={config.defaultSubject ?? ''}
+            onChange={(v) => set('defaultSubject', v || undefined)}
+            placeholder="Flocks Agent"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('email.advanced')} description={t('email.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('email.pollIntervalSeconds')} hint={t('email.pollIntervalSecondsHint')}>
+          <NumberInput
+            value={config.pollIntervalSeconds ?? 15}
+            onChange={(v) => set('pollIntervalSeconds', v)}
+            min={5}
+          />
+        </FieldRow>
+        <FieldRow label={t('email.skipExistingOnStart')} hint={t('email.skipExistingOnStartHint')}>
+          <Toggle
+            checked={config.skipExistingOnStart ?? true}
+            onChange={(v) => set('skipExistingOnStart', v)}
+            label={t('email.skipExistingOnStartLabel')}
+          />
+        </FieldRow>
+          <FieldRow label={t('email.skipAttachments')} hint={t('email.skipAttachmentsHint')}>
+          <Toggle
+            checked={config.skipAttachments ?? true}
+            onChange={(v) => set('skipAttachments', v)}
+            label={t('email.skipAttachmentsLabel')}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
+
+// WhatsApp Config Panel
+// ============================================================================
+
+interface WhatsAppPanelProps {
+  config: WhatsAppChannelConfig;
+  onChange: (c: WhatsAppChannelConfig) => void;
+  onPairSuccess?: (data: { sessionPath: string }) => Promise<void> | void;
+}
+
+type WhatsAppQrPhase =
+  | 'idle'
+  | 'loading'
+  | 'scanning'
+  | 'connected'
+  | 'complete'
+  | 'error';
+
+function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) {
+  const { t } = useTranslation('channel');
+  const toast = useToast();
+  const set = useCallback(
+    <K extends keyof WhatsAppChannelConfig>(key: K, value: WhatsAppChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  const [qrPhase, setQrPhase] = useState<WhatsAppQrPhase>('idle');
+  const [qrValue, setQrValue] = useState('');
+  const [qrError, setQrError] = useState('');
+  const [pairingId, setPairingId] = useState('');
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const completedRef = useRef(false);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  useEffect(() => () => stopPolling(), []);
+
+  const closeQrModal = async () => {
+    stopPolling();
+    if (pairingId && !['complete', 'connected'].includes(qrPhase)) {
+      client.post(`/api/channel/whatsapp/pair/${pairingId}/cancel`, {}, { timeout: 5000 }).catch(() => {});
+    }
+    setQrPhase('idle');
+    setQrValue('');
+    setQrError('');
+    setPairingId('');
+  };
+
+  const finishPairing = async (sessionPath: string) => {
+    if (completedRef.current) return;
+    completedRef.current = true;
+    stopPolling();
+    setQrPhase('complete');
+    const newConfig = { ...config, sessionPath, enabled: true, _paired: true };
+    onChange(newConfig);
+    if (onPairSuccess) {
+      await onPairSuccess({ sessionPath });
+    }
+    toast.success(t('whatsapp.qrSuccess'));
+  };
+
+  const startPairing = async (replaceExisting = false) => {
+    stopPolling();
+    completedRef.current = false;
+    setQrError('');
+    setQrValue('');
+    setQrPhase('loading');
+    try {
+      const pairingSessionPath =
+        replaceExisting && config.sessionPath
+          ? `${config.sessionPath}.relink.${Date.now()}`
+          : (config.sessionPath || null);
+      const res = await client.post('/api/channel/whatsapp/pair/start', {
+        sessionPath: pairingSessionPath,
+        resetSession: false,
+      });
+      const id = String(res.data?.pairing_id ?? '');
+      setPairingId(id);
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await client.get(`/api/channel/whatsapp/pair/${id}/status`);
+          const status = String(statusRes.data?.status ?? '');
+          const qr = String(statusRes.data?.qr ?? '');
+          if (qr) {
+            setQrValue(qr);
+            setQrPhase('scanning');
+          }
+          if (status === 'connected') {
+            setQrPhase('connected');
+          }
+          if (status === 'complete') {
+            await finishPairing(String(statusRes.data?.session_path ?? config.sessionPath ?? ''));
+          }
+          if (status === 'error') {
+            stopPolling();
+            setQrError(String(statusRes.data?.error ?? t('whatsapp.qrError')));
+            setQrPhase('error');
+          }
+        } catch {
+          // Pairing may still be starting; keep polling until the bridge reports a terminal state.
+        }
+      }, 1500);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      setQrError(detail);
+      setQrPhase('error');
+    }
+  };
+
+  const showModal = qrPhase !== 'idle';
+  const isPaired = Boolean(config._paired);
+  const allowFromEnabled = (config.dmPolicy ?? 'allowlist') === 'allowlist';
+
+  return (
+    <>
+      <Section title={t('whatsapp.credentials')} description={t('whatsapp.credentialsDesc')}>
+        <div className="mb-3">
+          <button
+            type="button"
+            onClick={() => startPairing(isPaired)}
+            disabled={qrPhase === 'loading'}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+          >
+            {qrPhase === 'loading' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <MessageSquare className="w-4 h-4" />
+            )}
+            {qrPhase === 'loading'
+              ? t('whatsapp.qrLoading')
+              : isPaired
+                ? t('whatsapp.qrRelinkButton')
+                : t('whatsapp.qrLoginButton')}
+          </button>
+          {isPaired && (
+            <p className="mt-1.5 text-xs text-emerald-700 flex items-center gap-1">
+              <CheckCircle className="w-3 h-3 text-emerald-500" />
+              {t('whatsapp.sessionConfigured')}
+            </p>
+          )}
+        </div>
+
+        {showModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-80 flex flex-col items-center gap-4 relative">
+              <button
+                type="button"
+                onClick={closeQrModal}
+                className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 text-xl leading-none"
+              >
+                x
+              </button>
+              <h3 className="text-base font-semibold text-gray-800">{t('whatsapp.qrModalTitle')}</h3>
+              {qrPhase === 'loading' && (
+                <div className="w-48 h-48 flex items-center justify-center">
+                  <Loader2 className="w-10 h-10 animate-spin text-emerald-500" />
+                </div>
+              )}
+              {qrPhase === 'scanning' && qrValue && (
+                <QRCodeSVG value={qrValue} size={192} />
+              )}
+              {(qrPhase === 'connected' || qrPhase === 'complete') && (
+                <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
+                  <CheckCircle className="w-14 h-14 text-emerald-500" />
+                  <p className="text-sm font-medium text-emerald-700">
+                    {qrPhase === 'complete' ? t('whatsapp.qrComplete') : t('whatsapp.qrConnected')}
+                  </p>
+                </div>
+              )}
+              {qrPhase === 'error' && (
+                <div className="w-48 flex flex-col items-center gap-3">
+                  <XCircle className="w-10 h-10 text-red-500" />
+                  <p className="text-xs text-red-600 text-center break-all">{qrError || t('whatsapp.qrError')}</p>
+                  <button
+                    type="button"
+                    onClick={() => startPairing(isPaired)}
+                    className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                  >
+                    {t('whatsapp.qrRetry')}
+                  </button>
+                </div>
+              )}
+              <p className="text-xs text-gray-500 text-center leading-relaxed">
+                {qrPhase === 'loading' && t('whatsapp.qrHintLoading')}
+                {qrPhase === 'scanning' && t('whatsapp.qrHintScanning')}
+                {qrPhase === 'connected' && t('whatsapp.qrHintConnected')}
+                {qrPhase === 'complete' && t('whatsapp.qrHintComplete')}
+              </p>
+              {qrPhase === 'complete' && (
+                <button
+                  type="button"
+                  onClick={closeQrModal}
+                  className="w-full py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                >
+                  {t('whatsapp.qrDone')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="my-2 border-t border-gray-100" />
+
+        <FieldRow label={t('whatsapp.sessionPath')} hint={t('whatsapp.sessionPathHint')}>
+          <TextInput
+            value={config.sessionPath ?? ''}
+            onChange={(v) => set('sessionPath', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.mode')} hint={t('whatsapp.modeHint')}>
+          <Select
+            value={config.mode ?? 'bot'}
+            onChange={(v) => set('mode', v as 'bot' | 'self-chat')}
+            options={[
+              { value: 'bot', label: t('whatsapp.modeBot') },
+              { value: 'self-chat', label: t('whatsapp.modeSelfChat') },
+            ]}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('whatsapp.behavior')} description={t('whatsapp.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('whatsapp.defaultAgent')} hint={t('whatsapp.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.dmPolicy')} hint={t('whatsapp.dmPolicyHint')}>
+          <Select
+            value={config.dmPolicy ?? 'allowlist'}
+            onChange={(v) => set('dmPolicy', v)}
+            options={[
+              { value: 'allowlist', label: t('whatsapp.dmPolicyAllowlist') },
+              { value: 'open', label: t('whatsapp.dmPolicyOpen') },
+              { value: 'disabled', label: t('whatsapp.dmPolicyDisabled') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.allowFromEnabled')} hint={t('whatsapp.allowFromEnabledHint')}>
+          <Toggle
+            checked={allowFromEnabled}
+            onChange={(enabled) => onChange({
+              ...config,
+              dmPolicy: enabled ? 'allowlist' : 'open',
+              allowFrom: enabled ? (config.allowFrom ?? []) : undefined,
+            })}
+          />
+        </FieldRow>
+        {allowFromEnabled && (
+          <FieldRow label={t('whatsapp.allowFrom')} hint={t('whatsapp.allowFromHint')}>
+            <TagsInput
+              value={config.allowFrom ?? []}
+              onChange={(v) => set('allowFrom', v)}
+              placeholder={t('whatsapp.allowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+        <FieldRow label={t('whatsapp.groupPolicy')} hint={t('whatsapp.groupPolicyHint')}>
+          <Select
+            value={config.groupPolicy ?? 'disabled'}
+            onChange={(v) => set('groupPolicy', v)}
+            options={[
+              { value: 'disabled', label: t('whatsapp.groupPolicyDisabled') },
+              { value: 'allowlist', label: t('whatsapp.groupPolicyAllowlist') },
+              { value: 'open', label: t('whatsapp.groupPolicyOpen') },
+            ]}
+          />
+        </FieldRow>
+        {(config.groupPolicy ?? 'disabled') === 'allowlist' && (
+          <FieldRow label={t('whatsapp.groupAllowFrom')} hint={t('whatsapp.groupAllowFromHint')}>
+            <TagsInput
+              value={config.groupAllowFrom ?? []}
+              onChange={(v) => set('groupAllowFrom', v.length ? v : undefined)}
+              placeholder={t('whatsapp.groupAllowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+        {(config.groupPolicy ?? 'disabled') !== 'disabled' && (
+          <FieldRow label={t('whatsapp.groupTrigger')} hint={t('whatsapp.groupTriggerHint')}>
+            <Select
+              value={config.groupTrigger ?? 'mention'}
+              onChange={(v) => set('groupTrigger', v)}
+              options={[
+                { value: 'mention', label: t('whatsapp.triggerMention') },
+                { value: 'all', label: t('whatsapp.triggerAll') },
+              ]}
+            />
+          </FieldRow>
+        )}
+      </Section>
+
+      <Section title={t('whatsapp.advanced')} description={t('whatsapp.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('whatsapp.bridgePort')} hint={t('whatsapp.bridgePortHint')}>
+          <NumberInput
+            value={config.bridgePort ?? 3100}
+            onChange={(v) => set('bridgePort', v)}
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.replyPrefix')} hint={t('whatsapp.replyPrefixHint')}>
+          <TextInput
+            value={config.replyPrefix ?? ''}
+            onChange={(v) => set('replyPrefix', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.textBatchDelaySeconds')} hint={t('whatsapp.textBatchDelaySecondsHint')}>
+          <NumberInput
+            value={config.textBatchDelaySeconds ?? 3}
+            onChange={(v) => set('textBatchDelaySeconds', v)}
+            min={0}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.sendChunkDelayMs')} hint={t('whatsapp.sendChunkDelayMsHint')}>
+          <NumberInput
+            value={config.sendChunkDelayMs ?? 300}
+            onChange={(v) => set('sendChunkDelayMs', v)}
+            min={0}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.sendTimeoutMs')} hint={t('whatsapp.sendTimeoutMsHint')}>
+          <NumberInput
+            value={config.sendTimeoutMs ?? 60000}
+            onChange={(v) => set('sendTimeoutMs', v)}
+            min={1000}
+          />
+        </FieldRow>
+        <FieldRow label={t('whatsapp.mediaCacheDir')} hint={t('whatsapp.mediaCacheDirHint')}>
+          <TextInput
+            value={config.mediaCacheDir ?? ''}
+            onChange={(v) => set('mediaCacheDir', v || undefined)}
+            placeholder={t('whatsapp.optional')}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
 // Weixin Config Panel
 // ============================================================================
 
@@ -1926,9 +2761,9 @@ export default function ChannelPage() {
   const originalConfigsRef = useRef<Record<string, ChannelConfig>>({});
   const toggleInFlightRef = useRef(false);
 
-  const fetchAll = useCallback(async () => {
+  const fetchAll = useCallback(async (showLoading = false) => {
     try {
-      setLoading(true);
+      if (showLoading) setLoading(true);
       const [listRes, configRes] = await Promise.all([
         client.get('/api/channel/list'),
         client.get('/api/config'),
@@ -1956,6 +2791,26 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'email') {
+          configs[ch.id] = { ...defaultEmailConfig(), ...saved };
+        } else if (ch.id === 'email') {
+          configs[ch.id] = { ...defaultEmailConfig(), ...saved };
+        } else if (ch.id === 'whatsapp') {
+          const whatsappCfg = { ...defaultWhatsAppConfig(), ...saved };
+          if (whatsappCfg.sessionPath) {
+            try {
+              const sessionRes = await client.get('/api/channel/whatsapp/session-status', {
+                params: { sessionPath: whatsappCfg.sessionPath },
+              });
+              whatsappCfg._paired = Boolean(sessionRes.data?.paired);
+            } catch {
+              whatsappCfg._paired = false;
+            }
+          } else {
+            whatsappCfg._paired = false;
+          }
+          configs[ch.id] = whatsappCfg;
+
         } else if (ch.id === 'weixin') {
           configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
@@ -1993,7 +2848,7 @@ export default function ChannelPage() {
   }, []);
 
   useEffect(() => {
-    fetchAll();
+    fetchAll(true);
     fetchStatuses(true);
     const interval = setInterval(() => fetchStatuses(true), 15000);
     return () => clearInterval(interval);
@@ -2090,6 +2945,37 @@ export default function ChannelPage() {
     setTimeout(() => { fetchAll(); fetchStatuses(true); }, 8000);
   };
 
+  const handleWhatsAppPairSuccess = async (
+    data: { sessionPath: string }
+  ) => {
+    const channelId = 'whatsapp';
+    const savedChannelCfg = (fullConfig.channels?.[channelId] ?? {}) as Record<string, any>;
+    const updatedChannelCfg: Record<string, any> = {
+      ...savedChannelCfg,
+      ...stripEmpty(channelConfigs[channelId] ?? {}),
+      enabled: true,
+    };
+    if (data.sessionPath) updatedChannelCfg.sessionPath = data.sessionPath;
+    const nextUiConfig = { ...updatedChannelCfg, _paired: true };
+
+    const updatedChannels = { ...(fullConfig.channels ?? {}), [channelId]: updatedChannelCfg };
+    const updated = { ...fullConfig, channels: updatedChannels };
+
+    await client.patch('/api/config/', updated);
+    setFullConfig(updated);
+    setChannelConfigs((prev) => ({
+      ...prev,
+      [channelId]: { ...prev[channelId], ...nextUiConfig } as ChannelConfig,
+    }));
+    originalConfigsRef.current = {
+      ...originalConfigsRef.current,
+      [channelId]: { ...originalConfigsRef.current[channelId], ...nextUiConfig },
+    };
+    client.post(`/api/channel/${channelId}/restart`, {}, { timeout: 5000 }).catch(() => {});
+    setTimeout(() => { fetchAll(); fetchStatuses(true); }, 3000);
+    setTimeout(() => { fetchAll(); fetchStatuses(true); }, 8000);
+  };
+
   // Manual restart — useful when connection drops and user wants to reconnect
   const handleRestart = async (channelId?: string) => {
     const id = channelId ?? selectedId;
@@ -2176,7 +3062,7 @@ export default function ChannelPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -2281,6 +3167,19 @@ export default function ChannelPage() {
                       onRefresh={fetchAll}
                     />
                   )}
+                  {selectedId === 'email' && (
+                    <EmailPanel
+                      config={selectedConfig as EmailChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('email', cfg)}
+                    />
+                  )}
+                  {selectedId === 'whatsapp' && (
+                    <WhatsAppPanel
+                      config={selectedConfig as WhatsAppChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('whatsapp', cfg)}
+                      onPairSuccess={handleWhatsAppPairSuccess}
+                    />
+                  )}
                   {selectedId === 'weixin' && (
                     <WeixinPanel
                       config={selectedConfig as WeixinChannelConfig}
@@ -2313,6 +3212,7 @@ export default function ChannelPage() {
 function stripEmpty(obj: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const [k, v] of Object.entries(obj)) {
+    if (k.startsWith('_')) continue;
     if (v === '' || v === undefined) continue;
     // Empty arrays ARE preserved: e.g. allowFrom:[] means "require pairing for everyone"
     // (distinct from absent key which means "open access").

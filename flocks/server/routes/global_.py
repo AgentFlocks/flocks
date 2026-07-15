@@ -18,6 +18,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from flocks.server.auth import require_user
 from flocks.utils.log import Log
 from flocks.server.routes.event import EventBroadcaster, sse_generator
 
@@ -54,7 +55,8 @@ async def get_global_events(request: Request):
     
     This is the main event endpoint that Flocks TUI uses.
     """
-    queue = await EventBroadcaster.get().subscribe()
+    user = require_user(request)
+    queue = await EventBroadcaster.get().subscribe(user)
     
     log.info("global.event.subscribe", {
         "clients": EventBroadcaster.get().client_count,

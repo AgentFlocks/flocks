@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { defaultModelAPI, modelV2API } from '@/api/provider';
+import { modelV2API } from '@/api/provider';
+import type { ModelDefinitionV2 } from '@/types';
+import {
+  __resetChatModelResourcesForTesting,
+  fetchEnabledChatModelDefinitions,
+  fetchResolvedDefaultModel,
+} from './useChatModelResources';
+import type { SharedResourceFetchOptions } from './useSharedResource';
 
 /**
  * Detect whether the resolved default LLM model supports image (vision) input.
@@ -21,10 +28,12 @@ import { defaultModelAPI, modelV2API } from '@/api/provider';
  * Caching:
  *   The resolved capability is cached at module scope so each newly mounted
  *   composer (sidebar drawer, dialog, etc.) reuses the in-flight or
- *   completed lookup instead of firing a fresh `getResolved + getDefinition`
- *   pair. The cache is invalidated when ``MODEL_CHANGED_EVENT`` fires —
- *   pages that change the default model (see ``Model/index.tsx``) dispatch
- *   that event after a successful update so this hook re-resolves.
+ *   completed lookup instead of firing a fresh request pair. The default
+ *   model and enabled model definitions come from `useChatModelResources`, so
+ *   composer chrome and model pickers reuse the same in-flight resource. The
+ *   cache is invalidated when ``MODEL_CHANGED_EVENT`` fires — pages that
+ *   change the default model (see ``Model/index.tsx``) dispatch that event
+ *   after a successful update so this hook re-resolves.
  */
 
 /** Window event other code can dispatch to invalidate the cached vision capability. */
@@ -40,34 +49,65 @@ function allowsBuiltInVision(modelId: string): boolean {
   return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
 }
 
-async function resolveVisionSupport(): Promise<VisionState> {
+function visionSupportFromDefinition(
+  def: Pick<ModelDefinitionV2, 'capabilities' | 'fetch_from'> | null | undefined,
+  modelId: string,
+): VisionState {
+  const caps = def?.capabilities;
+  if (!caps) return null;
+
+  const builtInVisionAllowed = allowsBuiltInVision(modelId);
+  if (
+    caps.supports_vision === true ||
+    caps.modalities?.input?.includes('image') ||
+    (caps.features ?? []).includes('vision')
+  ) {
+    if (def.fetch_from !== 'customizable' && !builtInVisionAllowed) {
+      return false;
+    }
+    return true;
+  }
+  if (caps.supports_vision === false) {
+    return false;
+  }
+  if (def.fetch_from !== 'customizable') {
+    return false;
+  }
+  return null;
+}
+
+async function getDefaultModelDefinition(
+  providerID: string,
+  modelID: string,
+  definitions: ModelDefinitionV2[],
+): Promise<Pick<ModelDefinitionV2, 'capabilities' | 'fetch_from'> | null> {
+  const sharedDefinition = definitions.find(
+    (definition) => definition.provider_id === providerID && definition.id === modelID,
+  );
+  if (sharedDefinition) return sharedDefinition;
+
   try {
-    const resolvedResp = await defaultModelAPI.getResolved();
-    const { provider_id, model_id } = resolvedResp.data;
-    if (!provider_id || !model_id) return null;
-    const defResp = await modelV2API.getDefinition(provider_id, model_id);
-    const def: any = defResp.data;
-    if (!def) return null;
-    const caps = def.capabilities;
-    if (!caps) return null;
-    const builtInVisionAllowed = allowsBuiltInVision(model_id);
-    if (
-      caps.supports_vision === true ||
-      caps.modalities?.input?.includes('image') ||
-      (caps.features ?? []).includes('vision')
-    ) {
-      if (def.fetch_from !== 'customizable' && !builtInVisionAllowed) {
-        return false;
-      }
-      return true;
-    }
-    if (caps.supports_vision === false) {
-      return false;
-    }
-    if (def.fetch_from !== 'customizable') {
-      return false;
-    }
+    const defResp = await modelV2API.getDefinition(providerID, modelID);
+    return defResp.data ?? null;
+  } catch {
     return null;
+  }
+}
+
+async function resolveVisionSupport(options?: SharedResourceFetchOptions): Promise<VisionState> {
+  try {
+    const [resolvedDefaultModel, definitions] = await Promise.all([
+      fetchResolvedDefaultModel(options),
+      fetchEnabledChatModelDefinitions(options),
+    ]);
+    if (!resolvedDefaultModel) return null;
+
+    const def = await getDefaultModelDefinition(
+      resolvedDefaultModel.providerID,
+      resolvedDefaultModel.modelID,
+      definitions,
+    );
+    return visionSupportFromDefinition(def, resolvedDefaultModel.modelID);
   } catch {
     return null;
   }
@@ -85,7 +125,7 @@ function invalidateAndRefetch(): void {
   // races ahead of this one cannot deliver a stale value to subscribers.
   // We only notify if our promise is still the current cached one by the
   // time it resolves.
-  const next = resolveVisionSupport();
+  const next = resolveVisionSupport({ force: true, silent: true });
   cachedPromise = next;
   next.then((value) => {
     if (cachedPromise === next) {
@@ -107,6 +147,7 @@ if (typeof window !== 'undefined') {
 export function __resetVisionCacheForTesting(): void {
   cachedPromise = null;
   subscribers.clear();
+  __resetChatModelResourcesForTesting();
 }
 
 export function useDefaultModelVision(): VisionState {

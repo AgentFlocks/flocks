@@ -39,7 +39,7 @@ Rex 引导用户时必须遵守：
 - 对降噪后的 HTTP 告警做攻击研判。
 - 复用 `stream_alert_denoise` 的 `dedup_key` 降低 LLM 调用。
 - 按日期重放某天全部去重结果。
-- 默认把研判后的完整告警写入 `~/.flocks/data/soc.db`，并保留 JSONL 可选输出，供归档或下游工作流消费。
+- 默认只把明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的研判告警写入 `~/.flocks/data/soc.db`，并保留 JSONL 可选输出，供归档或下游工作流消费。
 
 本工作流不适合：
 
@@ -118,6 +118,8 @@ Rex 引导用户时必须遵守：
 
 - 如果告警缺少 `dedup_key`，该告警会作为独立 work unit 研判，无法和其它告警复用。
 - `is_duplicate` 不决定是否研判。缓存命中策略只依赖 `dedup_key`。
+- `is_duplicate` 决定是否允许写入 SOC DB：只有明确为 `false` 的告警才有资格持久化；缺少该字段时按“未证明首见”处理，不写入 SOC DB。
+- SOC DB 持久化要求非空 `dedup_key`：批内只接受第一条，数据库再通过唯一索引保证跨执行全局唯一；无 `dedup_key` 的防御性研判结果不会写入 SOC DB。
 - `stream_alert_denoise` 只会把跨批次首见告警写入 JSONL；因此常规情况下本工作流读取到的是适合继续研判的首见告警。
 - 如果用户手工构造 JSONL，必须保证每行是独立 JSON 对象，不能是整文件 JSON 数组。
 
@@ -134,7 +136,7 @@ Rex 引导用户时必须遵守：
 | `loaded_files` | 实际读取的上游文件 |
 | `input_date` | 本次读取日期 |
 | `triage_output_mode` | 本次生效的输出模式：`soc_db` / `jsonl` / `both` / `none` |
-| `soc_db_result` / `soc_db_path` | 本次写入的 SOC DB 结果和路径 |
+| `soc_db_result` / `soc_db_path` | 本次写入的 SOC DB 结果和路径；结果区分 `inserted_rows` 与 `updated_rows` |
 | `output_paths` | 本次写入的研判 JSONL 文件列表；未启用 JSONL 时为空 |
 | `output_dir` | 研判 JSONL 结果目录；未启用 JSONL 时为空 |
 | `summary_report` | markdown 总览文本 |
@@ -174,6 +176,12 @@ alert_records
 
 写入规则：
 
+- SOC DB 只接受明确 `is_duplicate=false`、包含非空 `dedup_key` 且该 key 在本批次首次出现的告警。
+- `is_duplicate=true`、缺少 `is_duplicate`、缺少 `dedup_key` 或批内重复 `dedup_key` 的告警均不会写入 SOC DB。
+- `alert_records.dedup_key` 使用部分唯一索引保证跨批次、跨执行只能存在一条告警记录。
+- 已存在的 `dedup_key` 再次回放时只更新研判字段和研判运行标记，不覆盖首次告警的时间、来源、行号、标识与原始事件字段。
+- SOC DB 建表、迁移或写入失败会使本次工作流失败，不会以“成功但写入 0 条”结束。
+- `soc_db_result` 记录本次持久化总数、新增数与更新数；`triage_stats.soc_db_filter_stats` 记录候选数及各类跳过数。
 - `triage_output_mode=soc_db`：默认写入 `soc.db`，不写 JSONL。
 - `triage_output_mode=jsonl`：只写 `triage_result_NNN.jsonl`，不写 `soc.db`。
 - `triage_output_mode=both`：同时写 `soc.db` 和 JSONL。
@@ -306,7 +314,8 @@ leader/follower 规则：
 - `triage_stats.total == load_stats.record_count`
 - `triage_stats.work_units <= triage_stats.total`
 - `enriched_alerts_with_triage[*].triage_report` 存在于已研判或缓存命中的告警上
-- `soc_db_result.rows` 等于本次尝试写入 `alert_records` 的记录数，除非 `triage_output_mode=jsonl/none`
+- `soc_db_result.rows` 等于本次持久化的候选数（`inserted_rows + updated_rows`）；应与 `triage_stats.soc_db_first_seen_rows` 一致，除非 `triage_output_mode=jsonl/none`
+- `triage_stats.soc_db_skipped_rows` 等于输入总数减去首见唯一告警数，并可通过 `triage_stats.soc_db_filter_stats` 查看具体跳过原因
 - `output_paths` 指向当日 `triage_result_NNN.jsonl`，仅在 `triage_output_mode=jsonl/both` 或旧参数 `persist_triage_output=true` 时存在
 - `summary_path` 指向 `outputs/<today>/artifacts/stream_alert_triage_summary.md`
 
