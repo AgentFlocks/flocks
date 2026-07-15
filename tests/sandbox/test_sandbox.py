@@ -365,6 +365,56 @@ class TestToolPolicy:
         )
         assert policy.allow == ["bash"]
 
+    def test_agent_allow_cannot_expand_global_allow(self):
+        """Agent allow 只能收窄，不能扩大 global allow."""
+        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
+
+        policy = resolve_tool_policy(
+            global_allow=["read"],
+            agent_allow=["bash", "read"],
+        )
+
+        assert is_tool_allowed(policy, "read")
+        assert not is_tool_allowed(policy, "bash")
+
+    def test_empty_agent_allow_keeps_existing_global_ceiling(self):
+        """agent 空 allow 不能把已有 global allow 退化为全允许."""
+        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
+
+        policy = resolve_tool_policy(
+            global_allow=["read"],
+            agent_allow=[],
+        )
+
+        assert is_tool_allowed(policy, "read")
+        assert not is_tool_allowed(policy, "bash")
+
+    def test_denies_are_combined_across_global_and_agent_layers(self):
+        """任一层 deny 均应优先于 allow."""
+        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
+
+        policy = resolve_tool_policy(
+            global_allow=["read", "bash"],
+            global_deny=["read"],
+            agent_deny=["bash"],
+        )
+
+        assert not is_tool_allowed(policy, "read")
+        assert not is_tool_allowed(policy, "bash")
+
+    def test_global_and_agent_glob_allows_are_both_enforced(self):
+        """无法化简的通配符交集也不能退化为全允许."""
+        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
+
+        policy = resolve_tool_policy(
+            global_allow=["session*"],
+            agent_allow=["*list"],
+        )
+
+        assert is_tool_allowed(policy, "sessions_list")
+        assert not is_tool_allowed(policy, "sessions_get")
+        assert not is_tool_allowed(policy, "bash")
+
 
 # ==================== 5. Docker 参数构建测试 ====================
 

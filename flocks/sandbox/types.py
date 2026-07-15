@@ -121,6 +121,11 @@ class SandboxToolPolicy(BaseModel):
         default=None,
         description="拒绝的工具列表 (支持通配符 *)",
     )
+    allow_layers: Optional[List[List[str]]] = Field(
+        default=None,
+        exclude=True,
+        description="内部使用的 allow 交集层；不序列化到 sandbox 配置",
+    )
 
 
 class SandboxElevatedConfig(BaseModel):

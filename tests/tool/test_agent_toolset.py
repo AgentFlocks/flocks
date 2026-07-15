@@ -7,6 +7,7 @@ from flocks.agent.toolset import (
     agent_declares_tool,
     get_all_enabled_builtin_tool_names,
     normalize_declared_tool_names,
+    resolve_capability_pool,
     resolve_agent_initial_tools,
 )
 
@@ -87,6 +88,16 @@ def test_resolve_agent_initial_tools_keeps_empty_non_rex_tools_empty() -> None:
 
     assert tools == []
     assert permission == []
+
+
+def test_resolve_capability_pool_preserves_declared_order_after_intersection() -> None:
+    pool = resolve_capability_pool(
+        declared_tools=["bash", "read", "bash"],
+        enabled_tools=["read", "bash", "write"],
+        parent_ceiling_tools=["read", "bash"],
+    )
+
+    assert pool.tools == ("bash", "read")
 
 
 def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:

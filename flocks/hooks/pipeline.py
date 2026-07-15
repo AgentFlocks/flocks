@@ -162,6 +162,7 @@ class HookStage:
     CHANNEL_WEBHOOK_BEFORE = "channel.webhook.before"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
     CHANNEL_OUTBOUND_AFTER = "channel.outbound.after"
+    CAPABILITY_FILTER = "capability.filter"
 
 
 _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
@@ -176,6 +177,7 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.CHANNEL_WEBHOOK_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
+    HookStage.CAPABILITY_FILTER: 5.0,
     HookStage.EVENT: 10.0,
 }
 
@@ -222,6 +224,9 @@ class HookBase:
         return None
 
     async def channel_outbound_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def capability_filter(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
 
@@ -453,6 +458,14 @@ class HookPipeline:
         return await cls._run_stage(HookStage.CHANNEL_OUTBOUND_AFTER, input_data, output_data)
 
     @classmethod
+    async def run_capability_filter(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.CAPABILITY_FILTER, input_data, output_data)
+
+    @classmethod
     async def has_stage_handlers(
         cls,
         stage: str,
@@ -639,6 +652,7 @@ class HookPipeline:
             HookStage.CHANNEL_WEBHOOK_BEFORE: "channel_webhook_before",
             HookStage.CHANNEL_OUTBOUND_BEFORE: "channel_outbound_before",
             HookStage.CHANNEL_OUTBOUND_AFTER: "channel_outbound_after",
+            HookStage.CAPABILITY_FILTER: "capability_filter",
         }
         handler_name = handler_names.get(stage)
         if handler_name is None:
