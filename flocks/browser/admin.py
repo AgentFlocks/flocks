@@ -151,6 +151,12 @@ def _daemon_browser_connection(name: str):
         return None
 
 
+def daemon_browser_connected(name: str | None = None) -> bool:
+    """Return whether the selected daemon still has a live browser connection."""
+    effective_name = ipc.runtime_paths(name or NAME).name
+    return _daemon_browser_connection(effective_name) is not None
+
+
 def browser_connections() -> list[dict]:
     """Return live daemons with healthy browser connections."""
     output = []
