@@ -68,7 +68,12 @@ async def test_capability_filter_discovers_cold_hooks_before_returning_base(
 
     filtered = await filter_capability_pool(
         base,
-        context={"entry": "runner", "agent": "rex"},
+        context={
+            "entry": "runner",
+            "agent": "rex",
+            "workspace": "/trusted/workspace",
+            "sessionID": "ses-capability-context",
+        },
     )
 
     assert filtered == base
@@ -78,6 +83,8 @@ async def test_capability_filter_discovers_cold_hooks_before_returning_base(
     assert hook_input["capability_pool"] == base.as_dict()
     assert hook_input["entry"] == "runner"
     assert hook_input["agent"] == "rex"
+    assert hook_input["workspace"] == "/trusted/workspace"
+    assert hook_input["sessionID"] == "ses-capability-context"
 
 
 @pytest.mark.asyncio
@@ -122,6 +129,8 @@ async def test_capability_filter_cannot_add_tool_outside_base_pool() -> None:
         "permission_mode": "default_interactive",
         "execution_mode": "foreground",
         "agent": "rex",
+        "workspace": "",
+        "sessionID": "",
     }
     assert HookStage.CAPABILITY_FILTER == "capability.filter"
 

@@ -70,6 +70,8 @@ async def test_runner_passes_copied_trusted_context_to_callable_schema(
         "subject": {"subject_id": "user-1"},
         "entry": "api",
         "agent": "rex",
+        "workspace": "/tmp",
+        "sessionID": "ses_runner_capability_context",
     }
     capability_context["subject"]["subject_id"] = "mutated"
     assert runner._security_context["subject"]["subject_id"] == "user-1"

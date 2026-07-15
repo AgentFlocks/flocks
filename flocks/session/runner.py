@@ -347,6 +347,8 @@ class SessionRunner:
     ) -> Tuple[List[Any], Dict[str, Any]]:
         capability_context = copy.deepcopy(self._security_context)
         capability_context["agent"] = agent.name
+        capability_context["workspace"] = self.session.directory
+        capability_context["sessionID"] = self.session.id
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=getattr(agent, "tools", None),

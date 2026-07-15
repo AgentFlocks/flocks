@@ -122,6 +122,8 @@ def _hook_input(pool: CapabilityPool, context: Optional[Mapping[str, Any]]) -> d
         ),
         "execution_mode": _safe_text(raw_context.get("execution_mode"), default="default"),
         "agent": _safe_text(raw_context.get("agent"), default="unknown"),
+        "workspace": _safe_text(raw_context.get("workspace"), default=""),
+        "sessionID": _safe_text(raw_context.get("sessionID"), default=""),
     }
 
 

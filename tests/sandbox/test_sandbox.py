@@ -355,8 +355,8 @@ class TestToolPolicy:
         assert is_tool_allowed(policy, "sessions_list") is True
         assert is_tool_allowed(policy, "bash") is False
 
-    def test_agent_overrides_global(self):
-        """Agent 覆盖 global 策略."""
+    def test_agent_allow_intersects_global_allow(self):
+        """Agent allow 与 global allow 求交集，不能扩大权限."""
         from flocks.sandbox.tool_policy import resolve_tool_policy
 
         policy = resolve_tool_policy(
