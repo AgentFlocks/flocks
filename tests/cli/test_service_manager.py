@@ -512,6 +512,16 @@ def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
     assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
 
 
+def test_run_windows_netstat_handles_missing_stdout(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=None),
+    )
+
+    assert service_manager._run_windows_netstat(5173) == ""
+
+
 def test_port_owner_pids_warns_when_no_tool_found(monkeypatch) -> None:
     monkeypatch.setattr(service_manager.sys, "platform", "linux")
     monkeypatch.setattr(service_manager, "which", lambda _name: None)
@@ -527,6 +537,18 @@ def test_port_is_in_use_falls_back_to_bind_when_pid_lookup_unavailable(monkeypat
 
     with pytest.warns(RuntimeWarning, match="退回到 bind 检查"):
         assert service_manager.port_is_in_use(5173) is True
+
+
+@pytest.mark.parametrize(("port_available", "expected"), [(True, False), (False, True)])
+def test_windows_port_is_in_use_confirms_empty_pid_lookup_with_bind(
+    monkeypatch,
+    port_available: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_bind_port_available", lambda _port: port_available)
+
+    assert service_manager.port_is_in_use(5173, listeners=[]) is expected
 
 
 def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch) -> None:
