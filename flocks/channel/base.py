@@ -278,6 +278,7 @@ class ChannelPlugin(ABC):
 
     def mark_connected(self) -> None:
         self._status.connected = True
+        self._status.last_error = None
 
     def mark_disconnected(self, error: Optional[str] = None) -> None:
         self._status.connected = False
