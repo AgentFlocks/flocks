@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from flocks.hub import local
 from flocks.hub.catalog import list_catalog, load_manifest, load_taxonomy
 from flocks.hub.files import file_tree, read_file_content
-from flocks.hub.installer import install_plugin, uninstall_plugin
+from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.plugin.loader import PluginLoader
 
 
@@ -114,6 +114,41 @@ def test_soc_workspace_component_exposes_chinese_name():
     assert entries["soc-workspace"].nameCn == "SOC 工作区场景套件"
 
 
+async def test_chaitin_safeline_repair_release_replaces_broken_handler(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    plugin_id = "chaitin_safeline_waf_v1_0_0"
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "device"
+        / plugin_id
+    )
+    install_dir.mkdir(parents=True)
+    legacy_handler = install_dir / "chaitin_leichi_waf.handler.py"
+    legacy_handler.write_text("def broken(:\n", encoding="utf-8")
+
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="device")}
+    assert entries[plugin_id].state == "updateAvailable"
+    assert entries[plugin_id].version == "1.0.1"
+    assert entries[plugin_id].installedVersion is None
+
+    record = await update_plugin("device", plugin_id)
+
+    repaired_handler = install_dir / "chaitin_safeline_waf.handler.py"
+    assert record.version == "1.0.1"
+    assert local.get_record("device", plugin_id) == record
+    assert not legacy_handler.exists()
+    compile(repaired_handler.read_text(encoding="utf-8"), str(repaired_handler), "exec")
+
+
 def test_pentest_agents_are_listed_in_agent_catalog():
     entries = list_catalog(plugin_type="agent")
     ids = {entry.id for entry in entries}
@@ -214,7 +249,7 @@ async def test_hub_installs_pentest_subagent(isolated_hub_env):
 
 
 async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -246,7 +281,7 @@ async def test_hub_webui_install_fails_when_bundle_build_fails(
     isolated_hub_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     def fail_build(_self, _page_id: str):
@@ -269,7 +304,7 @@ async def test_hub_installed_soc_webui_registers_alert_access_contract(
     isolated_hub_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -296,7 +331,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     isolated_hub_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -392,7 +427,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
 
 
 async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -421,7 +456,7 @@ async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, m
 
 
 async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -448,7 +483,7 @@ async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_
 
 
 async def test_hub_component_adopts_existing_soc_workspace_tool(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -473,7 +508,7 @@ async def test_hub_component_adopts_existing_soc_workspace_tool(isolated_hub_env
 
 
 async def test_hub_component_uninstall_cleans_adoptable_legacy_tool_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -496,7 +531,7 @@ async def test_hub_component_uninstall_cleans_adoptable_legacy_tool_record(isola
 
 
 async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -521,7 +556,7 @@ async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_h
 
 
 async def test_hub_component_install_failure_rolls_back_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def fail_tool_refresh(plugin_type):
+    async def fail_tool_refresh(plugin_type, _changed_path=None):
         if plugin_type == "tool":
             raise RuntimeError("tool refresh failed")
         return None
@@ -548,7 +583,7 @@ async def test_hub_component_install_failure_rolls_back_children(isolated_hub_en
 
 
 async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -582,7 +617,7 @@ async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, 
 
 
 async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -758,7 +793,7 @@ def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, m
     from flocks.server.auth import require_admin
     from flocks.server.routes.hub import router
 
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)

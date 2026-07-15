@@ -196,7 +196,10 @@ def _copy_webui_package_with_build(plugin_id: str, src: Path, dst: Path) -> None
         raise
 
 
-async def _refresh_runtime(plugin_type: PluginType) -> None:
+async def _refresh_runtime(
+    plugin_type: PluginType,
+    changed_path: Path | None = None,
+) -> None:
     if plugin_type == "skill":
         from flocks.skill.skill import Skill
 
@@ -223,7 +226,13 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
         from flocks.tool.registry import ToolRegistry
 
         await ToolRegistry.init_async()
-        await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
+        if changed_path is None:
+            await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
+        else:
+            await asyncio.to_thread(
+                ToolRegistry.refresh_plugin_tools,
+                changed_path=changed_path,
+            )
         clear_device_template_cache()
         # Drop the descriptor cache so freshly installed/uninstalled
         # API plugins surface in ``_load_provider_yaml_metadata`` (and
@@ -518,7 +527,7 @@ async def install_plugin(
         )
         local.save_installed_record(record)
         clear_catalog_caches()
-        await _refresh_runtime(plugin_type)
+        await _refresh_runtime(plugin_type, dst)
         if plugin_type == "component":
             await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
         return record
@@ -618,5 +627,5 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     local.remove_installed_record(plugin_type, plugin_id)
     clear_catalog_caches()
     _cleanup_orphan_api_services(orphan_keys)
-    await _refresh_runtime(plugin_type)
+    await _refresh_runtime(plugin_type, install_path)
     return True

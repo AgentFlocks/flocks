@@ -740,6 +740,23 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in parts) if parts else (0,)
 
 
+def _catalog_install_state(
+    install_path: Optional[Path],
+    record: Optional[local.InstalledPluginRecord],
+    available_version: str,
+) -> tuple[str, Optional[str]]:
+    if install_path is None:
+        return "available", None
+    if record is None:
+        # An inferred install has no trustworthy package version because Hub
+        # manifests are not copied into the install directory. Reconcile it
+        # through the update path instead of assuming it is already current.
+        return "updateAvailable", None
+    if _version_tuple(record.version) < _version_tuple(available_version):
+        return "updateAvailable", record.version
+    return "installed", record.version
+
+
 def _os_compatible(manifest: HubPluginManifest) -> bool:
     allowed = {item.lower() for item in manifest.compatibility.os}
     if not allowed:
@@ -753,13 +770,11 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
     record = local.get_record(manifest.type, manifest.id)
     install_path = _resolve_install_path(manifest.type, manifest.id, record, local.infer_local_installs())
 
-    state = "available"
-    installed_version: Optional[str] = None
-    if install_path:
-        installed_version = record.version if record else manifest.version
-        state = "installed"
-        if _version_tuple(installed_version) < _version_tuple(manifest.version):
-            state = "updateAvailable"
+    state, installed_version = _catalog_install_state(
+        install_path,
+        record,
+        manifest.version,
+    )
     if not _os_compatible(manifest):
         state = "incompatible"
 
@@ -811,13 +826,11 @@ def _entry_from_index(
     record = records.get(f"{item.type}:{item.id}")
     install_path = _resolve_install_path(item.type, item.id, record, inferred_installs)
 
-    state = "available"
-    installed_version: Optional[str] = None
-    if install_path:
-        installed_version = record.version if record else item.version
-        state = "installed"
-        if _version_tuple(installed_version) < _version_tuple(item.version):
-            state = "updateAvailable"
+    state, installed_version = _catalog_install_state(
+        install_path,
+        record,
+        item.version,
+    )
 
     return HubCatalogEntry(
         id=item.id,
@@ -875,11 +888,10 @@ def _entry_from_bundled_tool(
     """Catalog entry for a tool bundled inside flockshub.
 
     State is computed exactly like :func:`_entry_from_index`:
-      * ``installed``       — the user installed it under
-                              ``~/.flocks/plugins/tools/<group>/<id>/``
-                              (record or on-disk payload found).
-      * ``updateAvailable`` — installed copy is older than the bundled
-                              version.
+      * ``installed``       — an installed record confirms the local copy is
+                              current.
+      * ``updateAvailable`` — the installed copy is older, or an unrecorded
+                              on-disk payload needs reconciliation.
       * ``available``       — bundled in flockshub, no local install.
                               The runtime ``ToolRegistry`` only picks up
                               installed tools, so an "available" entry
@@ -891,13 +903,11 @@ def _entry_from_bundled_tool(
     record = records.get(f"{manifest.type}:{manifest.id}")
     install_path = _resolve_install_path(manifest.type, manifest.id, record, inferred_installs)
 
-    state = "available"
-    installed_version: Optional[str] = None
-    if install_path:
-        installed_version = record.version if record else manifest.version
-        state = "installed"
-        if _version_tuple(installed_version) < _version_tuple(manifest.version):
-            state = "updateAvailable"
+    state, installed_version = _catalog_install_state(
+        install_path,
+        record,
+        manifest.version,
+    )
     if not _os_compatible(manifest):
         state = "incompatible"
 

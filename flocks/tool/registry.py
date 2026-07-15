@@ -607,6 +607,9 @@ class ToolRegistry:
     _dynamic_modules: Dict[str, str] = {}
     _dynamic_tools_by_module: Dict[str, List[str]] = {}
     _plugin_tool_names: List[str] = []
+    # Source-level plugin failures observed by the last load. They remain
+    # diagnostic only because the plugin loader already isolates each source.
+    _plugin_load_errors: List[str] = []
     _revision: int = 0
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
@@ -1052,7 +1055,7 @@ class ToolRegistry:
                 cls._register_builtin_tools()
                 cls._register_dynamic_tools()
                 cls._register_plugin_extension_point()
-                cls._load_plugin_tools()
+                cls._plugin_load_errors = cls._load_plugin_tools()
                 cls._initialized = True
                 log.debug("tool_registry.initialized", {"count": len(cls._tools)})
             finally:
@@ -1064,7 +1067,7 @@ class ToolRegistry:
         await asyncio.to_thread(cls.init)
 
     @classmethod
-    def _load_plugin_tools(cls, errors: Optional[List[str]] = None) -> None:
+    def _load_plugin_tools(cls, errors: Optional[List[str]] = None) -> List[str]:
         """Load plugin tools from both user-level and project-level plugin dirs on init.
 
         Without this, YAML/Python plugin tools only appear after an explicit
@@ -1077,18 +1080,23 @@ class ToolRegistry:
         Tracks which tool names were added so that
         ``refresh_plugin_tools`` can accurately unregister stale entries
         (regardless of the ``ToolInfo.source`` value).
+
+        Returns every source-level load error for diagnostics and scoped Hub
+        refresh decisions.
         """
         before = set(cls._tools.keys())
+        load_errors: List[str] = []
         try:
             from flocks.plugin import PluginLoader
 
-            load_errors = PluginLoader.load_extension("TOOLS", load_entry_points=True)
-            if errors is not None:
-                errors.extend(load_errors)
+            reported_errors = PluginLoader.load_extension("TOOLS", load_entry_points=True)
+            if reported_errors:
+                load_errors.extend(reported_errors)
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
-            if errors is not None:
-                errors.append(f"plugin loader: {e}")
+            load_errors.append(f"plugin loader: {e}")
+        if errors is not None:
+            errors.extend(load_errors)
         after = set(cls._tools.keys())
         new_plugin_tools = sorted(after - before)
         python_tool_sources: Dict[str, Path] = {}
@@ -1131,8 +1139,14 @@ class ToolRegistry:
             except ValueError:
                 tool.info.native = True
         cls._plugin_tool_names = sorted(set(new_plugin_tools) | python_plugin_names)
-        if errors:
-            return
+        if errors is not None and load_errors:
+            return load_errors
+        cls._finalize_plugin_tools_load()
+        return load_errors
+
+    @classmethod
+    def _finalize_plugin_tools_load(cls) -> None:
+        """Apply configuration overlays after an accepted plugin load."""
         cls._bootstrap_user_api_services()
         # Defence-in-depth: ``register()`` is the canonical writer for
         # ``_enabled_defaults`` but this catches any tool that landed in
@@ -1612,11 +1626,13 @@ class ToolRegistry:
         cls._watcher.start()
 
     @classmethod
-    def refresh_plugin_tools(cls) -> List[str]:
+    def refresh_plugin_tools(cls, changed_path: Optional[Path] = None) -> List[str]:
         """Reload plugin tools (YAML + Python) from disk.
 
         Unregisters stale plugin tools first so that deleted files are
-        correctly removed from the registry.
+        correctly removed from the registry. When a Hub operation supplies
+        ``changed_path``, source failures outside that path are isolated and
+        do not block the operation; failures inside it still roll back.
         """
         cls._ensure_initialized()
         with cls._refresh_lock:
@@ -1635,14 +1651,39 @@ class ToolRegistry:
                 cls._enabled_defaults.update(defaults_before)
                 cls._plugin_tool_names = plugin_names_before
                 raise
-            if load_errors:
+            changed_root = changed_path.resolve() if changed_path is not None else None
+            fatal_errors: List[str] = []
+            for error in load_errors:
+                if changed_root is None or error.startswith(
+                    ("plugin loader:", "extension point not found:")
+                ):
+                    fatal_errors.append(error)
+                    continue
+                if error.startswith("entry point "):
+                    continue
+                source_text, separator, _detail = error.partition(": ")
+                if not separator:
+                    fatal_errors.append(error)
+                    continue
+                source_path = Path(source_text)
+                if not source_path.is_absolute():
+                    fatal_errors.append(error)
+                    continue
+                source_path = source_path.resolve()
+                if source_path == changed_root or changed_root in source_path.parents:
+                    fatal_errors.append(error)
+            if fatal_errors:
                 cls._tools.clear()
                 cls._tools.update(tools_before)
                 cls._enabled_defaults.clear()
                 cls._enabled_defaults.update(defaults_before)
                 cls._plugin_tool_names = plugin_names_before
-                raise ToolRefreshError("plugin", load_errors)
+                raise ToolRefreshError("plugin", fatal_errors)
 
+            if load_errors:
+                cls._finalize_plugin_tools_load()
+
+            cls._plugin_load_errors = load_errors
             cls._bump_revision("plugin_refresh")
             return cls.all_tool_ids()
 

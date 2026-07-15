@@ -134,7 +134,10 @@ def _write_bundled_tool(
 
 
 @pytest.mark.asyncio
-async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
+async def test_tool_runtime_refresh_scopes_errors_and_clears_device_template_cache(
+    monkeypatch,
+    tmp_path,
+):
     from flocks.config import api_versioning
     from flocks.tool.device import plugin_index
     from flocks.tool.registry import ToolRegistry
@@ -144,7 +147,9 @@ async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
     monkeypatch.setattr(
         ToolRegistry,
         "refresh_plugin_tools",
-        classmethod(lambda cls: calls.append("refresh")),
+        classmethod(
+            lambda cls, changed_path=None: calls.append(f"refresh:{changed_path}")
+        ),
     )
     monkeypatch.setattr(
         api_versioning,
@@ -153,10 +158,11 @@ async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
     )
     plugin_index._template_cache = []
 
-    await _refresh_runtime("device")
+    changed_path = tmp_path / "device"
+    await _refresh_runtime("device", changed_path)
 
     assert plugin_index._template_cache is None
-    assert calls == ["init", "refresh", "discover:True"]
+    assert calls == ["init", f"refresh:{changed_path}", "discover:True"]
 
 
 @pytest.mark.asyncio
@@ -775,6 +781,23 @@ class TestPackageValidationSkipNames:
         # Symlink that escapes the package root must still trip the guard.
         (package / "evil").symlink_to(outside)
         with pytest.raises(ValueError, match="escapes"):
+            validate_package(package, self._manifest())
+
+    def test_python_syntax_error_is_rejected_before_install(self, tmp_path):
+        package = tmp_path / "demo"
+        package.mkdir()
+        (package / "broken.handler.py").write_text("def broken(:\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Invalid Python source.*broken\.handler\.py"):
+            validate_package(package, self._manifest())
+
+    def test_nested_python_syntax_error_is_rejected_before_install(self, tmp_path):
+        package = tmp_path / "demo"
+        scripts = package / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Invalid Python source.*scripts/broken\.py"):
             validate_package(package, self._manifest())
 
 

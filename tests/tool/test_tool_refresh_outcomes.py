@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 import threading
 
 import pytest
@@ -34,6 +35,7 @@ def _isolated_registry() -> Iterator[None]:
         "tools": ToolRegistry._tools,
         "defaults": ToolRegistry._enabled_defaults,
         "plugin_names": ToolRegistry._plugin_tool_names,
+        "plugin_errors": ToolRegistry._plugin_load_errors,
         "dynamic_modules": ToolRegistry._dynamic_modules,
         "dynamic_tools": ToolRegistry._dynamic_tools_by_module,
     }
@@ -42,6 +44,7 @@ def _isolated_registry() -> Iterator[None]:
         ToolRegistry._tools = {}
         ToolRegistry._enabled_defaults = {}
         ToolRegistry._plugin_tool_names = []
+        ToolRegistry._plugin_load_errors = []
         ToolRegistry._dynamic_modules = {}
         ToolRegistry._dynamic_tools_by_module = {}
         yield
@@ -50,11 +53,12 @@ def _isolated_registry() -> Iterator[None]:
         ToolRegistry._tools = state["tools"]
         ToolRegistry._enabled_defaults = state["defaults"]
         ToolRegistry._plugin_tool_names = state["plugin_names"]
+        ToolRegistry._plugin_load_errors = state["plugin_errors"]
         ToolRegistry._dynamic_modules = state["dynamic_modules"]
         ToolRegistry._dynamic_tools_by_module = state["dynamic_tools"]
 
 
-def test_plugin_refresh_restores_last_known_good_on_load_error(
+def test_plugin_refresh_restores_last_known_good_on_loader_failure(
     monkeypatch: pytest.MonkeyPatch,
 ):
     with _isolated_registry():
@@ -66,12 +70,162 @@ def test_plugin_refresh_restores_last_known_good_on_load_error(
             replacement = _tool("partial_replacement", "plugin_py")
             cls._tools[replacement.info.name] = replacement
             cls._plugin_tool_names = [replacement.info.name]
-            errors.append("broken plugin")
+            errors.append("plugin loader: unavailable")
 
         monkeypatch.setattr(ToolRegistry, "_load_plugin_tools", classmethod(_failed_load))
 
-        with pytest.raises(ToolRefreshError, match="broken plugin"):
+        with pytest.raises(ToolRefreshError, match="plugin loader: unavailable"):
             ToolRegistry.refresh_plugin_tools()
+
+        assert ToolRegistry._tools == {previous.info.name: previous}
+        assert ToolRegistry._plugin_tool_names == [previous.info.name]
+
+
+def test_plugin_refresh_accepts_later_unrelated_syntax_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from flocks.plugin import PluginLoader
+
+    with _isolated_registry():
+        project_dir = tmp_path / "project"
+        plugin_root = tmp_path / "plugins"
+        plugin_dir = plugin_root / "tools" / "device" / "legacy_device"
+        project_dir.mkdir()
+        plugin_dir.mkdir(parents=True)
+
+        monkeypatch.chdir(project_dir)
+        monkeypatch.setattr(PluginLoader, "_plugin_root", plugin_root)
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_finalize_plugin_tools_load",
+            classmethod(lambda cls: None),
+        )
+        monkeypatch.setattr(ToolRegistry, "_bump_revision", lambda _reason: None)
+        extension_points_before = PluginLoader._extension_points.copy()
+        try:
+            ToolRegistry._register_plugin_extension_point()
+            startup_errors = ToolRegistry._load_plugin_tools()
+            assert startup_errors == []
+            ToolRegistry._plugin_load_errors = startup_errors
+
+            (plugin_dir / "broken.handler.py").write_text(
+                "def broken(:\n",
+                encoding="utf-8",
+            )
+
+            (plugin_root / "tools" / "newly_installed.py").write_text(
+                "async def handle(ctx):\n"
+                "    return None\n\n"
+                "TOOLS = [{\n"
+                "    'name': 'newly_installed',\n"
+                "    'description': 'newly installed tool',\n"
+                "    'handler': handle,\n"
+                "}]\n",
+                encoding="utf-8",
+            )
+
+            refreshed = ToolRegistry.refresh_plugin_tools(
+                changed_path=plugin_root / "tools" / "newly_installed.py",
+            )
+
+            assert "newly_installed" in refreshed
+            assert ToolRegistry.get("newly_installed") is not None
+            assert any("SyntaxError" in error for error in ToolRegistry._plugin_load_errors)
+        finally:
+            PluginLoader.clear_extension_points()
+            PluginLoader._extension_points.update(extension_points_before)
+
+
+def test_registry_init_records_plugin_load_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with _isolated_registry():
+        ToolRegistry._initialized = False
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_register_builtin_tools",
+            classmethod(lambda cls: None),
+        )
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_register_dynamic_tools",
+            classmethod(lambda cls, errors=None: None),
+        )
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_register_plugin_extension_point",
+            classmethod(lambda cls: None),
+        )
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_load_plugin_tools",
+            classmethod(lambda cls: ["broken legacy plugin"]),
+        )
+
+        ToolRegistry.init()
+
+        assert ToolRegistry._plugin_load_errors == ["broken legacy plugin"]
+
+
+def test_plugin_refresh_commits_valid_sources_alongside_new_source_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with _isolated_registry():
+        previous = _tool("previous_plugin", "plugin_py")
+        ToolRegistry._tools[previous.info.name] = previous
+        ToolRegistry._plugin_tool_names = [previous.info.name]
+        ToolRegistry._plugin_load_errors = ["/plugins/legacy.py: broken legacy plugin"]
+
+        def _load_with_new_error(cls, errors):
+            replacement = _tool("partial_replacement", "plugin_py")
+            cls._tools[replacement.info.name] = replacement
+            cls._plugin_tool_names = [replacement.info.name]
+            errors.extend(
+                [
+                    "/plugins/legacy.py: broken legacy plugin",
+                    "/plugins/unrelated.py: new broken plugin",
+                ]
+            )
+
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_load_plugin_tools",
+            classmethod(_load_with_new_error),
+        )
+
+        refreshed = ToolRegistry.refresh_plugin_tools(
+            changed_path=Path("/plugins/newly_installed.py"),
+        )
+
+        assert refreshed == ["partial_replacement"]
+        assert set(ToolRegistry._tools) == {"partial_replacement"}
+        assert ToolRegistry._plugin_tool_names == ["partial_replacement"]
+        assert ToolRegistry._plugin_load_errors == [
+            "/plugins/legacy.py: broken legacy plugin",
+            "/plugins/unrelated.py: new broken plugin",
+        ]
+
+
+def test_plugin_refresh_rejects_error_inside_changed_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with _isolated_registry():
+        previous = _tool("previous_plugin", "plugin_py")
+        ToolRegistry._tools[previous.info.name] = previous
+        ToolRegistry._plugin_tool_names = [previous.info.name]
+
+        def _load_target_error(cls, errors):
+            errors.append("/plugins/new/broken.py: ImportError: missing dependency")
+
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_load_plugin_tools",
+            classmethod(_load_target_error),
+        )
+
+        with pytest.raises(ToolRefreshError, match="missing dependency"):
+            ToolRegistry.refresh_plugin_tools(changed_path=Path("/plugins/new"))
 
         assert ToolRegistry._tools == {previous.info.name: previous}
         assert ToolRegistry._plugin_tool_names == [previous.info.name]
@@ -121,7 +275,7 @@ def test_refresh_transactions_are_serialized_across_stages(
         def _failed_plugin_load(cls, errors):
             plugin_load_entered.set()
             assert allow_plugin_failure.wait(timeout=2)
-            errors.append("broken plugin")
+            errors.append("plugin loader: unavailable")
 
         def _successful_dynamic_load(cls, _errors):
             dynamic_load_entered.set()
@@ -199,7 +353,7 @@ def test_registry_readers_do_not_observe_an_in_progress_refresh(
         def _failed_plugin_load(cls, errors):
             load_entered.set()
             assert allow_failure.wait(timeout=2)
-            errors.append("broken plugin")
+            errors.append("plugin loader: unavailable")
 
         monkeypatch.setattr(
             ToolRegistry,

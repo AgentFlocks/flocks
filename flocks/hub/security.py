@@ -23,6 +23,30 @@ def _sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _validate_python_syntax(package_dir: Path, manifest: HubPluginManifest) -> None:
+    python_files = {
+        package_dir / entrypoint
+        for entrypoint in manifest.entrypoints
+        if Path(entrypoint).suffix == ".py"
+    }
+    if manifest.type in {"tool", "device"}:
+        python_files.update(
+            path
+            for path in package_dir.rglob("*.py")
+            if not any(part in SKIP_NAMES for part in path.relative_to(package_dir).parts)
+        )
+
+    for path in sorted(python_files):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(package_dir).as_posix()
+        try:
+            source = path.read_text(encoding="utf-8")
+            compile(source, str(path), "exec")
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            raise ValueError(f"Invalid Python source in package: {relative_path}: {exc}") from exc
+
+
 def validate_package(package_dir: Path, manifest: HubPluginManifest) -> None:
     base = package_dir.resolve()
     if not base.is_dir():
@@ -40,6 +64,8 @@ def validate_package(package_dir: Path, manifest: HubPluginManifest) -> None:
         entry = base / entrypoint
         if not entry.exists():
             raise ValueError(f"Missing entrypoint: {entrypoint}")
+
+    _validate_python_syntax(base, manifest)
 
     for rel_path, expected in manifest.checksums.items():
         if not expected:
