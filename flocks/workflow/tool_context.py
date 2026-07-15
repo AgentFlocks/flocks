@@ -88,17 +88,57 @@ async def build_workflow_tool_context(
         effective_message_id = message.id
 
     delegation_context: dict[str, Any] = {}
-    try:
-        from flocks.security.delegation_context import load_delegation_security_context
+    delegated_session = bool(
+        parent_session and getattr(parent_session, "delegation_context_required", False)
+    )
+    if delegated_session:
+        try:
+            from flocks.security.capability_pool import (
+                build_capability_ceiling,
+                normalize_capability_ceiling,
+            )
+            from flocks.security.delegation_context import load_delegation_security_context
 
-        stored_context = await load_delegation_security_context(effective_session_id)
-        if stored_context:
-            delegation_context.update(stored_context)
-    except Exception:
-        # Root/direct workflow execution keeps its existing behavior.  A
-        # marked delegated session will fail closed in SessionLoop/B3.
-        pass
-    if parent_context is not None and isinstance(parent_context.extra, dict):
+            stored_context = await load_delegation_security_context(effective_session_id)
+            stored_ceiling = (
+                normalize_capability_ceiling(stored_context.get("parent_ceiling"))
+                if isinstance(stored_context, dict)
+                else None
+            )
+            if stored_ceiling is not None:
+                # The persisted server-created ceiling is authoritative for a
+                # marked child.  A direct workflow caller can at most further
+                # narrow it with a valid source ceiling; it can never replace
+                # it or broaden it.
+                delegation_context = stored_context
+                if parent_context is not None and isinstance(parent_context.extra, dict):
+                    source_ceiling = parent_context.extra.get("_capability_pool")
+                    if source_ceiling is None:
+                        source_ceiling = parent_context.extra.get("parent_ceiling")
+                    if source_ceiling is not None:
+                        source = normalize_capability_ceiling(source_ceiling)
+                        if source is None:
+                            delegation_context = {"parent_ceiling": {"invalid": True}}
+                        else:
+                            narrowed_ceiling = build_capability_ceiling(
+                                tools=source["tools"],
+                                context={**source, "parent_ceiling": stored_ceiling},
+                            )
+                            if normalize_capability_ceiling(narrowed_ceiling) is None:
+                                delegation_context = {"parent_ceiling": {"invalid": True}}
+                            else:
+                                delegation_context = {
+                                    **stored_context,
+                                    "parent_ceiling": narrowed_ceiling,
+                                }
+            else:
+                delegation_context = {"parent_ceiling": {"invalid": True}}
+        except Exception:
+            # Direct workflow routes do not pass through SessionLoop.  A
+            # marked child therefore has to fail closed here as well when its
+            # internal record cannot be read.
+            delegation_context = {"parent_ceiling": {"invalid": True}}
+    elif parent_context is not None and isinstance(parent_context.extra, dict):
         from flocks.security.capability_pool import sanitize_parent_ceiling
 
         source_ceiling = parent_context.extra.get("_capability_pool")

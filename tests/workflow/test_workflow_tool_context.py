@@ -10,6 +10,7 @@ from flocks.storage.storage import Storage
 from flocks.workflow.tool_context import build_workflow_tool_context
 from flocks.tool.task.run_workflow import _create_nested_tool_context
 from flocks.tool.registry import ToolContext
+from flocks.security.delegation_context import store_delegation_security_context
 
 
 @pytest.fixture
@@ -88,6 +89,125 @@ async def test_build_workflow_tool_context_reuses_existing_parent_session(
     assert message is not None
     assert message.role == MessageRole.USER
     assert message.agent == "rex-junior"
+
+
+@pytest.mark.asyncio
+async def test_marked_delegated_workflow_context_fails_closed_when_internal_context_missing(
+    tmp_path: Path,
+    isolated_storage,
+) -> None:
+    delegated_session = await Session.create(
+        project_id="project-1",
+        directory=str(tmp_path / "workspace"),
+        title="Delegated session",
+        agent="rex-junior",
+        category="task",
+        delegation_context_required=True,
+    )
+
+    tool_context = await build_workflow_tool_context(
+        workflow_id="wf-marked",
+        action_name="run",
+        session_id=delegated_session.id,
+    )
+
+    assert tool_context.extra["parent_ceiling"] == {"invalid": True}
+
+
+@pytest.mark.asyncio
+async def test_marked_delegated_workflow_context_does_not_widen_stored_ceiling(
+    tmp_path: Path,
+    isolated_storage,
+) -> None:
+    delegated_session = await Session.create(
+        project_id="project-1",
+        directory=str(tmp_path / "workspace"),
+        title="Delegated session",
+        agent="rex-junior",
+        category="task",
+        delegation_context_required=True,
+    )
+    await store_delegation_security_context(
+        delegated_session.id,
+        {"parent_ceiling": {"tools": ["read"]}},
+    )
+
+    tool_context = await build_workflow_tool_context(
+        workflow_id="wf-marked",
+        action_name="run",
+        session_id=delegated_session.id,
+        parent_context=ToolContext(
+            session_id="parent-session",
+            message_id="parent-message",
+            extra={"_capability_pool": {"tools": ["read", "bash"]}},
+        ),
+    )
+
+    assert tool_context.extra["parent_ceiling"] == {"tools": ["read"]}
+
+
+@pytest.mark.asyncio
+async def test_marked_delegated_workflow_context_can_only_narrow_stored_ceiling(
+    tmp_path: Path,
+    isolated_storage,
+) -> None:
+    delegated_session = await Session.create(
+        project_id="project-1",
+        directory=str(tmp_path / "workspace"),
+        title="Delegated session",
+        agent="rex-junior",
+        category="task",
+        delegation_context_required=True,
+    )
+    await store_delegation_security_context(
+        delegated_session.id,
+        {"parent_ceiling": {"tools": ["read", "bash"]}},
+    )
+
+    tool_context = await build_workflow_tool_context(
+        workflow_id="wf-marked",
+        action_name="run",
+        session_id=delegated_session.id,
+        parent_context=ToolContext(
+            session_id="parent-session",
+            message_id="parent-message",
+            extra={"_capability_pool": {"tools": ["read"]}},
+        ),
+    )
+
+    assert tool_context.extra["parent_ceiling"] == {"tools": ["read"]}
+
+
+@pytest.mark.asyncio
+async def test_marked_delegated_workflow_context_fails_closed_for_malformed_source_ceiling(
+    tmp_path: Path,
+    isolated_storage,
+) -> None:
+    delegated_session = await Session.create(
+        project_id="project-1",
+        directory=str(tmp_path / "workspace"),
+        title="Delegated session",
+        agent="rex-junior",
+        category="task",
+        delegation_context_required=True,
+    )
+    await store_delegation_security_context(
+        delegated_session.id,
+        {"parent_ceiling": {"tools": ["read"]}},
+    )
+
+    tool_context = await build_workflow_tool_context(
+        workflow_id="wf-marked",
+        action_name="run",
+        session_id=delegated_session.id,
+        parent_context=ToolContext(
+            session_id="parent-session",
+            message_id="parent-message",
+            extra={"_capability_pool": {"tools": "read"}},
+        ),
+    )
+
+    assert tool_context.extra["parent_ceiling"] == {"invalid": True}
 
 
 def test_workflow_nested_tool_context_deep_copies_parent_ceiling() -> None:

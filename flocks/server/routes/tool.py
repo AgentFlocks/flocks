@@ -257,7 +257,7 @@ async def _validate_session_message_context(
     )
 
 
-def _build_http_tool_context(
+async def _build_http_tool_context(
     *,
     tool_name: str,
     tool_info: ToolInfo,
@@ -270,6 +270,28 @@ def _build_http_tool_context(
     effective_message_id = message_id or f"http-tool:{tool_name}"
 
     if session_id:
+        security_context: Dict[str, Any] = {}
+        try:
+            from flocks.security.delegation_context import resolve_session_security_context
+            from flocks.session.session import Session
+
+            session = await Session.get_by_id(session_id)
+            if session and getattr(session, "delegation_context_required", False):
+                # HTTP execution is a direct ToolRegistry path, so it does
+                # not receive SessionLoop's restoration step.  Restore only
+                # the server-persisted child context; an absent/corrupt record
+                # yields the explicit invalid marker used by B3 to fail closed.
+                security_context = await resolve_session_security_context(
+                    session_id,
+                    delegation_context_required=True,
+                )
+        except Exception as exc:
+            log.warning("tool.http.delegation_context.load_failed", {
+                "session_id": session_id,
+                "error": type(exc).__name__,
+            })
+            security_context = {"parent_ceiling": {"invalid": True}}
+
         async def permission_callback(request) -> None:
             metadata = dict(request.metadata or {})
             metadata.setdefault("messageID", effective_message_id)
@@ -289,6 +311,7 @@ def _build_http_tool_context(
             message_id=effective_message_id,
             agent=agent_name,
             permission_callback=permission_callback,
+            extra=security_context,
         )
 
     if _requires_session_backed_context(tool_info):
@@ -331,7 +354,7 @@ async def _execute_with_http_context(
         session_id=session_id,
         message_id=message_id,
     )
-    ctx = _build_http_tool_context(
+    ctx = await _build_http_tool_context(
         tool_name=tool_name,
         tool_info=tool_info,
         session_id=validated_session_id,
