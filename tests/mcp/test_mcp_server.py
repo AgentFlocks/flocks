@@ -43,19 +43,6 @@ class _FakeMcpClient:
         return []
 
 
-def test_status_snapshot_is_read_only_and_does_not_initialize():
-    manager = McpServerManager()
-    status = SimpleNamespace(status=McpStatus.DISCONNECTED)
-    manager._status["demo"] = status
-
-    snapshot, initialized = manager.status_snapshot()
-
-    assert initialized is False
-    assert snapshot == {"demo": status}
-    snapshot.clear()
-    assert manager._status == {"demo": status}
-
-
 @pytest.mark.asyncio
 async def test_connect_and_register_accepts_legacy_env_alias(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, object] = {}

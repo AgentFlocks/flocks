@@ -415,7 +415,7 @@ describe('DeviceIntegrationPage', () => {
 
     await openManualAddWizard(user);
 
-    expect(await screen.findByText('API 接入')).toBeInTheDocument();
+    expect(screen.getByText('API 接入')).toBeInTheDocument();
     expect(screen.getByText('浏览器接入')).toBeInTheDocument();
     expect(screen.getByText('TDP 接入')).toBeInTheDocument();
     expect(screen.getByText('OneSEC 接入')).toBeInTheDocument();

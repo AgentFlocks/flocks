@@ -26,7 +26,6 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import type { ComponentType } from 'react';
 import { useTranslation } from 'react-i18next';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
@@ -35,20 +34,6 @@ import { useTranslation } from 'react-i18next';
 // would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
-
-type LazyLayoutModule = { default: ComponentType<any> };
-
-function lazyLayoutComponent<T extends LazyLayoutModule>(
-  loader: () => Promise<T>,
-  namespaces: readonly string[] = [],
-) {
-  return lazy(() => recoverLazyLoad(
-    Promise.all([
-      loader(),
-      preloadI18nNamespaces(namespaces),
-    ]).then(([module]) => module),
-  ));
-}
 
 function isOnboardingDismissed(): boolean {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
@@ -78,9 +63,9 @@ function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
   }
 }
 
-const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
-const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
-const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
+const OnboardingModal = lazy(() => import('@/components/common/OnboardingModal'));
+const UpdateModal = lazy(() => import('@/components/common/UpdateModal'));
+const NotificationModal = lazy(() => import('@/components/common/NotificationModal'));
 import { checkUpdate, type VersionInfo } from '@/api/update';
 import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
@@ -95,7 +80,6 @@ import { useProductName } from '@/contexts/ProductNameContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
-import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
   buildWebUIContractWorkspaceSections,
@@ -103,13 +87,10 @@ import {
 } from '@/utils/webuiContractWorkspaceSections';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
-import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
-import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
-const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
 
 interface LayoutNavItem {
   name: string;
@@ -252,12 +233,12 @@ export default function Layout() {
     return () => window.removeEventListener('flocks:open-onboarding', handleOpenOnboarding);
   }, [handleOpenOnboarding]);
 
-  const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
+  const refreshUpdateStatus = useCallback(async (force = false) => {
     if (!flocksproStatusReady) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
-    if (!bypassMinGap && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
+    if (!force && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
 
     checkingUpdateRef.current = true;
     lastUpdateCheckAtRef.current = now;
@@ -306,9 +287,7 @@ export default function Layout() {
   useEffect(() => {
     if (!flocksproStatusReady) return undefined;
 
-    const initialCheckTimerId = window.setTimeout(() => {
-      refreshUpdateStatus(true);
-    }, UPDATE_CHECK_INITIAL_DELAY_MS);
+    refreshUpdateStatus(true);
 
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -330,7 +309,6 @@ export default function Layout() {
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
-      window.clearTimeout(initialCheckTimerId);
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
@@ -713,34 +691,31 @@ export default function Layout() {
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Modals render lazily — fallback={null} keeps the chunk download
           invisible to the user (they're already triggering an async UI). */}
-      <LazyLoadErrorBoundary mode="overlay">
-        <Suspense fallback={null}>
-          {showOnboarding && (
-            <OnboardingModal
-              onClose={() => setShowOnboarding(false)}
-            />
-          )}
-          {showUpdate && (
-            <UpdateModal
-              initialInfo={updateInfo}
-              forceInitialCheck={updateInfo === null}
-              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
-              canUpgrade={canManageUpdates}
-              onClose={() => setShowUpdate(false)}
-              onDismiss={() => setShowUpdate(false)}
-            />
-          )}
-          {visibleNotifications.length > 0 && (
-            <NotificationModal
-              notifications={visibleNotifications}
-              acknowledgingIds={acknowledgingNotificationIds}
-              onAcknowledge={closeVisibleNotification}
-              onClose={closeVisibleNotification}
-              onDismissForever={dismissVisibleNotificationForever}
-            />
-          )}
-        </Suspense>
-      </LazyLoadErrorBoundary>
+      <Suspense fallback={null}>
+        {showOnboarding && (
+          <OnboardingModal
+            onClose={() => setShowOnboarding(false)}
+          />
+        )}
+        {showUpdate && (
+          <UpdateModal
+            initialInfo={updateInfo}
+            edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+            canUpgrade={canManageUpdates}
+            onClose={() => setShowUpdate(false)}
+            onDismiss={() => setShowUpdate(false)}
+          />
+        )}
+        {visibleNotifications.length > 0 && (
+          <NotificationModal
+            notifications={visibleNotifications}
+            acknowledgingIds={acknowledgingNotificationIds}
+            onAcknowledge={closeVisibleNotification}
+            onClose={closeVisibleNotification}
+            onDismissForever={dismissVisibleNotificationForever}
+          />
+        )}
+      </Suspense>
 
       {sidebarOpen && (
         <div

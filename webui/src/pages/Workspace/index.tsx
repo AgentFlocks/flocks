@@ -1,15 +1,18 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
   X, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
   Brain, AlertTriangle, Search, ArrowLeft, Maximize2,
   Code2, Eye, ZoomIn, ZoomOut,
 } from 'lucide-react';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
+import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
 import {
   workspaceAPI, WorkspaceNode, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
@@ -49,8 +52,7 @@ const IMAGE_MIN_SCALE = 0.5;
 const IMAGE_MAX_SCALE = 3;
 const IMAGE_SCALE_STEP = 0.25;
 
-const LazyStreamingMarkdown = lazy(() => import('@/components/common/StreamingMarkdown')
-  .then((module) => ({ default: module.StreamingMarkdown })));
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 function getViewportWidth(): number {
   return typeof window === 'undefined' ? PREVIEW_PANEL_MIN_WIDTH * 2 : window.innerWidth;
@@ -359,7 +361,6 @@ function PdfPreview({
 
   useEffect(() => {
     let cancelled = false;
-    let loadingTask: any = null;
     setPdfDoc(null);
     setPageNumber(1);
     setPageCount(0);
@@ -369,40 +370,26 @@ function PdfPreview({
     setLoading(true);
     setError(null);
 
-    async function loadPdf() {
-      try {
-        const [pdfjsLib, pdfWorkerModule] = await Promise.all([
-          import('pdfjs-dist'),
-          import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
-        ]);
+    const loadingTask = pdfjsLib.getDocument({ url: previewUrl, withCredentials: true });
+    loadingTask.promise
+      .then((doc) => {
         if (cancelled) {
           return;
         }
-
-        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerModule.default;
-        loadingTask = pdfjsLib.getDocument({ url: previewUrl, withCredentials: true });
-        const doc = await loadingTask.promise;
-        if (cancelled) {
-          doc?.destroy?.();
-          return;
-        }
-
         setPdfDoc(doc);
         setPageCount(doc.numPages);
         setPagesToRender(new Set(Array.from({ length: Math.min(doc.numPages, PDF_RENDER_WINDOW + 1) }, (_, index) => index + 1)));
         setLoading(false);
-      } catch (e: any) {
+      })
+      .catch((e: any) => {
         if (cancelled) return;
         setError(e?.message ?? 'PDF preview failed');
         setLoading(false);
-      }
-    }
-
-    loadPdf();
+      });
 
     return () => {
       cancelled = true;
-      loadingTask?.destroy?.();
+      loadingTask.destroy();
     };
   }, [previewUrl]);
 
@@ -777,9 +764,7 @@ function RenderedPreview({
   if (kind === 'markdown') {
     return (
       <div className="h-full overflow-auto bg-white p-5">
-        <Suspense fallback={<div className="flex h-32 items-center justify-center"><LoadingSpinner /></div>}>
-          <LazyStreamingMarkdown content={content} isStreaming={false} />
-        </Suspense>
+        <StreamingMarkdown content={content} isStreaming={false} />
       </div>
     );
   }

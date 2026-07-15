@@ -55,8 +55,6 @@
     "backendUnavailable": "无法连接到后端服务",
     "backendError": "后端服务异常",
     "backendErrorHint": "请确保后端服务正在运行",
-    "chunkLoadFailed": "页面资源加载失败",
-    "chunkLoadHint": "应用可能已经更新，请刷新后重试。",
     "processingFailed": "处理失败",
     "deleteFailed": "删除失败",
     "saveFailed": "保存失败"

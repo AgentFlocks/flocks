@@ -331,10 +331,6 @@ class McpServerManager:
 
         return self._status.copy()
 
-    def status_snapshot(self) -> tuple[Dict[str, McpStatusInfo], bool]:
-        """Return current status without triggering MCP initialization."""
-        return self._status.copy(), self._initialized
-
     async def get_server_info(self, name: str) -> Optional[McpServerInfo]:
         """
         Get detailed server information

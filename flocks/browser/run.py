@@ -8,7 +8,6 @@ import sys
 
 from .admin import (
     _version,
-    daemon_browser_connected,
     ensure_daemon,
     print_update_banner,
     restart_daemon,
@@ -101,12 +100,10 @@ def _run_state_command(args: list[str]) -> None:
     url, no_reload = _parse_state_options(rest, allow_no_reload=action == "load")
 
     print_update_banner()
+    ensure_daemon()
     if action == "save":
-        if not daemon_browser_connected():
-            ensure_daemon()
         result = save_state(path, url=url)
     else:
-        ensure_daemon()
         result = load_state(path, url=url, reload=not no_reload)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

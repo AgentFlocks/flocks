@@ -673,7 +673,6 @@ class TestPermissionRoutes:
     async def test_permission_routes_preserve_request_created_time(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
         """List/detail routes should expose the stored permission request timestamp."""
         from flocks.permission.next import PermissionRequestInfo
-        from flocks.session.session import SessionInfo
 
         info = PermissionRequestInfo(
             id="perm_time_test",
@@ -693,17 +692,6 @@ class TestPermissionRoutes:
         monkeypatch.setattr(
             "flocks.server.routes.permission.PermissionNext.get_pending_info",
             AsyncMock(return_value=info),
-        )
-        monkeypatch.setattr(
-            "flocks.server.routes.permission.Session.get_by_id",
-            AsyncMock(return_value=SessionInfo(
-                id="ses_time_test",
-                project_id="test",
-                directory="/tmp",
-                title="Permission route test",
-                owner_user_id="api-token-service",
-                owner_username="api-token-service",
-            )),
         )
 
         list_resp = await client.get("/permission")

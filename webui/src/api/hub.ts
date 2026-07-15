@@ -112,40 +112,12 @@ export interface HubCatalogParams {
   q?: string;
 }
 
-export interface HubCatalogPageParams extends HubCatalogParams {
-  offset?: number;
-  limit?: number;
-}
-
-export interface HubCatalogFacets {
-  type: Record<string, number>;
-  category: Record<string, number>;
-  tags: Record<string, number>;
-  useCases: Record<string, number>;
-  state: Record<string, number>;
-  trust: Record<string, number>;
-  riskLevel: Record<string, number>;
-}
-
-export interface HubCatalogPageResponse {
-  items: HubCatalogEntry[];
-  total: number;
-  offset: number;
-  limit: number;
-  facets: HubCatalogFacets;
-}
-
 export const hubAPI = {
   catalog: (params?: HubCatalogParams) =>
     client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
 
-  catalogPage: (params?: HubCatalogPageParams) =>
-    client.get<HubCatalogPageResponse>('/api/hub/catalog', { params }),
-
-  categories: (params?: { includeCounts?: boolean }) =>
-    client.get('/api/hub/categories', {
-      params: params ? { include_counts: params.includeCounts } : undefined,
-    }),
+  categories: () =>
+    client.get('/api/hub/categories'),
 
   get: (type: HubPluginType, id: string) =>
     client.get<HubManifest>(`/api/hub/plugins/${type}/${id}`),

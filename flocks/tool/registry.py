@@ -25,15 +25,6 @@ from flocks.utils.log import Log
 log = Log.create(service="tool-registry")
 
 
-class ToolRefreshError(RuntimeError):
-    """A refresh stage failed and the previous registry state was restored."""
-
-    def __init__(self, stage: str, errors: List[str]):
-        self.stage = stage
-        self.errors = list(errors)
-        super().__init__(f"{stage}: {'; '.join(self.errors)}")
-
-
 class ToolCategory(str, Enum):
     """Tool categories"""
     FILE = "file"
@@ -611,7 +602,6 @@ class ToolRegistry:
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
     _init_lock = threading.Lock()
-    _refresh_lock = threading.RLock()
     _initializing_thread_id: Optional[int] = None
 
     # Snapshot of every tool's factory-default ``enabled`` flag — captured
@@ -656,9 +646,8 @@ class ToolRegistry:
         # ``refresh_plugin_tools`` cycle — must refresh the snapshot so
         # ``enabled_default`` / ``reset`` reflect the current source of
         # truth instead of the first value ever observed.
-        with cls._refresh_lock:
-            cls._enabled_defaults[tool.info.name] = bool(tool.info.enabled)
-            cls._tools[tool.info.name] = tool
+        cls._enabled_defaults[tool.info.name] = bool(tool.info.enabled)
+        cls._tools[tool.info.name] = tool
         log.debug("tool.registered", {
             "name": tool.info.name,
             "category": tool.info.category.value,
@@ -671,8 +660,7 @@ class ToolRegistry:
         The revision is bumped when plugin or dynamic tools are reloaded so
         long-lived session caches can detect toolset changes.
         """
-        with cls._refresh_lock:
-            return cls._revision
+        return cls._revision
 
     @classmethod
     def _bump_revision(cls, reason: str) -> None:
@@ -740,8 +728,7 @@ class ToolRegistry:
     @classmethod
     def unregister(cls, name: str) -> bool:
         """Unregister a tool by name. Returns True if the tool was found and removed."""
-        with cls._refresh_lock:
-            removed = cls._tools.pop(name, None)
+        removed = cls._tools.pop(name, None)
         if removed:
             log.debug("tool.unregistered", {"name": name})
         return removed is not None
@@ -756,18 +743,18 @@ class ToolRegistry:
     def get(cls, name: str) -> Optional[Tool]:
         """Get a tool by name"""
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            return cls._tools.get(name)
+        return cls._tools.get(name)
 
     @classmethod
     def list_tools(cls, category: Optional[ToolCategory] = None) -> List[ToolInfo]:
         """List all registered tools, optionally filtered by category"""
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            tools = list(cls._tools.values())
-            if category:
-                tools = [t for t in tools if t.info.category == category]
-            return [t.info for t in tools]
+        tools = list(cls._tools.values())
+
+        if category:
+            tools = [t for t in tools if t.info.category == category]
+
+        return [t.info for t in tools]
 
     @classmethod
     def get_schema(cls, name: str) -> Optional[ToolSchema]:
@@ -996,25 +983,13 @@ class ToolRegistry:
     def all_tool_ids(cls) -> List[str]:
         """Get all registered tool IDs"""
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            return list(cls._tools.keys())
-
-    @classmethod
-    def snapshot_identity(cls) -> tuple[int, tuple[str, ...]]:
-        """Return a revision/tool-id identity from one consistent registry state."""
-        cls._ensure_initialized()
-        with cls._refresh_lock:
-            return cls._revision, tuple(cls._tools.keys())
+        return list(cls._tools.keys())
 
     @classmethod
     def get_dynamic_tools_by_module(cls) -> Dict[str, List[str]]:
         """Return a copy of the dynamic-module → tool-names mapping."""
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            return {
-                module_name: list(tool_names)
-                for module_name, tool_names in cls._dynamic_tools_by_module.items()
-            }
+        return dict(cls._dynamic_tools_by_module)
 
     @classmethod
     def get_api_service_ids(cls) -> set:
@@ -1064,7 +1039,7 @@ class ToolRegistry:
         await asyncio.to_thread(cls.init)
 
     @classmethod
-    def _load_plugin_tools(cls, errors: Optional[List[str]] = None) -> None:
+    def _load_plugin_tools(cls) -> None:
         """Load plugin tools from both user-level and project-level plugin dirs on init.
 
         Without this, YAML/Python plugin tools only appear after an explicit
@@ -1082,13 +1057,9 @@ class ToolRegistry:
         try:
             from flocks.plugin import PluginLoader
 
-            load_errors = PluginLoader.load_extension("TOOLS", load_entry_points=True)
-            if errors is not None:
-                errors.extend(load_errors)
+            PluginLoader.load_extension("TOOLS", load_entry_points=True)
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
-            if errors is not None:
-                errors.append(f"plugin loader: {e}")
         after = set(cls._tools.keys())
         new_plugin_tools = sorted(after - before)
         python_tool_sources: Dict[str, Path] = {}
@@ -1131,8 +1102,6 @@ class ToolRegistry:
             except ValueError:
                 tool.info.native = True
         cls._plugin_tool_names = sorted(set(new_plugin_tools) | python_plugin_names)
-        if errors:
-            return
         cls._bootstrap_user_api_services()
         # Defence-in-depth: ``register()`` is the canonical writer for
         # ``_enabled_defaults`` but this catches any tool that landed in
@@ -1296,8 +1265,7 @@ class ToolRegistry:
         (e.g. dynamic tools registered after init).  Callers should fall
         back to the live ``ToolInfo.enabled`` in that case.
         """
-        with cls._refresh_lock:
-            return cls._enabled_defaults.get(name)
+        return cls._enabled_defaults.get(name)
 
     @classmethod
     def _apply_tool_settings(cls) -> None:
@@ -1383,9 +1351,8 @@ class ToolRegistry:
             except ValueError:
                 return True   # Under <cwd>/.flocks/plugins/ or elsewhere → project-level → native
 
-        def _consume_tools(items: list, source: str) -> Optional[List[str]]:
+        def _consume_tools(items: list, source: str) -> None:
             is_native = _is_native_source(source)
-            errors: List[str] = []
             for spec in items:
                 # YAML factory produces Tool instances directly
                 if isinstance(spec, Tool):
@@ -1413,7 +1380,6 @@ class ToolRegistry:
 
                 if not isinstance(spec, dict):
                     log.warn("plugin.tool.invalid_spec", {"source": source})
-                    errors.append("tool definition must be a Tool or mapping")
                     continue
                 name = spec.get("name")
                 handler = spec.get("handler")
@@ -1422,7 +1388,6 @@ class ToolRegistry:
                         "source": source,
                         "spec_keys": list(spec.keys()),
                     })
-                    errors.append("tool definition requires name and handler")
                     continue
                 existing = cls._tools.get(name)
                 if existing is not None:
@@ -1446,18 +1411,7 @@ class ToolRegistry:
                         log.warn("plugin.tool.handler_not_found", {
                             "source": source, "handler": spec.get("handler"),
                         })
-                        errors.append(
-                            f"tool {name}: handler {spec.get('handler')!r} not found"
-                        )
                         continue
-
-                if not callable(handler):
-                    log.warn("plugin.tool.handler_not_callable", {
-                        "source": source,
-                        "name": name,
-                    })
-                    errors.append(f"tool {name}: handler must be callable")
-                    continue
 
                 params = [
                     ToolParameter(**p) if isinstance(p, dict) else p
@@ -1475,7 +1429,6 @@ class ToolRegistry:
                     native=is_native,
                 )
                 cls.register(Tool(info=info, handler=handler))
-            return errors
 
         def _dedup_key(item: Any) -> str:
             if isinstance(item, Tool):
@@ -1619,68 +1572,18 @@ class ToolRegistry:
         correctly removed from the registry.
         """
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            tools_before = cls._tools.copy()
-            defaults_before = cls._enabled_defaults.copy()
-            plugin_names_before = list(cls._plugin_tool_names)
-            load_errors: List[str] = []
-
-            try:
-                cls._unregister_plugin_tools()
-                cls._load_plugin_tools(load_errors)
-            except Exception:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._plugin_tool_names = plugin_names_before
-                raise
-            if load_errors:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._plugin_tool_names = plugin_names_before
-                raise ToolRefreshError("plugin", load_errors)
-
-            cls._bump_revision("plugin_refresh")
-            return cls.all_tool_ids()
+        cls._unregister_plugin_tools()
+        cls._load_plugin_tools()
+        cls._bump_revision("plugin_refresh")
+        return cls.all_tool_ids()
 
     @classmethod
     def refresh_dynamic_tools(cls) -> List[str]:
         """Reload dynamically generated tools and return tool ids."""
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            tools_before = cls._tools.copy()
-            defaults_before = cls._enabled_defaults.copy()
-            dynamic_modules_before = cls._dynamic_modules.copy()
-            dynamic_tools_before = {
-                name: list(tool_names)
-                for name, tool_names in cls._dynamic_tools_by_module.items()
-            }
-            load_errors: List[str] = []
-
-            try:
-                cls._register_dynamic_tools(load_errors)
-            except Exception:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._dynamic_modules = dynamic_modules_before
-                cls._dynamic_tools_by_module = dynamic_tools_before
-                raise
-            if load_errors:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._dynamic_modules = dynamic_modules_before
-                cls._dynamic_tools_by_module = dynamic_tools_before
-                raise ToolRefreshError("dynamic", load_errors)
-
-            cls._bump_revision("dynamic_refresh")
-            return cls.all_tool_ids()
+        cls._register_dynamic_tools()
+        cls._bump_revision("dynamic_refresh")
+        return cls.all_tool_ids()
 
     @classmethod
     def _reset_failure_state(cls, tool_name: str) -> None:
@@ -1814,7 +1717,7 @@ class ToolRegistry:
         })
 
     @classmethod
-    def _register_dynamic_tools(cls, errors: Optional[List[str]] = None) -> None:
+    def _register_dynamic_tools(cls) -> None:
         """Register dynamically generated tools by importing modules."""
         modules = cls._discover_dynamic_modules()
 
@@ -1840,8 +1743,6 @@ class ToolRegistry:
                     "module": module_name,
                     "error": str(e),
                 })
-                if errors is not None:
-                    errors.append(f"{path}: {e}")
                 continue
 
             after = set(cls._tools.keys())

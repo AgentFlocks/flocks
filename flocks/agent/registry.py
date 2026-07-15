@@ -252,7 +252,7 @@ class Agent:
         from flocks.tool.registry import ToolRegistry
 
         cfg = await Config.get()
-        await ToolRegistry.init_async()
+        ToolRegistry.init()
 
         # ── ① Collect context ─────────────────────────────────────────────
         available_tools = [t.name for t in ToolRegistry.list_tools() if t.enabled]
@@ -303,7 +303,7 @@ class Agent:
             log.warn("agent.logic.deprecated", {"message": "non-rex agent logic is deprecated; using rex"})
 
         # ── ② YAML agents ─────────────────────────────────────────────────
-        result = await asyncio.to_thread(scan_and_load)
+        result = scan_and_load()
 
         # Apply global base permissions on top of per-agent YAML permissions.
         # For agents with explicit tool lists, their deny-all baseline is kept;

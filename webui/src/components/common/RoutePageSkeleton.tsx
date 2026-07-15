@@ -1,15 +1,6 @@
-import { useDelayedVisible } from '@/hooks/useDelayedVisible';
-
-interface RoutePageSkeletonProps {
-  delayMs?: number;
-}
-
-export default function RoutePageSkeleton({ delayMs = 0 }: RoutePageSkeletonProps) {
-  const visible = useDelayedVisible(delayMs);
-  if (!visible) return null;
-
+export default function RoutePageSkeleton() {
   return (
-    <div data-testid="route-page-skeleton" className="space-y-6 animate-pulse">
+    <div className="space-y-6 animate-pulse">
       <div className="flex items-start justify-between gap-6">
         <div className="space-y-3">
           <div className="h-8 w-56 rounded-xl bg-gray-200" />

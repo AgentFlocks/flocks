@@ -226,22 +226,18 @@ class WebUIPageApiRuntime:
         if spec is None or spec.loader is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="failed to load handlers.py")
         module = importlib.util.module_from_spec(spec)
-        page_builtins_module = ModuleType("builtins")
-        page_builtins_module.__dict__.update(vars(builtins))
-        guarded_import = self._create_guarded_import(
-            api_root=handlers_path.parent,
-            original_import=builtins.__import__,
-            builtins_module=page_builtins_module,
-        )
-        page_builtins_module.__dict__["__import__"] = guarded_import
-        module.__dict__["__builtins__"] = dict(vars(page_builtins_module))
+        guarded_import = self._create_guarded_import(api_root=handlers_path.parent)
+        original_import = builtins.__import__
         try:
+            builtins.__import__ = guarded_import  # type: ignore[assignment]
             spec.loader.exec_module(module)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to load handlers.py: {exc}",
             ) from exc
+        finally:
+            builtins.__import__ = original_import  # type: ignore[assignment]
 
         routes: dict[tuple[str, str], _RouteEntry] = {}
         for item in route_items:
@@ -296,12 +292,11 @@ class WebUIPageApiRuntime:
             loaded_at=int(time.time() * 1000),
         )
 
-    def _create_guarded_import(self, *, api_root: Path, original_import, builtins_module: ModuleType):
+    def _create_guarded_import(self, *, api_root: Path):
         api_root_resolved = api_root.resolve()
+        original_import = builtins.__import__
 
         def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if level == 0 and name == "builtins":
-                return builtins_module
             module = original_import(name, globals, locals, fromlist, level)
             modules_to_check = [module]
             if fromlist:

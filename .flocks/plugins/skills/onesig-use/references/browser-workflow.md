@@ -2,12 +2,12 @@
 
 只在以下情况进入浏览器模式：
 
-- API 不可用（未配置 / 未开通 / ApiKey 或 Secret 缺失 / 签名失败 / SSL 校验失败 / 网络不通）
+- API 不可用（未配置 / 未开通 / 认证失败 / Cookie 持久反复过期 / SSL 校验失败 / 网络不通）
 - 任务必须看页面级详情（攻击链、威胁图、报表预览、报文 hex view、PCAP 在线播放）
 - 需要图形验证码 / TOTP / 强制改密之类的人工交互
 - 用户明确要求使用浏览器，或者已经在浏览器操作过程中
 
-如果当前 Strategy API 能完成，请回到 [api-reference.md](api-reference.md)；浏览器操作不稳定、不可批量、字段不一定完整。
+如果走 API 能完成，请回到 [api-reference.md](api-reference.md) —— 浏览器操作不稳定、不可批量、字段不一定完整。
 
 > ⚠️ OneSIG 的 Web 控制台与 OneSEC、青藤是不同产品；不要把 OneSEC / 青藤的页面路径或 API 套用到 OneSIG。
 > 本文档统一按 `browser-use` 的 `cdp-direct` 流程执行：先 `flocks browser --doctor`，doctor 通过后只使用 `flocks browser`。
@@ -145,17 +145,14 @@ print(js("document.body.innerText.slice(0, 2000)"))
 
 ## 二、浏览器与 API 的互补建议
 
-进入浏览器模式后，只有当前 Strategy API 覆盖的诉求才优先回到 API；未覆盖的控制台能力继续走浏览器：
+进入浏览器模式后，对于"查询类"诉求，应该**优先回到 API**（除非 API 真的不可用）：
 
 | 任务 | 优先方案 |
 |---|---|
-| 看设备平台 / 系统 / 网络状态 | API（`onesig_strategy_api_query`） |
-| 看资产组、资产列表、资产类型 | API（`onesig_strategy_api_query`） |
-| 增删改资产或资产组 | API（`onesig_strategy_api_ops`），写操作前要二次确认 |
-| 看 / 改防护策略、全局白名单、全局黑名单、封禁白名单、HTTP 黑名单 | API（`onesig_strategy_api_query` / `onesig_strategy_api_ops`），写操作前要二次确认 |
-| 列威胁事件 / 失陷主机 / 趋势数据 | 浏览器（当前 Strategy API 不覆盖） |
-| IPS 规则、多维封锁、Syslog 自动封禁、FTP/SFTP 联动、高危端口防护 | 浏览器（当前 Strategy API 不覆盖） |
-| 设备升级 / 重启 / HA 切换 | 浏览器；强破坏性动作必须显式确认 |
+| 列威胁事件 / 失陷主机 / 趋势数据 | API（`onesig_monitoring`） —— 浏览器只在需要威胁图、报文 hex 时用 |
+| 增删改黑白名单 / IPS 规则 / 多维封锁 | API（`onesig_strategy`），写操作前要二次确认 |
+| 看资产清单、增改资产 | API（`onesig_assets`） —— 浏览器仅做导入文件预览 |
+| 设备升级 / 重启 / HA 切换 | 浏览器 + API 并用：先在浏览器里走完确认弹窗、备份提示，再用 API 触发；或者全程在浏览器里完成（更稳） |
 | 看证书 / 解密策略详情 | 浏览器（API 返回的字段比页面少） |
 | 看页面级图表 / 攻击链 / IOC 关联 | 浏览器（API 没有） |
 | 处理图形验证码 / TOTP / 强制改密 | 浏览器（API 不能完成人工交互） |
@@ -178,9 +175,10 @@ print(js("document.body.innerText.slice(0, 2000)"))
 
 ## 四、文件下载与导出
 
-OneSIG 控制台的导出按钮（资产 / 黑白名单 / 报表 / 审计 / coredump / pcap）多数会触发浏览器下载。当前 Strategy API 工具没有导出 / 下载 action；需要导出文件时走浏览器页面。
+OneSIG 控制台的导出按钮（资产 / 黑白名单 / 报表 / 审计 / coredump / pcap）多数会触发浏览器下载。优先顺序如下：
 
-先用 `js(...)` 或稳定 selector 触发下载，再用浏览器系统的下载目录或页面提示确认下载已开始；不要在 skill 里承诺不存在的“等待下载完成”专有命令。
+1. **优先用 API 的导出 / 下载 action**（参见 [api-reference.md](api-reference.md) "文件类返回 / 上传"小节）。
+2. 如果必须走页面下载，先用 `js(...)` 或稳定 selector 触发下载，再用浏览器系统的下载目录或页面提示确认下载已开始；不要在 skill 里承诺不存在的“等待下载完成”专有命令。
 
 页面下载最小模板：
 

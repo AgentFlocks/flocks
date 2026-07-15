@@ -3,11 +3,7 @@ import { Bot, ChevronDown, Cpu, Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { Agent } from '@/api/agent';
-import {
-  __resetChatModelResourcesForTesting,
-  useEnabledChatModelDefinitions,
-  useResolvedDefaultModel,
-} from '@/hooks/useChatModelResources';
+import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
@@ -39,10 +35,6 @@ type SelectorTooltip = {
   x: number;
   y: number;
 };
-
-export function __resetChatModelOptionsResourcesForTesting(): void {
-  __resetChatModelResourcesForTesting();
-}
 
 function formatAgentName(name: string): string {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
@@ -76,11 +68,27 @@ export function useChatAgentOptions(options: { allowedAgentNames?: string[] } = 
 export function useChatModelOptions() {
   const { t } = useTranslation('session');
   const { providers, loading: loadingProviders } = useProviders();
-  const {
-    data: enabledModelDefinitions,
-    loading: loadingEnabledModels,
-  } = useEnabledChatModelDefinitions();
+  const [enabledModelDefinitions, setEnabledModelDefinitions] = useState<ModelDefinitionV2[]>([]);
+  const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingEnabledModels(true);
+    Promise.resolve(modelV2API.listDefinitions({ enabled_only: true }))
+      .then((response) => {
+        if (!cancelled) setEnabledModelDefinitions(response?.data?.models ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setEnabledModelDefinitions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEnabledModels(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const options = useMemo<ChatModelOption[]>(() => {
     const providerById = new Map(
@@ -154,19 +162,24 @@ export function useChatModelOptions() {
     [options, selectedModelKey],
   );
 
-  const {
-    data: resolvedDefaultModel,
-    initialized: resolvedDefaultModelInitialized,
-  } = useResolvedDefaultModel(options.length > 0);
-
   useEffect(() => {
-    if (selectedModelKey || options.length === 0 || !resolvedDefaultModelInitialized) return;
-    const defaultKey = resolvedDefaultModel
-      ? `${resolvedDefaultModel.providerID}::${resolvedDefaultModel.modelID}`
-      : null;
-    const fallbackKey = options[0]?.key ?? null;
-    setSelectedModelKey(defaultKey && options.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
-  }, [options, resolvedDefaultModel, resolvedDefaultModelInitialized, selectedModelKey]);
+    if (selectedModelKey || options.length === 0) return;
+    let cancelled = false;
+    Promise.resolve(defaultModelAPI.getResolved())
+      .then((response) => {
+        if (cancelled) return;
+        const { provider_id: providerID, model_id: modelID } = response?.data ?? {};
+        const defaultKey = `${providerID}::${modelID}`;
+        const fallbackKey = options[0]?.key ?? null;
+        setSelectedModelKey(options.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedModelKey(options[0]?.key ?? null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [options, selectedModelKey]);
 
   useEffect(() => {
     if (loadingEnabledModels || options.length === 0 || !selectedModelKey) return;
