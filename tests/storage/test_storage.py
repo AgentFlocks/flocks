@@ -28,6 +28,15 @@ class StorageTestModel(BaseModel):
     value: int
 
 
+def _require_sqlite_recover() -> None:
+    sqlite_bin = shutil.which("sqlite3")
+    if sqlite_bin is None:
+        pytest.skip("sqlite3 CLI is not available")
+    supported, reason = Storage._sqlite_recover_capability_sync(sqlite_bin)
+    if not supported:
+        pytest.skip(f"sqlite3 .recover is unavailable: {reason}")
+
+
 @pytest.fixture
 async def storage():
     """Create a temporary storage for testing"""
@@ -324,10 +333,36 @@ async def test_storage_get_defers_corruption_recovery_until_restart(tmp_path):
     assert not any(".corrupt." in name for name in siblings), siblings
 
 
+def test_try_sqlite_recover_rejects_partial_output_on_failure(tmp_path):
+    quarantined = tmp_path / "flocks.db.corrupt.test"
+    quarantined.write_bytes(b"quarantined")
+    target = tmp_path / "flocks.db"
+    partial_failure = SimpleNamespace(
+        returncode=1,
+        stdout="BEGIN;\n",
+        stderr="sql error: no such table: sqlite_dbpage",
+    )
+
+    with patch(
+        "flocks.storage.storage.shutil.which",
+        return_value="/usr/bin/sqlite3",
+    ), patch.object(
+        Storage,
+        "_sqlite_recover_capability_sync",
+        return_value=(True, ""),
+    ), patch(
+        "flocks.storage.storage.subprocess.run",
+        return_value=partial_failure,
+    ):
+        assert Storage._try_sqlite_recover_sync(quarantined, target) is None
+
+    assert target.exists() is False
+    assert target.with_name("flocks.db.recovered").exists() is False
+
+
 def test_try_sqlite_recover_installs_recovered_db(tmp_path):
     """The lightweight `.recover` path should install a readable recovered DB."""
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is not available")
+    _require_sqlite_recover()
 
     quarantined = tmp_path / "flocks.db.corrupt.test"
     target = tmp_path / "flocks.db"
@@ -371,8 +406,7 @@ def test_try_sqlite_recover_installs_recovered_db(tmp_path):
 
 def test_sqlite_recover_reads_wal_paired_with_quarantined_main(tmp_path):
     """A committed WAL must stay paired with the renamed main DB during recovery."""
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is not available")
+    _require_sqlite_recover()
 
     source = tmp_path / "source.db"
     source_conn = sqlite3.connect(source)
@@ -637,8 +671,7 @@ async def test_cancelled_startup_waits_for_recovery_thread(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_storage_init_recovers_real_malformed_sqlite_file(tmp_path):
     """Startup should recover a real DB that fails SQLite integrity checks."""
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is not available")
+    _require_sqlite_recover()
 
     db_path = tmp_path / "flocks.db"
     conn = sqlite3.connect(db_path)

@@ -405,6 +405,33 @@ class Storage:
         )
 
     @classmethod
+    def _sqlite_recover_capability_sync(cls, sqlite_bin: str) -> tuple[bool, str]:
+        """Return whether *sqlite_bin* was built with support for ``.recover``."""
+
+        try:
+            completed = subprocess.run(
+                [
+                    sqlite_bin,
+                    ":memory:",
+                    "SELECT sqlite_compileoption_used('ENABLE_DBPAGE_VTAB');",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=cls._sqlite_recover_timeout_s,
+            )
+        except Exception as exc:
+            return False, str(exc)
+
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            return False, detail or f"capability probe exited with {completed.returncode}"
+        if completed.stdout.strip() != "1":
+            return False, "SQLite CLI was built without SQLITE_ENABLE_DBPAGE_VTAB"
+        return True, ""
+
+    @classmethod
     def _try_sqlite_recover_sync(cls, quarantined_path: Path, target_path: Path) -> Optional[Path]:
         """Recover from an isolated copy without allowing SQLite to mutate evidence."""
 
@@ -416,6 +443,18 @@ class Storage:
                     "db_path": str(target_path),
                     "quarantined_path": str(quarantined_path),
                     "reason": "sqlite3 CLI not found",
+                },
+            )
+            return None
+
+        supported, reason = cls._sqlite_recover_capability_sync(sqlite_bin)
+        if not supported:
+            cls._log.warn(
+                "storage.corruption.recovery.skipped",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "reason": f"sqlite3 .recover is unavailable: {reason}",
                 },
             )
             return None
@@ -517,7 +556,7 @@ class Storage:
 
         recover_sql = completed.stdout or ""
         sql_path.write_text(recover_sql, encoding="utf-8")
-        if completed.returncode != 0 and not recover_sql.strip():
+        if completed.returncode != 0:
             cls._log.warn(
                 "storage.corruption.recovery.failed",
                 {
