@@ -10,8 +10,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from flocks.cli import service_manager
+from flocks.cli import service_control, service_manager
 from flocks.updater import updater
+from tests.helpers.service_supervisor import (
+    make_short_runtime_root,
+    start_supervisor,
+    stop_supervisor,
+    wait_for_process_exit,
+    wait_for_supervisor,
+)
 
 
 def _write_pyproject_version(pyproject_path: Path, version: str) -> None:
@@ -37,6 +44,33 @@ def _prepare_real_restart_runtime(install_root: Path) -> None:
             shutil.copy2(sys.executable, python_path)
     if not symlinked:
         python_path.chmod(0o755)
+
+
+def _webui_control_payload(state: str = "healthy", last_error: str | None = None) -> dict[str, object]:
+    return {
+        "webui": {
+            "state": state,
+            "last_error": last_error,
+        },
+    }
+
+
+def _webui_control_status(
+    state: str = "healthy",
+    last_error: str | None = None,
+) -> service_control.SupervisorStatus:
+    return service_control.parse_supervisor_status(_webui_control_payload(state, last_error))
+
+
+def test_current_service_config_requires_supervisor_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        service_control,
+        "read_supervisor_status",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("control down")),
+    )
+
+    with pytest.raises(RuntimeError, match="Supervisor control API is unavailable"):
+        updater._current_service_config()
 
 
 def test_run_handles_none_process_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -223,13 +257,6 @@ def test_find_executable_checks_windows_cmd_suffixes(
     monkeypatch.setattr(updater.sys, "platform", "win32")
 
     assert updater._find_executable("npm") == str(npm_cmd)
-
-
-def test_is_windows_file_in_use_error_detects_winerror32(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-
-    assert updater._is_windows_file_in_use_error(PermissionError("[WinError 32] file in use")) is True
-    assert updater._is_windows_file_in_use_error(PermissionError("[WinError 5] access denied")) is False
 
 
 def test_is_uv_managed_python_runtime_error_detects_virtualenv_creation_failure() -> None:
@@ -504,12 +531,14 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
     assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--frozen", "--no-python-downloads"]
 
 
-def test_wheel_build_config_does_not_force_include_flockshub() -> None:
+def test_wheel_build_config_does_not_force_include_runtime_or_build_outputs() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     wheel_config = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
+    forced_includes = wheel_config.get("force-include", {})
 
-    assert ".flocks/flockshub" not in wheel_config.get("force-include", {})
+    assert ".flocks/flockshub" not in forced_includes
+    assert "webui/dist" not in forced_includes
 
 
 def test_build_frontend_subprocess_env_prepends_bundled_node_on_windows(
@@ -772,6 +801,50 @@ def test_build_restart_argv_uses_venv_python_on_non_windows(
     ]
 
 
+def test_build_restart_handoff_argv_rewrites_serve_to_managed_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="10.0.0.8",
+        backend_port=5273,
+        frontend_host="10.0.0.8",
+        frontend_port=5273,
+        legacy_backend_host="0.0.0.0",
+        legacy_backend_port=9000,
+    )
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: config)
+    monkeypatch.setattr(updater.os, "getpid", lambda: 1234)
+
+    argv = updater._build_restart_handoff_argv(
+        ["python", "-m", "flocks.cli.main", "serve", "--host", "0.0.0.0", "--port", "9000"],
+        tmp_path,
+        uv_path="uv",
+        sync_timeout=300,
+        version="2026.4.1",
+        current_version="2026.3.31",
+        prepare_handover=True,
+    )
+
+    assert "--prepare-handover" in argv[: argv.index("--")]
+    assert argv[argv.index("--") + 1 :] == [
+        "python",
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        "10.0.0.8",
+        "--port",
+        "5273",
+        "--server-host",
+        "0.0.0.0",
+        "--server-port",
+        "9000",
+    ]
+
+
 def test_refresh_global_cli_entry_creates_symlink_on_unix(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -990,92 +1063,134 @@ def test_safe_remove_renames_locked_directory_on_windows(
     assert (leftovers[0] / "dist" / "index.html").exists()
 
 
-def test_prepare_upgrade_handover_writes_state_and_stops_frontend(
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_prepare_upgrade_handover_writes_state_and_stops_frontend_with_real_control_api(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    paths = service_manager.RuntimePaths(
-        root=tmp_path / ".flocks",
-        run_dir=tmp_path / ".flocks" / "run",
-        log_dir=tmp_path / ".flocks" / "logs",
-        backend_pid=tmp_path / ".flocks" / "run" / "backend.pid",
-        frontend_pid=tmp_path / ".flocks" / "run" / "webui.pid",
-        backend_log=tmp_path / ".flocks" / "logs" / "backend.log",
-        frontend_log=tmp_path / ".flocks" / "logs" / "webui.log",
+    short_root = make_short_runtime_root("flocks-updater-")
+    monkeypatch.setenv("FLOCKS_ROOT", str(short_root))
+    paths = service_manager.runtime_paths()
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9995,
+        frontend_host="127.0.0.1",
+        frontend_port=9996,
     )
-    paths.run_dir.mkdir(parents=True)
-    paths.log_dir.mkdir(parents=True)
+    daemon, thread = start_supervisor(config)
+    wait_for_supervisor(paths, running=True)
 
-    calls: list[tuple[int, str]] = []
-    monkeypatch.setattr(updater, "_current_service_config", lambda: service_manager.ServiceConfig())
     monkeypatch.setattr(
         updater,
         "_start_upgrade_page_server",
-        lambda config, version: {"upgrade_server_pid": 321, "page_dir": str(tmp_path / "page"), "page_log": str(tmp_path / "upgrade.log")},
-    )
-    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
-    monkeypatch.setattr(service_manager, "_recorded_port", lambda _pid_file, default: default)
-    monkeypatch.setattr(
-        service_manager,
-        "stop_one",
-        lambda port, _pid_file, name, _console: calls.append((port, name)),
+        lambda _config, _version: {
+            "upgrade_server_pid": 321,
+            "page_dir": str(short_root / "page"),
+            "page_log": str(short_root / "logs" / "upgrade.log"),
+        },
     )
 
-    payload = updater._prepare_upgrade_handover("2026.3.31.1")
+    try:
+        payload = updater._prepare_upgrade_handover("2026.3.31.1")
 
-    assert calls == [(5173, "WebUI")]
-    assert payload["upgrade_server_pid"] == 321
-    assert updater._read_upgrade_state()["version"] == "2026.3.31.1"
+        status = service_control.read_supervisor_status(paths)
+        assert status.backend.paused is True
+        assert status.webui.paused is True
+        assert payload["upgrade_server_pid"] == 321
+        assert payload["backend_port"] == 9995
+        assert payload["frontend_port"] == 9996
+        assert updater._read_upgrade_state()["version"] == "2026.3.31.1"
+    finally:
+        stop_supervisor(daemon, thread)
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
-def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails(
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails_with_real_control_api(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    paths = service_manager.RuntimePaths(
-        root=tmp_path / ".flocks",
-        run_dir=tmp_path / ".flocks" / "run",
-        log_dir=tmp_path / ".flocks" / "logs",
-        backend_pid=tmp_path / ".flocks" / "run" / "backend.pid",
-        frontend_pid=tmp_path / ".flocks" / "run" / "webui.pid",
-        backend_log=tmp_path / ".flocks" / "logs" / "backend.log",
-        frontend_log=tmp_path / ".flocks" / "logs" / "webui.log",
+    short_root = make_short_runtime_root("flocks-updater-")
+    monkeypatch.setenv("FLOCKS_ROOT", str(short_root))
+    paths = service_manager.runtime_paths()
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9995,
+        frontend_host="127.0.0.1",
+        frontend_port=9996,
     )
-    paths.run_dir.mkdir(parents=True)
-    paths.log_dir.mkdir(parents=True)
+    daemon, thread = start_supervisor(config)
+    wait_for_supervisor(paths, running=True)
+    calls: list[str] = []
 
-    calls: list[tuple[str, bool]] = []
-    monkeypatch.setattr(updater, "_current_service_config", lambda: service_manager.ServiceConfig())
-    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
-    monkeypatch.setattr(service_manager, "_recorded_port", lambda _pid_file, default: default)
-    monkeypatch.setattr(
-        service_manager,
-        "stop_one",
-        lambda port, _pid_file, name, _console: calls.append((f"stop:{name}:{port}", True)),
-    )
-
-    def fake_start_frontend(config, _console) -> None:
-        calls.append(("start_frontend", config.skip_frontend_build))
-
-    monkeypatch.setattr(service_manager, "start_frontend", fake_start_frontend)
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: calls.append(("stop_page", True)))
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **_kw: calls.append("stop_page"))
     monkeypatch.setattr(
         updater,
         "_start_upgrade_page_server",
         lambda _config, _version: (_ for _ in ()).throw(RuntimeError("page failed")),
     )
 
-    with pytest.raises(RuntimeError, match="page failed"):
-        updater._prepare_upgrade_handover("2026.3.31.1")
+    try:
+        with pytest.raises(RuntimeError, match="page failed"):
+            updater._prepare_upgrade_handover("2026.3.31.1")
 
-    assert calls == [
-        ("stop:WebUI:5173", True),
-        ("stop_page", True),
-        ("start_frontend", False),
-    ]
-    assert updater._read_upgrade_state() is None
+        status = service_control.read_supervisor_status(paths)
+        assert calls == ["stop_page"]
+        assert status.backend.paused is False
+        assert status.backend.pid is not None
+        assert status.webui.paused is False
+        assert status.webui.pid is None
+        assert status.webui.state == "static"
+        assert updater._read_upgrade_state() is None
+    finally:
+        stop_supervisor(daemon, thread)
+        shutil.rmtree(short_root, ignore_errors=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_rollback_failed_update_resumes_backend_when_handoff_tasks_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    short_root = make_short_runtime_root("flocks-updater-")
+    monkeypatch.setenv("FLOCKS_ROOT", str(short_root))
+    paths = service_manager.runtime_paths()
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9995,
+        frontend_host="127.0.0.1",
+        frontend_port=9996,
+    )
+    daemon, thread = start_supervisor(config)
+    wait_for_supervisor(paths, running=True)
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **_kw: None)
+
+    try:
+        updater._write_upgrade_state(
+            {
+                "version": "2026.4.1",
+                "backend_host": "127.0.0.1",
+                "backend_port": 9995,
+                "frontend_host": "127.0.0.1",
+                "frontend_port": 9996,
+                "skip_frontend_build": True,
+            }
+        )
+        old_backend = daemon.backend.process
+        assert old_backend is not None
+        service_control.request_prepare_upgrade(paths=paths)
+        wait_for_process_exit(old_backend)
+
+        updater._rollback_failed_update(None, short_root / "install", "2026.3.31")
+
+        status = service_control.read_supervisor_status(paths)
+        assert status.backend.paused is False
+        assert status.webui.paused is False
+        assert status.backend.pid is not None
+        assert status.backend.pid != old_backend.pid
+        assert status.webui.pid is None
+        assert status.webui.state == "static"
+        assert updater._read_upgrade_state() is None
+    finally:
+        stop_supervisor(daemon, thread)
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
@@ -1083,14 +1198,15 @@ def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    started: list[tuple[int, bool]] = []
+    started: list[tuple[int, bool | None]] = []
     stopped: list[str] = []
 
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: stopped.append("stop"))
     monkeypatch.setattr(
-        service_manager,
-        "start_frontend",
-        lambda config, _console: started.append((config.frontend_port, config.skip_frontend_build)),
+        service_control,
+        "request_resume_upgrade",
+        lambda config, **_kwargs: started.append((config.frontend_port, config.skip_frontend_build))
+        or _webui_control_status(),
     )
     updater._write_upgrade_state(
         {
@@ -1115,16 +1231,25 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    starts: list[bool] = []
+    starts: list[tuple[str, bool | None, bool | None]] = []
 
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: None)
 
-    def fake_start_frontend(config, _console) -> None:
-        starts.append(config.skip_frontend_build)
-        if config.skip_frontend_build:
-            raise service_manager.ServiceError("missing dist")
+    results = iter([
+        _webui_control_payload("degraded", "missing dist"),
+        _webui_control_payload(),
+    ])
 
-    monkeypatch.setattr(service_manager, "start_frontend", fake_start_frontend)
+    def fake_resume_upgrade(config, **_kwargs):
+        starts.append(("resume", config.skip_frontend_build, None))
+        return service_control.parse_supervisor_status(next(results))
+
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
+        starts.append(("restart_webui", config.skip_frontend_build, force_frontend_build or None))
+        return service_control.parse_supervisor_status(next(results))
+
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.3.31.1",
@@ -1138,7 +1263,7 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
 
     updater.recover_upgrade_state()
 
-    assert starts == [True, False]
+    assert starts == [("resume", True, None), ("restart_webui", False, True)]
     assert updater._read_upgrade_state() is None
 
 
@@ -1147,15 +1272,20 @@ def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_p
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
-    starts: list[bool] = []
+    starts: list[tuple[str, bool | None, bool | None]] = []
 
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: None)
 
-    def fake_start_frontend(config, _console) -> None:
-        starts.append(config.skip_frontend_build)
-        raise service_manager.ServiceError("still broken")
+    def fake_resume_upgrade(config, **_kwargs):
+        starts.append(("resume", config.skip_frontend_build, None))
+        return _webui_control_status("degraded", "still broken")
 
-    monkeypatch.setattr(service_manager, "start_frontend", fake_start_frontend)
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs):
+        starts.append(("restart_webui", config.skip_frontend_build, force_frontend_build or None))
+        return _webui_control_status("degraded", "still broken")
+
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.3.31.1",
@@ -1167,10 +1297,10 @@ def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_p
         }
     )
 
-    with pytest.raises(service_manager.ServiceError, match="still broken"):
+    with pytest.raises(RuntimeError, match="still broken"):
         updater.recover_upgrade_state()
 
-    assert starts == [True, False]
+    assert starts == [("resume", True, None), ("restart_webui", False, True)]
     assert updater._read_upgrade_state() is None
 
 
@@ -1218,6 +1348,51 @@ def test_start_upgrade_page_server_binds_configured_frontend_host(
         str(page_dir.resolve()),
     ]
     assert captured["wait_host"] == "0.0.0.0"
+
+
+def test_stop_upgrade_page_server_does_not_kill_unified_flocks_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    killed: list[int] = []
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [111])
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: "/env/bin/python -m flocks.cli.main serve --host 127.0.0.1 --port 5173",
+    )
+    monkeypatch.setattr(updater.os, "kill", lambda pid, _sig: killed.append(pid))
+
+    updater._stop_upgrade_page_server(frontend_port=5173)
+
+    assert killed == []
+
+
+def test_stop_upgrade_page_server_kills_only_upgrade_page_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    page_dir = flocks_root / "run" / "upgrade-page"
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    killed: list[int] = []
+
+    def fake_command_line(pid: int) -> str:
+        if pid == 222:
+            return f"/env/bin/python -m http.server 5173 --directory {page_dir}"
+        return "/env/bin/python -m flocks.cli.main serve --host 127.0.0.1 --port 5173"
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [111, 222])
+    monkeypatch.setattr(service_manager, "_process_command_line", fake_command_line)
+    monkeypatch.setattr(updater.os, "kill", lambda pid, _sig: killed.append(pid))
+    monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
+
+    updater._stop_upgrade_page_server(frontend_port=5173)
+
+    assert killed == [222]
 
 
 def test_wait_for_upgrade_page_uses_access_host_for_local_probe(
@@ -1286,12 +1461,21 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: events.append("stop_page"))
     monkeypatch.setattr(updater.shutil, "rmtree", lambda path, ignore_errors=True: events.append(f"rmtree:{Path(path).name}"))
 
-    def fake_start_frontend(config, _console) -> None:
-        events.append(f"start_frontend:{config.skip_frontend_build}")
-        if config.skip_frontend_build:
-            raise service_manager.ServiceError("missing dist")
+    results = iter([
+        _webui_control_payload("degraded", "missing dist"),
+        _webui_control_payload(),
+    ])
 
-    monkeypatch.setattr(service_manager, "start_frontend", fake_start_frontend)
+    def fake_resume_upgrade(config, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"resume:{config.skip_frontend_build}")
+        return service_control.parse_supervisor_status(next(results))
+
+    def fake_restart_webui(config, *, force_frontend_build=False, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"restart_webui:{config.skip_frontend_build}:{force_frontend_build or None}")
+        return service_control.parse_supervisor_status(next(results))
+
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.4.1",
@@ -1311,8 +1495,8 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
         "restore:backup.tar.gz:install",
         "marker:2026.3.31",
         "stop_page",
-        "start_frontend:True",
-        "start_frontend:False",
+        "resume:True",
+        "restart_webui:False:True",
         "rmtree:upgrade-page",
     ]
     assert updater._read_upgrade_state() is None
@@ -1334,11 +1518,16 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
     monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda **kw: events.append("stop_page"))
     monkeypatch.setattr(updater.shutil, "rmtree", lambda path, ignore_errors=True: events.append(f"rmtree:{Path(path).name}"))
 
-    def fake_start_frontend(config, _console) -> None:
-        events.append(f"start_frontend:{config.skip_frontend_build}")
-        raise service_manager.ServiceError("frontend still broken")
+    def fake_resume_upgrade(config, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"resume:{config.skip_frontend_build}")
+        return _webui_control_status("degraded", "frontend still broken")
 
-    monkeypatch.setattr(service_manager, "start_frontend", fake_start_frontend)
+    def fake_restart_webui(config, **_kwargs) -> service_control.SupervisorStatus:
+        events.append(f"restart_webui:{config.skip_frontend_build}")
+        return _webui_control_status("degraded", "frontend still broken")
+
+    monkeypatch.setattr(service_control, "request_resume_upgrade", fake_resume_upgrade)
+    monkeypatch.setattr(service_control, "request_restart_webui", fake_restart_webui)
     updater._write_upgrade_state(
         {
             "version": "2026.4.1",
@@ -1357,7 +1546,7 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
 
     assert events == [
         "stop_page",
-        "start_frontend:True",
+        "resume:True",
         "rmtree:upgrade-page",
     ]
     assert updater._read_upgrade_state() is None
@@ -1513,7 +1702,7 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
 
 
 @pytest.mark.asyncio
-async def test_perform_update_schedules_handoff_after_handover(
+async def test_perform_update_schedules_handoff_with_deferred_handover(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1566,6 +1755,7 @@ async def test_perform_update_schedules_handoff_after_handover(
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover") or {})
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: service_manager.ServiceConfig())
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
@@ -1576,7 +1766,11 @@ async def test_perform_update_schedules_handoff_after_handover(
     monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
     monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda *_args: events.append("rollback_handover"))
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **_kwargs: popen_calls.append(list(argv)) or SimpleNamespace(pid=4321))
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, **_kwargs: popen_calls.append(list(argv)) or SimpleNamespace(pid=4321),
+    )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
     with pytest.raises(SystemExit, match="0"):
@@ -1584,22 +1778,33 @@ async def test_perform_update_schedules_handoff_after_handover(
             pass
 
     assert events[:2] == ["replace", "sleep"]
-    assert "handover" in events
+    assert "handover" not in events
     assert len(popen_calls) == 1
     handoff_argv = popen_calls[0]
     assert handoff_argv[:3] == ["/usr/bin/python3", "-m", "flocks.updater.restart_handoff"]
     assert "--uv-path" in handoff_argv
     assert "--version" in handoff_argv
+    assert "--prepare-handover" in handoff_argv[: handoff_argv.index("--")]
     assert handoff_argv[handoff_argv.index("--") + 1 :] == [
         "/usr/bin/python3",
         "-m",
         "flocks.cli.main",
         "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5173",
+        "--server-host",
+        "127.0.0.1",
+        "--server-port",
+        "8000",
     ]
 
 
 @pytest.mark.asyncio
-async def test_perform_update_errors_when_handover_fails_before_frontend_build(
+async def test_perform_update_does_not_prepare_handover_before_spawning_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1615,6 +1820,7 @@ async def test_perform_update_errors_when_handover_fails_before_frontend_build(
     install_root.mkdir()
 
     events: list[str] = []
+    popen_calls: list[list[str]] = []
 
     async def fake_get_updater_config():
         return SimpleNamespace(
@@ -1671,12 +1877,20 @@ async def test_perform_update_errors_when_handover_fails_before_frontend_build(
         lambda _version: (_ for _ in ()).throw(RuntimeError("handover boom")),
     )
     monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, **_kwargs: popen_calls.append(list(argv)) or SimpleNamespace(pid=4321),
+    )
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    progresses = [step async for step in updater.perform_update("2026.4.1")]
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1"):
+            pass
 
-    assert progresses[-1].stage == "error"
-    assert progresses[-1].message == "Failed to prepare WebUI handover: handover boom"
-    assert events == ["replace", "restore"]
+    assert events == ["replace"]
+    assert len(popen_calls) == 1
+    assert "--prepare-handover" in popen_calls[0][: popen_calls[0].index("--")]
 
 
 @pytest.mark.asyncio
@@ -2710,7 +2924,7 @@ async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_fi
 
 
 @pytest.mark.asyncio
-async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_handover_failures(
+async def test_perform_update_reports_windows_file_lock_without_stopping_current_backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2770,24 +2984,25 @@ async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_han
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: service_manager.ServiceConfig())
     monkeypatch.setattr(updater, "_replace_install_dir", fake_replace_install_dir)
     monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
     monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: events.append("popen") or SimpleNamespace(pid=4321))
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda *_args, **_kwargs: events.append("popen") or SimpleNamespace(pid=4321),
+    )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1"):
-            pass
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
 
-    assert events == [
-        "replace-1",
-        "handover",
-        "replace-2",
-        "popen",
-    ]
-    assert "restore" not in events
+    assert progresses[-1].stage == "error"
+    assert "WinError 32" in progresses[-1].message
+    assert events == ["replace-1", "restore"]
+    assert "handover" not in events
+    assert "popen" not in events
 
 
 @pytest.mark.asyncio
@@ -3017,7 +3232,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     (staged_webui / "dist").mkdir()
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
-    popen_calls: list[tuple[list[str], Path, bool]] = []
+    popen_calls: list[tuple[list[str], Path]] = []
     events: list[str] = []
 
     async def fake_get_updater_config():
@@ -3057,7 +3272,12 @@ async def test_perform_update_spawns_restart_process_on_windows(
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, cwd=None, close_fds=False: popen_calls.append((list(argv), cwd, close_fds)) or SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: service_manager.ServiceConfig())
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, cwd=None: popen_calls.append((list(argv), cwd)) or SimpleNamespace(pid=4321),
+    )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setattr(updater.os, "execv", lambda *_args: events.append("execv"))
 
@@ -3066,19 +3286,29 @@ async def test_perform_update_spawns_restart_process_on_windows(
             pass
 
     assert len(popen_calls) == 1
-    handoff_argv, cwd, close_fds = popen_calls[0]
+    handoff_argv, cwd = popen_calls[0]
     assert cwd == tmp_path / "install-root"
-    assert close_fds is True
     assert handoff_argv[:3] == [r"C:\tool\python.exe", "-m", "flocks.updater.restart_handoff"]
     assert "--parent-pid" in handoff_argv
     assert "--backend-port" in handoff_argv
+    assert "--prepare-handover" in handoff_argv[: handoff_argv.index("--")]
     assert handoff_argv[handoff_argv.index("--") + 1 :] == [
         r"C:\tool\python.exe",
         "-m",
         "flocks.cli.main",
         "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5173",
+        "--server-host",
+        "127.0.0.1",
+        "--server-port",
+        "8000",
     ]
-    assert events == ["handover"]
+    assert events == []
     assert "execv" not in events
 
 
@@ -3259,10 +3489,11 @@ async def test_perform_update_yields_error_when_windows_spawn_fails(
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main"])
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: service_manager.ServiceConfig())
     monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda: events.append("rollback_handover"))
     monkeypatch.setattr(
-        updater.subprocess,
-        "Popen",
+        updater,
+        "_spawn_restart_handoff",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
     )
 
@@ -3270,4 +3501,5 @@ async def test_perform_update_yields_error_when_windows_spawn_fails(
 
     assert progresses[-1].stage == "error"
     assert "Failed to restart service" in progresses[-1].message
-    assert "rollback_handover" in events
+    assert "handover" not in events
+    assert "rollback_handover" not in events

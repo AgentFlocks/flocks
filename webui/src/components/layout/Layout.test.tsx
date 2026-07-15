@@ -2,7 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
 import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
@@ -201,6 +201,24 @@ function renderHomeWithLayout() {
   );
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
+function renderHomeWithLayoutAndSessionsRoute() {
+  return render(
+    <MemoryRouter initialEntries={['/']}>
+      <Routes>
+        <Route path="/" element={<Layout />}>
+          <Route index element={<Home />} />
+          <Route path="sessions" element={<LocationProbe />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 async function flushEffects() {
   await act(async () => {
     if (vi.isFakeTimers()) {
@@ -352,10 +370,13 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_599_999);
+      await vi.advanceTimersByTimeAsync(3_599_749);
     });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
@@ -432,7 +453,7 @@ describe('Layout onboarding entry', () => {
     await waitFor(() => expect(updateModalMock).toHaveBeenCalled());
   });
 
-  it('shows Flocks Pro branding and version for member users', async () => {
+  it('shows configured product branding and Pro version for member users', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     useAuth.mockReturnValue({
       user: {
@@ -458,10 +479,9 @@ describe('Layout onboarding entry', () => {
 
     const { container } = renderHomeWithLayout();
 
-    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
-    expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
     await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
 
     const sidebarShell = container.querySelector('aside > div');
@@ -469,6 +489,7 @@ describe('Layout onboarding entry', () => {
     const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
     expect(logoRow).not.toBeNull();
     expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).getByText('Flocks')).toBeInTheDocument();
     expect(within(logoRow!).queryByText('v2026.6.21')).not.toBeInTheDocument();
     expect(within(accountRow!).getByText('v2026.6.21')).toBeInTheDocument();
   });
@@ -503,7 +524,6 @@ describe('Layout onboarding entry', () => {
 
     const { container } = renderHomeWithLayout();
 
-    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.22')).toBeInTheDocument();
 
     const sidebarShell = container.querySelector('aside > div');
@@ -511,12 +531,13 @@ describe('Layout onboarding entry', () => {
     const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
     expect(logoRow).not.toBeNull();
     expect(accountRow).not.toBeNull();
+    expect(within(logoRow!).getByText('Flocks')).toBeInTheDocument();
     expect(within(logoRow!).queryByText('v2026.6.22')).not.toBeInTheDocument();
     expect(within(accountRow!).getByText('v2026.6.22')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
@@ -587,7 +608,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'flocksproUpgrade' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
@@ -606,7 +627,11 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
     expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
-    expect(updateModalMock).toHaveBeenCalled();
+    expect(updateModalMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        forceInitialCheck: true,
+      }),
+    );
     expect(screen.queryByRole('button', { name: 'logout' })).not.toBeInTheDocument();
   });
 
@@ -662,6 +687,9 @@ describe('Layout onboarding entry', () => {
     renderHomeWithLayout();
 
     await flushEffects();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -866,6 +894,65 @@ describe('Layout WebUI contract pages navigation', () => {
     );
   });
 
+  it('keeps sidebar workspace groups expanded by default and allows collapsing each group', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    renderHomeWithLayout();
+
+    const aiWorkbenchToggle = await screen.findByRole('button', { name: 'aiWorkbench' });
+    const sceneWorkspacesToggle = screen.getByRole('button', { name: 'sceneWorkspaces' });
+    const agentHubToggle = screen.getByRole('button', { name: 'agentHub' });
+
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+
+    await user.click(aiWorkbenchToggle);
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['aiWorkbench']));
+    expect(screen.queryByRole('link', { name: 'sessions' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+    await user.click(aiWorkbenchToggle);
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+
+    await user.click(sceneWorkspacesToggle);
+    expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['sceneWorkspaces']));
+    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+    await user.click(sceneWorkspacesToggle);
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+
+    await user.click(agentHubToggle);
+    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['agentHub']));
+    expect(screen.queryByRole('link', { name: 'agents' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    await user.click(agentHubToggle);
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+  });
+
+  it('restores collapsed sidebar workspace groups after refresh', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    localStorage.setItem('flocks_layout_collapsed_nav_sections', JSON.stringify(['sceneWorkspaces']));
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByRole('button', { name: 'sceneWorkspaces' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'aiWorkbench' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'agentHub' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+  });
+
   it('does not render WebUI contract page links until their build is ready', async () => {
     useWebUIContractPages.mockReturnValue({
       pages: [
@@ -998,7 +1085,7 @@ describe('Layout WebUI contract pages navigation', () => {
 
     const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
     expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
-    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThan(sectionHeadings.indexOf('agentHub'));
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeLessThan(sectionHeadings.indexOf('agentHub'));
     expect(sectionHeadings).not.toContain('systemCenter');
 
     const sceneSection = Array.from(container.querySelectorAll('h3'))
@@ -1052,5 +1139,102 @@ describe('Layout WebUI contract pages navigation', () => {
     await waitFor(() => {
       expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
     });
+  });
+
+  it('starts a SOC-scoped custom page session from the SOC workspace menu', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    sessionApi.create.mockResolvedValueOnce({ id: 'session-soc-custom-page' });
+
+    const socPages = [
+      {
+        id: 'soc-dashboard',
+        title: '告警态势',
+        route: '/contracts/webui/soc-dashboard',
+        icon: 'Activity',
+        order: 10,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'soc_ui',
+        workspaceTitle: 'SOC 工作区',
+        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+      },
+      {
+        id: 'soc-alerts',
+        title: '告警调查',
+        route: '/contracts/webui/soc-alerts',
+        icon: 'AlertTriangle',
+        order: 20,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'soc_ui',
+        workspaceTitle: 'SOC 工作区',
+        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+      },
+    ];
+    useWebUIContractPages.mockReturnValue({
+      pages: socPages,
+      workspaces: [
+        {
+          id: 'soc_ui',
+          title: 'SOC 工作区',
+          route: '/contracts/webui/workspaces/soc_ui',
+          icon: 'ShieldCheck',
+          order: 10,
+          enabled: true,
+          placement: 'sceneWorkspace',
+          defaultPageId: 'soc-alerts',
+          sections: [
+            {
+              id: 'posture',
+              label: '态势',
+              pageIds: ['soc-dashboard'],
+              defaultPageId: 'soc-dashboard',
+              contentPadding: 'none',
+              themeOverride: 'dark',
+            },
+            {
+              id: 'operations',
+              label: '告警运营',
+              pageIds: ['soc-alerts'],
+              defaultPageId: 'soc-alerts',
+              contentPadding: 'none',
+            },
+          ],
+          pages: socPages,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderHomeWithLayoutAndSessionsRoute();
+
+    await user.click(await screen.findByRole('link', { name: 'SOC 工作区' }));
+
+    const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
+    const workspaceMenuScope = within(workspaceMenu);
+    expect(workspaceMenuScope.getByRole('link', { name: '态势' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/soc_ui/soc-dashboard',
+    );
+    expect(workspaceMenuScope.getByRole('link', { name: '告警运营' })).toHaveAttribute(
+      'href',
+      '/contracts/webui/workspaces/soc_ui/soc-alerts',
+    );
+
+    await user.click(workspaceMenuScope.getByRole('button', { name: 'workspace.customPage' }));
+
+    await waitFor(() => {
+      expect(sessionApi.create).toHaveBeenCalledWith({ title: 'workspace.customPageSessionTitle' });
+    });
+    expect(await screen.findByTestId('location-probe')).toHaveTextContent(
+      `/sessions?session=session-soc-custom-page&message=${encodeURIComponent('workspace.socCustomPageInitialMessage')}&display=${encodeURIComponent('workspace.socCustomPageDisplayLabel')}`,
+    );
   });
 });

@@ -1016,6 +1016,35 @@ function Install-FlocksCli {
     }
 }
 
+function Write-InstallProfile {
+    $configDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_CONFIG_DIR)) {
+        $flocksRoot = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_ROOT)) {
+            Join-Path $HOME ".flocks"
+        }
+        else {
+            $env:FLOCKS_ROOT
+        }
+        Join-Path $flocksRoot "config"
+    }
+    else {
+        $env:FLOCKS_CONFIG_DIR
+    }
+
+    try {
+        $language = if (Test-IsZhInstall) { "zh-CN" } else { "en" }
+        if (-not (Test-Path $configDir)) {
+            New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+        }
+
+        $profilePath = Join-Path $configDir "install_profile.json"
+        $profile = [ordered]@{ Language = $language } | ConvertTo-Json
+        [System.IO.File]::WriteAllText($profilePath, $profile + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    }
+    catch {
+        Write-Warning "Failed to write install profile. Continuing with the default installer behavior."
+    }
+}
+
 function Install-Bun {
     if (Test-Command "bun") {
         return
@@ -1229,6 +1258,7 @@ function Main {
     }
 
     Write-Info (Get-LocalizedText -English "Project directory: $RootDir" -Chinese "项目目录: $RootDir")
+    Write-InstallProfile
     Install-Uv
     Ensure-NpmInstalled
     Initialize-InstallSources
@@ -1258,6 +1288,19 @@ function Main {
             -ArgumentList @("install") `
             -WorkingDirectory (Join-Path $RootDir "webui") `
             -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
+    }
+    finally {
+        Pop-Location
+    }
+    Write-Info (Get-LocalizedText -English "Building WebUI static assets..." -Chinese "正在构建 WebUI 静态资源...")
+    Push-Location (Join-Path $RootDir "webui")
+    try {
+        $null = Invoke-NativeCommandOrFail `
+            -Description "WebUI static asset build" `
+            -FilePath "npm.cmd" `
+            -ArgumentList @("run", "build") `
+            -WorkingDirectory (Join-Path $RootDir "webui") `
             -StreamOutput
     }
     finally {

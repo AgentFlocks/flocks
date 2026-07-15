@@ -1,0 +1,11 @@
+{
+  "name": "stream_alert_triage",
+  "nameCn": "HTTP研判工作流",
+  "description": "Self-contained downstream pipeline for stream_alert_denoise. Loads enriched_alerts from JSONL files written by stream_alert_denoise, then runs leader/follower concurrent triage with the tdp_alert_triage logic INLINED (no sub-workflow invocation). Alerts sharing the same dedup_key in a batch form groups; only the LEADER (first occurrence) is triaged, FOLLOWERS reuse the leader result with no extra LLM calls. Each alert's 4 LLM analysis branches (survey / cve_related / cve_info / payload_analysis) still run in parallel via a nested 4-way ThreadPoolExecutor. The semantic-tagged markdown verdict report is attached to each alert via the `triage_report` field — NO per-alert markdown file is written to disk. Persistent cache (triage_cache.pkl, FIFO LRU, file-locked, atomic write): historic dedup_key hits reuse the cached verdict/title/triage_report instantly; misses run the full inline triage and persist new results. Default persistence writes enriched triage alerts into ~/.flocks/data/soc.db alert_records; optional JSONL output is controlled by config.json or triage_output_mode=jsonl/both.",
+  "category": "default",
+  "status": "active",
+  "createdBy": null,
+  "createdAt": 1780892155316,
+  "updatedAt": 1782876198603,
+  "id": "stream_alert_triage"
+}

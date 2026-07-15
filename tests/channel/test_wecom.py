@@ -577,6 +577,26 @@ class TestParseFrame:
         assert "查一下" in msg.text
         assert msg.mentioned is True
 
+    def test_group_message_preserves_email_after_leading_mention(self):
+        frame = {
+            "body": {
+                "msgid": "msg002b",
+                "chattype": "group",
+                "chatid": "grp_001",
+                "from": {"userid": "lisi"},
+                "msgtype": "text",
+                "text": {
+                    "content": '@ArchSec "friday@park.example.ai", 邮箱域名是park.example.ai'
+                },
+            }
+        }
+
+        msg = _parse_frame(frame, {})
+
+        assert msg is not None
+        assert msg.text == '"friday@park.example.ai", 邮箱域名是park.example.ai'
+        assert msg.mentioned is True
+
     def test_image_message(self):
         frame = {
             "body": {

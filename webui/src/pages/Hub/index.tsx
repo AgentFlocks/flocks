@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Archive,
@@ -19,13 +19,35 @@ import {
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
-import { hubAPI, HubCatalogEntry, HubFileContent, HubFileNode, HubManifest, HubPluginType } from '@/api/hub';
-import FlowCanvas from '@/pages/WorkflowDetail/FlowCanvas';
+import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
+import SuiteInstallProgressPanel, {
+  applySuiteInstallProgressEvent,
+  createSuiteInstallProgressState,
+  failSuiteInstallProgress,
+  type SuiteInstallProgressState,
+} from '@/components/hub/SuiteInstallProgressPanel';
+import {
+  hubAPI,
+  HubCatalogEntry,
+  type HubCatalogFacets,
+  HubFileContent,
+  HubFileNode,
+  HubInstallProgressEvent,
+  HubManifest,
+  HubPluginType,
+} from '@/api/hub';
 import type { WorkflowJSON } from '@/api/workflow';
 import { useTranslation } from 'react-i18next';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { useProductName } from '@/contexts/ProductNameContext';
+import { useAuth } from '@/contexts/AuthContext';
 
 type ViewMode = 'table' | 'tree';
+
+const FlowCanvas = lazy(() => import('@/pages/WorkflowDetail/FlowCanvas'));
+const HUB_LOADING_DELAY_MS = 180;
 
 interface HubTaxonomyCategory {
   id: string;
@@ -60,6 +82,8 @@ const TYPE_LABEL: Record<HubPluginType, string> = {
   tool: 'Tool',
   device: 'Device',
   workflow: 'Workflow',
+  webui: 'WebUI',
+  component: 'Scenario Suite',
 };
 
 const TYPE_LABEL_CN: Record<HubPluginType, string> = {
@@ -68,11 +92,15 @@ const TYPE_LABEL_CN: Record<HubPluginType, string> = {
   tool: 'Tool',
   device: '设备',
   workflow: 'Workflow',
+  webui: 'WebUI',
+  component: '场景套件',
 };
 
+const HUB_PLUGIN_TYPES: HubPluginType[] = ['skill', 'agent', 'tool', 'device', 'workflow', 'webui', 'component'];
+
 function normalizePluginType(value: string | null): HubPluginType | '' {
-  if (value === 'skill' || value === 'agent' || value === 'tool' || value === 'device' || value === 'workflow') {
-    return value;
+  if (HUB_PLUGIN_TYPES.includes(value as HubPluginType)) {
+    return value as HubPluginType;
   }
   return '';
 }
@@ -86,7 +114,7 @@ function formatPluginTypeLabel(type: HubPluginType, language: string): string {
 
 const HUB_TEXT = {
   zh: {
-    description: '浏览随 Flocks 打包的本地插件广场，并安装到本机插件目录。',
+    description: '浏览打包的本地插件广场，并安装到本机插件目录。',
     treeView: '目录视图',
     tableView: '表格视图',
     refresh: '刷新',
@@ -111,6 +139,25 @@ const HUB_TEXT = {
     noMatches: '没有匹配的插件',
     parseWorkflowFailed: 'workflow.json 解析失败',
     readWorkflowFailed: '无法读取 workflow.json',
+    suiteInstallTitle: '场景套件安装进度',
+    suiteInstallRunning: '正在安装',
+    suiteInstallCompleted: '安装完成',
+    suiteInstallFailed: '安装失败',
+    suiteInstallProgress: '安装进度',
+    suiteInstallDismiss: '关闭',
+    refreshFailed: '刷新 Hub 失败',
+    refreshReloadFailed: 'Hub 刷新已完成，但列表重载失败',
+    actionRefreshFailed: '操作已完成，但刷新 Hub 列表失败',
+    actionFailed: { install: '安装失败', update: '更新失败', uninstall: '卸载失败' },
+    unknownError: '未知错误',
+    suiteItemStatuses: {
+      pending: '等待中',
+      installing: '安装中',
+      installed: '已安装',
+      skipped: '已跳过',
+      failed: '失败',
+      completed: '已完成',
+    },
     tabs: { overview: '概览', flow: '流程图', files: '文件', deps: '依赖', permissions: '权限', versions: '版本' },
     id: 'ID',
     manifest: 'Manifest',
@@ -128,7 +175,7 @@ const HUB_TEXT = {
     },
   },
   en: {
-    description: 'Browse bundled Flocks Hub plugins and install them into the local plugin directory.',
+    description: 'Browse bundled Hub plugins and install them into the local plugin directory.',
     treeView: 'Directory View',
     tableView: 'Table View',
     refresh: 'Refresh',
@@ -153,6 +200,25 @@ const HUB_TEXT = {
     noMatches: 'No matching plugins',
     parseWorkflowFailed: 'Failed to parse workflow.json',
     readWorkflowFailed: 'Failed to read workflow.json',
+    suiteInstallTitle: 'Scenario suite install progress',
+    suiteInstallRunning: 'Installing',
+    suiteInstallCompleted: 'Installed',
+    suiteInstallFailed: 'Install failed',
+    suiteInstallProgress: 'Progress',
+    suiteInstallDismiss: 'Close',
+    refreshFailed: 'Hub refresh failed',
+    refreshReloadFailed: 'Hub refresh completed, but catalog reload failed',
+    actionRefreshFailed: 'Action completed, but Hub reload failed',
+    actionFailed: { install: 'Install failed', update: 'Update failed', uninstall: 'Uninstall failed' },
+    unknownError: 'Unknown error',
+    suiteItemStatuses: {
+      pending: 'Pending',
+      installing: 'Installing',
+      installed: 'Installed',
+      skipped: 'Skipped',
+      failed: 'Failed',
+      completed: 'Completed',
+    },
     tabs: { overview: 'Overview', flow: 'Flow', files: 'Files', deps: 'Dependencies', permissions: 'Permissions', versions: 'Versions' },
     id: 'ID',
     manifest: 'Manifest',
@@ -188,75 +254,42 @@ function getHubDescription(entry: Pick<HubCatalogEntry, 'description' | 'descrip
   );
 }
 
-interface HubFilterSnapshot {
-  query?: string;
-  type?: HubPluginType | '';
-  useCase?: string;
-  tag?: string;
-  state?: string;
+function getHubName(entry: Pick<HubCatalogEntry, 'id' | 'name' | 'nameCn'>, language: string) {
+  const name = entry.name?.trim();
+  const nameCn = entry.nameCn?.trim();
+  return language.toLowerCase().startsWith('zh') ? (nameCn || name || entry.id) : (name || nameCn || entry.id);
 }
 
-interface HubFacetCounts {
-  type: Record<string, number>;
-  useCases: Record<string, number>;
-  tags: Record<string, number>;
-  state: Record<string, number>;
-}
-
-function matchesCatalogEntry(entry: HubCatalogEntry, filters: HubFilterSnapshot) {
-  if (filters.type && entry.type !== filters.type) return false;
-  if (filters.useCase && !entry.useCases.includes(filters.useCase)) return false;
-  if (filters.tag && !entry.tags.includes(filters.tag)) return false;
-  if (filters.state && entry.state !== filters.state) return false;
-  const query = filters.query?.trim().toLowerCase();
-  if (query) {
-    const haystack = [
-      entry.id,
-      entry.name,
-      entry.description,
-      entry.descriptionCn ?? '',
-      entry.category,
-      ...entry.tags,
-      ...entry.useCases,
-    ].join(' ').toLowerCase();
-    if (!haystack.includes(query)) return false;
-  }
-  return true;
-}
-
-function addFacetCount(counts: Record<string, number>, key: string) {
-  counts[key] = (counts[key] ?? 0) + 1;
-}
-
-function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot): HubFacetCounts {
-  const counts: HubFacetCounts = { type: {}, useCases: {}, tags: {}, state: {} };
-
-  items.forEach(item => {
-    if (matchesCatalogEntry(item, { query: filters.query })) {
-      addFacetCount(counts.type, item.type);
-    }
-    if (matchesCatalogEntry(item, { query: filters.query, type: filters.type })) {
-      item.useCases.forEach(useCase => addFacetCount(counts.useCases, useCase));
-    }
-    if (matchesCatalogEntry(item, { query: filters.query, type: filters.type, useCase: filters.useCase })) {
-      item.tags.forEach(tag => addFacetCount(counts.tags, tag));
-    }
-    if (matchesCatalogEntry(item, { query: filters.query, type: filters.type, useCase: filters.useCase, tag: filters.tag })) {
-      addFacetCount(counts.state, item.state);
-    }
-  });
-
-  return counts;
-}
+const EMPTY_HUB_FACETS: HubCatalogFacets = {
+  type: {},
+  category: {},
+  tags: {},
+  useCases: {},
+  state: {},
+  trust: {},
+  riskLevel: {},
+};
 
 export default function HubPage() {
   const { i18n } = useTranslation();
+  const { user } = useAuth();
+  const { productName } = useProductName();
+  const toast = useToast();
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
+  const hubTitle = `${productName} Hub`;
+  const hubDescription = i18n.language.toLowerCase().startsWith('zh')
+    ? `浏览随 ${productName} 打包的本地插件广场，并安装到本机插件目录。`
+    : `Browse bundled ${hubTitle} plugins and install them into the local plugin directory.`;
   const urlPluginId = searchParams.get('plugin') || searchParams.get('id') || '';
   const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
+  const [treeItems, setTreeItems] = useState<HubCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [treeError, setTreeError] = useState<string | null>(null);
+  const [hasLoadedCatalog, setHasLoadedCatalog] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState(searchParams.get('q') || urlPluginId);
   const [typeFilter, setTypeFilter] = useState<HubPluginType | ''>(urlType);
@@ -269,27 +302,124 @@ export default function HubPage() {
   const [pageSize, setPageSize] = useState(25);
   const [selected, setSelected] = useState<HubCatalogEntry | null>(null);
   const [actionId, setActionId] = useState<string | null>(null);
+  const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [taxonomy, setTaxonomy] = useState<HubTaxonomyResponse | null>(null);
+  const [totalItems, setTotalItems] = useState(0);
+  const [facetCounts, setFacetCounts] = useState<HubCatalogFacets>(EMPTY_HUB_FACETS);
+  const catalogRequestIdRef = useRef(0);
+  const treeRequestIdRef = useRef(0);
+  const debouncedQuery = useDebouncedValue(query, 250);
+  const catalogRequestKey = JSON.stringify([
+    query,
+    debouncedQuery,
+    typeFilter,
+    useCaseFilter,
+    tagFilter,
+    stateFilter,
+    page,
+    pageSize,
+  ]);
+  const treeRequestKey = JSON.stringify([
+    query,
+    debouncedQuery,
+    typeFilter,
+    useCaseFilter,
+    tagFilter,
+    stateFilter,
+  ]);
+  const currentCatalogRequestKeyRef = useRef(catalogRequestKey);
+  const currentTreeRequestKeyRef = useRef(treeRequestKey);
+  currentCatalogRequestKeyRef.current = catalogRequestKey;
+  currentTreeRequestKeyRef.current = treeRequestKey;
+  const canManageHub = user?.role === 'admin';
 
-  const fetchCatalog = async (silent = false) => {
+  const fetchCatalog = useCallback(async (silent = false, propagateError = false) => {
+    const requestKey = catalogRequestKey;
+    if (requestKey !== currentCatalogRequestKeyRef.current) return null;
+    const requestId = ++catalogRequestIdRef.current;
+    const isCurrentRequest = () => (
+      requestId === catalogRequestIdRef.current
+      && requestKey === currentCatalogRequestKeyRef.current
+    );
     try {
       if (!silent) setLoading(true);
-      const res = await hubAPI.catalog();
-      const nextItems = Array.isArray(res.data) ? res.data : [];
-      setCatalogItems(nextItems);
-      setSelected(current => {
-        if (!current) return current;
-        return nextItems.find(item => item.type === current.type && item.id === current.id) ?? current;
+      setCatalogError(null);
+      const res = await hubAPI.catalogPage({
+        q: debouncedQuery.trim() || undefined,
+        type: typeFilter || undefined,
+        useCases: useCaseFilter || undefined,
+        tags: tagFilter || undefined,
+        state: stateFilter || undefined,
+        offset: (page - 1) * pageSize,
+        limit: pageSize,
       });
+      if (!isCurrentRequest()) return null;
+      const nextItems = Array.isArray(res.data.items) ? res.data.items : [];
+      setCatalogItems(nextItems);
+      setTotalItems(res.data.total ?? nextItems.length);
+      setFacetCounts(res.data.facets ?? EMPTY_HUB_FACETS);
       return nextItems;
+    } catch (error) {
+      const currentRequest = isCurrentRequest();
+      if (currentRequest) {
+        setCatalogError(error instanceof Error ? error.message : 'Failed to load Hub catalog');
+      }
+      if (propagateError && currentRequest) throw error;
+      return null;
     } finally {
-      if (!silent) setLoading(false);
+      if (isCurrentRequest()) {
+        setHasLoadedCatalog(true);
+        if (!silent) setLoading(false);
+      }
     }
-  };
+  }, [catalogRequestKey, debouncedQuery, page, pageSize, stateFilter, tagFilter, typeFilter, useCaseFilter]);
+
+  const fetchTreeCatalog = useCallback(async (silent = false, propagateError = false) => {
+    const requestKey = treeRequestKey;
+    if (requestKey !== currentTreeRequestKeyRef.current) return;
+    const requestId = ++treeRequestIdRef.current;
+    const isCurrentRequest = () => (
+      requestId === treeRequestIdRef.current
+      && requestKey === currentTreeRequestKeyRef.current
+    );
+    try {
+      if (!silent) setTreeLoading(true);
+      setTreeError(null);
+      const res = await hubAPI.catalog({
+        q: debouncedQuery.trim() || undefined,
+        type: typeFilter || undefined,
+        useCases: useCaseFilter || undefined,
+        tags: tagFilter || undefined,
+        state: stateFilter || undefined,
+      });
+      if (!isCurrentRequest()) return;
+      setTreeItems(Array.isArray(res.data) ? res.data : []);
+    } catch (error) {
+      const currentRequest = isCurrentRequest();
+      if (currentRequest) {
+        setTreeError(error instanceof Error ? error.message : 'Failed to load Hub tree');
+      }
+      if (propagateError && currentRequest) throw error;
+    } finally {
+      if (isCurrentRequest() && !silent) {
+        setTreeLoading(false);
+      }
+    }
+  }, [debouncedQuery, stateFilter, tagFilter, treeRequestKey, typeFilter, useCaseFilter]);
 
   useEffect(() => {
-    fetchCatalog();
-    hubAPI.categories().then(res => setTaxonomy(res.data as HubTaxonomyResponse)).catch(() => setTaxonomy(null));
+    if (query !== debouncedQuery) return;
+    void fetchCatalog();
+  }, [debouncedQuery, fetchCatalog, query]);
+
+  useEffect(() => {
+    if (viewMode === 'tree' && query === debouncedQuery) {
+      void fetchTreeCatalog();
+    }
+  }, [debouncedQuery, fetchTreeCatalog, query, viewMode]);
+
+  useEffect(() => {
+    hubAPI.categories({ includeCounts: false }).then(res => setTaxonomy(res.data as HubTaxonomyResponse)).catch(() => setTaxonomy(null));
   }, []);
 
   useEffect(() => {
@@ -302,31 +432,7 @@ export default function HubPage() {
     }
   }, [catalogItems, urlPluginId, urlType]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [query, typeFilter, stateFilter, tagFilter, useCaseFilter, viewMode, pageSize]);
-
-  const items = useMemo(
-    () => catalogItems.filter(item => matchesCatalogEntry(item, {
-      query,
-      type: typeFilter,
-      useCase: useCaseFilter,
-      tag: tagFilter,
-      state: stateFilter,
-    })),
-    [catalogItems, query, typeFilter, useCaseFilter, tagFilter, stateFilter],
-  );
-
-  const facetCounts = useMemo(
-    () => buildFacetCounts(catalogItems, {
-      query,
-      type: typeFilter,
-      useCase: useCaseFilter,
-      tag: tagFilter,
-      state: stateFilter,
-    }),
-    [catalogItems, query, typeFilter, useCaseFilter, tagFilter, stateFilter],
-  );
+  const items = catalogItems;
 
   const useCases = useMemo(
     () => taxonomy?.useCases ?? Array.from(new Set(catalogItems.flatMap(item => item.useCases))).sort(),
@@ -337,34 +443,92 @@ export default function HubPage() {
     [catalogItems, taxonomy],
   );
   const activeFilterCount = [typeFilter, useCaseFilter, tagFilter, stateFilter].filter(Boolean).length;
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pagedItems = useMemo(
-    () => items.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [items, currentPage, pageSize],
-  );
+  const pagedItems = items;
+  const isInitialLoading = loading && !hasLoadedCatalog;
+  const visibleCatalogError = viewMode === 'tree' ? (treeError || catalogError) : catalogError;
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
       await hubAPI.refresh();
-      await fetchCatalog(true);
+    } catch (error) {
+      toast.error(
+        text.refreshFailed,
+        extractErrorMessage(error, text.unknownError),
+      );
+      setRefreshing(false);
+      return;
+    }
+
+    try {
+      await Promise.all([
+        fetchCatalog(true, true),
+        viewMode === 'tree' ? fetchTreeCatalog(true, true) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      toast.error(
+        text.refreshReloadFailed,
+        extractErrorMessage(error, text.unknownError),
+      );
     } finally {
       setRefreshing(false);
     }
   };
 
+  const handleSuiteInstallProgress = (progress: HubInstallProgressEvent) => {
+    setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
+  };
+
   const runAction = async (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => {
+    if (!canManageHub) return;
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
-      if (action === 'install') await hubAPI.install(entry.type, entry.id);
+      if (action === 'install' && entry.type === 'component') {
+        setSuiteInstallProgress(createSuiteInstallProgressState(entry));
+        await hubAPI.installStream(entry.type, entry.id, handleSuiteInstallProgress);
+      } else if (action === 'install') {
+        await hubAPI.install(entry.type, entry.id);
+      }
       if (action === 'update') await hubAPI.update(entry.type, entry.id);
       if (action === 'uninstall') await hubAPI.uninstall(entry.type, entry.id);
-      const nextItems = await fetchCatalog(true);
-      const updated = nextItems?.find(item => item.type === entry.type && item.id === entry.id);
-      if (updated) {
-        setSelected(current => (current?.type === entry.type && current?.id === entry.id ? updated : current));
+    } catch (error) {
+      if (action === 'install' && entry.type === 'component') {
+        const message = extractErrorMessage(error, text.suiteInstallFailed);
+        setSuiteInstallProgress(current => failSuiteInstallProgress(current, entry, message));
+      } else {
+        toast.error(
+          `${text.actionFailed[action]}: ${getHubName(entry, i18n.language)}`,
+          extractErrorMessage(error, text.unknownError),
+        );
       }
+      setActionId(null);
+      return;
+    }
+
+    try {
+      const [, , refreshedEntry] = await Promise.all([
+        fetchCatalog(true, true),
+        viewMode === 'tree' ? fetchTreeCatalog(true, true) : Promise.resolve(),
+        hubAPI.catalog({ q: entry.id, type: entry.type }).then(res => (
+          (Array.isArray(res.data) ? res.data : []).find(item => (
+            item.type === entry.type && item.id === entry.id
+          )) ?? null
+        )),
+      ]);
+      setSelected(current => (
+        current?.type === entry.type && current?.id === entry.id ? refreshedEntry : current
+      ));
+    } catch (error) {
+      toast.error(
+        `${text.actionRefreshFailed}: ${getHubName(entry, i18n.language)}`,
+        extractErrorMessage(error, text.unknownError),
+      );
     } finally {
       setActionId(null);
     }
@@ -375,17 +539,35 @@ export default function HubPage() {
     setUseCaseFilter('');
     setTagFilter('');
     setStateFilter('');
+    setPage(1);
   };
 
-  if (loading) {
-    return <div className="h-full flex items-center justify-center"><LoadingSpinner /></div>;
+  if (isInitialLoading) {
+    return <div className="h-full flex items-center justify-center"><LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} /></div>;
+  }
+
+  if (catalogError && catalogItems.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <p className="mb-4 text-red-600">{catalogError}</p>
+          <button
+            type="button"
+            onClick={() => void fetchCatalog()}
+            className="rounded-lg bg-slate-700 px-4 py-2 text-white hover:bg-slate-800"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 flex flex-col" aria-busy={loading}>
       <PageHeader
-        title="Flocks Hub"
-        description={text.description}
+        title={hubTitle}
+        description={hubDescription}
         icon={<Archive className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
@@ -393,7 +575,10 @@ export default function HubPage() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 value={query}
-                onChange={e => setQuery(e.target.value)}
+                onChange={e => {
+                  setQuery(e.target.value);
+                  setPage(1);
+                }}
                 placeholder={text.searchPlaceholder}
                 className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white/90 focus:ring-2 focus:ring-slate-200 focus:border-slate-400"
               />
@@ -405,28 +590,33 @@ export default function HubPage() {
               {viewMode === 'table' ? <Folder className="w-4 h-4" /> : <Table2 className="w-4 h-4" />}
               {viewMode === 'table' ? text.treeView : text.tableView}
             </button>
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-              {text.refresh}
-            </button>
+            {canManageHub && (
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                {text.refresh}
+              </button>
+            )}
           </div>
         }
       />
 
-      <div className="px-4 pb-3">
+      <div className="shrink-0 px-4 pb-3">
         <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-slate-50 via-white to-white shadow-sm overflow-hidden">
           <div className="p-3">
             <FilterRow
               label={text.type}
               value={typeFilter}
-              onChange={value => setTypeFilter(value as HubPluginType | '')}
+              onChange={value => {
+                setTypeFilter(value as HubPluginType | '');
+                setPage(1);
+              }}
               options={[
                 { value: '', label: text.all },
-                ...(['skill', 'agent', 'tool', 'device', 'workflow'] as HubPluginType[]).map(type => ({
+                ...HUB_PLUGIN_TYPES.map(type => ({
                   value: type,
                   label: formatPluginTypeLabel(type, i18n.language),
                   count: facetCounts.type[type] ?? 0,
@@ -440,7 +630,10 @@ export default function HubPage() {
               <FilterRow
                 label={text.useCase}
                 value={useCaseFilter}
-                onChange={setUseCaseFilter}
+                onChange={value => {
+                  setUseCaseFilter(value);
+                  setPage(1);
+                }}
                 options={[
                   { value: '', label: text.all },
                   ...useCases.map(useCase => ({
@@ -454,7 +647,10 @@ export default function HubPage() {
               <FilterRow
                 label="Tag"
                 value={tagFilter}
-                onChange={setTagFilter}
+                onChange={value => {
+                  setTagFilter(value);
+                  setPage(1);
+                }}
                 options={[
                   { value: '', label: text.all },
                   ...tags.map(tag => ({
@@ -468,7 +664,10 @@ export default function HubPage() {
               <FilterRow
                 label={text.status}
                 value={stateFilter}
-                onChange={setStateFilter}
+                onChange={value => {
+                  setStateFilter(value);
+                  setPage(1);
+                }}
                 options={[
                   { value: '', label: text.all },
                   ...(['available', 'installed', 'updateAvailable', 'incompatible'] as const).map(state => ({
@@ -503,23 +702,35 @@ export default function HubPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4 [scrollbar-gutter:stable]">
+        {visibleCatalogError && (
+          <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {visibleCatalogError}
+          </div>
+        )}
         {viewMode === 'table' ? (
           <HubTable items={pagedItems} actionId={actionId} tagLabels={taxonomy?.tagLabels} language={i18n.language} text={text} onSelect={setSelected} onAction={runAction} />
+        ) : treeLoading && treeItems.length === 0 ? (
+          <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+            <LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} />
+          </div>
         ) : (
-          <HubTree items={items} actionId={actionId} text={text} onSelect={setSelected} onAction={runAction} />
+          <HubTree items={treeItems} actionId={actionId} text={text} onSelect={setSelected} onAction={runAction} />
         )}
       </div>
 
       {viewMode === 'table' && (
         <PaginationBar
-          total={items.length}
+          total={totalItems}
           page={currentPage}
           pageSize={pageSize}
           totalPages={totalPages}
           text={text}
           onPageChange={setPage}
-          onPageSizeChange={setPageSize}
+          onPageSizeChange={nextPageSize => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
         />
       )}
 
@@ -531,6 +742,14 @@ export default function HubPage() {
           onAction={runAction}
           actionId={actionId}
           text={text}
+        />
+      )}
+
+      {suiteInstallProgress && (
+        <SuiteInstallProgressPanel
+          progress={suiteInstallProgress}
+          language={i18n.language}
+          onClose={() => setSuiteInstallProgress(null)}
         />
       )}
     </div>
@@ -557,15 +776,15 @@ function FilterRow({ label, value, options, onChange }: {
         key={option.value || 'all'}
         title={option.title}
         onClick={() => onChange(option.value)}
-        className={`px-2 py-1 rounded-md transition-colors ${
+        className={`inline-flex h-8 items-center whitespace-nowrap rounded-md px-2 py-1 font-medium tabular-nums transition-colors ${
           active
-            ? 'bg-slate-800 text-white font-medium'
+            ? 'bg-slate-800 text-white'
             : 'text-gray-600 hover:bg-white hover:text-gray-900'
         }`}
       >
         {option.label}
         {option.count !== undefined && option.value && (
-          <span className={active ? 'ml-1 text-slate-200' : 'ml-1 text-gray-400'}>{option.count}</span>
+          <span className={active ? 'ml-1 inline-block min-w-3 text-right text-slate-200' : 'ml-1 inline-block min-w-3 text-right text-gray-400'}>{option.count}</span>
         )}
       </button>
     );
@@ -573,8 +792,8 @@ function FilterRow({ label, value, options, onChange }: {
   const [allOption, ...facetOptions] = options;
 
   return (
-    <div className="flex items-start gap-3 text-sm">
-      <div className="w-20 shrink-0 pt-1">
+    <div className="flex min-h-8 items-start gap-3 text-sm">
+      <div className="w-20 shrink-0 pt-1.5">
         <span className="inline-flex px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-xs font-medium">
           {label}
         </span>
@@ -601,7 +820,7 @@ function PaginationBar({ total, page, pageSize, totalPages, text, onPageChange, 
   const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const end = Math.min(total, page * pageSize);
   return (
-    <div className="px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
+    <div className="h-12 shrink-0 px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
       <div>
         {text.showing} {start}-{end} / {text.of} {total} {text.plugins}
       </div>
@@ -644,7 +863,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl overflow-hidden">
       <table className="min-w-full table-fixed text-xs">
         <colgroup>
           <col style={{ width: '7%' }} />
@@ -668,7 +887,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
               <td className="px-3 py-2 text-gray-500">{formatPluginTypeLabel(item.type, language)}</td>
               <td className="max-w-0 px-3 py-2">
                 <button onClick={() => onSelect(item)} className="w-full text-left">
-                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{item.name}</div>
+                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{getHubName(item, language)}</div>
                   <div className="truncate text-[11px] text-gray-500">{getHubDescription(item, language)}</div>
                 </button>
               </td>
@@ -737,7 +956,7 @@ function HubTree({ items, actionId, text, onSelect, onAction }: {
   }, [items]);
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-3">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl p-3">
       <HubTreeNodeView node={root} depth={0} actionId={actionId} text={text} onSelect={onSelect} onAction={onAction} root />
     </div>
   );
@@ -873,7 +1092,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
       <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-gray-900">{entry.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
             <StateBadge state={entry.state} text={text} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
@@ -905,6 +1124,24 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             <InfoBlock label={text.useCase} value={entry.useCases.join(', ') || '-'} />
             <InfoBlock label={text.trust} value={entry.trust} />
             <InfoBlock label={text.manifest} value={entry.manifestPath} />
+            {entry.type === 'component' && manifest?.components?.length ? (
+              <div>
+                <div className="text-xs text-gray-400 mb-2">
+                  {language.toLowerCase().startsWith('zh') ? '套件内容' : 'Suite items'}
+                </div>
+                <div className="space-y-2">
+                  {manifest.components.map((item) => (
+                    <div
+                      key={`${item.type}:${item.id}`}
+                      className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                    >
+                      <span className="font-mono text-gray-800">{item.id}</span>
+                      <span className="text-xs text-gray-500">{formatPluginTypeLabel(item.type, language)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
         {activeTab === 'flow' && (
@@ -916,7 +1153,9 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
                   <span>{text.workflowDiagram}</span>
                 </div>
                 <div className="h-[calc(100%-2.5rem)]">
-                  <FlowCanvas workflowJson={workflowJson} editable={false} />
+                  <Suspense fallback={<div className="h-full flex items-center justify-center"><LoadingSpinner /></div>}>
+                    <FlowCanvas workflowJson={workflowJson} editable={false} />
+                  </Suspense>
                 </div>
               </div>
             ) : workflowError ? (
@@ -990,11 +1229,13 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
   compact?: boolean;
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
+  const { user } = useAuth();
   const busy = actionId?.startsWith(`${item.type}:${item.id}:`);
   const buttonClass = compact
     ? 'p-1.5 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-50'
     : 'inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 rounded-md border border-gray-200 text-xs hover:bg-gray-50 disabled:opacity-50';
   if (busy) return <Loader2 className="w-4 h-4 animate-spin text-gray-400" />;
+  if (user?.role !== 'admin') return null;
   if (item.native && item.state === 'installed') return null;
   if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
   if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;

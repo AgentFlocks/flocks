@@ -54,7 +54,9 @@
   "error": {
     "backendUnavailable": "Cannot connect to backend service",
     "backendError": "Backend service error",
-    "backendErrorHint": "Please ensure the Flocks backend is running",
+    "backendErrorHint": "Please ensure the backend service is running",
+    "chunkLoadFailed": "Page resources failed to load",
+    "chunkLoadHint": "The application may have been updated. Refresh and try again.",
     "processingFailed": "Processing failed",
     "deleteFailed": "Delete failed",
     "saveFailed": "Save failed"
@@ -270,7 +272,7 @@
       "securityApis": { "title": "Configure Security Tool APIs", "tags": ["ThreatBook", "VirusTotal", "FOFA", "URLScan", "Shodan"] },
       "channels": { "title": "Connect IM Channels", "tags": ["Feishu", "WeCom", "DingTalk", "Discord", "Telegram"] },
       "devices": { "title": "Connect NDR Devices", "tags": ["SkyEye", "TDP"] },
-      "scenes": { "title": "Scenarios Demo", "tags": ["Daily Intel", "Alert Triage", "Phishing Detection"] }
+      "scenes": { "title": "Scenarios Demo", "tags": ["Daily Intel", "Alert Operations", "Phishing Detection"] }
     }
   },
   "hookStatus": {

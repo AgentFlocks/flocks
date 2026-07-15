@@ -1,6 +1,6 @@
 {
   "pageTitle": "Device Integration",
-  "pageDescription": "Configure security device API connections so Flocks agents can call and control them directly",
+  "pageDescription": "Configure security device API connections so agents can call and control them directly",
 
   "status": {
     "disabled": "Disabled",
@@ -41,7 +41,7 @@
 
   "empty": {
     "noDevices": "No devices integrated yet",
-    "noDevicesHint": "Once you add a device, Flocks agents can call its tools",
+    "noDevicesHint": "Once you add a device, agents can call its tools",
     "addNow": "Add device now",
     "roomEmpty": "No devices in this room",
     "roomEmptyHint": "Click \"Add Device\" to integrate a device into this room"

@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation, matchPath } from 'react-router-dom';
+import { Outlet, Link, useLocation, matchPath, useNavigate } from 'react-router-dom';
 import {
   Home,
   MessageSquare,
@@ -22,9 +22,11 @@ import {
   Settings,
   ArrowUpCircle,
   RefreshCw,
+  Loader2,
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import type { ComponentType } from 'react';
 import { useTranslation } from 'react-i18next';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
@@ -32,12 +34,53 @@ import { useTranslation } from 'react-i18next';
 // re-import dismissal helpers from the modal modules (a static named import
 // would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
+
+type LazyLayoutModule = { default: ComponentType<any> };
+
+function lazyLayoutComponent<T extends LazyLayoutModule>(
+  loader: () => Promise<T>,
+  namespaces: readonly string[] = [],
+) {
+  return lazy(() => recoverLazyLoad(
+    Promise.all([
+      loader(),
+      preloadI18nNamespaces(namespaces),
+    ]).then(([module]) => module),
+  ));
+}
+
 function isOnboardingDismissed(): boolean {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
-const OnboardingModal = lazy(() => import('@/components/common/OnboardingModal'));
-const UpdateModal = lazy(() => import('@/components/common/UpdateModal'));
-const NotificationModal = lazy(() => import('@/components/common/NotificationModal'));
+
+function readCollapsedNavSectionIds(): Set<string> {
+  try {
+    const rawValue = localStorage.getItem(COLLAPSED_NAV_SECTIONS_KEY);
+    if (!rawValue) return new Set();
+    const parsedValue: unknown = JSON.parse(rawValue);
+    if (!Array.isArray(parsedValue)) return new Set();
+    return new Set(parsedValue.filter((item): item is string => typeof item === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
+  try {
+    if (sectionIds.size === 0) {
+      localStorage.removeItem(COLLAPSED_NAV_SECTIONS_KEY);
+      return;
+    }
+    localStorage.setItem(COLLAPSED_NAV_SECTIONS_KEY, JSON.stringify(Array.from(sectionIds).sort()));
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
+const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
+const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
+const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 import { checkUpdate, type VersionInfo } from '@/api/update';
 import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
@@ -48,14 +91,25 @@ import {
 } from '@/api/notifications';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProductName } from '@/contexts/ProductNameContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
+import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
-import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
+import {
+  buildWebUIContractWorkspaceSections,
+  getLocalizedWebUIContractTitle,
+} from '@/utils/webuiContractWorkspaceSections';
+import { sessionApi } from '@/api/session';
+import { useToast } from '@/components/common/Toast';
+import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
+import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
 
 interface LayoutNavItem {
   name: string;
@@ -66,8 +120,10 @@ interface LayoutNavItem {
 }
 
 interface LayoutNavSection {
+  id?: string;
   name: string;
   items: LayoutNavItem[];
+  collapsible?: boolean;
 }
 
 function formatProVersion(version?: string | null): string | null {
@@ -115,8 +171,21 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
   };
 }
 
+function isSocWorkspace(workspace: WebUIContractWorkspaceListItem | null): boolean {
+  if (!workspace) return false;
+  const id = workspace.id.toLowerCase();
+  const title = `${workspace.title} ${workspace.titleEn ?? ''}`.toLowerCase();
+  return id === 'soc_ui'
+    || id === 'soc_dashboard'
+    || id.startsWith('soc_')
+    || id.startsWith('soc-')
+    || title.includes('soc workspace')
+    || workspace.title.includes('SOC 工作区');
+}
+
 export default function Layout() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -128,6 +197,8 @@ export default function Layout() {
   const { t, i18n } = useTranslation('nav');
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
+  const toast = useToast();
+  const { productName } = useProductName();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -146,9 +217,12 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
+  const canCreateWorkspaceCustomPage = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
+  const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(readCollapsedNavSectionIds);
   const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
+  const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
   const workspaceMenuCloseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -178,12 +252,12 @@ export default function Layout() {
     return () => window.removeEventListener('flocks:open-onboarding', handleOpenOnboarding);
   }, [handleOpenOnboarding]);
 
-  const refreshUpdateStatus = useCallback(async (force = false) => {
+  const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
     if (!flocksproStatusReady) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
-    if (!force && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
+    if (!bypassMinGap && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
 
     checkingUpdateRef.current = true;
     lastUpdateCheckAtRef.current = now;
@@ -232,7 +306,9 @@ export default function Layout() {
   useEffect(() => {
     if (!flocksproStatusReady) return undefined;
 
-    refreshUpdateStatus(true);
+    const initialCheckTimerId = window.setTimeout(() => {
+      refreshUpdateStatus(true);
+    }, UPDATE_CHECK_INITIAL_DELAY_MS);
 
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -254,6 +330,7 @@ export default function Layout() {
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
+      window.clearTimeout(initialCheckTimerId);
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
@@ -282,7 +359,11 @@ export default function Layout() {
           const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
           setIsFlocksproActive(active);
           const version = active
-            ? formatProVersion(packageStatus?.installed_version || packageStatus?.flockspro_component_version)
+            ? formatProVersion(
+                packageStatus?.bundle_version ||
+                  packageStatus?.installed_version ||
+                  packageStatus?.flockspro_component_version,
+              )
             : null;
           setFlocksproVersion(version);
         })
@@ -429,7 +510,7 @@ export default function Layout() {
       const sceneWorkspaceItems = webuiContractWorkspaces
         .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
         .map((workspace) => ({
-          name: workspace.title,
+          name: getLocalizedWebUIContractTitle(workspace, i18n.language),
           href: workspace.route,
           icon: resolveWebUIContractPageIcon(workspace.icon),
           opensWorkspaceMenu: true,
@@ -444,14 +525,16 @@ export default function Layout() {
             ...webuiContractPages
               .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
               .map((page) => ({
-                name: page.title,
+                name: getLocalizedWebUIContractTitle(page, i18n.language),
                 href: page.route,
                 icon: resolveWebUIContractPageIcon(page.icon),
               })),
           ],
         },
         {
+          id: 'aiWorkbench',
           name: t('aiWorkbench'),
+          collapsible: true,
           items: [
             { name: t('sessions'), href: '/sessions', icon: MessageSquare },
             { name: t('workspace'), href: '/workspace', icon: FolderOpen },
@@ -460,26 +543,30 @@ export default function Layout() {
           ],
         },
         {
-          name: t('agentHub'),
-          items: [
-            { name: t('agents'), href: '/agents', icon: Bot },
-            { name: t('skills'), href: '/skills', icon: BookOpen },
-            { name: t('tools'), href: '/tools', icon: Wrench },
-            { name: t('hub'), href: '/hub', icon: Archive },
-            { name: t('models'), href: '/models', icon: Brain },
-            { name: t('channels'), href: '/channels', icon: Radio },
-          ],
-        },
-        {
+          id: 'sceneWorkspaces',
           name: t('sceneWorkspaces'),
+          collapsible: true,
           items: [
             ...sceneWorkspaceItems,
             { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
           ],
         },
+        {
+          id: 'agentHub',
+          name: t('agentHub'),
+          collapsible: true,
+          items: [
+            { name: t('agents'), href: '/agents', icon: Bot },
+            { name: t('skills'), href: '/skills', icon: BookOpen },
+            { name: t('tools'), href: '/tools', icon: Wrench },
+            { name: t('hub', { productName }), href: '/hub', icon: Archive },
+            { name: t('models'), href: '/models', icon: Brain },
+            { name: t('channels'), href: '/channels', icon: Radio },
+          ],
+        },
       ];
     },
-    [webuiContractPages, webuiContractWorkspaces, t],
+    [i18n.language, productName, webuiContractPages, webuiContractWorkspaces, t],
   );
 
   const isFullScreenPage =
@@ -489,7 +576,6 @@ export default function Layout() {
     matchPath('/sessions', location.pathname) ||
     matchPath('/devices', location.pathname) ||
     matchPath('/contracts/webui/*', location.pathname);
-  const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
     ? updateInfo?.edition === 'flockspro'
       ? formatProVersion(currentProductVersion(updateInfo, true))
@@ -517,9 +603,13 @@ export default function Layout() {
     ? resolveWebUIContractPageIcon(activeWorkspaceMenu.icon)
     : null;
   const activeWorkspaceSections = useMemo(
-    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu) : []),
-    [activeWorkspaceMenu],
+    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu, i18n.language) : []),
+    [activeWorkspaceMenu, i18n.language],
   );
+  const activeWorkspaceMenuTitle = activeWorkspaceMenu
+    ? getLocalizedWebUIContractTitle(activeWorkspaceMenu, i18n.language)
+    : '';
+  const showWorkspaceCustomPageAction = canCreateWorkspaceCustomPage && isSocWorkspace(activeWorkspaceMenu);
 
   const cancelWorkspaceMenuClose = useCallback(() => {
     if (workspaceMenuCloseTimerRef.current === null) return;
@@ -553,6 +643,19 @@ export default function Layout() {
     }
   }, [activeWorkspaceMenu, openWorkspaceMenuId]);
 
+  const toggleNavSection = useCallback((sectionId: string) => {
+    setCollapsedNavSectionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sectionId)) {
+        next.delete(sectionId);
+      } else {
+        next.add(sectionId);
+      }
+      saveCollapsedNavSectionIds(next);
+      return next;
+    });
+  }, []);
+
   const toggleWorkspaceSection = useCallback((sectionId: string) => {
     setCollapsedWorkspaceSectionIds((current) => {
       const next = new Set(current);
@@ -565,6 +668,41 @@ export default function Layout() {
     });
   }, []);
 
+  const handleCreateWorkspaceCustomPage = useCallback(async () => {
+    if (!activeWorkspaceMenu || creatingWorkspaceCustomPageSession) return;
+    setCreatingWorkspaceCustomPageSession(true);
+    try {
+      const session = await sessionApi.create({
+        title: tWebUIContractPage('workspace.customPageSessionTitle', {
+          workspace: activeWorkspaceMenuTitle,
+        }),
+      });
+      const message = tWebUIContractPage('workspace.socCustomPageInitialMessage', {
+        workspaceId: activeWorkspaceMenu.id,
+        workspaceTitle: activeWorkspaceMenuTitle,
+        workspaceRoute: activeWorkspaceMenu.route,
+      });
+      const displayLabel = tWebUIContractPage('workspace.socCustomPageDisplayLabel');
+      setOpenWorkspaceMenuId(null);
+      setSidebarOpen(false);
+      navigate(
+        `/sessions?session=${session.id}&message=${encodeURIComponent(message)}&display=${encodeURIComponent(displayLabel)}`,
+      );
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : tWebUIContractPage('workspace.customPageCreateError');
+      toast.error(tWebUIContractPage('workspace.customPageCreateError'), detail);
+    } finally {
+      setCreatingWorkspaceCustomPageSession(false);
+    }
+  }, [
+    activeWorkspaceMenu,
+    activeWorkspaceMenuTitle,
+    creatingWorkspaceCustomPageSession,
+    navigate,
+    tWebUIContractPage,
+    toast,
+  ]);
+
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
     setUpdateInfo(null);
@@ -575,31 +713,34 @@ export default function Layout() {
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Modals render lazily — fallback={null} keeps the chunk download
           invisible to the user (they're already triggering an async UI). */}
-      <Suspense fallback={null}>
-        {showOnboarding && (
-          <OnboardingModal
-            onClose={() => setShowOnboarding(false)}
-          />
-        )}
-        {showUpdate && (
-          <UpdateModal
-            initialInfo={updateInfo}
-            edition={isFlocksproActive ? 'flockspro' : 'flocks'}
-            canUpgrade={canManageUpdates}
-            onClose={() => setShowUpdate(false)}
-            onDismiss={() => setShowUpdate(false)}
-          />
-        )}
-        {visibleNotifications.length > 0 && (
-          <NotificationModal
-            notifications={visibleNotifications}
-            acknowledgingIds={acknowledgingNotificationIds}
-            onAcknowledge={closeVisibleNotification}
-            onClose={closeVisibleNotification}
-            onDismissForever={dismissVisibleNotificationForever}
-          />
-        )}
-      </Suspense>
+      <LazyLoadErrorBoundary mode="overlay">
+        <Suspense fallback={null}>
+          {showOnboarding && (
+            <OnboardingModal
+              onClose={() => setShowOnboarding(false)}
+            />
+          )}
+          {showUpdate && (
+            <UpdateModal
+              initialInfo={updateInfo}
+              forceInitialCheck={updateInfo === null}
+              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+              canUpgrade={canManageUpdates}
+              onClose={() => setShowUpdate(false)}
+              onDismiss={() => setShowUpdate(false)}
+            />
+          )}
+          {visibleNotifications.length > 0 && (
+            <NotificationModal
+              notifications={visibleNotifications}
+              acknowledgingIds={acknowledgingNotificationIds}
+              onAcknowledge={closeVisibleNotification}
+              onClose={closeVisibleNotification}
+              onDismissForever={dismissVisibleNotificationForever}
+            />
+          )}
+        </Suspense>
+      </LazyLoadErrorBoundary>
 
       {sidebarOpen && (
         <div
@@ -665,72 +806,92 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section) => (
-              <div key={section.name} className="mb-6">
-                {!collapsed && section.name && (
-                  <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
-                    {section.name}
-                  </h3>
-                )}
-                {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
-                <div className="space-y-0.5">
-                  {section.items.map((item) => {
-                    const isActive = location.pathname === item.href
-                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
-                    return (
-                      <Link
-                        key={item.href}
-                        to={item.href}
-                        onMouseEnter={() => {
-                          if (item.opensWorkspaceMenu) {
-                            openWorkspaceMenu(item.workspaceId);
-                          } else {
-                            scheduleWorkspaceMenuClose();
-                          }
-                        }}
-                        onMouseLeave={() => {
-                          if (item.opensWorkspaceMenu) {
-                            scheduleWorkspaceMenuClose();
-                          }
-                        }}
-                        onClick={(event) => {
-                          if (item.opensWorkspaceMenu) {
-                            event.preventDefault();
-                            openWorkspaceMenu(item.workspaceId);
-                            return;
-                          }
-                          setOpenWorkspaceMenuId(null);
-                          setSidebarOpen(false);
-                        }}
-                        title={collapsed ? item.name : undefined}
-                        className={`
-                          flex items-center rounded-lg transition-all duration-150
-                          ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
-                          ${isActive
-                            ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
-                            : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
-                          }
-                        `}
-                      >
-                        <item.icon
-                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
-                        />
-                        {!collapsed && (
-                          <>
-                            <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                            {item.opensWorkspaceMenu && (
-                              <ChevronRight
-                                className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
-                              />
+            {navigation.map((section, sectionIndex) => {
+              const sectionId = (section.id ?? section.name) || `section-${sectionIndex}`;
+              const sectionContentId = `layout-nav-section-${sectionId}`;
+              const sectionCollapsed = Boolean(section.collapsible && collapsedNavSectionIds.has(sectionId));
+              return (
+                <div key={sectionId} className="mb-6">
+                  {!collapsed && section.name && (
+                    <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
+                      {section.collapsible ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleNavSection(sectionId)}
+                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
+                          aria-expanded={!sectionCollapsed}
+                          aria-controls={sectionContentId}
+                        >
+                          <span className="min-w-0 truncate">{section.name}</span>
+                          <ChevronRight className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                        </button>
+                      ) : (
+                        section.name
+                      )}
+                    </h3>
+                  )}
+                  {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
+                  {!sectionCollapsed && (
+                    <div id={sectionContentId} className="space-y-0.5">
+                      {section.items.map((item) => {
+                        const isActive = location.pathname === item.href
+                          || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
+                        return (
+                          <Link
+                            key={item.href}
+                            to={item.href}
+                            onMouseEnter={() => {
+                              if (item.opensWorkspaceMenu) {
+                                openWorkspaceMenu(item.workspaceId);
+                              } else {
+                                scheduleWorkspaceMenuClose();
+                              }
+                            }}
+                            onMouseLeave={() => {
+                              if (item.opensWorkspaceMenu) {
+                                scheduleWorkspaceMenuClose();
+                              }
+                            }}
+                            onClick={(event) => {
+                              if (item.opensWorkspaceMenu) {
+                                event.preventDefault();
+                                openWorkspaceMenu(item.workspaceId);
+                                return;
+                              }
+                              setOpenWorkspaceMenuId(null);
+                              setSidebarOpen(false);
+                            }}
+                            title={collapsed ? item.name : undefined}
+                            className={`
+                              flex items-center rounded-lg transition-all duration-150
+                              ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
+                              ${isActive
+                                ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
+                                : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
+                              }
+                            `}
+                          >
+                            <item.icon
+                              className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
+                            />
+                            {!collapsed && (
+                              <>
+                                <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                                {item.opensWorkspaceMenu && (
+                                  <ChevronRight
+                                    className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
+                                  />
+                                )}
+                              </>
                             )}
-                          </>
-                        )}
-                      </Link>
-                    );
-                  })}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </nav>
 
           {/* Bottom account entry */}
@@ -753,7 +914,7 @@ export default function Layout() {
                     className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                   >
                     <ArrowUpCircle className="h-4 w-4 text-zinc-400" />
-                    {t('flocksproUpgrade')}
+                    {productName}
                   </Link>
                 )}
                 <button
@@ -866,8 +1027,8 @@ export default function Layout() {
             {ActiveWorkspaceMenuIcon && (
               <ActiveWorkspaceMenuIcon className="h-5 w-5 shrink-0 text-zinc-500 dark:text-zinc-300" />
             )}
-            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenu.title}>
-              {activeWorkspaceMenu.title}
+            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenuTitle}>
+              {activeWorkspaceMenuTitle}
             </div>
             <button
               type="button"
@@ -961,6 +1122,22 @@ export default function Layout() {
                 {tWebUIContractPage('workspace.empty')}
               </div>
             )}
+
+            {showWorkspaceCustomPageAction ? (
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  onClick={() => void handleCreateWorkspaceCustomPage()}
+                  disabled={creatingWorkspaceCustomPageSession}
+                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:text-zinc-300"
+                >
+                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
+                  {creatingWorkspaceCustomPageSession ? (
+                    <Loader2 className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
+                  ) : null}
+                </button>
+              </div>
+            ) : null}
           </div>
         </nav>
       )}

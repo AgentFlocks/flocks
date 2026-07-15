@@ -32,6 +32,7 @@ log = Log.create(service="channel.wecom")
 
 _FRAME_CACHE_MAX = 500
 _DEFAULT_RECONNECT_TIMEOUT_SECONDS = 60.0
+_LEADING_MENTION_RE = re.compile(r"^\s*(?:@\S+(?:\s+|$))+")
 
 
 class _WeComSdkLogger:
@@ -481,7 +482,7 @@ def _parse_frame(frame: dict, config: dict) -> Optional[InboundMessage]:
     chat_id = body.get("chatid") or from_user
 
     if chat_type == ChatType.GROUP:
-        text = re.sub(r"@\S+", "", text).strip()
+        text = _strip_leading_mentions(text)
 
     # WeCom platform only delivers group messages when the bot is @mentioned,
     # so every group message that reaches here is inherently a mention.
@@ -506,6 +507,11 @@ def _extract_sent_message_id(frame: Any) -> str:
     if not isinstance(body, dict):
         return ""
     return str(body.get("msgid") or body.get("message_id") or "")
+
+
+def _strip_leading_mentions(text: str) -> str:
+    """Remove only the bot mention prefix from a WeCom group message."""
+    return _LEADING_MENTION_RE.sub("", text, count=1).strip()
 
 
 def _extract_content(body: dict) -> tuple[str, Optional[str]]:

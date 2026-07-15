@@ -1,0 +1,44 @@
+name: chaitin_safeline_waf_api_readonly
+description: Chaitin SafeLine WAF documented read-only REST caller.
+description_cn: 长亭雷池 WAF 文档内只读 REST 调用工具。使用 api_catalog 查看已收录 API，再用 rest_call_readonly 调用 kind=readonly 的 method/path。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_safeline_waf
+version: "1.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_readonly
+        - profile
+        - overview
+        - acl_rules
+        - acl_templates
+        - attack_logs
+        - ip_groups
+        - reverse_proxy_sites
+        - traffic_detection_sites
+        - certificates
+        - traffic_learning_overview
+        - test
+    method:
+      type: string
+      description: rest_call_readonly 使用的 HTTP 方法，通常为 GET。
+    path:
+      type: string
+      description: REST 路径，例如 /api/ProfileAPI，必须属于 catalog 中 kind=readonly 的条目。
+    query:
+      type: object
+      description: Query string 参数。
+    body:
+      description: 请求 body；只读调用通常不需要。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_safeline_waf.handler.py
+  function: api_readonly

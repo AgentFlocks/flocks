@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 import re
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -28,6 +29,11 @@ _LEGACY_REMOVED_PLUGINS: dict[tuple[PluginType, str], dict[str, Optional[str]]] 
     },
 }
 
+_TOOL_TYPE_DIRS = frozenset({"api", "device", "python", "mcp", "generated"})
+_SKIP_PLUGIN_DIRS = frozenset({"__pycache__"})
+_PATH_SIGNATURE_MISSING = -1
+_CATALOG_ENTRIES_LOCK = threading.Lock()
+
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -41,6 +47,59 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _path_signature(path: Path) -> tuple[str, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), _PATH_SIGNATURE_MISSING, _PATH_SIGNATURE_MISSING)
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _is_plugin_dir(path: Path) -> bool:
+    name = path.name
+    return path.is_dir() and not name.startswith("_") and name not in _SKIP_PLUGIN_DIRS
+
+
+def _iter_tool_plugin_dirs(tools_root: Path) -> Iterable[Path]:
+    """Yield tool plugin roots under ``tools/`` without descending into payload dirs."""
+    if not tools_root.is_dir():
+        return
+    for child in sorted(tools_root.iterdir(), key=lambda item: item.name):
+        if not _is_plugin_dir(child):
+            continue
+        if child.name in _TOOL_TYPE_DIRS:
+            if _has_direct_tool_payload(child):
+                yield child
+            for plugin_dir in sorted(child.iterdir(), key=lambda item: item.name):
+                if _is_plugin_dir(plugin_dir):
+                    yield plugin_dir
+            continue
+        yield child
+
+
+def _plugin_manifest_signature(plugin_type: PluginType, root: Path) -> tuple[tuple[str, int, int], ...]:
+    if plugin_type == "skill":
+        candidates = [root / "SKILL.md"]
+    elif plugin_type == "agent":
+        candidates = [root / "agent.yaml"]
+    elif plugin_type == "workflow":
+        candidates = [root / "workflow.json", root / "workflow.md"]
+    else:
+        try:
+            candidates = [
+                path
+                for path in root.iterdir()
+                if path.is_file()
+                and (
+                    path.name == "_provider.yaml"
+                    or (path.suffix in {".yaml", ".yml", ".py"} and not path.name.startswith("_"))
+                )
+            ]
+        except OSError:
+            candidates = []
+    return tuple(_path_signature(path) for path in sorted(candidates, key=lambda item: item.name))
 
 
 def _contains_cjk(value: str) -> bool:
@@ -157,6 +216,7 @@ def _base_manifest(
     name: str,
     description: str,
     category: str,
+    name_cn: Optional[str] = None,
     version: str = "1.0.0",
     description_cn: Optional[str] = None,
     tags: Optional[list[str]] = None,
@@ -175,6 +235,7 @@ def _base_manifest(
         id=plugin_id,
         type=plugin_type,
         name=name or plugin_id,
+        nameCn=name_cn,
         description=description or "",
         descriptionCn=description_cn,
         version=version or "1.0.0",
@@ -260,6 +321,14 @@ def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest
     description_raw = str(data.get("description") or "")
     description_en = str(data.get("description_en") or "").strip()
     description_cn = str(data.get("description_cn") or data.get("descriptionCn") or "").strip()
+    name_cn = str(
+        data.get("nameCn")
+        or data.get("name_cn")
+        or data.get("nameZh")
+        or data.get("zhName")
+        or data.get("cnName")
+        or ""
+    ).strip()
     description = description_en or description_raw
     if not description_cn and _contains_cjk(description_raw):
         description_cn = description_raw
@@ -267,6 +336,7 @@ def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest
         plugin_type="workflow",
         plugin_id=plugin_id,
         name=str(data.get("name") or data.get("id") or plugin_id),
+        name_cn=name_cn or None,
         description=description,
         category="workflow-automation",
         description_cn=description_cn or None,
@@ -396,7 +466,30 @@ def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
-def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
+def _system_plugin_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+
+    for plugin_type in ("skill", "agent", "workflow"):
+        base = local.install_root(plugin_type, "project")
+        signature.append(_path_signature(base))
+        if not base.is_dir():
+            continue
+        for child in sorted(base.iterdir(), key=lambda item: item.name):
+            if not _is_plugin_dir(child):
+                continue
+            signature.append(_path_signature(child))
+            signature.extend(_plugin_manifest_signature(plugin_type, child))
+
+    tools_root = local.install_root("tool", "project")
+    signature.append(_path_signature(tools_root))
+    for directory in _iter_tool_plugin_dirs(tools_root):
+        signature.append(_path_signature(directory))
+        signature.extend(_plugin_manifest_signature("tool", directory))
+
+    return tuple(signature)
+
+
+def _discover_system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     roots: dict[tuple[PluginType, str], Path] = {}
 
     for plugin_type, detector in (
@@ -408,23 +501,51 @@ def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
         if not base.is_dir():
             continue
         for child in sorted(base.iterdir(), key=lambda item: item.name):
-            if child.is_dir() and detector(child.name, child):
+            if _is_plugin_dir(child) and detector(child.name, child):
                 roots[(plugin_type, child.name)] = child
 
     tools_root = local.install_root("tool", "project")
-    if tools_root.is_dir():
-        for directory in sorted((path for path in tools_root.rglob("*") if path.is_dir()), key=lambda item: item.as_posix()):
-            manifest = _tool_manifest(directory.name, directory)
-            if manifest:
-                # The manifest type already reflects ``integration_type:
-                # device`` (see :func:`_tool_manifest`), so we just defer
-                # to it instead of hardcoding ``"tool"``.
-                roots[(manifest.type, directory.name)] = directory
+    for directory in _iter_tool_plugin_dirs(tools_root):
+        manifest = _tool_manifest(directory.name, directory)
+        if manifest:
+            # The manifest type already reflects ``integration_type:
+            # device`` (see :func:`_tool_manifest`), so we just defer
+            # to it instead of hardcoding ``"tool"``.
+            roots[(manifest.type, directory.name)] = directory
 
     return roots
 
 
-def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
+@lru_cache(maxsize=8)
+def _cached_system_plugin_roots(
+    _signature: tuple[tuple[str, int, int], ...],
+) -> tuple[tuple[PluginType, str, Path], ...]:
+    return tuple(
+        (plugin_type, plugin_id, path)
+        for (plugin_type, plugin_id), path in _discover_system_plugin_roots().items()
+    )
+
+
+def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
+    return {
+        (plugin_type, plugin_id): path
+        for plugin_type, plugin_id, path in _cached_system_plugin_roots(_system_plugin_roots_cache_key())
+    }
+
+
+def _bundled_tool_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
+    from flocks.hub.paths import bundled_tool_plugin_roots
+
+    signature: list[tuple[str, int, int]] = []
+    for tools_root in bundled_tool_plugin_roots():
+        signature.append(_path_signature(tools_root))
+        for directory in _iter_tool_plugin_dirs(tools_root):
+            signature.append(_path_signature(directory))
+            signature.extend(_plugin_manifest_signature("tool", directory))
+    return tuple(signature)
+
+
+def _discover_bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     """Tool plugin directories shipped pre-bundled inside flockshub.
 
     Returns ``(plugin_type, plugin_id) -> Path`` for every directory
@@ -444,20 +565,8 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
 
     roots: dict[tuple[PluginType, str], Path] = {}
     for tools_root in bundled_tool_plugin_roots():
-        if not tools_root.is_dir():
-            continue
-        for directory in sorted(
-            (path for path in tools_root.rglob("*") if path.is_dir()),
-            key=lambda item: item.as_posix(),
-        ):
-            # Skip the type-organisation subdirs (api/, python/) and
-            # housekeeping noise. Their direct children are the actual
-            # plugin directories we want to surface.
+        for directory in _iter_tool_plugin_dirs(tools_root):
             name = directory.name
-            if name.startswith("_") or name == "__pycache__":
-                continue
-            if directory.parent == tools_root and name in {"api", "device", "python", "mcp", "generated"}:
-                continue
             manifest = _tool_manifest(name, directory)
             if not manifest:
                 continue
@@ -468,6 +577,113 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
             # surface with ``("device", id)`` keys.
             roots.setdefault((manifest.type, name), directory)
     return roots
+
+
+@lru_cache(maxsize=8)
+def _cached_bundled_tool_roots(
+    _signature: tuple[tuple[str, int, int], ...],
+) -> tuple[tuple[PluginType, str, Path], ...]:
+    return tuple(
+        (plugin_type, plugin_id, path)
+        for (plugin_type, plugin_id), path in _discover_bundled_tool_roots().items()
+    )
+
+
+def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
+    return {
+        (plugin_type, plugin_id): path
+        for plugin_type, plugin_id, path in _cached_bundled_tool_roots(_bundled_tool_roots_cache_key())
+    }
+
+
+def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = [_path_signature(local._record_path())]
+
+    for plugin_type in ("skill", "agent", "workflow", "webui", "component"):
+        for scope in ("global", "project"):
+            base = local.install_root(plugin_type, scope)
+            signature.append(_path_signature(base))
+            if not base.is_dir():
+                continue
+            for child in sorted(base.iterdir(), key=lambda item: item.name):
+                if not child.is_dir():
+                    continue
+                signature.append(_path_signature(child))
+                signature.extend(_plugin_manifest_signature(plugin_type, child))
+
+    for scope in ("global", "project"):
+        base = local.install_root("tool", scope)
+        signature.append(_path_signature(base))
+        if not base.is_dir():
+            continue
+        for directory in _iter_tool_plugin_dirs(base):
+            signature.append(_path_signature(directory))
+            signature.extend(_plugin_manifest_signature("tool", directory))
+
+    return tuple(signature)
+
+
+def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
+    root = get_bundled_hub_root()
+    return (
+        _path_signature(root / "index.json"),
+        _path_signature(root / "taxonomy.json"),
+        *_installed_plugins_cache_key(),
+        *_system_plugin_roots_cache_key(),
+        *_bundled_tool_roots_cache_key(),
+    )
+
+
+@lru_cache(maxsize=8)
+def _cached_catalog_entries(
+    _signature: tuple[tuple[str, int, int], ...],
+) -> tuple[HubCatalogEntry, ...]:
+    records = local.load_installed_records()
+    inferred_installs = local.infer_local_installs()
+    entries = [
+        _entry_from_index(item, records, inferred_installs)
+        for item in load_index().plugins
+    ]
+    seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
+    for (system_type, system_id), root in _system_plugin_roots().items():
+        if (system_type, system_id) in seen:
+            continue
+        manifest = _manifest_for_system_root(system_type, system_id, root)
+        if manifest:
+            entries.append(_entry_from_system_manifest(manifest, root))
+            seen.add((system_type, system_id))
+
+    # FlocksHub-bundled tool plugins. The runtime ``ToolRegistry`` only
+    # discovers tools that have been installed into ``<plugins>/tools``,
+    # so the catalog needs an explicit pass to surface bundled-but-not-
+    # yet-installed plugins like ``onesig_v2_5_3_D20250710``. These show
+    # up as ``state="available"`` until the user installs them, at which
+    # point the standard ``records``/``inferred_installs`` flow upgrades
+    # them to ``state="installed"`` (see :func:`_entry_from_bundled_tool`).
+    for (bundled_type, bundled_id), root in _bundled_tool_roots().items():
+        if (bundled_type, bundled_id) in seen:
+            continue
+        manifest = _manifest_for_system_root(bundled_type, bundled_id, root)
+        if manifest:
+            entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
+            seen.add((bundled_type, bundled_id))
+    return tuple(entries)
+
+
+def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
+    signature = _catalog_entries_cache_key()
+    with _CATALOG_ENTRIES_LOCK:
+        return _cached_catalog_entries(signature)
+
+
+def clear_catalog_caches() -> None:
+    """Clear Hub filesystem discovery caches after installs or explicit refreshes."""
+    load_index.cache_clear()
+    load_taxonomy.cache_clear()
+    _manifest_path_lookup.cache_clear()
+    _cached_system_plugin_roots.cache_clear()
+    _cached_bundled_tool_roots.cache_clear()
+    _cached_catalog_entries.cache_clear()
 
 
 def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
@@ -551,6 +767,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
         id=manifest.id,
         type=manifest.type,
         name=manifest.name,
+        nameCn=getattr(manifest, "nameCn", None),
         description=manifest.description,
         descriptionCn=getattr(manifest, "descriptionCn", None),
         version=manifest.version,
@@ -606,6 +823,7 @@ def _entry_from_index(
         id=item.id,
         type=item.type,
         name=item.name,
+        nameCn=item.nameCn,
         description=item.description,
         descriptionCn=item.descriptionCn,
         version=item.version,
@@ -628,6 +846,7 @@ def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubC
         id=manifest.id,
         type=manifest.type,
         name=manifest.name,
+        nameCn=getattr(manifest, "nameCn", None),
         description=manifest.description,
         descriptionCn=getattr(manifest, "descriptionCn", None),
         version=manifest.version,
@@ -692,6 +911,7 @@ def _entry_from_bundled_tool(
         id=manifest.id,
         type=manifest.type,
         name=manifest.name,
+        nameCn=getattr(manifest, "nameCn", None),
         description=manifest.description,
         descriptionCn=getattr(manifest, "descriptionCn", None),
         version=manifest.version,
@@ -731,7 +951,8 @@ def _contains_any(values: Iterable[str], selected: Optional[list[str]]) -> bool:
     return any(item.lower() in value_set for item in selected)
 
 
-def list_catalog(
+def filter_catalog_entries(
+    entries: Iterable[HubCatalogEntry],
     *,
     plugin_type: Optional[PluginType] = None,
     category: Optional[list[str]] = None,
@@ -742,35 +963,6 @@ def list_catalog(
     risk: Optional[list[str]] = None,
     q: Optional[str] = None,
 ) -> list[HubCatalogEntry]:
-    records = local.load_installed_records()
-    inferred_installs = local.infer_local_installs()
-    entries = [
-        _entry_from_index(item, records, inferred_installs)
-        for item in load_index().plugins
-    ]
-    seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
-    for (system_type, system_id), root in _system_plugin_roots().items():
-        if (system_type, system_id) in seen:
-            continue
-        manifest = _manifest_for_system_root(system_type, system_id, root)
-        if manifest:
-            entries.append(_entry_from_system_manifest(manifest, root))
-            seen.add((system_type, system_id))
-
-    # FlocksHub-bundled tool plugins. The runtime ``ToolRegistry`` only
-    # discovers tools that have been installed into ``<plugins>/tools``,
-    # so the catalog needs an explicit pass to surface bundled-but-not-
-    # yet-installed plugins like ``onesig_v2_5_3_D20250710``. These show
-    # up as ``state="available"`` until the user installs them, at which
-    # point the standard ``records``/``inferred_installs`` flow upgrades
-    # them to ``state="installed"`` (see :func:`_entry_from_bundled_tool`).
-    for (bundled_type, bundled_id), root in _bundled_tool_roots().items():
-        if (bundled_type, bundled_id) in seen:
-            continue
-        manifest = _manifest_for_system_root(bundled_type, bundled_id, root)
-        if manifest:
-            entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
-            seen.add((bundled_type, bundled_id))
     query = (q or "").strip().lower()
 
     def keep(entry: HubCatalogEntry) -> bool:
@@ -805,6 +997,30 @@ def list_catalog(
         return True
 
     return [entry for entry in entries if keep(entry)]
+
+
+def list_catalog(
+    *,
+    plugin_type: Optional[PluginType] = None,
+    category: Optional[list[str]] = None,
+    tags: Optional[list[str]] = None,
+    use_cases: Optional[list[str]] = None,
+    state: Optional[list[str]] = None,
+    trust: Optional[list[str]] = None,
+    risk: Optional[list[str]] = None,
+    q: Optional[str] = None,
+) -> list[HubCatalogEntry]:
+    return filter_catalog_entries(
+        _catalog_entries_snapshot(),
+        plugin_type=plugin_type,
+        category=category,
+        tags=tags,
+        use_cases=use_cases,
+        state=state,
+        trust=trust,
+        risk=risk,
+        q=q,
+    )
 
 
 def category_counts() -> dict:

@@ -1,7 +1,7 @@
 {
   "badge": "AI 原生的安全运营",
   "subtitle": "AI 原生的安全运营自动化平台",
-  "description": "让 AI 替你做安全运营，从告警研判到威胁处置，全流程智能化，效率提升 10 倍",
+  "description": "让 AI 替你做安全运营，从告警运营到威胁处置，全流程智能化，效率提升 10 倍",
   "getStarted": "新手引导",
   "createWebUIContractPage": "自定义页面",
   "createWebUIContractPageSessionTitle": "自定义页面",
@@ -9,7 +9,7 @@
   "createWebUIContractPageError": "无法创建自定义页面会话，请稍后重试",
   "openSource": "开源项目",
   "systemCard": {
-    "title": "Flocks 系统",
+    "title": "系统",
     "tagline": "AI 原生安全平台",
     "cannotConnect": "无法连接到后端服务"
   },

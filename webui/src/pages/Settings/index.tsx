@@ -1,29 +1,49 @@
-import { Suspense, lazy, useContext, useEffect, useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
+import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, ComponentType, ReactNode } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft,
   ArrowUpCircle,
   Check,
+  ImageIcon,
   Languages,
   Moon,
+  RotateCcw,
   ScrollText,
+  Save,
   Settings as SettingsIcon,
   ShieldCheck,
   Sun,
+  TextCursorInput,
+  Upload,
   UserCog,
   type LucideIcon,
 } from 'lucide-react';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProductName } from '@/contexts/ProductNameContext';
+import { useToast } from '@/components/common/Toast';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
+import { preloadI18nNamespaces } from '@/i18nResources';
 
-const ConfigPage = lazy(() => import('@/pages/Config'));
-const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
-const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
-const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
+type LazySettingsModule = { default: ComponentType<any> };
+
+function lazySettingsPage<T extends LazySettingsModule>(
+  loader: () => Promise<T>,
+  namespaces: readonly string[] = [],
+) {
+  return lazy(() => Promise.all([
+    loader(),
+    preloadI18nNamespaces(namespaces),
+  ]).then(([module]) => module));
+}
+
+const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
+const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
+const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpgrade'), ['flockspro']);
+const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
 
 type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
 
@@ -139,7 +159,79 @@ function SegmentedOption({
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
   const { theme, setTheme } = useContext(ThemeContext);
+  const {
+    productName,
+    configuredDisplayName,
+    faviconUrl,
+    hasCustomFavicon,
+    updateProductName,
+    uploadProductFavicon,
+    resetProductFavicon,
+  } = useProductName();
+  const toast = useToast();
   const language = i18n.language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
+  const faviconInputRef = useRef<HTMLInputElement | null>(null);
+  const [displayNameDraft, setDisplayNameDraft] = useState(configuredDisplayName ?? '');
+  const [savingDisplayName, setSavingDisplayName] = useState(false);
+  const [savingFavicon, setSavingFavicon] = useState(false);
+  const normalizedDisplayName = displayNameDraft.trim();
+  const displayNameChanged = normalizedDisplayName !== (configuredDisplayName ?? '');
+
+  useEffect(() => {
+    setDisplayNameDraft(configuredDisplayName ?? '');
+  }, [configuredDisplayName]);
+
+  const handleSaveDisplayName = async () => {
+    setSavingDisplayName(true);
+    try {
+      await updateProductName(normalizedDisplayName || null);
+      toast.success(t('displayNameSaved'));
+    } catch (err: any) {
+      toast.error(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+    } finally {
+      setSavingDisplayName(false);
+    }
+  };
+
+  const handleResetDisplayName = async () => {
+    setSavingDisplayName(true);
+    try {
+      await updateProductName(null);
+      toast.success(t('displayNameSaved'));
+    } catch (err: any) {
+      toast.error(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+    } finally {
+      setSavingDisplayName(false);
+    }
+  };
+
+  const handleFaviconUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setSavingFavicon(true);
+    try {
+      await uploadProductFavicon(file);
+      toast.success(t('faviconSaved'));
+    } catch (err: any) {
+      toast.error(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+    } finally {
+      setSavingFavicon(false);
+    }
+  };
+
+  const handleResetFavicon = async () => {
+    setSavingFavicon(true);
+    try {
+      await resetProductFavicon();
+      toast.success(t('faviconSaved'));
+    } catch (err: any) {
+      toast.error(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+    } finally {
+      setSavingFavicon(false);
+    }
+  };
 
   return (
     <div className="mx-auto w-full max-w-5xl">
@@ -149,6 +241,91 @@ function PreferencesPanel() {
       </header>
 
       <div className="mt-2">
+        <PreferenceRow
+          icon={TextCursorInput}
+          title={t('displayName')}
+          description={t('displayNameDescription')}
+        >
+          <div className="flex w-full flex-col gap-2 md:max-w-64">
+            <input
+              value={displayNameDraft}
+              onChange={(event) => setDisplayNameDraft(event.target.value)}
+              maxLength={48}
+              placeholder={t('displayNamePlaceholder')}
+              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-600"
+            />
+            <div className="text-xs text-zinc-500 dark:text-zinc-400">
+              {t('displayNameCurrent', { name: productName })}
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSaveDisplayName()}
+                disabled={savingDisplayName || !displayNameChanged}
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
+              >
+                <Save className="h-4 w-4" />
+                {t('saveDisplayName')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleResetDisplayName()}
+                disabled={savingDisplayName || !configuredDisplayName}
+                title={t('resetDisplayName')}
+                aria-label={t('resetDisplayName')}
+                className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </PreferenceRow>
+
+        <PreferenceRow
+          icon={ImageIcon}
+          title={t('favicon')}
+          description={t('faviconDescription')}
+        >
+          <div className="flex w-full flex-col gap-3 md:max-w-64">
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+                <img src={faviconUrl} alt="" className="h-7 w-7 rounded-sm object-contain" />
+              </span>
+              <div className="min-w-0 text-xs text-zinc-500 dark:text-zinc-400">
+                {hasCustomFavicon ? t('faviconCustom') : t('faviconDefault')}
+              </div>
+            </div>
+            <input
+              ref={faviconInputRef}
+              type="file"
+              accept=".ico,.png,.svg,.jpg,.jpeg,.webp,image/x-icon,image/png,image/svg+xml,image/jpeg,image/webp"
+              className="hidden"
+              onChange={(event) => void handleFaviconUpload(event)}
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => faviconInputRef.current?.click()}
+                disabled={savingFavicon}
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
+              >
+                <Upload className="h-4 w-4" />
+                {t('uploadFavicon')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleResetFavicon()}
+                disabled={savingFavicon || !hasCustomFavicon}
+                title={t('resetFavicon')}
+                aria-label={t('resetFavicon')}
+                className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </PreferenceRow>
+
         <PreferenceRow
           icon={Languages}
           title={t('language')}
@@ -203,7 +380,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   if (sectionId === 'preferences') return <PreferencesPanel />;
 
   return (
-    <Suspense fallback={<RoutePageSkeleton />}>
+    <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
       {sectionId === 'account' && <ConfigPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}
@@ -218,6 +395,7 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const { t } = useTranslation('nav');
   const { user } = useAuth();
+  const { productName } = useProductName();
   const isAdmin = user?.role === 'admin';
   const sectionId = params.sectionId;
   const [flocksproCapabilityReady, setFlocksproCapabilityReady] = useState(false);
@@ -277,11 +455,11 @@ export default function SettingsPage() {
           { id: 'account', name: t('accountManagement'), icon: UserCog },
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
           { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
-          { id: 'flockspro', name: t('flocksproUpgrade'), icon: ArrowUpCircle, adminOnly: true },
+          { id: 'flockspro', name: productName, icon: ArrowUpCircle, adminOnly: true },
         ],
       },
     ],
-    [t],
+    [productName, t],
   );
 
   const visibleGroups = groups

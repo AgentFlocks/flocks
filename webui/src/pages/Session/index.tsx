@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   MessageSquare, Plus, Trash2,
   ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
@@ -12,14 +12,21 @@ import i18n from '@/i18n';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SuiteInstallProgressPanel, {
+  applySuiteInstallProgressEvent,
+  createSuiteInstallProgressState,
+  failSuiteInstallProgress,
+  type SuiteInstallProgressState,
+} from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
+import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
+import { useEnabledChatModelDefinitions, useResolvedDefaultModel } from '@/hooks/useChatModelResources';
 import client from '@/api/client';
-import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
@@ -37,6 +44,9 @@ function sanitizeSessionExportName(value: string) {
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
+const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
+const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
+const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ProjectSummary = {
   id: string;
@@ -147,6 +157,219 @@ function isLegacyDefaultProjectId(projectId?: string): boolean {
   return !projectId || projectId === 'default' || projectId === 'global';
 }
 
+export type SessionGroupKey = 'today' | 'yesterday' | 'thisWeek' | 'lastWeek' | 'earlier';
+
+export interface SessionGroup {
+  key: SessionGroupKey;
+  labelKey: string;
+  items: Session[];
+}
+
+const SESSION_GROUP_DEFAULT_LIMIT: Record<SessionGroupKey, number> = {
+  today: Infinity,
+  yesterday: Infinity,
+  thisWeek: 5,
+  lastWeek: 5,
+  earlier: 5,
+};
+
+const SESSION_GROUP_DEFS: Array<Pick<SessionGroup, 'key' | 'labelKey'>> = [
+  { key: 'today', labelKey: 'groupToday' },
+  { key: 'yesterday', labelKey: 'groupYesterday' },
+  { key: 'thisWeek', labelKey: 'groupThisWeek' },
+  { key: 'lastWeek', labelKey: 'groupLastWeek' },
+  { key: 'earlier', labelKey: 'groupEarlier' },
+];
+
+export function groupSessionsByDate(
+  sessions: Session[],
+  searchQuery: string,
+  now = new Date(),
+): SessionGroup[] {
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+  const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
+  const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
+  const lastWeekStart = thisWeekStart - 7 * 86400000;
+
+  const q = searchQuery.toLowerCase().trim();
+  const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
+  const buckets: SessionGroup[] = SESSION_GROUP_DEFS.map((group) => ({
+    ...group,
+    items: [],
+  }));
+
+  for (const session of filtered) {
+    const ts = session.time?.updated ?? 0;
+    if (ts >= todayStart) buckets[0].items.push(session);
+    else if (ts >= yesterdayStart) buckets[1].items.push(session);
+    else if (ts >= thisWeekStart) buckets[2].items.push(session);
+    else if (ts >= lastWeekStart) buckets[3].items.push(session);
+    else buckets[4].items.push(session);
+  }
+
+  return buckets.filter(group => group.items.length > 0);
+}
+
+export function getVisibleSessionGroupItems({
+  group,
+  expanded,
+  searching,
+}: {
+  group: SessionGroup;
+  expanded: boolean;
+  searching: boolean;
+}): { visibleItems: Session[]; hiddenCount: number; limit: number } {
+  const limit = searching ? Infinity : SESSION_GROUP_DEFAULT_LIMIT[group.key];
+  const visibleItems = (searching || expanded || group.items.length <= limit)
+    ? group.items
+    : group.items.slice(0, limit);
+  return {
+    visibleItems,
+    hiddenCount: group.items.length - visibleItems.length,
+    limit,
+  };
+}
+
+interface SessionSidebarItemProps {
+  session: Session;
+  selected: boolean;
+  selectMode: boolean;
+  checked: boolean;
+  menuOpen: boolean;
+  renaming: boolean;
+  renameValue: string;
+  renameSubmitting: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
+  renameInputRef: RefObject<HTMLInputElement | null>;
+  onSelect: (sessionId: string) => void;
+  onToggleCheck: (sessionId: string) => void;
+  onRenameValueChange: (value: string) => void;
+  onSubmitRename: (sessionId: string) => void | Promise<void>;
+  onCancelRename: () => void;
+  onToggleMenu: (sessionId: string, trigger: HTMLElement) => void;
+}
+
+function SessionSidebarItemInner({
+  session,
+  selected,
+  selectMode,
+  checked,
+  menuOpen,
+  renaming,
+  renameValue,
+  renameSubmitting,
+  t,
+  renameInputRef,
+  onSelect,
+  onToggleCheck,
+  onRenameValueChange,
+  onSubmitRename,
+  onCancelRename,
+  onToggleMenu,
+}: SessionSidebarItemProps) {
+  return (
+    <div
+      onClick={() => onSelect(session.id)}
+      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+        !selectMode && selected
+          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          : selectMode && checked
+          ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
+          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+      }`}
+    >
+      <div className="flex items-center gap-1.5 min-w-0 pr-7">
+        {selectMode && (
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={() => onToggleCheck(session.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+          />
+        )}
+        {session.category === 'workflow' && (
+          <span title={t('workflowSession')} className="flex-shrink-0">
+            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+          </span>
+        )}
+        {session.category === 'entity-config' && (
+          <span title={t('configSession')} className="flex-shrink-0">
+            <Settings2 className="w-3 h-3 text-purple-400" />
+          </span>
+        )}
+        {renaming ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => onRenameValueChange(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => void onSubmitRename(session.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void onSubmitRename(session.id); }
+              if (e.key === 'Escape') { e.preventDefault(); onCancelRename(); }
+            }}
+            placeholder={t('renamePlaceholder')}
+            disabled={renameSubmitting}
+            className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+            aria-label={t('rename')}
+            data-session-rename-input
+          />
+        ) : (
+          <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+            <span className="truncate">{session.title}</span>
+            {session.isShared && (
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                {t('sharedTag')}
+              </span>
+            )}
+          </h3>
+        )}
+      </div>
+      {session.time?.updated && !renaming && (
+        <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
+          {formatSessionDate(session.time.updated)}
+        </p>
+      )}
+      {!selectMode && (
+        <div className="absolute right-1.5 top-2" data-session-actions>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleMenu(session.id, e.currentTarget);
+            }}
+            title={t('moreActions')}
+            aria-label={t('moreActions')}
+            aria-expanded={menuOpen}
+            className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
+              menuOpen ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <MoreHorizontal className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
+  prev.session.id === next.session.id &&
+  prev.session.title === next.session.title &&
+  prev.session.category === next.session.category &&
+  prev.session.isShared === next.session.isShared &&
+  prev.session.time?.updated === next.session.time?.updated &&
+  prev.selected === next.selected &&
+  prev.selectMode === next.selectMode &&
+  prev.checked === next.checked &&
+  prev.menuOpen === next.menuOpen &&
+  prev.renaming === next.renaming &&
+  prev.renameValue === next.renameValue &&
+  prev.renameSubmitting === next.renameSubmitting &&
+  prev.t === next.t
+));
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const location = useLocation();
@@ -158,11 +381,12 @@ export default function SessionPage() {
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
-  const [enabledModelDefinitions, setEnabledModelDefinitions] = useState<ModelDefinitionV2[]>([]);
-  const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
+  const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
+  const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
+  const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -187,6 +411,7 @@ export default function SessionPage() {
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
+  const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const toast = useToast();
 
   const {
@@ -203,6 +428,10 @@ export default function SessionPage() {
   } = useSessions(searchQuery);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
+  const {
+    data: enabledModelDefinitions,
+    loading: loadingEnabledModels,
+  } = useEnabledChatModelDefinitions();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
   const subAgents = useMemo(
     () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
@@ -286,6 +515,18 @@ export default function SessionPage() {
       .filter((group) => group.models.length > 0)
       .sort((a, b) => a.providerName.localeCompare(b.providerName));
   }, [chatModelOptions, providers]);
+  const listedSelectedSession = useMemo(
+    () => sessions.find(s => s.id === selectedSessionId) ?? null,
+    [sessions, selectedSessionId],
+  );
+  const selectedSession = listedSelectedSession
+    ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
+  const activeChatSessionId = selectedSession ? selectedSessionId : null;
+  const resolvingSelectedSession = Boolean(selectedSessionId && !selectedSession);
+  const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
+    ? makeModelKey(selectedSession.provider, selectedSession.model)
+    : null;
+  const hasPinnedModelOption = !!pinnedModelKey && chatModelOptions.some((option) => option.key === pinnedModelKey);
   const selectedModelOption = useMemo(
     () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? (selectedModelKey ? null : chatModelOptions[0] ?? null),
     [chatModelOptions, selectedModelKey],
@@ -293,13 +534,11 @@ export default function SessionPage() {
   const selectedPromptModel = selectedModelOption
     ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
     : null;
+  const {
+    data: resolvedDefaultModel,
+    initialized: resolvedDefaultModelInitialized,
+  } = useResolvedDefaultModel(chatModelOptions.length > 0 && !hasPinnedModelOption);
   const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
-  const listedSelectedSession = useMemo(
-    () => sessions.find(s => s.id === selectedSessionId) ?? null,
-    [sessions, selectedSessionId],
-  );
-  const selectedSession = listedSelectedSession
-    ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
 
   const toggleProjectCollapsed = useCallback((projectId: string) => {
     setCollapsedProjectIds(prev => {
@@ -379,19 +618,33 @@ export default function SessionPage() {
     toast.error(t('chat.error', 'Error'), msg);
   }, [toast, t]);
 
+  const scheduleSessionListRefetch = useCallback(() => {
+    if (sessionUpdateRefetchTimerRef.current !== null) return;
+    sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
+      sessionUpdateRefetchTimerRef.current = null;
+      void refetchSessions();
+    }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
+  }, [refetchSessions]);
+
+  useEffect(() => () => {
+    if (sessionUpdateRefetchTimerRef.current !== null) {
+      window.clearTimeout(sessionUpdateRefetchTimerRef.current);
+      sessionUpdateRefetchTimerRef.current = null;
+    }
+  }, []);
+
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
     if (event.type === 'session.updated' && event.properties?.id) {
       if (event.properties?.title) {
         // Instant local title update so the sidebar reflects the change immediately.
         updateSessionTitle(event.properties.id, event.properties.title);
       }
-      // Always do a silent background sync: session.updated also changes
-      // time.updated (affects ordering) and potentially other metadata.
-      // refetchSessions() is safe here — it never shows a loading spinner
-      // after the initial load (see initializedRef in useSessions).
-      refetchSessions();
+      // Session/title updates can arrive in bursts when several sessions or
+      // background tasks finish together. Coalesce the full sidebar refresh so
+      // those bursts don't turn into a request/re-render storm.
+      scheduleSessionListRefetch();
     }
-  }, [updateSessionTitle, refetchSessions]);
+  }, [scheduleSessionListRefetch, updateSessionTitle]);
 
   const fetchProjects = useCallback(async () => {
     const [listResult, currentResult] = await Promise.allSettled([
@@ -421,6 +674,7 @@ export default function SessionPage() {
   useEffect(() => {
     const sessionParam = searchParams.get('session');
     const messageParam = searchParams.get('message');
+    const displayParam = searchParams.get('display');
     if (!sessionParam) return;
 
     if (sessionParam !== selectedSessionId) {
@@ -429,6 +683,10 @@ export default function SessionPage() {
     if (sessionParam) {
       if (messageParam) {
         setPendingInitialMessage(messageParam);
+        setPendingInitialDisplayText(displayParam ? buildInstructionDisplayText(displayParam) : null);
+      } else {
+        setPendingInitialMessage(null);
+        setPendingInitialDisplayText(null);
       }
       setSearchParams({}, { replace: true });
     }
@@ -452,9 +710,9 @@ export default function SessionPage() {
   }, [loadingSessions, location.state, searchParams, selectedSessionId]);
 
   useEffect(() => {
-    if (!selectedSessionId) return;
+    if (!selectedSessionId || selectedSession?.id !== selectedSessionId) return;
     writeLastSelectedSessionId(selectedSessionId);
-  }, [selectedSessionId]);
+  }, [selectedSession?.id, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSessionId) {
@@ -465,6 +723,7 @@ export default function SessionPage() {
       setSelectedSessionFallback(null);
       return;
     }
+    if (selectedSessionFallback?.id === selectedSessionId) return;
     if (loadingSessions) return;
 
     let cancelled = false;
@@ -479,31 +738,15 @@ export default function SessionPage() {
         if (statusCode === 403 || statusCode === 404) {
           setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
           setSelectedSessionFallback(null);
+          setPendingInitialMessage(null);
+          setPendingInitialDisplayText(null);
           writeLastSelectedSessionId(null);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [listedSelectedSession, loadingSessions, selectedSessionId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingEnabledModels(true);
-    modelV2API.listDefinitions({ enabled_only: true })
-      .then((response) => {
-        if (!cancelled) setEnabledModelDefinitions(response.data.models ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setEnabledModelDefinitions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingEnabledModels(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [listedSelectedSession, loadingSessions, selectedSessionFallback?.id, selectedSessionId]);
 
   // Close agent dropdown on outside click
   useEffect(() => {
@@ -532,35 +775,24 @@ export default function SessionPage() {
       return;
     }
 
-    const pinnedKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
-      ? makeModelKey(selectedSession.provider, selectedSession.model)
-      : null;
-    if (pinnedKey && chatModelOptions.some((option) => option.key === pinnedKey)) {
-      setSelectedModelKey(pinnedKey);
+    if (hasPinnedModelOption && pinnedModelKey) {
+      setSelectedModelKey(pinnedModelKey);
       return;
     }
 
-    let cancelled = false;
     setSelectedModelKey(null);
-    defaultModelAPI.getResolved()
-      .then((response) => {
-        if (cancelled) return;
-        const { provider_id: providerID, model_id: modelID } = response.data;
-        const defaultKey = makeModelKey(providerID, modelID);
-        const fallbackKey = chatModelOptions[0]?.key ?? null;
-        setSelectedModelKey(chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedModelKey(chatModelOptions[0]?.key ?? null);
-      });
-    return () => {
-      cancelled = true;
-    };
+    if (!resolvedDefaultModelInitialized) return;
+    const defaultKey = resolvedDefaultModel
+      ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
+      : null;
+    const fallbackKey = chatModelOptions[0]?.key ?? null;
+    setSelectedModelKey(defaultKey && chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
   }, [
     chatModelOptions,
-    selectedSession?.model,
-    selectedSession?.model_pinned,
-    selectedSession?.provider,
+    hasPinnedModelOption,
+    pinnedModelKey,
+    resolvedDefaultModel,
+    resolvedDefaultModelInitialized,
     selectedSessionId,
   ]);
 
@@ -610,6 +842,7 @@ export default function SessionPage() {
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
       });
       addSession(response.data);
+      setSelectedSessionFallback(response.data);
       setSelectedAgent('rex');
       setSelectedModelKey(null);
       setSelectedSessionId(response.data.id);
@@ -642,6 +875,7 @@ export default function SessionPage() {
     imageParts?: ImagePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
+    options?: PromptDisplayOptions,
   ) => {
     try {
       const response = await client.post('/api/session', {
@@ -651,6 +885,7 @@ export default function SessionPage() {
       const newSessionId = response.data.id;
 
       addSession(response.data);
+      setSelectedSessionFallback(response.data);
       setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
 
@@ -660,6 +895,7 @@ export default function SessionPage() {
       const effectiveAgent = agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (modelOverride) payload.model = modelOverride;
+      if (options?.displayText) payload.displayText = options.displayText;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
       });
@@ -667,6 +903,57 @@ export default function SessionPage() {
       toast.error(t('createFailed'), err.message);
     }
   }, [addSession, selectedAgent, selectedProjectIDForCreate, toast, t]);
+
+  const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
+    setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
+  }, []);
+
+  const handleAlertOperationsSetup = useCallback(async () => {
+    if (installingSocWorkspace) return;
+
+    setInstallingSocWorkspace(true);
+    let startedComponentInstall = false;
+    try {
+      const { data } = await hubAPI.catalog({ type: 'component', q: SOC_WORKSPACE_COMPONENT_ID });
+      const component = data.find((item) => item.id === SOC_WORKSPACE_COMPONENT_ID && item.type === 'component');
+
+      if (!component) {
+        toast.error(t('welcome.socComponentMissingTitle'), t('welcome.socComponentMissingDescription'));
+        return;
+      }
+
+      if (!INSTALLED_HUB_STATES.has(component.state)) {
+        const confirmed = window.confirm(t('welcome.socComponentInstallConfirm'));
+        if (!confirmed) return;
+        startedComponentInstall = true;
+        setSuiteInstallProgress(createSuiteInstallProgressState(component));
+        await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
+      }
+
+      await handleCreateAndSend(
+        t('welcome.alertOperationsSuggestion'),
+        [],
+        undefined,
+        selectedPromptModel,
+        { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
+      );
+    } catch (err: any) {
+      const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
+      if (startedComponentInstall) {
+        setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
+          id: SOC_WORKSPACE_COMPONENT_ID,
+          name: 'SOC Workspace Component',
+          nameCn: 'SOC 工作区场景套件',
+        }, message));
+      }
+      toast.error(
+        t('welcome.socComponentInstallFailedTitle'),
+        message,
+      );
+    } finally {
+      setInstallingSocWorkspace(false);
+    }
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();
@@ -848,6 +1135,24 @@ export default function SessionPage() {
       return next;
     });
   }, []);
+  const handleSelectSessionRow = useCallback((sessionId: string) => {
+    if (selectMode) {
+      handleToggleCheck(sessionId);
+    } else {
+      setSelectedSessionId(sessionId);
+    }
+  }, [handleToggleCheck, selectMode]);
+  const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
+    setOpenMenuSessionId((current) => {
+      if (current === sessionId) {
+        setMenuAnchor(null);
+        return null;
+      }
+      const rect = trigger.getBoundingClientRect();
+      setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+      return sessionId;
+    });
+  }, []);
 
   const handleSelectAll = useCallback(() => {
     if (checkedIds.size === sessions.length) {
@@ -985,7 +1290,7 @@ export default function SessionPage() {
   if (loadingSessions) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -1112,7 +1417,27 @@ export default function SessionPage() {
                       {!collapsed && (
                         <div className="mt-1">
                           {group.sessions.length > 0 ? (
-                            group.sessions.map(renderSessionListItem)
+                            group.sessions.map((session) => (
+                              <SessionSidebarItem
+                                key={session.id}
+                                session={session}
+                                selected={selectedSessionId === session.id}
+                                selectMode={selectMode}
+                                checked={checkedIds.has(session.id)}
+                                menuOpen={openMenuSessionId === session.id}
+                                renaming={renamingSessionId === session.id}
+                                renameValue={renameValue}
+                                renameSubmitting={renameSubmitting}
+                                t={t}
+                                renameInputRef={renameInputRef}
+                                onSelect={handleSelectSessionRow}
+                                onToggleCheck={handleToggleCheck}
+                                onRenameValueChange={setRenameValue}
+                                onSubmitRename={handleSubmitRename}
+                                onCancelRename={handleCancelRename}
+                                onToggleMenu={handleToggleSessionMenu}
+                              />
+                            ))
                           ) : (
                             <div className="mx-4 py-1 text-xs text-gray-400 dark:text-zinc-600">
                               {t('noProjectSessions')}
@@ -1202,10 +1527,15 @@ export default function SessionPage() {
         </div>
 
         {/* Chat — powered by unified SessionChat */}
-        <SessionChat
-          key={selectedSessionId ?? 'empty-session'}
-          sessionId={selectedSessionId}
-          live={Boolean(selectedSessionId)}
+        {resolvingSelectedSession ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <LoadingSpinner delayMs={180} />
+          </div>
+        ) : (
+          <SessionChat
+            key={activeChatSessionId ?? 'empty-session'}
+            sessionId={activeChatSessionId}
+            live={Boolean(activeChatSessionId)}
           hideInput={selectedSession?.canWrite === false}
           display={{
             compact: false,
@@ -1219,18 +1549,29 @@ export default function SessionPage() {
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
-          onInitialMessageConsumed={() => setPendingInitialMessage(null)}
-          onSseStatusChange={selectedSessionId ? setSseStatus : undefined}
+          initialDisplayText={pendingInitialDisplayText}
+          onInitialMessageConsumed={() => {
+            setPendingInitialMessage(null);
+            setPendingInitialDisplayText(null);
+          }}
+          onSseStatusChange={activeChatSessionId ? setSseStatus : undefined}
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
           onCreateNewSession={handleCreateSession}
-          onStreamingDone={() => setPendingInitialMessage(null)}
+          onStreamingDone={() => {
+            setPendingInitialMessage(null);
+            setPendingInitialDisplayText(null);
+          }}
           supportsVision={effectiveSupportsVision}
           contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (
-            <WelcomeScreen onSuggestion={setInput} />
+            <WelcomeScreen
+              onSuggestion={setInput}
+              onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
+              alertOperationsBusy={installingSocWorkspace}
+            />
           )}
           toolbarSlot={
             <div className="relative" data-agent-selector>
@@ -1437,7 +1778,8 @@ export default function SessionPage() {
               )}
             </div>
           }
-        />
+          />
+        )}
       </div>
 
       {projectDialogMode && (
@@ -1509,6 +1851,14 @@ export default function SessionPage() {
         </div>
       )}
 
+      {suiteInstallProgress && (
+        <SuiteInstallProgressPanel
+          progress={suiteInstallProgress}
+          language={i18n.language}
+          onClose={() => setSuiteInstallProgress(null)}
+        />
+      )}
+
       {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
       {openMenuSessionId && menuAnchor && (() => {
         const sid = openMenuSessionId;
@@ -1562,7 +1912,15 @@ export default function SessionPage() {
 
 // ── Welcome Screen (shown when no messages) ──
 
-function WelcomeScreen({ onSuggestion }: { onSuggestion: (text: string) => void }) {
+function WelcomeScreen({
+  onSuggestion,
+  onAlertOperationsSetup,
+  alertOperationsBusy,
+}: {
+  onSuggestion: (text: string) => void;
+  onAlertOperationsSetup: () => void;
+  alertOperationsBusy: boolean;
+}) {
   const { t } = useTranslation('session');
   return (
     <div className="text-center max-w-2xl px-8">
@@ -1574,11 +1932,16 @@ function WelcomeScreen({ onSuggestion }: { onSuggestion: (text: string) => void 
 
       <div className="flex flex-wrap gap-3 justify-center">
         <button
-          onClick={() => onSuggestion(t('welcome.alertTriageSuggestion'))}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-slate-400 hover:bg-slate-50 transition-all duration-200 shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-slate-500/70 dark:hover:bg-zinc-800 dark:hover:shadow-none"
+          onClick={onAlertOperationsSetup}
+          disabled={alertOperationsBusy}
+          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-slate-400 hover:bg-slate-50 transition-all duration-200 shadow-sm hover:shadow-md disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-slate-500/70 dark:hover:bg-zinc-800 dark:hover:shadow-none"
         >
-          <Shield className="w-5 h-5 text-slate-600" />
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.alertTriage')}</span>
+          {alertOperationsBusy ? (
+            <Loader2 className="w-5 h-5 animate-spin text-slate-600" />
+          ) : (
+            <Shield className="w-5 h-5 text-slate-600" />
+          )}
+          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.alertOperations')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}

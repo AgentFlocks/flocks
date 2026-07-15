@@ -284,6 +284,61 @@ async def test_tdp_threat_inbound_attack_uses_severity_distribution_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_tdp_threat_monitor_list_uses_public_api_endpoint():
+    tool = _load_tool("tdp_threat_monitor_list.yaml")
+    fake_session = _FakeSession(
+        [_FakeResponse(json_payload={"response_code": 0, "data": {"items": [{"machine": "10.0.0.1"}]}})]
+    )
+
+    with (
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:tdp_api_key}",
+                "secret": "{secret:tdp_secret}",
+                "base_url": "https://tdp.local",
+            },
+        ),
+        patch(
+            "flocks.security.get_secret_manager",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=lambda key: {"tdp_api_key": "demo-api", "tdp_secret": "demo-secret"}.get(key))
+            ),
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            time_from=1700000000,
+            time_to=1700003600,
+            sql="threat.type = 'c2'",
+            size=100,
+            assets_group=[1, 3],
+            net_data_type=["attack", "risk"],
+            cur_page=2,
+            page_size=50,
+        )
+
+    assert result.success is True
+    assert result.metadata["api"] == "threat_monitor_list"
+    method, request_url, request_kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert request_url == "https://tdp.local/api/v1/monitor/threat/list"
+    assert request_kwargs["json"] == {
+        "condition": {
+            "time_from": 1700000000,
+            "time_to": 1700003600,
+            "sql": "threat.type = 'c2'",
+            "size": 100,
+            "refresh_rate": -1,
+            "assets_group": [1, 3],
+            "net_data_type": ["attack", "risk"],
+        },
+        "page": {"cur_page": 2, "page_size": 50},
+    }
+
+
+@pytest.mark.asyncio
 async def test_tdp_login_api_list_can_switch_to_summary_action():
     tool = _load_tool("tdp_login_api_list.yaml")
     fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "data": {"all_login_api": {"count": 35}}})])
@@ -861,3 +916,128 @@ async def test_tdp_policy_settings_ip_reputation_delete_supports_ids_wrapper():
     assert result.metadata["api"] == "ip_reputation_delete"
     assert fake_session.calls[0][1] == "https://tdp.local/api/v1/ipReputation/delete"
     assert fake_session.calls[0][2]["json"] == [302773, 302774]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "path", "handler_kwargs", "expected_body"),
+    [
+        (
+            "custom_rule_list",
+            "/api/v1/customRule/list",
+            {
+                "custom_rule_status": [1],
+                "custom_rule_severity": [3, 4],
+                "custom_rule_result": ["success"],
+                "custom_rule_keyword": "SQL",
+            },
+            {
+                "condition": {
+                    "status": [1],
+                    "threat_severity": [3, 4],
+                    "threat_result": ["success"],
+                    "fuzzy": {"keyword": "SQL", "fieldlist": ["threat_name", "threat_msg"]},
+                },
+                "page": {
+                    "cur_page": 1,
+                    "page_size": 20,
+                    "sort": [{"sort_by": "updated_time", "sort_order": "desc"}],
+                },
+            },
+        ),
+        (
+            "custom_rule_add",
+            "/api/v1/customRule/add",
+            {
+                "custom_rule": {
+                    "threat_name": "Custom SQL injection",
+                    "threat_msg": "Detected SQL injection",
+                    "threat_severity": 3,
+                    "threat_type": "exploit",
+                    "threat_result": "success",
+                    "directions": ["in"],
+                    "body": [{"field": "http.uri", "method": "GET", "content": "/api"}],
+                    "attacker": "src",
+                    "status": 1,
+                }
+            },
+            {
+                "threat_name": "Custom SQL injection",
+                "threat_msg": "Detected SQL injection",
+                "threat_severity": 3,
+                "threat_type": "exploit",
+                "threat_result": "success",
+                "directions": ["in"],
+                "body": [{"field": "http.uri", "method": "GET", "content": "/api"}],
+                "attacker": "src",
+                "status": 1,
+            },
+        ),
+        (
+            "custom_rule_update",
+            "/api/v1/customRule/update",
+            {
+                "custom_rule": {
+                    "suuid": "rule-1",
+                    "threat_name": "Updated SQL injection rule",
+                    "threat_msg": "Detected SQL injection",
+                    "threat_severity": 4,
+                    "threat_type": "exploit",
+                    "threat_result": "success",
+                    "directions": ["in"],
+                    "body": [{"field": "http.uri", "method": "GET", "content": "/api"}],
+                    "attacker": "src",
+                    "status": 1,
+                }
+            },
+            {
+                "suuid": "rule-1",
+                "threat_name": "Updated SQL injection rule",
+                "threat_msg": "Detected SQL injection",
+                "threat_severity": 4,
+                "threat_type": "exploit",
+                "threat_result": "success",
+                "directions": ["in"],
+                "body": [{"field": "http.uri", "method": "GET", "content": "/api"}],
+                "attacker": "src",
+                "status": 1,
+            },
+        ),
+        (
+            "custom_rule_delete",
+            "/api/v1/customRule/delete",
+            {"custom_rule_ids": ["rule-1"], "delete_alert_data": 0},
+            {"suuid": ["rule-1"], "delete_alert_data": 0},
+        ),
+    ],
+)
+async def test_tdp_platform_config_supports_custom_rule_endpoints(action, path, handler_kwargs, expected_body):
+    tool = _load_tool("tdp_platform_config.yaml")
+    fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "verbose_msg": "OK"})])
+
+    with (
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:tdp_api_key}",
+                "secret": "{secret:tdp_secret}",
+                "base_url": "https://tdp.local",
+            },
+        ),
+        patch(
+            "flocks.security.get_secret_manager",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=lambda key: {"tdp_api_key": "demo-api", "tdp_secret": "demo-secret"}.get(key))
+            ),
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action=action,
+            **handler_kwargs,
+        )
+
+    assert result.success is True
+    assert fake_session.calls[0][1] == f"https://tdp.local{path}"
+    assert fake_session.calls[0][2]["json"] == expected_body

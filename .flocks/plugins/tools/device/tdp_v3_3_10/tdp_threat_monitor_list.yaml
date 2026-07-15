@@ -1,0 +1,57 @@
+name: tdp_threat_monitor_list
+description: >
+  查询 TDP 威胁-实时监控列表，对应正式 API `/api/v1/monitor/threat/list`。
+  查询时间范围不得超过 24 小时；未传时间时 handler 动态使用最近 24 小时。
+  `sql` 是 TDP 过滤表达式，不是包含 SELECT/FROM 的完整 SQL。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    time_from:
+      type: integer
+      description: 开始时间戳，Unix 秒级时间戳；与 `time_to` 同时传入，范围不得超过 24 小时。
+    time_to:
+      type: integer
+      description: 截止时间戳，Unix 秒级时间戳；与 `time_from` 同时传入，范围不得超过 24 小时。
+    sql:
+      type: string
+      description: >
+        告警过滤表达式，例如 `threat.type = 'c2'`。不得使用 SELECT、FROM 等完整 SQL 语法。
+    size:
+      type: integer
+      description: 返回的最大记录条数；未传时使用文档默认值 1000。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表。
+    net_data_type:
+      type: array
+      items:
+        type: string
+        enum: [attack, risk, action]
+      description: 日志类型列表；attack=攻击、risk=风险、action=敏感行为。
+    refresh_rate:
+      type: integer
+      description: 自动刷新间隔；`-1` 表示关闭自动刷新，其他值可能使响应返回 `new_alert_count`。
+    cur_page:
+      type: integer
+      description: 当前页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    condition:
+      type: object
+      description: 高级兼容参数，仅在顶层语义化参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数，仅在需要自定义底层分页结构时使用。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: threat_monitor_list

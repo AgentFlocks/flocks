@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef, startTransition } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message } from '@/types';
@@ -350,12 +350,26 @@ export function useSessionMessages(sessionId?: string) {
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Tracks part IDs seen in this session to distinguish first-time creation
-  // (structural change → immediate update) from content deltas (low-priority).
-  const knownPartIdsRef = useRef<Set<string>>(new Set());
+  const activeSessionIdRef = useRef(sessionId);
+  const firstPageRequestIdRef = useRef(0);
+  const firstPageInFlightRequestIdRef = useRef<number | null>(null);
+  const olderPageRequestIdRef = useRef(0);
+  const olderPageInFlightRequestIdRef = useRef<number | null>(null);
 
   const fetchMessages = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || activeSessionIdRef.current !== sessionId) return;
+
+    const requestSessionId = sessionId;
+    const requestId = ++firstPageRequestIdRef.current;
+    firstPageInFlightRequestIdRef.current = requestId;
+    // A fresh first page invalidates pagination based on an older snapshot.
+    olderPageRequestIdRef.current += 1;
+    olderPageInFlightRequestIdRef.current = null;
+    setLoadingOlder(false);
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === requestSessionId
+      && firstPageRequestIdRef.current === requestId
+    );
     
     try {
       setLoading(true);
@@ -366,19 +380,44 @@ export function useSessionMessages(sessionId?: string) {
         params: { page: true, limit: MESSAGE_PAGE_SIZE, include_archived: true },
       });
       markMeasure('session:messages:first-page', startMark);
+      if (!isCurrentRequest()) return;
       const { messages: messagesData, hasMore, nextBefore } = transformMessageResponse(response.data);
       setMessages(prev => mergeLatestFetchedMessages(prev, messagesData));
       setHasMore(hasMore);
       setNextBefore(nextBefore);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch messages');
+      if (isCurrentRequest()) {
+        setError(err.message || 'Failed to fetch messages');
+      }
     } finally {
-      setLoading(false);
+      if (firstPageInFlightRequestIdRef.current === requestId) {
+        firstPageInFlightRequestIdRef.current = null;
+      }
+      if (isCurrentRequest()) {
+        setLoading(false);
+      }
     }
   }, [sessionId]);
 
   const loadOlder = useCallback(async () => {
-    if (!sessionId || !hasMore || !nextBefore || loadingOlder) return;
+    if (
+      !sessionId
+      || activeSessionIdRef.current !== sessionId
+      || firstPageInFlightRequestIdRef.current !== null
+      || olderPageInFlightRequestIdRef.current !== null
+      || !hasMore
+      || !nextBefore
+    ) return;
+
+    const requestSessionId = sessionId;
+    const requestId = ++olderPageRequestIdRef.current;
+    olderPageInFlightRequestIdRef.current = requestId;
+    const firstPageRequestId = firstPageRequestIdRef.current;
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === requestSessionId
+      && olderPageRequestIdRef.current === requestId
+      && firstPageRequestIdRef.current === firstPageRequestId
+    );
 
     try {
       setLoadingOlder(true);
@@ -394,25 +433,35 @@ export function useSessionMessages(sessionId?: string) {
         },
       });
       markMeasure('session:messages:older-page', startMark);
+      if (!isCurrentRequest()) return;
       const page = transformMessageResponse(response.data);
       setMessages(prev => prependOlderMessages(prev, page.messages));
       setHasMore(page.hasMore);
       setNextBefore(page.nextBefore);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch older messages');
+      if (isCurrentRequest()) {
+        setError(err.message || 'Failed to fetch older messages');
+      }
     } finally {
-      setLoadingOlder(false);
+      if (olderPageInFlightRequestIdRef.current === requestId) {
+        olderPageInFlightRequestIdRef.current = null;
+      }
+      if (isCurrentRequest()) {
+        setLoadingOlder(false);
+      }
     }
-  }, [hasMore, loadingOlder, nextBefore, sessionId]);
+  }, [hasMore, nextBefore, sessionId]);
 
   // Reset state synchronously before paint when session changes
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
+    activeSessionIdRef.current = sessionId;
     setMessages([]);
     setError(null);
     setHasMore(false);
     setNextBefore(null);
-    knownPartIdsRef.current.clear();
+    olderPageInFlightRequestIdRef.current = null;
+    setLoadingOlder(false);
     if (sessionId) {
       setLoading(true);
     } else {
@@ -456,14 +505,6 @@ export function useSessionMessages(sessionId?: string) {
             providerID: messageInfo.providerID ?? existing.providerID,
             cost: messageInfo.cost ?? existing.cost,
           };
-          // When a message finishes streaming, evict its part IDs from the
-          // known-parts registry to reclaim memory.
-          if (messageInfo.finish) {
-            const parts = updated[existingIndex].parts as any[] | undefined;
-            parts?.forEach((p: any) => {
-              if (p?.id) knownPartIdsRef.current.delete(p.id);
-            });
-          }
           return updated;
         }
 
@@ -521,23 +562,12 @@ export function useSessionMessages(sessionId?: string) {
      * @param partInfo - Part object containing id, messageID, sessionID, type, text, etc.
      * @param delta - Optional text delta for this update.
      *
-     * New parts are structural changes and update synchronously so thinking or
-     * streaming indicators appear immediately. Deltas for known parts are
-     * lowered with startTransition so React can batch high-frequency SSE chunks.
+     * Every SSE update enters message state immediately so a following finish
+     * event cannot overtake the final delta. Display-layer smoothing owns the
+     * frame-level typing cadence and Markdown parse budget.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
-      const isNewPart = !knownPartIdsRef.current.has(partInfo.id);
-      if (isNewPart) {
-        // Structural change: first appearance of this part — must render immediately
-        // so that "thinking" / "streaming" indicators show without delay.
-        knownPartIdsRef.current.add(partInfo.id);
-        setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
-      } else {
-        // Content delta on an existing part — low priority, allow React to batch.
-        startTransition(() => {
-          setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
-        });
-      }
+      setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
     },
     replaceMessageText: (messageId: string, partId: string, text: string) => {
       setMessages(prev => prev.map((message) => {

@@ -56,7 +56,8 @@ Do not use this tool when a dedicated tool is a better fit:
     github:<owner>/<repo>/<skill-dir>   e.g. github:octocat/skills/find-ioc
     clawhub:<name>                      e.g. clawhub:ndr-alert-analysis
     skills-sh:<owner>/<repo>/<skill>    e.g. skills-sh:owner/repo/code-review
-    safeskill:<source>                  e.g. safeskill:safeskill://official/acme/code-review
+    safeskill://...                     e.g. safeskill://official/acme/code-review@1.2.0
+    safeskill:<source>                  SafeSkill source alias
     https://...                         direct SKILL.md URL
   The tool auto-adds --yes so non-interactive agent calls do not hang on
   downstream CLI confirmation prompts (e.g. `skills add`).
@@ -170,7 +171,7 @@ async def flocks_skills(
         if not source:
             return ToolResult(
                 success=False,
-                error="install requires a source, e.g. github:owner/repo/skill-name",
+                error="install requires a source, e.g. github:owner/repo/skill-name or safeskill://...",
             )
         if scope not in {"global", "project"}:
             return ToolResult(

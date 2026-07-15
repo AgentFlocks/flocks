@@ -1,5 +1,7 @@
 # SkyEye CLI 查询总览
 
+执行前必须先进入 `skill_load` 输出的 Base directory，或把命令工具的 `workdir` 设置为该目录。CLI 默认复用 `~/.flocks/browser/skyeye/auth-state.json`，也支持 `--auto-login`、`--username/--password` 触发 OCR 图片验证码自动登录；提供账密后会自动保存到 Flocks secret。若登录页不是默认路径，可传 `--login-path /skyeye/home/login`。
+
 ## 查询策略
 
 ### 告警类请求
@@ -61,14 +63,14 @@ uv run python scripts/skyeye_cli.py log search \
 
 ```bash
 # 告警明细
-uv run python skyeye_cli.py alarm list --days 1 --filter attack_sip=1.1.1.1
+uv run python scripts/skyeye_cli.py alarm list --days 1 --filter attack_sip=1.1.1.1
 
 # 告警计数
-uv run python skyeye_cli.py alarm count --days 1 --filter threat_name=暴力破解
+uv run python scripts/skyeye_cli.py alarm count --days 1 --filter threat_name=暴力破解
 
 # 日志搜索（仅支持高级模式 Lucene 语法）
-uv run python skyeye_cli.py log search 'alarm_sip:(10.0.0.1)' --days 1
-uv run python skyeye_cli.py log search 'attack_result:(攻击成功) AND threat_type:(WEB攻击)' --days 7
+uv run python scripts/skyeye_cli.py log search 'alarm_sip:(10.0.0.1)' --days 1
+uv run python scripts/skyeye_cli.py log search 'attack_result:(攻击成功) AND threat_type:(WEB攻击)' --days 7
 ```
 
 ## 详细参考

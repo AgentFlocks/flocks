@@ -6,8 +6,6 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel
 from datetime import datetime
 
-from flocks.config.config import Config
-
 
 router = APIRouter()
 
@@ -17,8 +15,6 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     timestamp: str
-    config_dir: str
-    data_dir: str
 
 
 @router.get(
@@ -35,15 +31,12 @@ async def health_check() -> HealthResponse:
     Returns server status and basic information
     """
     from datetime import UTC
-    config = Config.get_global()
     
     from flocks.updater import get_current_version
     return HealthResponse(
         status="healthy",
         version=get_current_version(),
         timestamp=datetime.now(UTC).isoformat(),
-        config_dir=str(config.config_dir),
-        data_dir=str(config.data_dir),
     )
 
 

@@ -18,16 +18,16 @@ from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
+API_TOKEN_SERVICE_USER_ID = "api-token-service"
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     "/favicon.ico",
     "/api/health",
+    "/api/config/ui-display",
+    "/api/config/ui-favicon",
     "/api/auth/login",
     "/api/auth/bootstrap-status",
     "/api/auth/bootstrap-admin",
@@ -65,6 +65,11 @@ PUBLIC_PREFIXES = (
 # downstream handler is fully responsible for its own authentication
 # (signature checks, IP allowlists, replay protection, …).  Do NOT add
 # entries that touch user data without a per-request integrity check.
+#
+# Workflow webhook paths also need to be reachable by external systems that
+# cannot present a browser session.  They are safe to exempt here only because
+# _authorize_webhook_trigger() fails closed unless the trigger config supplies
+# api_key or hmac authentication.  See: https://github.com/AgentFlocks/flocks/issues/454
 PUBLIC_PATH_REGEXES = (
     re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
     re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),
@@ -224,8 +229,8 @@ def _is_valid_api_token(token: Optional[str]) -> bool:
 def _build_api_token_user() -> AuthUser:
     """Synthetic service identity for API token clients."""
     return AuthUser(
-        id="api-token-service",
-        username="api-token-service",
+        id=API_TOKEN_SERVICE_USER_ID,
+        username=API_TOKEN_SERVICE_USER_ID,
         role="admin",
         status="active",
         must_reset_password=False,

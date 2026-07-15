@@ -1,7 +1,7 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useWebUIContractPages } from './useWebUIContractPages';
+import { __resetWebUIContractPagesResourceForTesting, useWebUIContractPages } from './useWebUIContractPages';
 import { setupSSEMock } from '@/test/mocks/sse';
 
 const { listMock, listWorkspacesMock } = vi.hoisted(() => ({
@@ -21,6 +21,7 @@ describe('useWebUIContractPages', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetWebUIContractPagesResourceForTesting();
     listWorkspacesMock.mockResolvedValue({ data: [] });
   });
 
@@ -52,6 +53,38 @@ describe('useWebUIContractPages', () => {
     expect(result.current.workspaces).toHaveLength(0);
     expect(listMock).toHaveBeenCalledWith(true);
     expect(listWorkspacesMock).toHaveBeenCalledWith(true);
+  });
+
+  it('shares the initial navigation request across concurrent hook instances', async () => {
+    let resolvePages: (value: { data: any[] }) => void = () => {};
+    let resolveWorkspaces: (value: { data: any[] }) => void = () => {};
+    listMock.mockReturnValue(new Promise((resolve) => {
+      resolvePages = resolve;
+    }));
+    listWorkspacesMock.mockReturnValue(new Promise((resolve) => {
+      resolveWorkspaces = resolve;
+    }));
+
+    const first = renderHook(() => useWebUIContractPages());
+    const second = renderHook(() => useWebUIContractPages());
+
+    expect(listMock).toHaveBeenCalledTimes(1);
+    expect(listWorkspacesMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePages({ data: [{ id: 'dash-1', title: '仪表盘' }] });
+      resolveWorkspaces({ data: [{ id: 'workspace-1', title: '工作区', pages: [] }] });
+    });
+
+    await waitFor(() => {
+      expect(first.result.current.loading).toBe(false);
+      expect(second.result.current.loading).toBe(false);
+    });
+
+    expect(first.result.current.pages).toHaveLength(1);
+    expect(second.result.current.pages).toHaveLength(1);
+    expect(first.result.current.workspaces).toHaveLength(1);
+    expect(second.result.current.workspaces).toHaveLength(1);
   });
 
   it('refetches when contracts.webui.pages.nav_changed SSE event arrives', async () => {

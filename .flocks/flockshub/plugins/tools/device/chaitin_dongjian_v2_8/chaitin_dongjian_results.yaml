@@ -1,0 +1,42 @@
+name: chaitin_dongjian_results
+description: Chaitin Dongjian scan result, vulnerability, audit log, and report read-only queries.
+description_cn: 长亭洞鉴扫描结果、漏洞、审计日志和报表只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_dongjian_api
+version: "2.8"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - result_filter
+        - result_detail
+        - vuln_filter
+        - vuln_detail
+        - auditlog_filter
+        - report_filter
+        - test
+      description: |
+        - result_filter: POST /result/filter/，筛选任务结果。
+        - result_detail: GET /result/{id}/，查询任务结果详情。
+        - vuln_filter: POST /vuln/filter/，筛选漏洞资产。
+        - vuln_detail: GET /vuln/{id}/，查询漏洞资产详情。
+        - auditlog_filter: POST /auditlog/filter/，筛选审计日志。
+        - report_filter: POST /report/filter/，筛选报表。
+    id:
+      type: integer
+      description: 路径中的结果或漏洞 ID。
+    query:
+      type: object
+      description: GET query 参数。
+    body:
+      description: POST 查询 body。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_dongjian.handler.py
+  function: results

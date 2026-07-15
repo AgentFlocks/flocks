@@ -1,0 +1,58 @@
+schema_version: 1
+provider: chaitin_safeline_waf
+
+connectivity:
+  tool: chaitin_safeline_waf_system
+  params:
+    action: profile
+
+fixtures:
+  chaitin_safeline_waf_system:
+    - label: Query current profile
+      label_cn: 查询当前账号信息
+      tags: [smoke, auth]
+      params:
+        action: profile
+      assert:
+        success: true
+    - label: Query security overview
+      label_cn: 查询安全概览
+      tags: [dashboard]
+      params:
+        action: overview
+
+  chaitin_safeline_waf_policy:
+    - label: List ACL templates
+      label_cn: 查询访问频率限制规则
+      tags: [policy]
+      params:
+        action: acl_templates
+        count: 10
+        offset: 0
+
+  chaitin_safeline_waf_site:
+    - label: List reverse proxy sites
+      label_cn: 查询反向代理站点
+      tags: [site]
+      params:
+        action: reverse_proxy_sites
+        count: 10
+        offset: 0
+
+  chaitin_safeline_waf_api_readonly:
+    - label: Show API catalog
+      label_cn: 查看 API 目录
+      tags: [api]
+      params:
+        action: api_catalog
+      assert:
+        success: true
+
+  chaitin_safeline_waf_api_mutation:
+    - label: Show API catalog before confirmed mutation
+      label_cn: 变更调用前查看 API 目录
+      tags: [api, mutation]
+      params:
+        action: api_catalog
+      assert:
+        success: true
