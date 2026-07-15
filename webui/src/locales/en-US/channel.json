@@ -242,7 +242,7 @@
     "address": "Email Address",
     "addressHint": "Address that receives user mail and sends agent replies.",
     "password": "Password",
-    "passwordHint": "Mailbox password or app password. Stored in the Flocks secret store.",
+    "passwordHint": "Enable IMAP/SMTP in the mailbox provider settings first, then enter the generated client authorization code or app password. Most providers do not accept the normal web login password here. Stored in the Flocks secret store.",
     "servers": "Mail Servers",
     "serversDesc": "Configure the IMAP inbox and SMTP sender used by this channel.",
     "imapHost": "IMAP Host",
