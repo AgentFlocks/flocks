@@ -27,6 +27,27 @@ _SAFE_SUBJECT_KEYS = frozenset(
 )
 
 
+def _normalized_tenant_ids(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = value
+    else:
+        values = ()
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        if not isinstance(raw_value, str):
+            continue
+        tenant_id = raw_value.strip()
+        if not tenant_id or tenant_id in seen:
+            continue
+        seen.add(tenant_id)
+        normalized.append(tenant_id)
+    return tuple(normalized)
+
+
 def _normalize_tools(tools: Optional[Iterable[Any]]) -> tuple[str, ...]:
     if tools is None:
         return ()
@@ -100,7 +121,24 @@ def _safe_subject(value: Any) -> dict[str, Any]:
         value = value.model_dump()
     if not isinstance(value, Mapping):
         return {}
-    return {key: value[key] for key in _SAFE_SUBJECT_KEYS if key in value}
+    safe_subject = {key: value[key] for key in _SAFE_SUBJECT_KEYS if key in value}
+    tenant_ids = _normalized_tenant_ids(safe_subject.get("tenant_ids"))
+    if "tenant_ids" in safe_subject:
+        safe_subject["tenant_ids"] = tenant_ids
+
+    explicit_tenant_id = safe_subject.get("tenant_id")
+    explicit_tenant_id = (
+        explicit_tenant_id.strip()
+        if isinstance(explicit_tenant_id, str)
+        else ""
+    )
+    if explicit_tenant_id and (not tenant_ids or explicit_tenant_id in tenant_ids):
+        safe_subject["tenant_id"] = explicit_tenant_id
+    elif len(tenant_ids) == 1:
+        safe_subject["tenant_id"] = tenant_ids[0]
+    else:
+        safe_subject.pop("tenant_id", None)
+    return safe_subject
 
 
 def _safe_text(value: Any, *, default: str) -> str:

@@ -177,6 +177,72 @@ async def test_capability_filter_forwards_trusted_tenant_id_without_subject_or_c
     assert "do-not-forward" not in str(seen_input)
 
 
+@pytest.mark.parametrize(
+    ("subject", "expected_tenant_id"),
+    [
+        (
+            {"tenant_id": " tenant-b ", "tenant_ids": ("tenant-a", "tenant-b", "tenant-a")},
+            "tenant-b",
+        ),
+        ({"tenant_id": "tenant-z", "tenant_ids": ("tenant-a",)}, "tenant-a"),
+        ({"tenant_id": "tenant-z", "tenant_ids": ("tenant-a", "tenant-b")}, None),
+        ({"tenant_id": " ", "tenant_ids": ()}, None),
+    ],
+)
+def test_safe_subject_derives_singular_tenant_only_from_a_valid_binding(
+    subject,
+    expected_tenant_id,
+) -> None:
+    from flocks.security.capability_pool import _safe_subject
+
+    safe_subject = _safe_subject({"subject_id": "user-1", "secret": "do-not-forward", **subject})
+
+    assert safe_subject.get("tenant_id") == expected_tenant_id
+    assert "secret" not in safe_subject
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tenant_ids", "expected_tenant_id"),
+    [(("tenant-a",), "tenant-a"), (("tenant-a", "tenant-b"), None)],
+)
+async def test_capability_filter_derives_current_subject_tenant_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tenant_ids: tuple[str, ...],
+    expected_tenant_id: str | None,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookBase, HookPipeline
+    from flocks.identity.subject import Subject, reset_current_subject, set_current_subject
+    from flocks.security.capability_pool import filter_capability_pool
+
+    seen_input = {}
+
+    class _CaptureHook(HookBase):
+        async def capability_filter(self, ctx) -> None:
+            seen_input.update(ctx.input)
+            ctx.output["capability_pool"] = {"tools": ["read"]}
+
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    HookPipeline.register("test-capability-filter-current-tenant", _CaptureHook())
+    token = set_current_subject(Subject(subject_id="user-1", tenant_ids=tenant_ids))
+    try:
+        base = resolve_capability_pool(
+            declared_tools=["read", "bash"],
+            enabled_tools=["read", "bash"],
+        )
+        filtered = await filter_capability_pool(base, context={})
+    finally:
+        reset_current_subject(token)
+        HookPipeline.unregister("test-capability-filter-current-tenant")
+
+    assert filtered.tools == ("read",)
+    assert seen_input["subject"].get("tenant_id") == expected_tenant_id
+    if expected_tenant_id is None:
+        assert "tenant_id" not in seen_input["subject"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("hook_output", [{}, {"tools": "read"}])
 async def test_missing_or_malformed_capability_filter_output_leaves_base_pool_unchanged(
