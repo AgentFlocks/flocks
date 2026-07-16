@@ -397,10 +397,8 @@ export interface MCPCatalogStats {
 export interface ProviderCredentials {
   secret_id?: string | null;
   /**
-   * Write-only compatibility field. Credential reads never return the raw key;
-   * they return ``api_key: null`` plus ``api_key_masked`` and
-   * ``has_credential``. UI code must never submit the masked value as a new
-   * secret. Leave ``api_key`` out of an update to preserve the stored key.
+   * Raw API key returned only by the admin-only reveal endpoint. Ordinary LLM
+   * and API-service credential reads return null and expose only masked values.
    */
   api_key?: string | null;
   api_key_masked?: string | null;
