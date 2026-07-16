@@ -149,6 +149,127 @@ async def test_chaitin_safeline_repair_release_replaces_broken_handler(
     compile(repaired_handler.read_text(encoding="utf-8"), str(repaired_handler), "exec")
 
 
+async def test_hub_install_runtime_failure_rolls_back_new_plugin(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_refresh(_plugin_type, _changed_path=None):
+        raise RuntimeError("import failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_refresh)
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "python"
+        / "soc_workspace_query"
+    )
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        await install_plugin("tool", "soc_workspace_query")
+
+    assert not install_dir.exists()
+    assert local.get_record("tool", "soc_workspace_query") is None
+
+
+async def test_hub_update_runtime_failure_restores_previous_plugin(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "python"
+        / "soc_workspace_query"
+    )
+    install_dir.mkdir(parents=True)
+    old_handler = install_dir / "old_tool.py"
+    old_handler.write_text("OLD = True\n", encoding="utf-8")
+    previous_record = local.make_record(
+        plugin_type="tool",
+        plugin_id="soc_workspace_query",
+        version="0.9.0",
+        source="bundled:old",
+        install_path=install_dir,
+        scope="global",
+    )
+    local.save_installed_record(previous_record)
+    refresh_calls = 0
+
+    async def fail_then_recover(_plugin_type, _changed_path=None):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("import failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_then_recover)
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        await update_plugin("tool", "soc_workspace_query")
+
+    assert refresh_calls == 2
+    assert old_handler.read_text(encoding="utf-8") == "OLD = True\n"
+    assert not (install_dir / "soc_workspace_query.py").exists()
+    assert local.get_record("tool", "soc_workspace_query") == previous_record
+
+
+async def test_hub_webui_runtime_failure_rolls_back_package_and_access_contracts(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_refresh(_plugin_type, _changed_path=None):
+        raise RuntimeError("reconcile failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        await install_plugin("webui", "soc_ui")
+
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert local.get_record("webui", "soc_ui") is None
+
+
+def test_catalog_ignores_stale_record_when_legacy_install_is_inferred(
+    isolated_hub_env,
+):
+    plugin_id = "chaitin_safeline_waf_v1_0_0"
+    legacy_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "device"
+        / plugin_id
+    )
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy.yaml").write_text(
+        "name: legacy\nhandler:\n  type: http\n",
+        encoding="utf-8",
+    )
+    stale_record = local.make_record(
+        plugin_type="device",
+        plugin_id=plugin_id,
+        version="1.0.1",
+        source="bundled:stale",
+        install_path=isolated_hub_env["home"] / "missing",
+        scope="global",
+    )
+    local.save_installed_record(stale_record)
+
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="device")}
+
+    assert entries[plugin_id].state == "updateAvailable"
+    assert entries[plugin_id].installedVersion is None
+    assert entries[plugin_id].installPath == str(legacy_dir)
+    assert local.get_record("device", plugin_id) is None
+
+
 def test_pentest_agents_are_listed_in_agent_catalog():
     entries = list_catalog(plugin_type="agent")
     ids = {entry.id for entry in entries}

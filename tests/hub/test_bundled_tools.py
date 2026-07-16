@@ -168,6 +168,7 @@ async def test_tool_runtime_refresh_scopes_errors_and_clears_device_template_cac
 @pytest.mark.asyncio
 async def test_uninstall_missing_tool_record_clears_device_template_cache(isolated_hub, monkeypatch):
     calls: list[str] = []
+    missing_path = isolated_hub["home"] / ".flocks" / "plugins" / "tools" / "api" / "ghost_tool"
     local.save_installed_record(
         InstalledPluginRecord(
             id="ghost_tool",
@@ -175,7 +176,7 @@ async def test_uninstall_missing_tool_record_clears_device_template_cache(isolat
             version="1.0",
             source="bundled",
             installedAt=1,
-            installPath=str(isolated_hub["home"] / ".flocks" / "plugins" / "tools" / "api" / "ghost_tool"),
+            installPath=str(missing_path),
         )
     )
     monkeypatch.setattr("flocks.hub.installer.clear_catalog_caches", lambda: calls.append("catalog"))
@@ -184,8 +185,8 @@ async def test_uninstall_missing_tool_record_clears_device_template_cache(isolat
         lambda plugin_type: calls.append(f"device:{plugin_type}"),
     )
 
-    async def fake_refresh_runtime(plugin_type):
-        calls.append(f"refresh:{plugin_type}")
+    async def fake_refresh_runtime(plugin_type, changed_path=None):
+        calls.append(f"refresh:{plugin_type}:{changed_path}")
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fake_refresh_runtime)
 
@@ -193,7 +194,37 @@ async def test_uninstall_missing_tool_record_clears_device_template_cache(isolat
 
     assert removed is True
     assert local.get_record("tool", "ghost_tool") is None
-    assert calls == ["catalog", "device:tool", "refresh:tool"]
+    assert calls == ["catalog", "device:tool", f"refresh:tool:{missing_path}"]
+
+
+@pytest.mark.asyncio
+async def test_uninstall_missing_tool_record_without_path_uses_canonical_path(
+    isolated_hub,
+    monkeypatch,
+):
+    local.save_installed_record(
+        InstalledPluginRecord(
+            id="ghost_tool",
+            type="tool",
+            version="1.0",
+            source="bundled",
+            installedAt=1,
+            installPath=None,
+        )
+    )
+    refresh_paths: list[Path | None] = []
+
+    async def fake_refresh_runtime(_plugin_type, changed_path=None):
+        refresh_paths.append(changed_path)
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fake_refresh_runtime)
+
+    removed = await uninstall_plugin("tool", "ghost_tool")
+
+    assert removed is True
+    assert refresh_paths == [
+        isolated_hub["home"] / ".flocks" / "plugins" / "tools" / "ghost_tool"
+    ]
 
 
 class TestBundledToolRoots:

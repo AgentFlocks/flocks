@@ -768,7 +768,12 @@ def _os_compatible(manifest: HubPluginManifest) -> bool:
 
 def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
     record = local.get_record(manifest.type, manifest.id)
-    install_path = _resolve_install_path(manifest.type, manifest.id, record, local.infer_local_installs())
+    install_path, record = _resolve_install_path(
+        manifest.type,
+        manifest.id,
+        record,
+        local.infer_local_installs(),
+    )
 
     state, installed_version = _catalog_install_state(
         install_path,
@@ -807,15 +812,16 @@ def _resolve_install_path(
     plugin_id: str,
     record: Optional[local.InstalledPluginRecord],
     inferred_installs: Optional[dict[tuple[PluginType, str], Path]] = None,
-) -> Optional[Path]:
+) -> tuple[Optional[Path], Optional[local.InstalledPluginRecord]]:
     if record and record.installPath:
         path = Path(record.installPath)
         if local.has_install_payload(plugin_type, path):
-            return path
+            return path, record
         local.remove_installed_record(plugin_type, plugin_id)
+        record = None
     if inferred_installs is not None:
-        return inferred_installs.get((plugin_type, plugin_id))
-    return local.infer_local_install(plugin_type, plugin_id)
+        return inferred_installs.get((plugin_type, plugin_id)), record
+    return local.infer_local_install(plugin_type, plugin_id), record
 
 
 def _entry_from_index(
@@ -824,7 +830,12 @@ def _entry_from_index(
     inferred_installs: dict[tuple[PluginType, str], Path],
 ) -> HubCatalogEntry:
     record = records.get(f"{item.type}:{item.id}")
-    install_path = _resolve_install_path(item.type, item.id, record, inferred_installs)
+    install_path, record = _resolve_install_path(
+        item.type,
+        item.id,
+        record,
+        inferred_installs,
+    )
 
     state, installed_version = _catalog_install_state(
         install_path,
@@ -901,7 +912,12 @@ def _entry_from_bundled_tool(
       * ``incompatible``    — manifest declares an incompatible OS.
     """
     record = records.get(f"{manifest.type}:{manifest.id}")
-    install_path = _resolve_install_path(manifest.type, manifest.id, record, inferred_installs)
+    install_path, record = _resolve_install_path(
+        manifest.type,
+        manifest.id,
+        record,
+        inferred_installs,
+    )
 
     state, installed_version = _catalog_install_state(
         install_path,

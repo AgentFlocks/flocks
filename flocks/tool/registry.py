@@ -1639,53 +1639,67 @@ class ToolRegistry:
             tools_before = cls._tools.copy()
             defaults_before = cls._enabled_defaults.copy()
             plugin_names_before = list(cls._plugin_tool_names)
+            plugin_errors_before = list(cls._plugin_load_errors)
+            enabled_before = {
+                name: tool.info.enabled
+                for name, tool in tools_before.items()
+            }
+            revision_before = cls._revision
             load_errors: List[str] = []
+
+            def _restore_snapshot() -> None:
+                for name, enabled in enabled_before.items():
+                    tool = tools_before.get(name)
+                    if tool is not None:
+                        tool.info.enabled = enabled
+                cls._tools.clear()
+                cls._tools.update(tools_before)
+                cls._enabled_defaults.clear()
+                cls._enabled_defaults.update(defaults_before)
+                cls._plugin_tool_names = plugin_names_before
+                cls._plugin_load_errors = plugin_errors_before
+                cls._revision = revision_before
 
             try:
                 cls._unregister_plugin_tools()
                 cls._load_plugin_tools(load_errors)
+                changed_root = changed_path.resolve() if changed_path is not None else None
+                fatal_errors: List[str] = []
+                for error in load_errors:
+                    if changed_root is None or error.startswith(
+                        (
+                            "plugin loader:",
+                            "extension point not found:",
+                            "entry point scan:",
+                        )
+                    ):
+                        fatal_errors.append(error)
+                        continue
+                    if error.startswith("entry point "):
+                        continue
+                    source_text, separator, _detail = error.partition(": ")
+                    if not separator:
+                        fatal_errors.append(error)
+                        continue
+                    source_path = Path(source_text)
+                    if not source_path.is_absolute():
+                        fatal_errors.append(error)
+                        continue
+                    source_path = source_path.resolve()
+                    if source_path == changed_root or changed_root in source_path.parents:
+                        fatal_errors.append(error)
+                if fatal_errors:
+                    raise ToolRefreshError("plugin", fatal_errors)
+
+                if load_errors:
+                    cls._finalize_plugin_tools_load()
+
+                cls._plugin_load_errors = load_errors
+                cls._bump_revision("plugin_refresh")
+                return cls.all_tool_ids()
             except Exception:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._plugin_tool_names = plugin_names_before
+                _restore_snapshot()
                 raise
-            changed_root = changed_path.resolve() if changed_path is not None else None
-            fatal_errors: List[str] = []
-            for error in load_errors:
-                if changed_root is None or error.startswith(
-                    ("plugin loader:", "extension point not found:")
-                ):
-                    fatal_errors.append(error)
-                    continue
-                if error.startswith("entry point "):
-                    continue
-                source_text, separator, _detail = error.partition(": ")
-                if not separator:
-                    fatal_errors.append(error)
-                    continue
-                source_path = Path(source_text)
-                if not source_path.is_absolute():
-                    fatal_errors.append(error)
-                    continue
-                source_path = source_path.resolve()
-                if source_path == changed_root or changed_root in source_path.parents:
-                    fatal_errors.append(error)
-            if fatal_errors:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._plugin_tool_names = plugin_names_before
-                raise ToolRefreshError("plugin", fatal_errors)
-
-            if load_errors:
-                cls._finalize_plugin_tools_load()
-
-            cls._plugin_load_errors = load_errors
-            cls._bump_revision("plugin_refresh")
-            return cls.all_tool_ids()
 
     @classmethod
     def refresh_dynamic_tools(cls) -> List[str]:

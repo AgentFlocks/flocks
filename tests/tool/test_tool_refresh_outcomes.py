@@ -36,6 +36,7 @@ def _isolated_registry() -> Iterator[None]:
         "defaults": ToolRegistry._enabled_defaults,
         "plugin_names": ToolRegistry._plugin_tool_names,
         "plugin_errors": ToolRegistry._plugin_load_errors,
+        "revision": ToolRegistry._revision,
         "dynamic_modules": ToolRegistry._dynamic_modules,
         "dynamic_tools": ToolRegistry._dynamic_tools_by_module,
     }
@@ -45,6 +46,7 @@ def _isolated_registry() -> Iterator[None]:
         ToolRegistry._enabled_defaults = {}
         ToolRegistry._plugin_tool_names = []
         ToolRegistry._plugin_load_errors = []
+        ToolRegistry._revision = 0
         ToolRegistry._dynamic_modules = {}
         ToolRegistry._dynamic_tools_by_module = {}
         yield
@@ -54,6 +56,7 @@ def _isolated_registry() -> Iterator[None]:
         ToolRegistry._enabled_defaults = state["defaults"]
         ToolRegistry._plugin_tool_names = state["plugin_names"]
         ToolRegistry._plugin_load_errors = state["plugin_errors"]
+        ToolRegistry._revision = state["revision"]
         ToolRegistry._dynamic_modules = state["dynamic_modules"]
         ToolRegistry._dynamic_tools_by_module = state["dynamic_tools"]
 
@@ -185,6 +188,7 @@ def test_plugin_refresh_commits_valid_sources_alongside_new_source_error(
                 [
                     "/plugins/legacy.py: broken legacy plugin",
                     "/plugins/unrelated.py: new broken plugin",
+                    "entry point legacy_package: RuntimeError: broken",
                 ]
             )
 
@@ -204,6 +208,7 @@ def test_plugin_refresh_commits_valid_sources_alongside_new_source_error(
         assert ToolRegistry._plugin_load_errors == [
             "/plugins/legacy.py: broken legacy plugin",
             "/plugins/unrelated.py: new broken plugin",
+            "entry point legacy_package: RuntimeError: broken",
         ]
 
 
@@ -226,6 +231,94 @@ def test_plugin_refresh_rejects_error_inside_changed_path(
 
         with pytest.raises(ToolRefreshError, match="missing dependency"):
             ToolRegistry.refresh_plugin_tools(changed_path=Path("/plugins/new"))
+
+        assert ToolRegistry._tools == {previous.info.name: previous}
+        assert ToolRegistry._plugin_tool_names == [previous.info.name]
+
+
+def test_plugin_refresh_restores_snapshot_when_finalize_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with _isolated_registry():
+        builtin = _tool("builtin", "builtin")
+        previous = _tool("previous_plugin", "plugin_py")
+        ToolRegistry._tools = {
+            builtin.info.name: builtin,
+            previous.info.name: previous,
+        }
+        ToolRegistry._enabled_defaults = {
+            builtin.info.name: True,
+            previous.info.name: True,
+        }
+        ToolRegistry._plugin_tool_names = [previous.info.name]
+        ToolRegistry._plugin_load_errors = ["old error"]
+        ToolRegistry._revision = 7
+
+        def _load_with_unrelated_error(cls, errors):
+            replacement = _tool("replacement", "plugin_py")
+            cls._tools[replacement.info.name] = replacement
+            cls._enabled_defaults[replacement.info.name] = True
+            cls._plugin_tool_names = [replacement.info.name]
+            errors.append("/plugins/unrelated.py: SyntaxError: broken")
+
+        def _failed_finalize(cls):
+            cls._tools[builtin.info.name].info.enabled = False
+            raise RuntimeError("finalize failed")
+
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_load_plugin_tools",
+            classmethod(_load_with_unrelated_error),
+        )
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_finalize_plugin_tools_load",
+            classmethod(_failed_finalize),
+        )
+
+        with pytest.raises(RuntimeError, match="finalize failed"):
+            ToolRegistry.refresh_plugin_tools(
+                changed_path=Path("/plugins/target.py"),
+            )
+
+        assert ToolRegistry._tools == {
+            builtin.info.name: builtin,
+            previous.info.name: previous,
+        }
+        assert builtin.info.enabled is True
+        assert ToolRegistry._enabled_defaults == {
+            builtin.info.name: True,
+            previous.info.name: True,
+        }
+        assert ToolRegistry._plugin_tool_names == [previous.info.name]
+        assert ToolRegistry._plugin_load_errors == ["old error"]
+        assert ToolRegistry._revision == 7
+
+
+def test_plugin_refresh_rejects_entry_point_scan_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with _isolated_registry():
+        previous = _tool("entrypoint_old", "plugin_py")
+        ToolRegistry._tools[previous.info.name] = previous
+        ToolRegistry._plugin_tool_names = [previous.info.name]
+
+        def _load_with_scan_failure(cls, errors):
+            replacement = _tool("hub_target", "plugin_py")
+            cls._tools[replacement.info.name] = replacement
+            cls._plugin_tool_names = [replacement.info.name]
+            errors.append("entry point scan: RuntimeError: metadata unavailable")
+
+        monkeypatch.setattr(
+            ToolRegistry,
+            "_load_plugin_tools",
+            classmethod(_load_with_scan_failure),
+        )
+
+        with pytest.raises(ToolRefreshError, match="metadata unavailable"):
+            ToolRegistry.refresh_plugin_tools(
+                changed_path=Path("/plugins/hub_target.py"),
+            )
 
         assert ToolRegistry._tools == {previous.info.name: previous}
         assert ToolRegistry._plugin_tool_names == [previous.info.name]
