@@ -40,6 +40,7 @@ def test_provider_global_configuration_credentials_and_tests_require_admin():
         client.post("/api/provider/example/test"),
         client.put("/api/provider/example", json={}),
         client.get("/api/provider/example/credentials"),
+        client.post("/api/provider/example/credentials/reveal"),
         client.post("/api/provider/example/credentials", json={"api_key": "secret"}),
         client.delete("/api/provider/example/credentials"),
         client.get("/api/provider/example/service-credentials"),
@@ -53,7 +54,9 @@ def test_provider_global_configuration_credentials_and_tests_require_admin():
     assert [response.status_code for response in responses] == [403] * len(responses)
 
 
-def test_admin_credential_routes_return_only_masked_secrets(monkeypatch: pytest.MonkeyPatch):
+def test_admin_reveal_returns_raw_llm_key_with_audit_and_no_store(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from flocks.server.routes import provider as provider_routes
 
     raw_llm_key = "sk-raw-llm-secret-1234"
@@ -63,7 +66,9 @@ def test_admin_credential_routes_return_only_masked_secrets(monkeypatch: pytest.
         "llm-example_llm_key": raw_llm_key,
         "service-example_api_key": raw_service_key,
     }.get(key)
+    audit = AsyncMock()
     monkeypatch.setattr("flocks.security.get_secret_manager", lambda: secrets)
+    monkeypatch.setattr(provider_routes, "emit_audit_event", audit)
     monkeypatch.setattr(
         provider_routes.ConfigWriter,
         "get_provider_raw",
@@ -100,20 +105,33 @@ def test_admin_credential_routes_return_only_masked_secrets(monkeypatch: pytest.
 
     client = _user_client(provider_routes.router, prefix="/api/provider", role="admin")
     llm_response = client.get("/api/provider/llm-example/credentials")
+    reveal_response = client.post("/api/provider/llm-example/credentials/reveal")
     service_response = client.get("/api/provider/service-example/service-credentials")
 
     assert llm_response.status_code == 200
+    assert reveal_response.status_code == 200
     assert service_response.status_code == 200
     llm_payload = llm_response.json()
+    reveal_payload = reveal_response.json()
     service_payload = service_response.json()
     assert llm_payload["api_key"] is None
     assert llm_payload["api_key_masked"]
+    assert reveal_payload["api_key"] == raw_llm_key
+    assert reveal_response.headers["Cache-Control"] == "no-store"
+    assert reveal_response.headers["Pragma"] == "no-cache"
     assert service_payload["api_key"] is None
     assert service_payload["api_key_masked"]
     assert service_payload["fields"]["api_key"] != raw_service_key
     assert service_payload["fields"]["base_url"] == "https://service.example.test"
     assert raw_llm_key not in llm_response.text
+    assert raw_llm_key in reveal_response.text
     assert raw_service_key not in service_response.text
+    audit.assert_awaited_once()
+    event_type, audit_payload = audit.await_args.args
+    assert event_type == "provider.credentials_reveal"
+    assert audit_payload["provider_id"] == "llm-example"
+    assert audit_payload["username"] == "admin-test"
+    assert raw_llm_key not in repr(audit_payload)
 
 
 def test_admin_provider_update_never_writes_raw_api_key_to_storage(monkeypatch: pytest.MonkeyPatch):
