@@ -41,6 +41,7 @@ _BUILTIN_AGENTS_DIR = Path(__file__).parent / "agents"
 # Default plugin root (same as plugin loader convention)
 try:
     from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
+
     _PLUGIN_AGENTS_DIR = DEFAULT_PLUGIN_ROOT / "agents"
 except ImportError:
     _PLUGIN_AGENTS_DIR = Path.home() / ".flocks" / "plugins" / "agents"
@@ -50,9 +51,11 @@ def _project_plugin_agents_dir() -> Path:
     """Return the current project's plugin agent directory."""
     return Path.cwd() / ".flocks" / "plugins" / "agents"
 
+
 # ---------------------------------------------------------------------------
 # Prompt metadata parsing
 # ---------------------------------------------------------------------------
+
 
 def _parse_prompt_metadata(raw: dict) -> Optional[AgentPromptMetadata]:
     """Parse ``prompt_metadata`` section from a raw YAML dict."""
@@ -79,6 +82,7 @@ def _parse_prompt_metadata(raw: dict) -> Optional[AgentPromptMetadata]:
 # ---------------------------------------------------------------------------
 # Core loading function
 # ---------------------------------------------------------------------------
+
 
 def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
     """
@@ -109,17 +113,23 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
     try:
         raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
-        log.error("agent.factory.yaml_parse_error", {
-            "path": str(yaml_path),
-            "error": str(e),
-        })
+        log.error(
+            "agent.factory.yaml_parse_error",
+            {
+                "path": str(yaml_path),
+                "error": str(e),
+            },
+        )
         return None
 
     if not isinstance(raw, dict):
-        log.warn("agent.factory.yaml_invalid", {
-            "path": str(yaml_path),
-            "hint": "Expected a YAML mapping",
-        })
+        log.warn(
+            "agent.factory.yaml_invalid",
+            {
+                "path": str(yaml_path),
+                "hint": "Expected a YAML mapping",
+            },
+        )
         return None
 
     name = raw.get("name") or agent_dir.name
@@ -181,6 +191,7 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
             prompt=prompt,
             prompt_builder=prompt_builder,
             tools=tools_list,
+            capability_tools=raw.get("capability_tools"),
             options=raw.get("options", {}),
             steps=raw.get("steps"),
             delegatable=raw.get("delegatable"),
@@ -190,18 +201,22 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
             tags=raw.get("tags", []),
         )
     except Exception as e:
-        log.error("agent.factory.load_failed", {
-            "name": name,
-            "path": str(yaml_path),
-            "error": str(e),
-            "type": type(e).__name__,
-        })
+        log.error(
+            "agent.factory.load_failed",
+            {
+                "name": name,
+                "path": str(yaml_path),
+                "error": str(e),
+                "type": type(e).__name__,
+            },
+        )
         return None
 
 
 # ---------------------------------------------------------------------------
 # Directory scanning
 # ---------------------------------------------------------------------------
+
 
 def _iter_agent_dirs(scan_dir: Path) -> List[Path]:
     """Return immediate agents and one-level nested agents inside collection packs."""
@@ -259,20 +274,26 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
             if agent is None:
                 continue
             if agent.name in result:
-                log.warn("agent.factory.name_conflict", {
-                    "name": agent.name,
-                    "existing_source": "previous scan",
-                    "skipped_source": str(agent_dir),
-                })
+                log.warn(
+                    "agent.factory.name_conflict",
+                    {
+                        "name": agent.name,
+                        "existing_source": "previous scan",
+                        "skipped_source": str(agent_dir),
+                    },
+                )
                 continue
             result[agent.name] = agent
-            log.debug("agent.factory.loaded", {
-                "name": agent.name,
-                "dir": str(agent_dir),
-                "native": is_native,
-                "has_prompt": agent.prompt is not None,
-                "has_builder": agent.prompt_builder is not None,
-            })
+            log.debug(
+                "agent.factory.loaded",
+                {
+                    "name": agent.name,
+                    "dir": str(agent_dir),
+                    "native": is_native,
+                    "has_prompt": agent.prompt is not None,
+                    "has_builder": agent.prompt_builder is not None,
+                },
+            )
 
     return result
 
@@ -280,6 +301,7 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
 # ---------------------------------------------------------------------------
 # Dynamic prompt injection (Phase 2)
 # ---------------------------------------------------------------------------
+
 
 def inject_dynamic_prompts(
     agents: Dict[str, AgentInfo],
@@ -309,16 +331,20 @@ def inject_dynamic_prompts(
             inject_fn(agent, available_agents, tools, skills, categories, workflows or [])
             log.debug("agent.factory.prompt_injected", {"name": name})
         except Exception as e:
-            log.error("agent.factory.prompt_inject_error", {
-                "name": name,
-                "builder": agent.prompt_builder,
-                "error": str(e),
-            })
+            log.error(
+                "agent.factory.prompt_inject_error",
+                {
+                    "name": name,
+                    "builder": agent.prompt_builder,
+                    "error": str(e),
+                },
+            )
 
 
 # ---------------------------------------------------------------------------
 # YAML CRUD helpers (for plugin agents via API routes)
 # ---------------------------------------------------------------------------
+
 
 def _find_yaml_file(name: str, *, include_project: bool = True, include_user: bool = True) -> Optional[Path]:
     """Find the YAML source file for a plugin agent by name.
@@ -412,6 +438,7 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
         color=raw.get("color"),
         permission=legacy_permission,
         tools=tools_list,
+        capability_tools=raw.get("capability_tools"),
         model=model,
         prompt=prompt,
         prompt_builder=raw.get("prompt_builder"),

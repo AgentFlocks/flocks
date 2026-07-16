@@ -7,7 +7,7 @@ and the function schema exposed to the model for the current turn.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Set
 
 from flocks.security.capability_pool import (
@@ -28,7 +28,9 @@ from flocks.tool.registry import ToolRegistry
 class CallableSchemaResult:
     tool_infos: List[Any]
     metadata: Dict[str, Any]
-    capability_ceiling: Dict[str, Any]
+    # Keep older resolver test doubles/source integrations constructible while
+    # treating an omitted B4 ceiling as an explicit fail-closed empty pool.
+    capability_ceiling: Dict[str, Any] = field(default_factory=lambda: {"tools": []})
 
 
 def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], int]:

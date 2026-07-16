@@ -87,10 +87,18 @@ async def test_http_tool_context_fails_closed_for_marked_session_without_record(
 async def test_http_tool_context_keeps_unmarked_session_behavior(
     tmp_path: Path,
     isolated_storage,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root_session = await Session.create(
         project_id="project-1",
         directory=str(tmp_path / "workspace"),
+    )
+
+    expected_ceiling = {"tools": ["read"], "permission_mode": "readonly"}
+    build_context = AsyncMock(return_value={"parent_ceiling": expected_ceiling})
+    monkeypatch.setattr(
+        "flocks.security.execution_context.build_root_execution_security_context",
+        build_context,
     )
 
     context = await _build_http_tool_context(
@@ -101,7 +109,13 @@ async def test_http_tool_context_keeps_unmarked_session_behavior(
         agent="rex",
     )
 
-    assert context.extra == {}
+    assert context.extra["parent_ceiling"] == expected_ceiling
+    build_context.assert_awaited_once_with(
+        session_id=root_session.id,
+        agent_name=root_session.agent,
+        workspace=root_session.directory,
+        supplied_context={},
+    )
 
 
 @pytest.mark.asyncio

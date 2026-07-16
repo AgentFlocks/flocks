@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -30,6 +31,12 @@ async def test_build_workflow_tool_context_creates_temp_parent_session_and_messa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    expected_ceiling = {"tools": ["read"]}
+    build_context = AsyncMock(return_value={"parent_ceiling": expected_ceiling})
+    monkeypatch.setattr(
+        "flocks.security.execution_context.build_root_execution_security_context",
+        build_context,
+    )
 
     tool_context = await build_workflow_tool_context(
         workflow_id="wf-1",
@@ -46,6 +53,7 @@ async def test_build_workflow_tool_context_creates_temp_parent_session_and_messa
     assert session.directory == str(tmp_path)
     assert tool_context.extra["workspace_dir"] == str(tmp_path)
     assert tool_context.extra["main_session_key"] == tool_context.session_id
+    assert tool_context.extra["parent_ceiling"] == expected_ceiling
 
     message = await Message.get(tool_context.session_id, tool_context.message_id)
     assert message is not None

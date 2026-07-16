@@ -120,3 +120,36 @@ async def test_marked_delegated_session_restores_original_ceiling_on_continuatio
     assert continued["subject"] == {"subject_id": "user-1"}
     assert "must-not-leak" not in str(continued)
     assert root == {"entry": "webui"}
+
+
+@pytest.mark.asyncio
+async def test_delegation_context_preserves_safe_non_tool_capability_attributes(
+    tmp_path,
+) -> None:
+    from flocks.storage.storage import Storage
+    from flocks.security.delegation_context import load_delegation_security_context
+
+    await Storage.init(tmp_path / "delegation-attributes.db")
+    attributes = {
+        "permission_mode": "readonly",
+        "execution_mode": "foreground",
+        "development_mode": "locked",
+        "network_profile": "internal-only",
+        "data_domains": ["tenant-a"],
+        "secret_scopes": ["read-only"],
+    }
+    await store_delegation_security_context(
+        "child-attributes",
+        {
+            "parent_ceiling": {"tools": ["read"], **attributes},
+            **attributes,
+            "token": "must-not-leak",
+        },
+    )
+
+    restored = await load_delegation_security_context("child-attributes")
+
+    assert restored is not None
+    for key, value in attributes.items():
+        assert restored[key] == value
+    assert "must-not-leak" not in str(restored)

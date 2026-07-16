@@ -75,6 +75,7 @@ def _set_agents_ref(agents: Dict[str, AgentInfo]) -> None:
 # Metadata query helpers  (merged from metadata.py)
 # ---------------------------------------------------------------------------
 
+
 def is_delegatable(agent_name: str) -> bool:
     if _agents_ref and agent_name in _agents_ref:
         return bool(_agents_ref[agent_name].delegatable)
@@ -115,14 +116,17 @@ def list_subagents() -> List[str]:
 # Delegation candidate list builder
 # ---------------------------------------------------------------------------
 
+
 def _make_default_prompt_metadata(agent: AgentInfo) -> AgentPromptMetadata:
     return AgentPromptMetadata(
         category="plugin",
         cost="medium",
-        triggers=[DelegationTrigger(
-            domain=agent.name,
-            trigger=agent.description or f"Tasks requiring {agent.name}",
-        )],
+        triggers=[
+            DelegationTrigger(
+                domain=agent.name,
+                trigger=agent.description or f"Tasks requiring {agent.name}",
+            )
+        ],
     )
 
 
@@ -132,11 +136,13 @@ def _build_available_agents(agents: Dict[str, AgentInfo]) -> List[AvailableAgent
         if not (agent.delegatable and agent.mode != "primary" and not agent.hidden):
             continue
         metadata = agent.prompt_metadata or _make_default_prompt_metadata(agent)
-        available.append(AvailableAgent(
-            name=agent.name,
-            description=agent.description or "",
-            metadata=metadata,
-        ))
+        available.append(
+            AvailableAgent(
+                name=agent.name,
+                description=agent.description or "",
+                metadata=metadata,
+            )
+        )
     return available
 
 
@@ -172,6 +178,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         hidden=agent_data.get("hidden", False),
         delegatable=agent_data.get("delegatable"),
         tools=agent_data.get("tools", []),
+        capability_tools=agent_data.get("capability_tools"),
         tags=agent_data.get("tags", []),
     )
 
@@ -180,6 +187,7 @@ async def _load_storage_custom_agents(existing_names: Set[str]) -> Dict[str, Age
     """Load Storage-backed custom agents created by POST /api/agent."""
     try:
         from flocks.storage.storage import Storage
+
         entries = await Storage.list_entries("agent/custom/")
     except Exception as exc:
         log.warn("agent.registry.storage_custom_load_error", {"error": str(exc)})
@@ -193,10 +201,13 @@ async def _load_storage_custom_agents(existing_names: Set[str]) -> Dict[str, Age
         if agent is None:
             continue
         if agent.name in existing_names or agent.name in loaded:
-            log.warn("agent.registry.storage_custom_name_conflict", {
-                "name": agent.name,
-                "key": key,
-            })
+            log.warn(
+                "agent.registry.storage_custom_name_conflict",
+                {
+                    "name": agent.name,
+                    "key": key,
+                },
+            )
             continue
         loaded[agent.name] = agent
     return loaded
@@ -213,6 +224,7 @@ def _apply_delegatable_overrides(agents: Dict[str, AgentInfo]) -> None:
 # ---------------------------------------------------------------------------
 # Agent registry
 # ---------------------------------------------------------------------------
+
 
 class Agent:
     """
@@ -261,8 +273,7 @@ class Agent:
         # agent's system prompt context.  All() would include them.
         skills = await Skill.list_enabled()
         available_skills = [
-            AvailableSkill(name=s.name, description=s.description, location=s.source or "project")
-            for s in skills
+            AvailableSkill(name=s.name, description=s.description, location=s.source or "project") for s in skills
         ]
         category_configs = {**DEFAULT_CATEGORIES, **(cfg.categories or {})}
         available_categories = [
@@ -281,21 +292,23 @@ class Agent:
         available_workflows: List[AvailableWorkflow] = []
         try:
             from flocks.workflow.center import scan_skill_workflows
+
             workflow_entries = await scan_skill_workflows()
             for entry in workflow_entries:
-                available_workflows.append(AvailableWorkflow(
-                    name=entry.get("name") or "",
-                    description=entry.get("description") or "",
-                    path=entry.get("workflowPath") or "",
-                    source=entry.get("sourceType") or "project",
-                ))
+                available_workflows.append(
+                    AvailableWorkflow(
+                        name=entry.get("name") or "",
+                        description=entry.get("description") or "",
+                        path=entry.get("workflowPath") or "",
+                        source=entry.get("sourceType") or "project",
+                    )
+                )
         except Exception as _wf_err:
             log.debug("agent.registry.workflow_scan_skipped", {"error": str(_wf_err)})
 
         user_perms = from_config(cfg.permission or {})
         cli_run_mode = (
-            os.environ.get("FLOCKS_CLI_RUN_MODE") == "true"
-            or os.environ.get("FLOCKS_CLI_RUN_MODE") == "true"
+            os.environ.get("FLOCKS_CLI_RUN_MODE") == "true" or os.environ.get("FLOCKS_CLI_RUN_MODE") == "true"
         )
         cli_overrides = from_config({"question": "deny"}) if cli_run_mode else []
 
@@ -317,22 +330,27 @@ class Agent:
         def _consume_agents(agents: list, source: str) -> None:
             for agent in agents:
                 if agent.name in result:
-                    log.warn("plugin.name_conflict", {
-                        "name": agent.name,
-                        "source": source,
-                        "hint": f"Plugin agent '{agent.name}' conflicts with existing agent, skipped",
-                    })
+                    log.warn(
+                        "plugin.name_conflict",
+                        {
+                            "name": agent.name,
+                            "source": source,
+                            "hint": f"Plugin agent '{agent.name}' conflicts with existing agent, skipped",
+                        },
+                    )
                     continue
                 result[agent.name] = agent
 
-        PluginLoader.register_extension_point(ExtensionPoint(
-            attr_name="AGENTS",
-            subdir="agents",
-            item_type=AgentInfo,
-            dedup_key=lambda a: a.name,
-            consumer=_consume_agents,
-            yaml_item_factory=_yaml_to_agent_info,
-        ))
+        PluginLoader.register_extension_point(
+            ExtensionPoint(
+                attr_name="AGENTS",
+                subdir="agents",
+                item_type=AgentInfo,
+                dedup_key=lambda a: a.name,
+                consumer=_consume_agents,
+                yaml_item_factory=_yaml_to_agent_info,
+            )
+        )
         PluginLoader.load_extension(
             "AGENTS",
             extra_sources=cfg.plugin or [],
@@ -629,6 +647,7 @@ class Agent:
         if agent_declares_tool(agent, tool):
             return True
         from flocks.tool.catalog import get_always_load_tool_names
+
         return tool in get_always_load_tool_names()
 
     # ── Agent generation (LLM-assisted) ────────────────────────────────────
@@ -650,6 +669,7 @@ class Agent:
 
         from flocks.session.prompt import SystemPrompt
         from flocks.session.prompt_strings import PROMPT_GENERATE
+
         system = SystemPrompt.header(provider_id)
         if hasattr(system, "append"):
             system.append(PROMPT_GENERATE)
@@ -827,9 +847,7 @@ class AgentFileWatcher:
         with self._lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
-            self._debounce_timer = threading.Timer(
-                self._DEBOUNCE_SECONDS, self._do_invalidate
-            )
+            self._debounce_timer = threading.Timer(self._DEBOUNCE_SECONDS, self._do_invalidate)
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 
@@ -842,6 +860,7 @@ class AgentFileWatcher:
         dirs: Set[str] = set()
         try:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
+
             user_dir = str(DEFAULT_PLUGIN_ROOT / "agents")
         except Exception:
             user_dir = str(Path.home() / ".flocks" / "plugins" / "agents")
@@ -863,23 +882,27 @@ class AgentFileWatcher:
 # Base permission helper (for user-override created agents)
 # ---------------------------------------------------------------------------
 
+
 def _build_base_permissions(user_perms, cli_overrides):
     """Allow-all default permission set for user-created agents."""
     from flocks.agent.constants import Truncate
-    defaults = from_config({
-        "*": "allow",
-        "doom_loop": "ask",
-        "external_directory": {
-            "*": "ask",
-            f"{Truncate.DIR}": "allow",
-            f"{Truncate.GLOB}": "allow",
-        },
-        "question": "deny",
-        "read": {
+
+    defaults = from_config(
+        {
             "*": "allow",
-            "*.env": "ask",
-            "*.env.*": "ask",
-            "*.env.example": "allow",
-        },
-    })
+            "doom_loop": "ask",
+            "external_directory": {
+                "*": "ask",
+                f"{Truncate.DIR}": "allow",
+                f"{Truncate.GLOB}": "allow",
+            },
+            "question": "deny",
+            "read": {
+                "*": "allow",
+                "*.env": "ask",
+                "*.env.*": "ask",
+                "*.env.example": "allow",
+            },
+        }
+    )
     return merge(defaults, user_perms, cli_overrides)

@@ -10,11 +10,16 @@ from flocks.storage.storage import Storage
 
 
 _DELEGATION_CONTEXT_PREFIX = "security:delegation:"
-_SAFE_CONTEXT_KEYS = (
+_SAFE_CONTEXT_SCALAR_KEYS = (
     "entry",
     "permission_mode",
     "execution_mode",
     "development_mode",
+    "network_profile",
+)
+_SAFE_CONTEXT_COLLECTION_KEYS = (
+    "data_domains",
+    "secret_scopes",
 )
 
 
@@ -35,10 +40,17 @@ def normalize_delegation_security_context(value: Any) -> Optional[dict[str, Any]
     subject = _safe_subject(value.get("subject"))
     if subject:
         normalized["subject"] = subject
-    for key in _SAFE_CONTEXT_KEYS:
+    for key in _SAFE_CONTEXT_SCALAR_KEYS:
         raw_value = value.get(key)
         if isinstance(raw_value, str) and raw_value.strip():
             normalized[key] = raw_value.strip()
+    for key in _SAFE_CONTEXT_COLLECTION_KEYS:
+        raw_values = value.get(key)
+        if not isinstance(raw_values, (list, tuple, set, frozenset)):
+            continue
+        cleaned_values = [item.strip() for item in raw_values if isinstance(item, str) and item.strip()]
+        if len(cleaned_values) == len(raw_values):
+            normalized[key] = cleaned_values
     return normalized
 
 

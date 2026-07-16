@@ -22,6 +22,7 @@ from flocks.tool.delegate_task_constants import (
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
+
 # 使用轻量级元数据查询，避免循环依赖
 from flocks.agent.registry import is_delegatable
 from flocks.skill.skill import Skill
@@ -30,10 +31,12 @@ from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 from flocks.security.capability_pool import (
     _safe_subject,
+    capability_ceiling_audit_summary,
     derive_child_capability_ceiling,
     normalize_capability_ceiling,
 )
 from flocks.security.delegation_context import store_delegation_security_context
+from flocks.audit import emit_audit_event
 
 log = Log.create(service="tool.delegate_task")
 
@@ -48,9 +51,31 @@ async def _build_delegated_security_context(
     if parent_ceiling is None:
         parent_ceiling = extra.get("parent_ceiling")
     if parent_ceiling is None:
-        # Manual/root calls without an execution ceiling retain legacy OSS
-        # behavior.  They must not create a fake delegated marker.
-        return None
+        # Direct HTTP, service, and legacy task callers may bypass Runner.  A
+        # root parent is still required to derive its capability ceiling from
+        # server-owned session state; failure is explicit and fail-closed.
+        try:
+            from flocks.security.execution_context import build_root_execution_security_context
+
+            parent_session = await Session.get_by_id(ctx.session_id)
+            if parent_session is None:
+                return {"parent_ceiling": {"invalid": True}}
+            extra = await build_root_execution_security_context(
+                session_id=parent_session.id,
+                agent_name=str(getattr(parent_session, "agent", None) or ctx.agent or "rex"),
+                workspace=str(getattr(parent_session, "directory", None) or ""),
+                supplied_context=extra,
+            )
+            parent_ceiling = extra.get("parent_ceiling")
+        except Exception as exc:
+            log.warning(
+                "delegate_task.root_capability_ceiling.build_failed",
+                {
+                    "session_id": ctx.session_id,
+                    "error": type(exc).__name__,
+                },
+            )
+            return {"parent_ceiling": {"invalid": True}}
 
     normalized_parent = normalize_capability_ceiling(parent_ceiling)
     if normalized_parent is None:
@@ -64,6 +89,11 @@ async def _build_delegated_security_context(
         declared_tools = getattr(child_agent, "tools", None) if child_agent is not None else None
         if not isinstance(declared_tools, (list, tuple, set, frozenset)):
             return {"parent_ceiling": {"invalid": True}}
+        capability_tools = getattr(child_agent, "capability_tools", None)
+        if capability_tools == "all_enabled":
+            declared_tools = get_all_enabled_tool_names()
+        elif isinstance(capability_tools, (list, tuple, set, frozenset)):
+            declared_tools = capability_tools
         child_pool = resolve_capability_pool(
             declared_tools,
             get_all_enabled_tool_names(),
@@ -73,20 +103,36 @@ async def _build_delegated_security_context(
             child_tools=child_pool.tools,
         )
     except Exception as exc:
-        log.warning("delegate_task.capability_ceiling.build_failed", {
-            "agent": child_agent_name,
-            "error": type(exc).__name__,
-        })
+        log.warning(
+            "delegate_task.capability_ceiling.build_failed",
+            {
+                "agent": child_agent_name,
+                "error": type(exc).__name__,
+            },
+        )
         child_ceiling = {"invalid": True}
 
     result: Dict[str, Any] = {"parent_ceiling": child_ceiling}
     subject = _safe_subject(extra.get("subject"))
     if subject:
         result["subject"] = subject
-    for key in ("entry", "permission_mode", "execution_mode", "development_mode"):
-        value = extra.get(key)
+    for key in (
+        "entry",
+        "permission_mode",
+        "execution_mode",
+        "development_mode",
+        "network_profile",
+    ):
+        value = extra.get(key, normalized_parent.get(key))
         if isinstance(value, str) and value.strip():
             result[key] = value.strip()
+    for key in ("data_domains", "secret_scopes"):
+        values = extra.get(key, normalized_parent.get(key))
+        if not isinstance(values, (list, tuple, set, frozenset)):
+            continue
+        cleaned_values = [item.strip() for item in values if isinstance(item, str) and item.strip()]
+        if len(cleaned_values) == len(values):
+            result[key] = cleaned_values
     return result
 
 
@@ -98,10 +144,13 @@ async def _subagent_session_permissions(agent_name: str) -> list:
     try:
         agent = await Agent.get(agent_name)
     except Exception as exc:
-        log.debug("delegate_task.subagent_permission_agent_load_failed", {
-            "agent": agent_name,
-            "error": str(exc),
-        })
+        log.debug(
+            "delegate_task.subagent_permission_agent_load_failed",
+            {
+                "agent": agent_name,
+                "error": str(exc),
+            },
+        )
         agent = None
     rules: list = []
     if agent_name != "prometheus":
@@ -122,11 +171,13 @@ async def _subagent_session_permissions(agent_name: str) -> list:
         return rules
 
     if agent_name == "prometheus":
-        rules.extend([
-            SessionPermissionRule(permission="question", action="allow", pattern="*"),
-            SessionPermissionRule(permission="edit", action="deny", pattern="*"),
-            SessionPermissionRule(permission="edit", action="allow", pattern=".flocks/plans/*"),
-        ])
+        rules.extend(
+            [
+                SessionPermissionRule(permission="question", action="allow", pattern="*"),
+                SessionPermissionRule(permission="edit", action="deny", pattern="*"),
+                SessionPermissionRule(permission="edit", action="allow", pattern=".flocks/plans/*"),
+            ]
+        )
     elif not rules:
         rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
     return rules
@@ -141,7 +192,9 @@ def _parse_model(model: Optional[str]) -> Optional[Dict[str, str]]:
     return {"modelID": model}
 
 
-def _validate_category_model(category_model: Optional[Dict[str, str]], category: Optional[str]) -> Optional[Dict[str, str]]:
+def _validate_category_model(
+    category_model: Optional[Dict[str, str]], category: Optional[str]
+) -> Optional[Dict[str, str]]:
     """Validate that the category model's provider is available and has the model registered.
 
     Returns the original model dict when valid, or None to signal the caller
@@ -157,41 +210,54 @@ def _validate_category_model(category_model: Optional[Dict[str, str]], category:
 
     try:
         from flocks.provider.provider import Provider
+
         provider = Provider.get(provider_id)
         if not provider:
-            log.warn("delegate_task.category_model_fallback", {
-                "category": category,
-                "provider": provider_id,
-                "model": model_id,
-                "reason": "provider not registered",
-            })
+            log.warn(
+                "delegate_task.category_model_fallback",
+                {
+                    "category": category,
+                    "provider": provider_id,
+                    "model": model_id,
+                    "reason": "provider not registered",
+                },
+            )
             return None
 
         if not provider.is_configured():
-            log.warn("delegate_task.category_model_fallback", {
-                "category": category,
-                "provider": provider_id,
-                "model": model_id,
-                "reason": "provider not configured",
-            })
+            log.warn(
+                "delegate_task.category_model_fallback",
+                {
+                    "category": category,
+                    "provider": provider_id,
+                    "model": model_id,
+                    "reason": "provider not configured",
+                },
+            )
             return None
 
         registered_ids = {m.id for m in provider.get_models()}
         if model_id not in registered_ids:
-            log.warn("delegate_task.category_model_fallback", {
-                "category": category,
-                "provider": provider_id,
-                "model": model_id,
-                "reason": "model not found in provider",
-                "available_models": list(registered_ids)[:10],
-            })
+            log.warn(
+                "delegate_task.category_model_fallback",
+                {
+                    "category": category,
+                    "provider": provider_id,
+                    "model": model_id,
+                    "reason": "model not found in provider",
+                    "available_models": list(registered_ids)[:10],
+                },
+            )
             return None
 
     except Exception as exc:
-        log.warn("delegate_task.category_model_validate_error", {
-            "category": category,
-            "error": str(exc),
-        })
+        log.warn(
+            "delegate_task.category_model_validate_error",
+            {
+                "category": category,
+                "error": str(exc),
+            },
+        )
         return None
 
     return category_model
@@ -206,6 +272,7 @@ async def _find_completed_delegate(
     """Return a previous ToolResult if an identical delegate_task already completed."""
     try:
         from flocks.session.message import ToolPart
+
         messages = await Message.list(session_id)
         for msg in messages:
             if msg.id == current_message_id:
@@ -225,6 +292,7 @@ async def _find_completed_delegate(
                     output = getattr(state, "output", "")
                     if isinstance(output, dict):
                         import json as _json
+
                         output = _json.dumps(output, ensure_ascii=False)
                     meta = getattr(state, "metadata", {}) or {}
                     return ToolResult(
@@ -317,6 +385,7 @@ LOAD_SKILLS is optional and defaults to [].
 DESCRIPTION is optional and will be auto-derived when omitted.
 USE EITHER subagent_type OR category — NEVER both simultaneously.
 """
+
 
 @ToolRegistry.register_function(
     name="delegate_task",
@@ -423,11 +492,14 @@ async def delegate_task_tool(
         agent_key = subagent_type or category
         prev = await _find_completed_delegate(ctx.session_id, ctx.message_id, agent_key, description)
         if prev is not None:
-            log.info("delegate_task.dedup_hit", {
-                "session_id": ctx.session_id,
-                "agent_key": agent_key,
-                "description": description,
-            })
+            log.info(
+                "delegate_task.dedup_hit",
+                {
+                    "session_id": ctx.session_id,
+                    "agent_key": agent_key,
+                    "description": description,
+                },
+            )
             return prev
 
     skill_result = await _resolve_skill_content(load_skills)
@@ -453,6 +525,7 @@ async def delegate_task_tool(
             agent=session.agent or ctx.agent,
         )
         from flocks.session.session_loop import LoopCallbacks
+
         result = await SessionLoop.run(
             session.id,
             callbacks=LoopCallbacks(
@@ -473,18 +546,22 @@ async def delegate_task_tool(
         if not config:
             available = ", ".join(category_configs.keys())
             return ToolResult(success=False, error=f'Unknown category "{category}". Available: {available}')
-        raw_model = explicit_model or _parse_model(config.get("model") if isinstance(config, dict) else getattr(config, "model", None))
+        raw_model = explicit_model or _parse_model(
+            config.get("model") if isinstance(config, dict) else getattr(config, "model", None)
+        )
         category_model = _validate_category_model(raw_model, category)
         if raw_model and not category_model:
-            log.info("delegate_task.using_parent_model", {
-                "category": category,
-                "original_model": raw_model,
-                "reason": "category model unavailable, inheriting parent session model",
-            })
+            log.info(
+                "delegate_task.using_parent_model",
+                {
+                    "category": category,
+                    "original_model": raw_model,
+                    "reason": "category model unavailable, inheriting parent session model",
+                },
+            )
         category_prompt_append = (
-            (config.get("prompt_append") if isinstance(config, dict) else getattr(config, "prompt_append", None))
-            or CATEGORY_PROMPT_APPENDS.get(category)
-        )
+            config.get("prompt_append") if isinstance(config, dict) else getattr(config, "prompt_append", None)
+        ) or CATEGORY_PROMPT_APPENDS.get(category)
     elif subagent_type:
         # 使用轻量级元数据查询，避免循环依赖
         # 不再调用 Agent.get()，而是使用 is_delegatable()
@@ -541,13 +618,43 @@ async def delegate_task_tool(
         try:
             await store_delegation_security_context(created.id, delegation_security_context)
         except Exception as exc:
-            log.error("delegate_task.capability_ceiling.persist_failed", {
-                "session_id": created.id,
-                "error": type(exc).__name__,
-            })
+            log.error(
+                "delegate_task.capability_ceiling.persist_failed",
+                {
+                    "session_id": created.id,
+                    "error": type(exc).__name__,
+                },
+            )
             return ToolResult(
                 success=False,
                 error="Unable to establish delegated capability ceiling.",
+            )
+        try:
+            ceiling = delegation_security_context.get("parent_ceiling")
+            await emit_audit_event(
+                "capability.delegate",
+                {
+                    "session_id": parent_session.id,
+                    "parent_session_id": parent_session.id,
+                    "child_session_id": created.id,
+                    "parent_agent": str(getattr(parent_session, "agent", None) or ctx.agent or ""),
+                    "child_agent": agent_to_use,
+                    "entry": delegation_security_context.get("entry"),
+                    "subject": _safe_subject(delegation_security_context.get("subject")),
+                    "capability": {
+                        "source": "parent_ceiling_intersect_child_declaration",
+                        **capability_ceiling_audit_summary(ceiling),
+                    },
+                },
+            )
+        except Exception as exc:
+            # Auditing must not make a successfully bounded delegation fail.
+            log.warning(
+                "delegate_task.capability_ceiling.audit_failed",
+                {
+                    "session_id": created.id,
+                    "error": type(exc).__name__,
+                },
             )
     await Message.create(
         session_id=created.id,

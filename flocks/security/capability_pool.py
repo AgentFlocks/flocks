@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any, Iterable, Mapping, Optional
 
 from flocks.hooks.pipeline import HookPipeline, HookStage
@@ -131,6 +132,24 @@ def sanitize_parent_ceiling(value: Any) -> Optional[dict[str, Any]]:
         return None
     normalized = normalize_capability_ceiling(value)
     return normalized if normalized is not None else {"invalid": True}
+
+
+def capability_ceiling_audit_summary(value: Any) -> dict[str, Any]:
+    """Return a secret-free, stable summary suitable for delegation audit."""
+    normalized = normalize_capability_ceiling(value)
+    if normalized is None:
+        return {"valid": False}
+    tools = normalized["tools"]
+    tools_hash = hashlib.sha256("\n".join(sorted(tools)).encode("utf-8")).hexdigest()
+    collection_counts = {key: len(normalized[key]) for key in _CEILING_COLLECTION_KEYS if key in normalized}
+    scalar_keys = [key for key in _CEILING_SCALAR_KEYS if key in normalized]
+    return {
+        "valid": True,
+        "tool_count": len(tools),
+        "tools_hash": tools_hash,
+        "scalar_keys": scalar_keys,
+        "collection_counts": collection_counts,
+    }
 
 
 def _intersect_capability_ceilings(
@@ -266,11 +285,7 @@ def _safe_subject(value: Any) -> dict[str, Any]:
         safe_subject["tenant_ids"] = tenant_ids
 
     explicit_tenant_id = safe_subject.get("tenant_id")
-    explicit_tenant_id = (
-        explicit_tenant_id.strip()
-        if isinstance(explicit_tenant_id, str)
-        else ""
-    )
+    explicit_tenant_id = explicit_tenant_id.strip() if isinstance(explicit_tenant_id, str) else ""
     if explicit_tenant_id and (not tenant_ids or explicit_tenant_id in tenant_ids):
         safe_subject["tenant_id"] = explicit_tenant_id
     elif len(tenant_ids) == 1:
@@ -317,11 +332,7 @@ def _requested_pool(requested: Any, context: Optional[Mapping[str, Any]]) -> Opt
 def _requested_pools(output: Mapping[str, Any], context: Optional[Mapping[str, Any]]) -> list[CapabilityPool]:
     candidates = output.get("capability_filters")
     if isinstance(candidates, list):
-        return [
-            pool
-            for candidate in candidates
-            if (pool := _requested_pool(candidate, context)) is not None
-        ]
+        return [pool for candidate in candidates if (pool := _requested_pool(candidate, context)) is not None]
 
     requested_pool = _requested_pool(output.get("capability_pool"), context)
     return [requested_pool] if requested_pool is not None else []
@@ -333,23 +344,65 @@ async def filter_capability_pool(
     context: Optional[Mapping[str, Any]],
 ) -> CapabilityPool:
     """Apply an optional capability hook without allowing capability expansion."""
-    hook_input = _hook_input(pool, context)
+    filtered_pool = await _filter_runtime_tool_policy(pool, context=context)
+    hook_input = _hook_input(filtered_pool, context)
     try:
         has_handlers = await HookPipeline.has_stage_handlers(
             HookStage.CAPABILITY_FILTER,
             hook_input,
         )
     except Exception:
-        return pool
+        return filtered_pool
     if not has_handlers:
-        return pool
+        return filtered_pool
 
     try:
         hook_context = await HookPipeline.run_capability_filter(hook_input)
     except Exception:
-        return pool
+        return filtered_pool
 
-    filtered_pool = pool
     for requested_pool in _requested_pools(hook_context.output, context):
         filtered_pool = filtered_pool.intersect(requested_pool, source=HookStage.CAPABILITY_FILTER)
     return filtered_pool
+
+
+async def _filter_runtime_tool_policy(
+    pool: CapabilityPool,
+    *,
+    context: Optional[Mapping[str, Any]],
+) -> CapabilityPool:
+    """Apply global ∩ agent tool_policy before schema or hook exposure.
+
+    Sandbox enablement controls where a tool runs, not whether the configured
+    allow/deny policy is a capability limit.  The same policy therefore applies
+    to normal sessions, HTTP execution, and workflow execution.
+    """
+    raw_context = context if isinstance(context, Mapping) else {}
+    try:
+        from flocks.sandbox.tool_policy import is_tool_allowed
+        from flocks.sandbox.runtime_status import resolve_sandbox_runtime_status
+
+        config_data = raw_context.get("_config_data")
+        if not isinstance(config_data, Mapping):
+            from flocks.config import Config
+
+            config = await Config.get()
+            config_data = config.model_dump(by_alias=True, exclude_none=True)
+        runtime = resolve_sandbox_runtime_status(
+            config_data=dict(config_data),
+            session_key=str(raw_context.get("sessionID") or ""),
+            agent_id=str(raw_context.get("agent") or "rex"),
+            main_session_key=str(raw_context.get("main_session_key") or raw_context.get("sessionID") or ""),
+        )
+        allowed = [tool_name for tool_name in pool.tools if is_tool_allowed(runtime.tool_policy, tool_name)]
+    except Exception:
+        # Configuration availability is not an authorization source.  Preserve
+        # existing OSS behavior if it cannot be read; an active Pro B3 gate can
+        # still apply its independent fail-closed source policy.
+        return pool
+    if tuple(allowed) == pool.tools:
+        return pool
+    return pool.intersect(
+        CapabilityPool.from_tools(allowed, context=context),
+        source="sandbox.tool_policy",
+    )

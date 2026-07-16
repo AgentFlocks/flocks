@@ -3,7 +3,7 @@ Session runner module.
 
 Core session execution logic including:
 - Session loop (message processing)
-- Tool resolution and execution  
+- Tool resolution and execution
 - LLM interaction with tool support
 
 Implements session/prompt.ts SessionPrompt namespace pattern.
@@ -93,6 +93,8 @@ def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) 
     if not base.strip():
         return note
     return f"{base.rstrip()}\n\n{note}"
+
+
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 
@@ -178,13 +180,16 @@ async def _iter_with_chunk_timeout(
 @dataclass
 class ToolCall:
     """Tool call from LLM response."""
+
     id: str
     name: str
     arguments: Dict[str, Any]
 
+
 @dataclass
 class StepResult:
     """Result of a single processing step."""
+
     action: str  # "stop", "continue", "compact"
     content: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
@@ -195,6 +200,7 @@ class StepResult:
 @dataclass
 class RunnerCallbacks:
     """Callbacks for runner events."""
+
     on_step_start: Optional[Callable[[int], Awaitable[None]]] = None
     on_step_end: Optional[Callable[[int], Awaitable[None]]] = None
     on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None
@@ -210,20 +216,20 @@ class RunnerCallbacks:
 class SessionRunner:
     """
     Core session runner.
-    
+
     Manages the session execution loop:
     1. Get messages from session
     2. Check if LLM response is needed
     3. Call LLM with tools
     4. Execute tool calls
     5. Loop until complete
-    
+
     Implements SessionPrompt.loop()
     """
-    
+
     # Class-level state for active sessions
-    _active_sessions: Dict[str, 'SessionRunner'] = {}
-    
+    _active_sessions: Dict[str, "SessionRunner"] = {}
+
     def __init__(
         self,
         session: SessionInfo,
@@ -239,6 +245,7 @@ class SessionRunner:
     ):
         self.session = session
         from flocks.session.core.defaults import fallback_provider_id, fallback_model_id
+
         self.provider_id = provider_id or fallback_provider_id()
         self.model_id = model_id or fallback_model_id()
         self.agent_name = agent_name or "rex"
@@ -320,11 +327,13 @@ class SessionRunner:
         if state.get("last_signature") == signature:
             exact_count = int(state.get("exact_count", 0)) + 1
 
-        state.update({
-            "last_user_id": last_user_id,
-            "last_signature": signature,
-            "exact_count": exact_count,
-        })
+        state.update(
+            {
+                "last_user_id": last_user_id,
+                "last_signature": signature,
+                "exact_count": exact_count,
+            }
+        )
 
         if exact_count >= REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD:
             return {
@@ -390,11 +399,14 @@ class SessionRunner:
         if not self.callbacks.event_publish_callback:
             return
         try:
-            await self.callbacks.event_publish_callback("turn.tools_selected", {
-                "sessionID": self.session.id,
-                "step": self._step,
-                **selection_metadata,
-            })
+            await self.callbacks.event_publish_callback(
+                "turn.tools_selected",
+                {
+                    "sessionID": self.session.id,
+                    "step": self._step,
+                    **selection_metadata,
+                },
+            )
         except Exception as exc:
             log.debug("runner.turn_tools_selected.publish_failed", {"error": str(exc)})
 
@@ -443,10 +455,7 @@ class SessionRunner:
         preview = normalized[:TOOL_RESULT_PREVIEW_CHARS]
         suffix = "..." if len(normalized) > TOOL_RESULT_PREVIEW_CHARS else ""
         if preview:
-            placeholder = (
-                f"[Context compacted: `{tool_name}` output omitted to save space. "
-                f"Preview: {preview}{suffix}]"
-            )
+            placeholder = f"[Context compacted: `{tool_name}` output omitted to save space. Preview: {preview}{suffix}]"
         else:
             placeholder = f"[Context compacted: `{tool_name}` output omitted to save space.]"
         return placeholder, preview
@@ -497,13 +506,15 @@ class SessionRunner:
         state = getattr(part, "state", None)
         if state is not None:
             metadata = dict(getattr(state, "metadata", None) or {})
-            metadata.update({
-                "context_compacted": True,
-                "context_compact_reason": reason,
-                "context_compact_preview": preview,
-                "context_compact_placeholder": placeholder,
-                "context_compacted_step": self._step,
-            })
+            metadata.update(
+                {
+                    "context_compacted": True,
+                    "context_compact_reason": reason,
+                    "context_compact_preview": preview,
+                    "context_compact_placeholder": placeholder,
+                    "context_compacted_step": self._step,
+                }
+            )
             state.metadata = metadata
             time_info = dict(getattr(state, "time", None) or {})
             time_info["compacted"] = int(datetime.now().timestamp() * 1000)
@@ -551,13 +562,16 @@ class SessionRunner:
         persisted = await self._persist_tool_compaction(tool_result_refs)
         if compacted and self.callbacks.event_publish_callback:
             try:
-                await self.callbacks.event_publish_callback("context.compacted", {
-                    "sessionID": self.session.id,
-                    "step": self._step,
-                    "reason": "tool_result_budget",
-                    "compactedToolResults": compacted,
-                    "persistedToolResults": persisted,
-                })
+                await self.callbacks.event_publish_callback(
+                    "context.compacted",
+                    {
+                        "sessionID": self.session.id,
+                        "step": self._step,
+                        "reason": "tool_result_budget",
+                        "compactedToolResults": compacted,
+                        "persistedToolResults": persisted,
+                    },
+                )
             except Exception as exc:
                 log.debug("runner.context_compacted.publish_failed", {"error": str(exc)})
 
@@ -576,10 +590,16 @@ class SessionRunner:
     # checked separately via ``startswith`` because their ids follow the
     # pattern ``custom-<user-chosen-name>`` and they always use the
     # ``@ai-sdk/openai-compatible`` adapter that handles vision blocks.
-    _MULTIMODAL_PROVIDER_NAMES = frozenset({
-        "anthropic", "openai", "azure",
-        "vertex", "bedrock", "openrouter",
-    })
+    _MULTIMODAL_PROVIDER_NAMES = frozenset(
+        {
+            "anthropic",
+            "openai",
+            "azure",
+            "vertex",
+            "bedrock",
+            "openrouter",
+        }
+    )
 
     def _model_supports_vision(self) -> bool:
         """Best-effort vision capability lookup from the model definition.
@@ -617,10 +637,7 @@ class SessionRunner:
         if self._model_supports_vision():
             return True
         provider_id = (self.provider_id or "").lower()
-        return (
-            provider_id in self._MULTIMODAL_PROVIDER_NAMES
-            or provider_id.startswith("custom-")
-        )
+        return provider_id in self._MULTIMODAL_PROVIDER_NAMES or provider_id.startswith("custom-")
 
     def _append_file_content_block(
         self,
@@ -642,16 +659,19 @@ class SessionRunner:
         is_image = mime.startswith("image/")
         multimodal_ok = self._supports_multimodal_user_content()
 
-        log.info("runner.file_part.dispatch", {
-            "provider_id": self.provider_id,
-            "model_id": self.model_id,
-            "mime": mime,
-            "filename": filename,
-            "is_image": is_image,
-            "multimodal_supported": multimodal_ok,
-            "url_scheme": url.split(":", 1)[0] if url else None,
-            "url_size": len(url),
-        })
+        log.info(
+            "runner.file_part.dispatch",
+            {
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "mime": mime,
+                "filename": filename,
+                "is_image": is_image,
+                "multimodal_supported": multimodal_ok,
+                "url_scheme": url.split(":", 1)[0] if url else None,
+                "url_size": len(url),
+            },
+        )
 
         # For images we ALWAYS try the multimodal path first, regardless of
         # provider whitelist. The whitelist guards against silently degrading
@@ -662,18 +682,24 @@ class SessionRunner:
         # 250k-token context_length_exceeded error.
         if is_image:
             import base64 as _b64
+
             data = read_file_part_bytes(url)
             if data:
-                blocks.append({
-                    "type": "image",
-                    "mimeType": mime,
-                    "data": _b64.b64encode(data).decode("utf-8"),
-                })
+                blocks.append(
+                    {
+                        "type": "image",
+                        "mimeType": mime,
+                        "data": _b64.b64encode(data).decode("utf-8"),
+                    }
+                )
                 return
-            log.warn("runner.file_part.image_decode_failed", {
-                "provider_id": self.provider_id,
-                "filename": filename,
-            })
+            log.warn(
+                "runner.file_part.image_decode_failed",
+                {
+                    "provider_id": self.provider_id,
+                    "filename": filename,
+                },
+            )
             # Image bytes could not be read — fall through to placeholder
             # (which is intentionally tiny, never the raw URL).
 
@@ -691,79 +717,81 @@ class SessionRunner:
         MAX_PLACEHOLDER_CHARS = 200
         if is_image:
             placeholder = (
-                f"[Image: {filename} — model does not support image input; "
-                f"the image was omitted from the prompt]"
+                f"[Image: {filename} — model does not support image input; the image was omitted from the prompt]"
             )
-            log.info("runner.file_part.image_skipped", {
-                "provider_id": self.provider_id,
-                "model_id": self.model_id,
-                "reason": "multimodal_unsupported" if not multimodal_ok else "decode_failed",
-                "filename": filename,
-            })
+            log.info(
+                "runner.file_part.image_skipped",
+                {
+                    "provider_id": self.provider_id,
+                    "model_id": self.model_id,
+                    "reason": "multimodal_unsupported" if not multimodal_ok else "decode_failed",
+                    "filename": filename,
+                },
+            )
         else:
             safe_url = url if url and not url.startswith("data:") else ""
-            placeholder = (
-                f"[File: {filename}]({safe_url})" if safe_url else f"[File: {filename}]"
-            )
+            placeholder = f"[File: {filename}]({safe_url})" if safe_url else f"[File: {filename}]"
         if len(placeholder) > MAX_PLACEHOLDER_CHARS:
             placeholder = placeholder[:MAX_PLACEHOLDER_CHARS] + "…"
         text_fallbacks.append(placeholder)
 
     @classmethod
-    async def loop(cls, session_id: str) -> Optional['MessageInfo']:
+    async def loop(cls, session_id: str) -> Optional["MessageInfo"]:
         """
         Start or continue session processing loop.
-        
+
         This is the main entry point for session execution,
         matching Flocks' SessionPrompt.loop() behavior.
-        
+
         Now delegates to SessionLoop for better separation of concerns.
-        
+
         Args:
             session_id: Session ID to process
-            
+
         Returns:
             Last assistant message with parts
         """
         # Delegate to SessionLoop (new architecture)
         from flocks.session.session_loop import SessionLoop
-        
+
         result = await SessionLoop.run(session_id)
         return result.last_message
-    
+
     @classmethod
     def cancel(cls, session_id: str) -> bool:
         """
         Cancel a running session.
-        
+
         Args:
             session_id: Session ID to cancel
-            
+
         Returns:
             True if session was cancelled
         """
         from flocks.session.core.status import SessionStatus
-        
+
         runner = cls._active_sessions.get(session_id)
         if runner:
             runner.abort()
             del cls._active_sessions[session_id]
             log.info("runner.cancelled", {"session_id": session_id})
-        
+
         # Set status to idle (Flocks compatibility)
         from flocks.session.core.status import SessionStatusIdle
+
         SessionStatus.set(session_id, SessionStatusIdle())
         return True
-    
+
     @classmethod
     def cancel_children(cls, parent_session_id: str) -> int:
         """Cancel all runners whose session.parent_id matches, recursively."""
         from flocks.session.core.status import SessionStatus, SessionStatusIdle
-        
+
         cancelled = 0
         child_ids = [
-            sid for sid, runner in list(cls._active_sessions.items())
-            if getattr(runner.session, 'parent_id', None) == parent_session_id
+            sid
+            for sid, runner in list(cls._active_sessions.items())
+            if getattr(runner.session, "parent_id", None) == parent_session_id
         ]
         for sid in child_ids:
             runner = cls._active_sessions.pop(sid, None)
@@ -771,13 +799,16 @@ class SessionRunner:
                 runner.abort()
                 SessionStatus.set(sid, SessionStatusIdle())
                 cancelled += 1
-                log.info("runner.child_cancelled", {
-                    "session_id": sid,
-                    "parent_session_id": parent_session_id,
-                })
+                log.info(
+                    "runner.child_cancelled",
+                    {
+                        "session_id": sid,
+                        "parent_session_id": parent_session_id,
+                    },
+                )
             cancelled += cls.cancel_children(sid)
         return cancelled
-    
+
     @classmethod
     async def command(
         cls,
@@ -791,7 +822,7 @@ class SessionRunner:
     ) -> Dict[str, Any]:
         """
         Execute a slash command in a session.
-        
+
         Args:
             session_id: Session ID
             command: Command name (e.g., "init", "help")
@@ -800,45 +831,48 @@ class SessionRunner:
             agent: Optional agent name
             model: Optional model string (provider/model)
             variant: Optional model variant
-            
+
         Returns:
             Command execution result
         """
         from flocks.command.command import Command
-        
+
         # Get command definition
         cmd = Command.get(command)
         if not cmd:
             raise ValueError(f"Command '{command}' not found")
-        
+
         # Parse model if provided
         provider_id, model_id = None, None
         if model:
             parts = model.split("/", 1)
             if len(parts) == 2:
                 provider_id, model_id = parts
-        
+
         # Execute command template
         template = cmd.template
-        
+
         # Replace placeholders
         template = template.replace("$ARGUMENTS", arguments)
-        
+
         # Create prompt request
         parts = [{"type": "text", "text": template}]
-        
-        log.info("runner.command", {
-            "session_id": session_id,
-            "command": command,
-            "arguments": arguments[:50] if arguments else "",
-        })
-        
+
+        log.info(
+            "runner.command",
+            {
+                "session_id": session_id,
+                "command": command,
+                "arguments": arguments[:50] if arguments else "",
+            },
+        )
+
         return {
             "command": command,
             "arguments": arguments,
             "template": template,
         }
-    
+
     @classmethod
     async def shell(
         cls,
@@ -849,29 +883,29 @@ class SessionRunner:
     ) -> Dict[str, Any]:
         """
         Execute a shell command in session context.
-        
+
         Args:
             session_id: Session ID
             agent: Agent name
             command: Shell command to execute
             model: Optional model info
-            
+
         Returns:
             Shell execution result
         """
         session = await Session.get_by_id(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
-        
+
         cwd = session.directory or os.getcwd()
-        
+
         user_msg = await Message.create(
             session_id=session_id,
             role=MessageRole.USER,
             content="The following tool was executed by the user",
             agent=agent,
         )
-        
+
         assistant_msg = await Message.create(
             session_id=session_id,
             role=MessageRole.ASSISTANT,
@@ -879,7 +913,7 @@ class SessionRunner:
             agent=agent,
             parent_id=user_msg.id,
         )
-        
+
         start_time = asyncio.get_event_loop().time()
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -889,10 +923,12 @@ class SessionRunner:
                 cwd=cwd,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=300,
+                proc.communicate(),
+                timeout=300,
             )
-            output = (stdout_bytes or b"").decode("utf-8", errors="replace") + \
-                     (stderr_bytes or b"").decode("utf-8", errors="replace")
+            output = (stdout_bytes or b"").decode("utf-8", errors="replace") + (stderr_bytes or b"").decode(
+                "utf-8", errors="replace"
+            )
             exit_code = proc.returncode or 0
         except asyncio.TimeoutError:
             output = "Command timed out after 300 seconds"
@@ -904,16 +940,19 @@ class SessionRunner:
         except Exception as e:
             output = f"Error executing command: {str(e)}"
             exit_code = -1
-        
+
         end_time = asyncio.get_event_loop().time()
-        
-        log.info("runner.shell", {
-            "session_id": session_id,
-            "command": command[:50],
-            "exit_code": exit_code,
-            "duration_ms": int((end_time - start_time) * 1000),
-        })
-        
+
+        log.info(
+            "runner.shell",
+            {
+                "session_id": session_id,
+                "command": command[:50],
+                "exit_code": exit_code,
+                "duration_ms": int((end_time - start_time) * 1000),
+            },
+        )
+
         return {
             "info": {
                 "id": assistant_msg.id,
@@ -921,24 +960,26 @@ class SessionRunner:
                 "role": "assistant",
                 "agent": agent,
             },
-            "parts": [{
-                "id": Identifier.create("part"),
-                "messageID": assistant_msg.id,
-                "sessionID": session_id,
-                "type": "tool",
-                "tool": "bash",
-                "state": {
-                    "status": "completed",
-                    "input": {"command": command},
-                    "output": output,
-                },
-            }],
+            "parts": [
+                {
+                    "id": Identifier.create("part"),
+                    "messageID": assistant_msg.id,
+                    "sessionID": session_id,
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": {"command": command},
+                        "output": output,
+                    },
+                }
+            ],
         }
-    
+
     def abort(self) -> None:
         """Signal abort to stop the loop."""
         self._abort.set()
-    
+
     @property
     def is_aborted(self) -> bool:
         """Check if abort was signaled (internal or external)."""
@@ -947,7 +988,7 @@ class SessionRunner:
         if self._external_abort is not None and self._external_abort.is_set():
             return True
         return False
-    
+
     async def _process_step(
         self,
         messages: List[MessageInfo],
@@ -956,22 +997,25 @@ class SessionRunner:
         """Process a single step in the loop with retry logic."""
         # Check for CLI callbacks (if running in CLI mode)
         # Only use CLI fallback if no callbacks were explicitly provided via constructor
-        has_explicit_callbacks = any([
-            self.callbacks.on_text_delta,
-            self.callbacks.on_tool_start,
-            self.callbacks.on_tool_end,
-            self.callbacks.on_error,
-            self.callbacks.event_publish_callback,
-        ])
+        has_explicit_callbacks = any(
+            [
+                self.callbacks.on_text_delta,
+                self.callbacks.on_tool_start,
+                self.callbacks.on_tool_end,
+                self.callbacks.on_error,
+                self.callbacks.event_publish_callback,
+            ]
+        )
         if not has_explicit_callbacks:
             try:
                 from flocks.cli.session_runner import _get_cli_callbacks
+
                 cli_callbacks = _get_cli_callbacks()
                 if cli_callbacks:
                     self.callbacks = cli_callbacks
             except ImportError:
                 pass
-        
+
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
         agent = await Agent.get(agent_name) or await Agent.get("rex")
@@ -979,14 +1023,15 @@ class SessionRunner:
         # Track session agent (Flocks compatibility)
         try:
             from flocks.session.core.session_state import set_session_agent
+
             set_session_agent(self.session.id, agent.name)
         except Exception as e:
             log.debug("runner.session_agent.error", {"error": str(e)})
-        
+
         # Check if we've reached max steps (matching Flocks logic)
-        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
+        max_steps = agent.steps if hasattr(agent, "steps") and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
         is_last_step = self._step >= max_steps
-        
+
         # Get provider
         provider = Provider.get(self.provider_id)
         if not provider:
@@ -999,17 +1044,20 @@ class SessionRunner:
         try:
             await Provider.apply_config(provider_id=self.provider_id)
         except Exception as e:
-            log.debug("runner.provider.apply_config.error", {
-                "provider": self.provider_id,
-                "error": str(e),
-            })
-        
+            log.debug(
+                "runner.provider.apply_config.error",
+                {
+                    "provider": self.provider_id,
+                    "error": str(e),
+                },
+            )
+
         if not provider.is_configured():
             error = f"Provider {self.provider_id} not configured"
             if self.callbacks.on_error:
                 await self.callbacks.on_error(error)
             return StepResult(action="stop", error=error)
-        
+
         # Build prompts and tools
         tools_started_at = time.perf_counter()
         tools = await self._build_callable_tool_schema(agent, messages)
@@ -1069,27 +1117,33 @@ class SessionRunner:
             parts = await Message.parts(last_assistant_msg.id, self.session.id)
             has_text = any(getattr(p, "type", None) == "text" and getattr(p, "text", "").strip() for p in parts)
             has_tool_result = any(
-                getattr(p, "type", None) == "tool" and
-                getattr(getattr(p, "state", None), "status", None) in ("completed", "error", "running")
+                getattr(p, "type", None) == "tool"
+                and getattr(getattr(p, "state", None), "status", None) in ("completed", "error", "running")
                 for p in parts
             )
             if has_tool_result and not has_text:
                 from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
+
                 system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
-            
+
             if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
                 state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
-                log.warn("runner.repeated_tool_calls_detected", {
-                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
-                    "exact_count": state.get("exact_count", 0),
-                    "step": self._step,
-                })
+                log.warn(
+                    "runner.repeated_tool_calls_detected",
+                    {
+                        "tool_name": state.get("last_signature", "").split(":", 1)[0],
+                        "exact_count": state.get("exact_count", 0),
+                        "step": self._step,
+                    },
+                )
                 from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+
                 system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
         # Hook pipeline: chat.message stage
         try:
             from flocks.hooks.pipeline import HookPipeline
+
             user_text = await Message.get_text_content(last_user)
             hook_input = {
                 "sessionID": self.session.id,
@@ -1109,7 +1163,7 @@ class SessionRunner:
                 await Message.update(self.session.id, last_user.id, variant=variant)
         except Exception as e:
             log.debug("runner.hook.chat_message.error", {"error": str(e)})
-        
+
         # Convert messages to chat format with error handling
         try:
             queued_user_message_ids = self._get_queued_user_message_ids(messages)
@@ -1133,13 +1187,16 @@ class SessionRunner:
                 chat_message_count=len(chat_messages),
             )
         except Exception as e:
-            log.error("runner.to_chat_messages.error", {
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "message_count": len(messages),
-            })
+            log.error(
+                "runner.to_chat_messages.error",
+                {
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "message_count": len(messages),
+                },
+            )
             raise
-        
+
         # CRITICAL FIX: Ensure messages don't end with assistant role when tools are present
         # This prevents "assistant role in the final position when tools are used" API error
         # This commonly happens when:
@@ -1151,34 +1208,44 @@ class SessionRunner:
                 # Check if we need to add a synthetic user message
                 # This is required by Anthropic API when using tools
                 from flocks.session.prompt_strings import PROMPT_SYNTHETIC_CONTINUE
+
                 synthetic_msg = ChatMessage(
                     role="user",
                     content=PROMPT_SYNTHETIC_CONTINUE,
                 )
                 chat_messages.append(synthetic_msg)
-                log.info("runner.synthetic_user_added", {
-                    "reason": "assistant_at_end_with_tools",
-                    "step": self._step,
-                    "session_id": self.session.id,
-                })
-        
+                log.info(
+                    "runner.synthetic_user_added",
+                    {
+                        "reason": "assistant_at_end_with_tools",
+                        "step": self._step,
+                        "session_id": self.session.id,
+                    },
+                )
+
         # Add max steps warning if this is the last step (matching Flocks)
         if is_last_step:
             from flocks.session.prompt_strings import PROMPT_MAX_STEPS
-            chat_messages.append(ChatMessage(
-                role="assistant",
-                content=PROMPT_MAX_STEPS,
-            ))
-            
-            log.warn("runner.max_steps_reached", {
-                "step": self._step,
-                "max_steps": max_steps,
-                "session_id": self.session.id,
-            })
-            
+
+            chat_messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=PROMPT_MAX_STEPS,
+                )
+            )
+
+            log.warn(
+                "runner.max_steps_reached",
+                {
+                    "step": self._step,
+                    "max_steps": max_steps,
+                    "session_id": self.session.id,
+                },
+            )
+
             # Disable tools when max steps reached
             tools = []
-        
+
         # Create assistant message (will be reused across retries)
         assistant_msg = await Message.create(
             session_id=self.session.id,
@@ -1189,25 +1256,29 @@ class SessionRunner:
             provider_id=self.provider_id,
             parent_id=last_user.id,
         )
-        
+
         # Publish assistant message SSE event so frontends can show the message card
         if self.callbacks.event_publish_callback:
             import time as _time
-            await self.callbacks.event_publish_callback("message.updated", {
-                "info": {
-                    "id": assistant_msg.id,
-                    "sessionID": self.session.id,
-                    "role": "assistant",
-                    "time": {"created": int(_time.time() * 1000)},
-                    "parentID": last_user.id,
-                    "modelID": self.model_id,
-                    "providerID": self.provider_id,
-                    "agent": agent.name,
-                    "mode": agent.name,
-                    "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
-                }
-            })
-        
+
+            await self.callbacks.event_publish_callback(
+                "message.updated",
+                {
+                    "info": {
+                        "id": assistant_msg.id,
+                        "sessionID": self.session.id,
+                        "role": "assistant",
+                        "time": {"created": int(_time.time() * 1000)},
+                        "parentID": last_user.id,
+                        "modelID": self.model_id,
+                        "providerID": self.provider_id,
+                        "agent": agent.name,
+                        "mode": agent.name,
+                        "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                    }
+                },
+            )
+
         # Retry loop matching Flocks' SessionProcessor.process()
         # MAX_ERROR_RETRIES caps exception-based retries so a permanently-failing
         # model endpoint (e.g. repeated 500) cannot hold the session loop open
@@ -1225,7 +1296,7 @@ class SessionRunner:
             try:
                 # Set status to busy
                 SessionStatus.set(self.session.id, SessionStatusBusy())
-                
+
                 # Call LLM with tools
                 result = await self._call_llm(
                     provider=provider,
@@ -1254,8 +1325,7 @@ class SessionRunner:
                 # producing no text and no tool calls. Treat this as a transient
                 # failure and retry with exponential backoff instead of silently
                 # terminating the agent.
-                if (result.action == "stop" and not result.error
-                        and not result.content and not result.tool_calls):
+                if result.action == "stop" and not result.error and not result.content and not result.tool_calls:
                     empty_attempt += 1
                     if empty_attempt <= MAX_EMPTY_RETRIES:
                         # Record usage for this empty attempt even though we are
@@ -1264,19 +1334,22 @@ class SessionRunner:
                         await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
                         delay_ms = SessionRetry.delay(empty_attempt)
                         next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
-                        log.warn("runner.step.empty_response_retry", {
-                            "attempt": empty_attempt,
-                            "delay_ms": delay_ms,
-                            "session_id": self.session.id,
-                            "model": self.model_id,
-                        })
+                        log.warn(
+                            "runner.step.empty_response_retry",
+                            {
+                                "attempt": empty_attempt,
+                                "delay_ms": delay_ms,
+                                "session_id": self.session.id,
+                                "model": self.model_id,
+                            },
+                        )
                         SessionStatus.set(
                             self.session.id,
                             SessionStatusRetry(
                                 attempt=empty_attempt,
                                 message="Model returned empty response, retrying...",
                                 next=next_retry_time,
-                            )
+                            ),
                         )
                         await SessionRetry.sleep(delay_ms, self._abort)
                         continue
@@ -1285,14 +1358,16 @@ class SessionRunner:
                         # user knows the model is incompatible, rather than
                         # silently hanging or showing a blank response.
                         empty_error_msg = (
-                            f"Model '{self.model_id}' returned an empty response "
-                            f"after {MAX_EMPTY_RETRIES} retries."
+                            f"Model '{self.model_id}' returned an empty response after {MAX_EMPTY_RETRIES} retries."
                         )
-                        log.error("runner.step.empty_response_exhausted", {
-                            "session_id": self.session.id,
-                            "model": self.model_id,
-                            "attempts": empty_attempt,
-                        })
+                        log.error(
+                            "runner.step.empty_response_exhausted",
+                            {
+                                "session_id": self.session.id,
+                                "model": self.model_id,
+                                "attempts": empty_attempt,
+                            },
+                        )
                         empty_error_dict = {
                             "name": "EmptyResponseError",
                             "message": empty_error_msg,
@@ -1321,12 +1396,15 @@ class SessionRunner:
                         tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
                         count=int(tool_loop_guard.get("count", 0) or 0),
                     )
-                    log.warn("runner.tool_loop_guard_halt", {
-                        "tool_name": tool_loop_guard.get("tool_name"),
-                        "reason": tool_loop_guard.get("reason"),
-                        "count": tool_loop_guard.get("count"),
-                        "step": self._step,
-                    })
+                    log.warn(
+                        "runner.tool_loop_guard_halt",
+                        {
+                            "tool_name": tool_loop_guard.get("tool_name"),
+                            "reason": tool_loop_guard.get("reason"),
+                            "count": tool_loop_guard.get("count"),
+                            "step": self._step,
+                        },
+                    )
                     await Message.update(
                         self.session.id,
                         assistant_msg.id,
@@ -1342,22 +1420,25 @@ class SessionRunner:
                 finish = "tool-calls" if result.tool_calls else "stop"
                 await Message.update(self.session.id, assistant_msg.id, finish=finish)
                 await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                
+
                 # Note: Compaction check is now done in the main loop (run()) before processing step
                 # This matches Flocks's logic: check lastFinished.tokens at loop start
 
                 return result
-                
+
             except Exception as e:
                 error_attempt += 1
-                log.error("runner.step.error", {
-                    "error": str(e),
-                    "attempt": error_attempt,
-                })
-                
+                log.error(
+                    "runner.step.error",
+                    {
+                        "error": str(e),
+                        "attempt": error_attempt,
+                    },
+                )
+
                 # Convert exception to error dict for retry check
                 error_dict = self._exception_to_error_dict(e)
-                
+
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
 
@@ -1368,16 +1449,20 @@ class SessionRunner:
                     # headers-present but retry-after-absent 500 response cannot
                     # cause multi-minute sleeps that block the loop.
                     from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+
                     delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
                     next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
-                    
-                    log.info("runner.step.retry", {
-                        "attempt": error_attempt,
-                        "delay_ms": delay_ms,
-                        "reason": retry_message,
-                        "max_retries": MAX_ERROR_RETRIES,
-                    })
-                    
+
+                    log.info(
+                        "runner.step.retry",
+                        {
+                            "attempt": error_attempt,
+                            "delay_ms": delay_ms,
+                            "reason": retry_message,
+                            "max_retries": MAX_ERROR_RETRIES,
+                        },
+                    )
+
                     # Set retry status
                     SessionStatus.set(
                         self.session.id,
@@ -1385,22 +1470,25 @@ class SessionRunner:
                             attempt=error_attempt,
                             message=retry_message,
                             next=next_retry_time,
-                        )
+                        ),
                     )
-                    
+
                     # Wait before retry
                     await SessionRetry.sleep(delay_ms, self._abort)
-                    
+
                     # Continue to next retry attempt
                     continue
                 else:
                     # Error is not retryable, or retry budget exhausted
                     if retry_message is not None:
-                        log.error("runner.step.max_retries_exceeded", {
-                            "error": str(e),
-                            "attempt": error_attempt,
-                            "max_retries": MAX_ERROR_RETRIES,
-                        })
+                        log.error(
+                            "runner.step.max_retries_exceeded",
+                            {
+                                "error": str(e),
+                                "attempt": error_attempt,
+                                "max_retries": MAX_ERROR_RETRIES,
+                            },
+                        )
                     else:
                         log.error("runner.step.not_retryable", {"error": str(e)})
 
@@ -1411,7 +1499,7 @@ class SessionRunner:
 
                     if self.callbacks.on_error:
                         await self.callbacks.on_error(final_error_message)
-                    
+
                     # Update assistant message with error (must be dict, not string)
                     await Message.update(
                         self.session.id,
@@ -1419,9 +1507,9 @@ class SessionRunner:
                         error=error_dict,
                         finish="error",
                     )
-                    
+
                     return StepResult(action="stop", error=final_error_message)
-        
+
         # Aborted
         return StepResult(action="stop", error="Aborted")
 
@@ -1482,13 +1570,16 @@ class SessionRunner:
                 )
             )
         except Exception as exc:
-            log.warn("runner.usage_record_failed", {
-                "session_id": self.session.id,
-                "provider_id": self.provider_id,
-                "model_id": self.model_id,
-                "error": str(exc),
-            })
-    
+            log.warn(
+                "runner.usage_record_failed",
+                {
+                    "session_id": self.session.id,
+                    "provider_id": self.provider_id,
+                    "model_id": self.model_id,
+                    "error": str(exc),
+                },
+            )
+
     async def _build_device_asset_hint(self) -> Optional[str]:
         """Return concise device-aware tool guidance plus enabled device summary."""
         try:
@@ -1517,9 +1608,8 @@ class SessionRunner:
             vendor = vendor_by_storage_key.get(device.storage_key) or "unknown"
             device_lines.append(f"- `{device.name}` -> `{vendor}`")
 
-        summary = (
-            "当前已启用设备（名称 -> 厂商）:\n"
-            + ("\n".join(device_lines) if device_lines else "- 当前无已启用设备")
+        summary = "当前已启用设备（名称 -> 厂商）:\n" + (
+            "\n".join(device_lines) if device_lines else "- 当前无已启用设备"
         )
 
         return (
@@ -1634,15 +1724,11 @@ class SessionRunner:
             return None
 
         catalog_tools = self._list_catalog_tool_infos(agent)
-        excluded_tool_names = (
-            set(get_all_enabled_builtin_tool_names())
-            | get_always_load_tool_names()
-        )
+        excluded_tool_names = set(get_all_enabled_builtin_tool_names()) | get_always_load_tool_names()
         catalog_tools = [
             tool_info
             for tool_info in catalog_tools
-            if tool_info.name not in excluded_tool_names
-            and getattr(tool_info, "source", None) != "device"
+            if tool_info.name not in excluded_tool_names and getattr(tool_info, "source", None) != "device"
         ]
         if not catalog_tools:
             return None
@@ -1662,11 +1748,7 @@ class SessionRunner:
             "`select:<name>[,<name>...]` to load tool schemas before calling them:"
         )
 
-        return (
-            "## Tool Catalog Awareness\n\n"
-            f"{rules}\n\n"
-            f"{catalog_summary}"
-        )
+        return f"## Tool Catalog Awareness\n\n{rules}\n\n{catalog_summary}"
 
     def _should_use_text_tool_call_mode(self) -> bool:
         # MiniMax models exposed through ThreatBook-managed gateways do not
@@ -1723,7 +1805,7 @@ class SessionRunner:
                         lines.append(f"  - `{param_name}` ({param_type}, {required_suffix})")
 
         return "\n".join(lines)
-    
+
     async def _build_callable_tool_schema(
         self,
         agent: AgentInfo,
@@ -1766,18 +1848,21 @@ class SessionRunner:
                     "name": tool_info.name,
                     "description": description,
                     "parameters": schema.to_json_schema(),
-                }
+                },
             }
             tools.append(tool_def)
 
         schema_cache[cache_key] = copy.deepcopy(tools)
 
-        log.info("runner.tools_selected", {
-            "session_id": self.session.id,
-            "step": self._step,
-            "selected": len(tools),
-            "enabled": selection_metadata.get("enabledToolCount"),
-        })
+        log.info(
+            "runner.tools_selected",
+            {
+                "session_id": self.session.id,
+                "step": self._step,
+                "selected": len(tools),
+                "enabled": selection_metadata.get("enabledToolCount"),
+            },
+        )
         self._log_perf(
             "runner.tools_schema_built",
             started_at,
@@ -1785,7 +1870,7 @@ class SessionRunner:
             enabled=selection_metadata.get("enabledToolCount"),
         )
         return tools
-    
+
     def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
         """Check if agent statically declares a tool."""
         tool = ToolRegistry.get(tool_name)
@@ -1793,11 +1878,11 @@ class SessionRunner:
             return False
         metadata = get_tool_catalog_metadata(tool_name, tool.info)
         return agent_declares_tool(agent, tool_name) or metadata.always_load
-    
+
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
         Convert exception to error dict for retry checking.
-        
+
         Ported from original MessageV2.fromError() structure.
         """
         error_dict = {
@@ -1805,31 +1890,41 @@ class SessionRunner:
             "message": str(exception),
             "data": {
                 "message": str(exception),
-            }
+            },
         }
-        
+
         # Check if it's an API error with specific attributes
-        if hasattr(exception, 'status_code'):
-            status_code = getattr(exception, 'status_code')
+        if hasattr(exception, "status_code"):
+            status_code = getattr(exception, "status_code")
             error_dict["name"] = "APIError"
             error_dict["data"]["statusCode"] = status_code
-            
+
             # Determine if retryable based on status code
             is_retryable = status_code in {429, 500, 502, 503, 504}
             error_dict["data"]["isRetryable"] = is_retryable
-            
+
             # Extract response headers if available
-            if hasattr(exception, 'response') and hasattr(exception.response, 'headers'):
+            if hasattr(exception, "response") and hasattr(exception.response, "headers"):
                 headers = dict(exception.response.headers)
                 error_dict["data"]["responseHeaders"] = headers
-        
+
         # Check for common retryable error patterns
         error_msg = str(exception).lower()
-        if any(pattern in error_msg for pattern in [
-            "rate limit", "too many requests", "429",
-            "overloaded", "unavailable", "503", "502",
-            "timeout", "timed out", "server error",
-        ]):
+        if any(
+            pattern in error_msg
+            for pattern in [
+                "rate limit",
+                "too many requests",
+                "429",
+                "overloaded",
+                "unavailable",
+                "503",
+                "502",
+                "timeout",
+                "timed out",
+                "server error",
+            ]
+        ):
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True
 
@@ -1837,9 +1932,9 @@ class SessionRunner:
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True
             error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
-        
+
         return error_dict
-    
+
     def _get_context_window_tokens(self) -> int:
         """Resolve the context window size for the current model."""
         try:
@@ -1859,8 +1954,10 @@ class SessionRunner:
     ) -> Tuple[Any, ...]:
         role = msg.role if isinstance(msg.role, str) else getattr(msg.role, "value", None)
         has_file_part = any(getattr(part, "type", None) == "file" for part in parts)
-        latest_user_marker = msg.id if (role == "user" and has_file_part and is_latest_user_turn) else (
-            "stale-file-user" if role == "user" and has_file_part else None
+        latest_user_marker = (
+            msg.id
+            if (role == "user" and has_file_part and is_latest_user_turn)
+            else ("stale-file-user" if role == "user" and has_file_part else None)
         )
         return (
             msg.id,
@@ -1907,7 +2004,7 @@ class SessionRunner:
 
         queued_user_ids: set[str] = set()
         seen_turn_root_user = False
-        for msg in messages[last_finished_index + 1:]:
+        for msg in messages[last_finished_index + 1 :]:
             if self._message_role_value(msg) != "user":
                 continue
             if not seen_turn_root_user:
@@ -1984,10 +2081,8 @@ class SessionRunner:
                     tool_output_str = str(tool_output)
 
         from flocks.tool.truncation import truncate_tool_result_dynamic, HARD_MAX_TOOL_RESULT_CHARS
-        already_truncated = (
-            metadata.get("truncated")
-            and len(tool_output_str) <= HARD_MAX_TOOL_RESULT_CHARS * 2
-        )
+
+        already_truncated = metadata.get("truncated") and len(tool_output_str) <= HARD_MAX_TOOL_RESULT_CHARS * 2
         if already_truncated:
             return tool_output_str, False, False
 
@@ -2033,7 +2128,7 @@ class SessionRunner:
     ) -> List[ChatMessage]:
         """
         Convert messages to chat format with tool calls.
-        
+
         Ported from original MessageV2.toModelMessage() logic:
         - Include text parts
         - Include tool calls and results
@@ -2108,11 +2203,13 @@ class SessionRunner:
 
         # Add system prompts
         if system_prompts and not chat_messages:
-            chat_messages.append(ChatMessage(
-                role="system",
-                content=system_content,
-            ))
-        
+            chat_messages.append(
+                ChatMessage(
+                    role="system",
+                    content=system_content,
+                )
+            )
+
         # Convert each message with parts
         for idx, msg in enumerate(messages):
             if idx < resume_message_index:
@@ -2123,7 +2220,7 @@ class SessionRunner:
             is_latest_user_turn = msg.id == last_user_msg_id
             # Get message parts
             parts = preloaded_parts[idx]
-            
+
             if not parts:
                 # Fallback: use text content only
                 content = await Message.get_text_content(msg)
@@ -2131,32 +2228,36 @@ class SessionRunner:
                     normalized_content = _expand_workflow_node_ref(content)
                     if role == "user" and msg.id in queued_user_message_ids:
                         normalized_content = self._wrap_queued_user_text(normalized_content)
-                    chat_messages.append(ChatMessage(
-                        role=role,
-                        content=normalized_content,
-                    ))
+                    chat_messages.append(
+                        ChatMessage(
+                            role=role,
+                            content=normalized_content,
+                        )
+                    )
                 continue
-            
+
             # Build message content from parts
             if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
                 is_queued_user_turn = msg.id in queued_user_message_ids
                 user_content_parts = []
                 user_content_blocks: list[dict[str, Any]] = []
                 for part in parts:
-                    if hasattr(part, 'type'):
-                        if part.type == "text" and hasattr(part, 'text'):
-                            if not getattr(part, 'ignored', False) and part.text.strip():
+                    if hasattr(part, "type"):
+                        if part.type == "text" and hasattr(part, "text"):
+                            if not getattr(part, "ignored", False) and part.text.strip():
                                 normalized_text = _expand_workflow_node_ref(part.text)
                                 user_content_parts.append(normalized_text)
-                                user_content_blocks.append({
-                                    "type": "text",
-                                    "text": normalized_text,
-                                })
-                        elif part.type == "file" and hasattr(part, 'mime'):
-                            mime = getattr(part, 'mime', '')
-                            if mime != 'application/x-directory':
-                                filename = getattr(part, 'filename', 'file')
-                                url = getattr(part, 'url', '')
+                                user_content_blocks.append(
+                                    {
+                                        "type": "text",
+                                        "text": normalized_text,
+                                    }
+                                )
+                        elif part.type == "file" and hasattr(part, "mime"):
+                            mime = getattr(part, "mime", "")
+                            if mime != "application/x-directory":
+                                filename = getattr(part, "filename", "file")
+                                url = getattr(part, "url", "")
                                 # Image bytes only ride on the latest user
                                 # turn — older turns are reduced to a short,
                                 # opaque placeholder. Crucially the placeholder
@@ -2169,10 +2270,12 @@ class SessionRunner:
                                 if mime.startswith("image/") and not is_latest_user_turn:
                                     stub = "[earlier image omitted]"
                                     user_content_parts.append(stub)
-                                    user_content_blocks.append({
-                                        "type": "text",
-                                        "text": stub,
-                                    })
+                                    user_content_blocks.append(
+                                        {
+                                            "type": "text",
+                                            "text": stub,
+                                        }
+                                    )
                                 else:
                                     self._append_file_content_block(
                                         user_content_blocks,
@@ -2183,51 +2286,55 @@ class SessionRunner:
                                     )
                         elif part.type == "compaction":
                             user_content_parts.append("What did we do so far?")
-                            user_content_blocks.append({
-                                "type": "text",
-                                "text": "What did we do so far?",
-                            })
+                            user_content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": "What did we do so far?",
+                                }
+                            )
                         elif part.type == "subtask":
                             user_content_parts.append("The following tool was executed by the user")
-                            user_content_blocks.append({
-                                "type": "text",
-                                "text": "The following tool was executed by the user",
-                            })
-                
-                if user_content_blocks and any(
-                    block.get("type") == "image"
-                    for block in user_content_blocks
-                ):
+                            user_content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": "The following tool was executed by the user",
+                                }
+                            )
+
+                if user_content_blocks and any(block.get("type") == "image" for block in user_content_blocks):
                     if is_queued_user_turn:
                         user_content_blocks = self._wrap_queued_user_blocks(user_content_blocks)
-                    chat_messages.append(ChatMessage(
-                        role="user",
-                        content=user_content_blocks,
-                    ))
+                    chat_messages.append(
+                        ChatMessage(
+                            role="user",
+                            content=user_content_blocks,
+                        )
+                    )
                 elif user_content_parts:
                     user_text = "\n\n".join(user_content_parts)
                     if is_queued_user_turn:
                         user_text = self._wrap_queued_user_text(user_text)
-                    chat_messages.append(ChatMessage(
-                        role="user",
-                        content=user_text,
-                    ))
-            
+                    chat_messages.append(
+                        ChatMessage(
+                            role="user",
+                            content=user_text,
+                        )
+                    )
+
             elif msg.role == MessageRole.ASSISTANT or (isinstance(msg.role, str) and msg.role == "assistant"):
                 # Skip messages with errors (matching Flocks logic)
                 # Flocks: skip if error exists, UNLESS it's AbortedError with useful content
-                if hasattr(msg, 'error') and msg.error:
+                if hasattr(msg, "error") and msg.error:
                     # Check if it's an AbortedError
                     is_aborted_error = False
                     if isinstance(msg.error, dict):
-                        error_name = msg.error.get('name', '')
-                        is_aborted_error = error_name in ('MessageAbortedError', 'AbortedError')
-                    
+                        error_name = msg.error.get("name", "")
+                        is_aborted_error = error_name in ("MessageAbortedError", "AbortedError")
+
                     # If AbortedError, check if message has useful content
                     if is_aborted_error:
                         has_content = any(
-                            hasattr(p, 'type') and p.type not in ("step-start", "reasoning")
-                            for p in parts
+                            hasattr(p, "type") and p.type not in ("step-start", "reasoning") for p in parts
                         )
                         if not has_content:
                             # AbortedError with no content - skip
@@ -2236,7 +2343,7 @@ class SessionRunner:
                     else:
                         # Non-AbortedError - skip
                         continue
-                
+
                 assistant_content_parts = []
                 assistant_reasoning_parts = []
                 assistant_reasoning_content_parts = []
@@ -2247,15 +2354,15 @@ class SessionRunner:
                 structured_tool_calls: List[Dict[str, Any]] = []
                 # Corresponding tool-result messages (role="tool")
                 pending_tool_results: List[ChatMessage] = []
-                
+
                 for part in parts:
-                    if not hasattr(part, 'type'):
+                    if not hasattr(part, "type"):
                         continue
-                    
+
                     # Text parts
-                    if part.type == "text" and hasattr(part, 'text'):
+                    if part.type == "text" and hasattr(part, "text"):
                         assistant_content_parts.append(part.text)
-                    elif part.type == "reasoning" and hasattr(part, 'text'):
+                    elif part.type == "reasoning" and hasattr(part, "text"):
                         assistant_reasoning_parts.append(part.text)
                         part_metadata = getattr(part, "metadata", None) or {}
                         reasoning_meta = part_metadata.get("reasoning") if isinstance(part_metadata, dict) else None
@@ -2281,32 +2388,44 @@ class SessionRunner:
                             for item in reasoning_details:
                                 if isinstance(item, dict):
                                     assistant_reasoning_details.append(item)
-                        reasoning_field = part_metadata.get("reasoningField") if isinstance(part_metadata, dict) else None
-                        thinking_signature = part_metadata.get("thinkingSignature") if isinstance(part_metadata, dict) else None
-                        redacted_thinking = part_metadata.get("redactedThinkingData") if isinstance(part_metadata, dict) else None
+                        reasoning_field = (
+                            part_metadata.get("reasoningField") if isinstance(part_metadata, dict) else None
+                        )
+                        thinking_signature = (
+                            part_metadata.get("thinkingSignature") if isinstance(part_metadata, dict) else None
+                        )
+                        redacted_thinking = (
+                            part_metadata.get("redactedThinkingData") if isinstance(part_metadata, dict) else None
+                        )
                         if redacted_thinking:
-                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
-                                "type": "redacted_thinking",
-                                "data": redacted_thinking,
-                            })
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append(
+                                {
+                                    "type": "redacted_thinking",
+                                    "data": redacted_thinking,
+                                }
+                            )
                         elif thinking_signature:
-                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
-                                "type": "thinking",
-                                "thinking": part.text,
-                                "signature": thinking_signature,
-                            })
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": part.text,
+                                    "signature": thinking_signature,
+                                }
+                            )
                         elif reasoning_field == "thinking" and getattr(part, "text", None):
-                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
-                                "type": "thinking",
-                                "thinking": part.text,
-                            })
-                    
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": part.text,
+                                }
+                            )
+
                     # Tool parts - use structured OpenAI function-calling format
-                    elif part.type == "tool" and hasattr(part, 'state'):
-                        tool_name = getattr(part, 'tool', 'unknown')
-                        call_id = getattr(part, 'callID', None) or f"call_{id(part)}"
-                        tool_input = getattr(part.state, 'input', {})
-                        
+                    elif part.type == "tool" and hasattr(part, "state"):
+                        tool_name = getattr(part, "tool", "unknown")
+                        call_id = getattr(part, "callID", None) or f"call_{id(part)}"
+                        tool_input = getattr(part.state, "input", {})
+
                         if part.state.status == "completed":
                             tool_output_str, was_dyn_truncated, persisted_placeholder = self._build_tool_output_text(
                                 part,
@@ -2314,92 +2433,127 @@ class SessionRunner:
                                 ctx_window_tokens,
                             )
                             if was_dyn_truncated:
-                                log.info("runner.tool_result_dynamic_truncated", {
+                                log.info(
+                                    "runner.tool_result_dynamic_truncated",
+                                    {
+                                        "tool_name": tool_name,
+                                        "call_id": call_id,
+                                        "context_window": ctx_window_tokens,
+                                        "truncated_len": len(tool_output_str),
+                                    },
+                                )
+
+                            # Build structured tool call for assistant message
+                            args_str = (
+                                json.dumps(tool_input, ensure_ascii=False)
+                                if not isinstance(tool_input, str)
+                                else tool_input
+                            )
+                            structured_tool_calls.append(
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": args_str,
+                                    },
+                                }
+                            )
+                            # Build tool-result message
+                            pending_tool_results.append(
+                                ChatMessage(
+                                    role="tool",
+                                    content=tool_output_str,
+                                    tool_call_id=call_id,
+                                    name=tool_name,
+                                )
+                            )
+                            tool_result_refs.append(
+                                {
+                                    "chat_message": pending_tool_results[-1],
+                                    "part": part,
+                                    "message_id": msg.id,
+                                    "tool_name": tool_name,
+                                    "turn_index": turn_index,
+                                    "char_count": len(tool_output_str),
+                                    "compacted": bool(persisted_placeholder),
+                                    "dirty": False,
+                                }
+                            )
+
+                            log.debug(
+                                "runner.to_chat_messages.tool_result_added",
+                                {
+                                    "message_id": msg.id,
                                     "tool_name": tool_name,
                                     "call_id": call_id,
-                                    "context_window": ctx_window_tokens,
-                                    "truncated_len": len(tool_output_str),
-                                })
-                            
-                            # Build structured tool call for assistant message
-                            args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
-                            structured_tool_calls.append({
-                                "id": call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": args_str,
+                                    "output_length": len(tool_output_str),
+                                    "compacted": bool(persisted_placeholder),
                                 },
-                            })
-                            # Build tool-result message
-                            pending_tool_results.append(ChatMessage(
-                                role="tool",
-                                content=tool_output_str,
-                                tool_call_id=call_id,
-                                name=tool_name,
-                            ))
-                            tool_result_refs.append({
-                                "chat_message": pending_tool_results[-1],
-                                "part": part,
-                                "message_id": msg.id,
-                                "tool_name": tool_name,
-                                "turn_index": turn_index,
-                                "char_count": len(tool_output_str),
-                                "compacted": bool(persisted_placeholder),
-                                "dirty": False,
-                            })
-                            
-                            log.debug("runner.to_chat_messages.tool_result_added", {
-                                "message_id": msg.id,
-                                "tool_name": tool_name,
-                                "call_id": call_id,
-                                "output_length": len(tool_output_str),
-                                "compacted": bool(persisted_placeholder),
-                            })
-                        
+                            )
+
                         elif part.state.status == "error":
-                            tool_error = getattr(part.state, 'error', 'Unknown error')
-                            args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
-                            structured_tool_calls.append({
-                                "id": call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": args_str,
-                                },
-                            })
-                            pending_tool_results.append(ChatMessage(
-                                role="tool",
-                                content=f"Error: {tool_error}",
-                                tool_call_id=call_id,
-                                name=tool_name,
-                            ))
-                        
+                            tool_error = getattr(part.state, "error", "Unknown error")
+                            args_str = (
+                                json.dumps(tool_input, ensure_ascii=False)
+                                if not isinstance(tool_input, str)
+                                else tool_input
+                            )
+                            structured_tool_calls.append(
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": args_str,
+                                    },
+                                }
+                            )
+                            pending_tool_results.append(
+                                ChatMessage(
+                                    role="tool",
+                                    content=f"Error: {tool_error}",
+                                    tool_call_id=call_id,
+                                    name=tool_name,
+                                )
+                            )
+
                         elif part.state.status == "running":
                             # Tool was interrupted (e.g., by user abort) before completing.
                             # Include it in chat context so the LLM knows this tool call was
                             # attempted and interrupted, allowing it to re-attempt if needed.
-                            args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
-                            structured_tool_calls.append({
-                                "id": call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": args_str,
+                            args_str = (
+                                json.dumps(tool_input, ensure_ascii=False)
+                                if not isinstance(tool_input, str)
+                                else tool_input
+                            )
+                            structured_tool_calls.append(
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": args_str,
+                                    },
+                                }
+                            )
+                            pending_tool_results.append(
+                                ChatMessage(
+                                    role="tool",
+                                    content="Error: Tool execution was interrupted",
+                                    tool_call_id=call_id,
+                                    name=tool_name,
+                                )
+                            )
+                            log.debug(
+                                "runner.to_chat_messages.running_tool_as_interrupted",
+                                {
+                                    "message_id": msg.id,
+                                    "tool_name": tool_name,
+                                    "call_id": call_id,
                                 },
-                            })
-                            pending_tool_results.append(ChatMessage(
-                                role="tool",
-                                content="Error: Tool execution was interrupted",
-                                tool_call_id=call_id,
-                                name=tool_name,
-                            ))
-                            log.debug("runner.to_chat_messages.running_tool_as_interrupted", {
-                                "message_id": msg.id,
-                                "tool_name": tool_name,
-                                "call_id": call_id,
-                            })
-                
+                            )
+
                 has_assistant_reasoning = bool(
                     assistant_reasoning_parts
                     or assistant_reasoning_content_parts
@@ -2412,9 +2566,13 @@ class SessionRunner:
                         role="assistant",
                         content="\n\n".join(assistant_content_parts) if assistant_content_parts else "",
                         reasoning="".join(assistant_reasoning_parts) if assistant_reasoning_parts else None,
-                        reasoning_content="".join(assistant_reasoning_content_parts) if assistant_reasoning_content_parts else None,
+                        reasoning_content="".join(assistant_reasoning_content_parts)
+                        if assistant_reasoning_content_parts
+                        else None,
                         reasoning_details=assistant_reasoning_details if assistant_reasoning_details else None,
-                        reasoning_source=sorted(assistant_reasoning_sources)[0] if assistant_reasoning_sources else None,
+                        reasoning_source=sorted(assistant_reasoning_sources)[0]
+                        if assistant_reasoning_sources
+                        else None,
                         tool_calls=structured_tool_calls if structured_tool_calls else None,
                         custom_settings=assistant_custom_settings,
                     )
@@ -2429,33 +2587,39 @@ class SessionRunner:
                     chat_messages.extend(pending_tool_results)
                 else:
                     # Log if assistant message was skipped due to no content
-                    log.debug("runner.to_chat_messages.assistant_skipped", {
-                        "message_id": msg.id,
-                        "parts_count": len(parts),
-                        "has_error": hasattr(msg, 'error') and bool(msg.error),
-                    })
-        
+                    log.debug(
+                        "runner.to_chat_messages.assistant_skipped",
+                        {
+                            "message_id": msg.id,
+                            "parts_count": len(parts),
+                            "has_error": hasattr(msg, "error") and bool(msg.error),
+                        },
+                    )
+
         budget_result = await self._apply_tool_result_budget(tool_result_refs, ctx_window_tokens)
         if budget_result.get("compacted"):
-            log.info("runner.context_budget_enforced", {
-                "session_id": self.session.id,
-                "step": self._step,
-                "context_window": ctx_window_tokens,
-                "compacted_tool_results": budget_result.get("compacted", 0),
-                "persisted_tool_results": budget_result.get("persisted", 0),
-            })
+            log.info(
+                "runner.context_budget_enforced",
+                {
+                    "session_id": self.session.id,
+                    "step": self._step,
+                    "context_window": ctx_window_tokens,
+                    "compacted_tool_results": budget_result.get("compacted", 0),
+                    "persisted_tool_results": budget_result.get("persisted", 0),
+                },
+            )
 
-        log.debug("runner.to_chat_messages.result", {
-            "total_messages": len(chat_messages),
-            "roles": [m.role for m in chat_messages],
-        })
+        log.debug(
+            "runner.to_chat_messages.result",
+            {
+                "total_messages": len(chat_messages),
+                "roles": [m.role for m in chat_messages],
+            },
+        )
         context_cache["latest"] = {
             "system_cache_key": system_cache_key,
             "message_signatures": list(message_signatures),
-            "chat_messages": [
-                message.model_dump(exclude_none=True)
-                for message in chat_messages
-            ],
+            "chat_messages": [message.model_dump(exclude_none=True) for message in chat_messages],
         }
         self._log_perf(
             "runner.to_chat_messages.complete",
@@ -2463,9 +2627,9 @@ class SessionRunner:
             source_message_count=len(messages),
             chat_message_count=len(chat_messages),
         )
-        
+
         return chat_messages
-    
+
     async def _call_llm(
         self,
         provider: Any,
@@ -2476,10 +2640,11 @@ class SessionRunner:
     ) -> StepResult:
         """
         Call LLM and process response with event-driven streaming.
-        
+
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
+
         def _serialize_message(message: ChatMessage) -> Dict[str, Any]:
             payload = message.model_dump(exclude_none=True)
             if not payload.get("custom_settings"):
@@ -2517,11 +2682,11 @@ class SessionRunner:
 
         stream_security_context = copy.deepcopy(self._security_context)
         if self._turn_capability_ceiling is not None:
-            # This pool is internal runtime state.  It is used only when a
-            # tool delegates work; ToolRegistry never forwards it to hooks.
-            stream_security_context["_capability_pool"] = copy.deepcopy(
-                self._turn_capability_ceiling
-            )
+            # Keep the internal pool for delegation and expose the same
+            # server-derived ceiling to ToolRegistry/B3.  Hidden tools must be
+            # rejected even when a caller bypasses the model schema.
+            stream_security_context["_capability_pool"] = copy.deepcopy(self._turn_capability_ceiling)
+            stream_security_context["parent_ceiling"] = copy.deepcopy(self._turn_capability_ceiling)
 
         processor = StreamProcessor(
             session_id=self.session.id,
@@ -2541,18 +2706,20 @@ class SessionRunner:
             step_index=self._step,
             security_context=stream_security_context,
         )
-        
+
         # Build provider options (thinking / reasoning / max_tokens)
         from flocks.provider.options import build_provider_options
+
         provider_options = build_provider_options(self.provider_id, self.model_id)
 
         # Clean up any leftover reasoning state from a previous (failed) call
-        if hasattr(self, '_current_reasoning_id'):
-            delattr(self, '_current_reasoning_id')
-        if hasattr(self, '_current_reasoning_metadata'):
-            delattr(self, '_current_reasoning_metadata')
+        if hasattr(self, "_current_reasoning_id"):
+            delattr(self, "_current_reasoning_id")
+        if hasattr(self, "_current_reasoning_metadata"):
+            delattr(self, "_current_reasoning_metadata")
 
         from flocks.session.streaming.tool_accumulator import ToolCallAccumulator
+
         tool_accumulator = ToolCallAccumulator(processor)
 
         text_started = False
@@ -2569,9 +2736,7 @@ class SessionRunner:
                 input_preview = []
                 for _msg in messages[-12:]:
                     _mc = _msg.content or ""
-                    input_preview.append(
-                        {"role": _msg.role, "chars": len(_mc), "preview": _mc[:240]}
-                    )
+                    input_preview.append({"role": _msg.role, "chars": len(_mc), "preview": _mc[:240]})
 
                 trace_tags = [
                     f"session:{self.session.id}",
@@ -2617,39 +2782,48 @@ class SessionRunner:
                 log.debug("runner.observability.init_failed", {"error": str(exc)})
                 trace_ctx = None
                 generation_ctx = None
-        
+
         # Validate messages - ensure we have at least one non-system message
         non_system_messages = [m for m in messages if m.role != "system"]
         if not non_system_messages:
-            log.error("runner.call_llm.no_messages", {
-                "total_messages": len(messages),
-                "session_id": self.session.id,
-            })
+            log.error(
+                "runner.call_llm.no_messages",
+                {
+                    "total_messages": len(messages),
+                    "session_id": self.session.id,
+                },
+            )
             self._end_observability(generation_ctx, trace_ctx, output="No valid messages", level="ERROR")
             return StepResult(action="stop", content="", error="No valid messages to send to LLM")
-        
-        log.debug("runner.call_llm.messages", {
-            "total": len(messages),
-            "non_system": len(non_system_messages),
-            "roles": [m.role for m in messages],
-        })
-        
+
+        log.debug(
+            "runner.call_llm.messages",
+            {
+                "total": len(messages),
+                "non_system": len(non_system_messages),
+                "roles": [m.role for m in messages],
+            },
+        )
+
         # Emit start event
         await processor.process_event(StartEvent())
-        
+
         # Lightweight counters instead of storing all chunks in memory
         chunk_counts = {"total": 0, "reasoning": 0, "text": 0, "tool": 0}
         stream_usage: Optional[Dict[str, int]] = None
-        
+
         # Stream response and convert chunks to events
         provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
         if provider_tools is None and tools:
-            log.info("runner.text_tool_call_mode.enabled", {
-                "session_id": self.session.id,
-                "provider_id": self.provider_id,
-                "model_id": self.model_id,
-                "tool_count": len(tools),
-            })
+            log.info(
+                "runner.text_tool_call_mode.enabled",
+                {
+                    "session_id": self.session.id,
+                    "provider_id": self.provider_id,
+                    "model_id": self.model_id,
+                    "tool_count": len(tools),
+                },
+            )
 
         llm_hook_metadata = {
             "sessionID": self.session.id,
@@ -2729,59 +2903,63 @@ class SessionRunner:
                         provider_id=self.provider_id,
                         model_id=self.model_id,
                     )
-                
-                chunk_finish = getattr(chunk, 'finish_reason', None)
+
+                chunk_finish = getattr(chunk, "finish_reason", None)
                 if chunk_finish:
                     stream_finish_reason = chunk_finish
-                
+
                 # Capture usage from chunk (providers may include it in the final chunk)
-                if hasattr(chunk, 'usage') and chunk.usage:
+                if hasattr(chunk, "usage") and chunk.usage:
                     stream_usage = chunk.usage
-                
+
                 # Check for abort
                 if self.is_aborted:
                     aborted_during_stream = True
                     break
-                
+
                 # Determine event type from chunk.  A single chunk may carry any
                 # combination of reasoning / text / tool_calls (e.g. Gemini bundles
                 # them).  We must not drop non-reasoning content when reasoning is
                 # present, and we must not double-emit `delta` as text when the
                 # provider used `event_type == 'reasoning'` to overload `delta` for
                 # reasoning text.
-                event_type = getattr(chunk, 'event_type', None)
-                chunk_metadata = getattr(chunk, 'metadata', None) or {}
+                event_type = getattr(chunk, "event_type", None)
+                chunk_metadata = getattr(chunk, "metadata", None) or {}
                 reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
 
-                if hasattr(self, '_current_reasoning_id') and chunk_metadata:
-                    current_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                if hasattr(self, "_current_reasoning_id") and chunk_metadata:
+                    current_metadata = getattr(self, "_current_reasoning_metadata", {}) or {}
                     current_metadata.update(chunk_metadata)
                     self._current_reasoning_metadata = current_metadata
 
-                if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
+                if event_type == "reasoning-start" and not hasattr(self, "_current_reasoning_id"):
                     reasoning_id_counter += 1
                     self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
                     self._current_reasoning_metadata = dict(chunk_metadata)
-                    await processor.process_event(ReasoningStartEvent(
-                        id=self._current_reasoning_id,
-                        metadata=chunk_metadata,
-                    ))
+                    await processor.process_event(
+                        ReasoningStartEvent(
+                            id=self._current_reasoning_id,
+                            metadata=chunk_metadata,
+                        )
+                    )
 
-                if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
-                    reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-                    await processor.process_event(ReasoningEndEvent(
-                        id=self._current_reasoning_id,
-                        metadata=reasoning_end_metadata,
-                    ))
-                    delattr(self, '_current_reasoning_id')
-                    if hasattr(self, '_current_reasoning_metadata'):
-                        delattr(self, '_current_reasoning_metadata')
+                if event_type == "reasoning-end" and hasattr(self, "_current_reasoning_id"):
+                    reasoning_end_metadata = getattr(self, "_current_reasoning_metadata", {}) or {}
+                    await processor.process_event(
+                        ReasoningEndEvent(
+                            id=self._current_reasoning_id,
+                            metadata=reasoning_end_metadata,
+                        )
+                    )
+                    delattr(self, "_current_reasoning_id")
+                    if hasattr(self, "_current_reasoning_metadata"):
+                        delattr(self, "_current_reasoning_metadata")
 
-                chunk_reasoning = getattr(chunk, 'reasoning', None) or None
-                if not chunk_reasoning and event_type == 'reasoning':
+                chunk_reasoning = getattr(chunk, "reasoning", None) or None
+                if not chunk_reasoning and event_type == "reasoning":
                     # Older providers signal reasoning via event_type and put the
                     # reasoning text in `delta` (no separate `reasoning` field).
-                    chunk_reasoning = getattr(chunk, 'delta', '') or None
+                    chunk_reasoning = getattr(chunk, "delta", "") or None
                 has_reasoning_metadata = bool(
                     chunk_metadata.get("reasoningDetails")
                     or chunk_metadata.get("reasoningContent") is not None
@@ -2791,47 +2969,56 @@ class SessionRunner:
                 # Treat `delta` as text only when it isn't already consumed as
                 # reasoning above.  This preserves backward compatibility with
                 # providers that emit reasoning-only chunks via `event_type`.
-                chunk_text = ''
-                if event_type not in reasoning_event_types or getattr(chunk, 'reasoning', None):
-                    chunk_text = getattr(chunk, 'delta', '') or ''
+                chunk_text = ""
+                if event_type not in reasoning_event_types or getattr(chunk, "reasoning", None):
+                    chunk_text = getattr(chunk, "delta", "") or ""
 
-                chunk_tool_calls = getattr(chunk, 'tool_calls', None)
+                chunk_tool_calls = getattr(chunk, "tool_calls", None)
 
                 # 1) Process reasoning delta (start reasoning block on first sight).
-                if chunk_reasoning or (event_type == 'reasoning' and has_reasoning_metadata):
+                if chunk_reasoning or (event_type == "reasoning" and has_reasoning_metadata):
                     reasoning_text = chunk_reasoning or ""
                     chunk_counts["reasoning"] += 1
-                    log.debug("runner.reasoning.received", {
-                        "length": len(reasoning_text),
-                        "text_preview": reasoning_text[:50],
-                    })
-                    if not hasattr(self, '_current_reasoning_id'):
+                    log.debug(
+                        "runner.reasoning.received",
+                        {
+                            "length": len(reasoning_text),
+                            "text_preview": reasoning_text[:50],
+                        },
+                    )
+                    if not hasattr(self, "_current_reasoning_id"):
                         reasoning_id_counter += 1
                         self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
                         self._current_reasoning_metadata = dict(chunk_metadata)
-                        await processor.process_event(ReasoningStartEvent(
-                            id=self._current_reasoning_id,
-                            metadata=chunk_metadata,
-                        ))
+                        await processor.process_event(
+                            ReasoningStartEvent(
+                                id=self._current_reasoning_id,
+                                metadata=chunk_metadata,
+                            )
+                        )
 
                     if chunk_reasoning:
-                        await processor.process_event(ReasoningDeltaEvent(
-                            id=self._current_reasoning_id,
-                            text=chunk_reasoning,
-                            metadata=chunk_metadata,
-                        ))
+                        await processor.process_event(
+                            ReasoningDeltaEvent(
+                                id=self._current_reasoning_id,
+                                text=chunk_reasoning,
+                                metadata=chunk_metadata,
+                            )
+                        )
 
                 # 2) End reasoning block when this chunk also carries non-reasoning
                 #    content (or once the stream moves away from reasoning).
-                if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
-                    reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-                    await processor.process_event(ReasoningEndEvent(
-                        id=self._current_reasoning_id,
-                        metadata=reasoning_end_metadata,
-                    ))
-                    delattr(self, '_current_reasoning_id')
-                    if hasattr(self, '_current_reasoning_metadata'):
-                        delattr(self, '_current_reasoning_metadata')
+                if (chunk_text or chunk_tool_calls) and hasattr(self, "_current_reasoning_id"):
+                    reasoning_end_metadata = getattr(self, "_current_reasoning_metadata", {}) or {}
+                    await processor.process_event(
+                        ReasoningEndEvent(
+                            id=self._current_reasoning_id,
+                            metadata=reasoning_end_metadata,
+                        )
+                    )
+                    delattr(self, "_current_reasoning_id")
+                    if hasattr(self, "_current_reasoning_metadata"):
+                        delattr(self, "_current_reasoning_metadata")
 
                 # 3) Process text delta.
                 if chunk_text:
@@ -2840,9 +3027,11 @@ class SessionRunner:
                         await processor.process_event(TextStartEvent())
                         text_started = True
 
-                    await processor.process_event(TextDeltaEvent(
-                        text=chunk_text,
-                    ))
+                    await processor.process_event(
+                        TextDeltaEvent(
+                            text=chunk_text,
+                        )
+                    )
 
                 # 4) Process tool calls.
                 if chunk_tool_calls:
@@ -2873,48 +3062,51 @@ class SessionRunner:
                 except Exception as hook_exc:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
             raise
-        
-        log.debug("runner.stream.summary", {
-            "total_chunks": chunk_counts["total"],
-            "reasoning_chunks": chunk_counts["reasoning"],
-            "text_chunks": chunk_counts["text"],
-            "tool_chunks": chunk_counts["tool"],
-            "had_reasoning": chunk_counts["reasoning"] > 0,
-            "finish_reason": stream_finish_reason,
-            "agent": agent.name,
-        })
+
+        log.debug(
+            "runner.stream.summary",
+            {
+                "total_chunks": chunk_counts["total"],
+                "reasoning_chunks": chunk_counts["reasoning"],
+                "text_chunks": chunk_counts["text"],
+                "tool_chunks": chunk_counts["tool"],
+                "had_reasoning": chunk_counts["reasoning"] > 0,
+                "finish_reason": stream_finish_reason,
+                "agent": agent.name,
+            },
+        )
 
         await tool_accumulator.flush_remaining(stream_finish_reason)
-        
+
         # End text block if started
         if text_started:
             await processor.process_event(TextEndEvent())
-        
+
         # End any remaining reasoning block
-        if hasattr(self, '_current_reasoning_id'):
-            reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-            await processor.process_event(ReasoningEndEvent(
-                id=self._current_reasoning_id,
-                metadata=reasoning_end_metadata,
-            ))
-            delattr(self, '_current_reasoning_id')
-            if hasattr(self, '_current_reasoning_metadata'):
-                delattr(self, '_current_reasoning_metadata')
-        
+        if hasattr(self, "_current_reasoning_id"):
+            reasoning_end_metadata = getattr(self, "_current_reasoning_metadata", {}) or {}
+            await processor.process_event(
+                ReasoningEndEvent(
+                    id=self._current_reasoning_id,
+                    metadata=reasoning_end_metadata,
+                )
+            )
+            delattr(self, "_current_reasoning_id")
+            if hasattr(self, "_current_reasoning_metadata"):
+                delattr(self, "_current_reasoning_metadata")
+
         # Emit finish event
-        await processor.process_event(FinishEvent(
-            finish_reason=processor.get_finish_reason()
-        ))
+        await processor.process_event(FinishEvent(finish_reason=processor.get_finish_reason()))
 
         # Foreground subagent tool-calls are launched concurrently during
         # streaming so sibling subagents can start in the same assistant turn.
         # Drain them here before exposing tool results to the next loop step.
         await processor.drain_parallel_tool_calls()
-        
+
         # Get processed content
         content = processor.get_text_content()
         reasoning = processor.get_reasoning_content()
-        
+
         # Update message tokens if provider reported usage
         tokens_update = self._build_tokens_update(stream_usage)
         if tokens_update:
@@ -2924,22 +3116,28 @@ class SessionRunner:
                     assistant_msg.id,
                     tokens=tokens_update,
                 )
-                log.info("runner.stream.usage_captured", {
-                    "input": tokens_update["input"],
-                    "output": tokens_update["output"],
-                    "total": stream_usage.get("total_tokens", 0),
-                })
+                log.info(
+                    "runner.stream.usage_captured",
+                    {
+                        "input": tokens_update["input"],
+                        "output": tokens_update["output"],
+                        "total": stream_usage.get("total_tokens", 0),
+                    },
+                )
             except Exception as e:
                 log.warn("runner.stream.usage_update_failed", {"error": str(e)})
-        
+
         # Log summary
-        log.debug("runner.stream.complete", {
-            "text_length": len(content),
-            "reasoning_length": len(reasoning),
-            "tool_calls": len(processor.tool_calls),
-            "usage": stream_usage,
-        })
-        
+        log.debug(
+            "runner.stream.complete",
+            {
+                "text_length": len(content),
+                "reasoning_length": len(reasoning),
+                "tool_calls": len(processor.tool_calls),
+                "usage": stream_usage,
+            },
+        )
+
         # Update assistant message with content
         if content:
             await Message.update(
@@ -2948,7 +3146,7 @@ class SessionRunner:
                 content=content,
             )
         self._llm_call_aborted = aborted_during_stream
-        
+
         # Note: Tools were already executed synchronously during streaming
         # Build tool call list for result
         tool_calls_for_result = [
@@ -2977,8 +3175,7 @@ class SessionRunner:
                         "reasoningLength": len(reasoning),
                         "toolCallCount": len(tool_calls_for_result),
                         "toolCalls": [
-                            {"id": tool_call.id, "name": tool_call.name}
-                            for tool_call in tool_calls_for_result[:30]
+                            {"id": tool_call.id, "name": tool_call.name} for tool_call in tool_calls_for_result[:30]
                         ],
                         "response": response_payload,
                         "usage": stream_usage,
@@ -2994,10 +3191,11 @@ class SessionRunner:
                 )
             except Exception as exc:
                 log.debug("runner.hook.llm_after.error", {"error": str(exc)})
-        
+
         if tool_calls_for_result:
             self._end_observability(
-                generation_ctx, trace_ctx,
+                generation_ctx,
+                trace_ctx,
                 output={
                     "content_preview": content[:600],
                     "content_chars": len(content),
@@ -3023,9 +3221,10 @@ class SessionRunner:
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
             )
-        
+
         self._end_observability(
-            generation_ctx, trace_ctx,
+            generation_ctx,
+            trace_ctx,
             output={
                 "content_preview": content[:600],
                 "content_chars": len(content),
@@ -3044,7 +3243,7 @@ class SessionRunner:
             },
         )
         return StepResult(action=result_action, content=content, usage=stream_usage)
-    
+
     @staticmethod
     def _end_observability(
         generation_ctx: Any,
@@ -3094,13 +3293,16 @@ class SessionRunner:
 
         tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
         if self.callbacks.event_publish_callback:
-            await self.callbacks.event_publish_callback("runtime.permission_gate", {
-                "sessionID": self.session.id,
-                "step": self._step,
-                "toolName": getattr(request, "permission", ""),
-                "alwaysLoad": tool_metadata.always_load,
-                "patterns": list(getattr(request, "patterns", None) or []),
-            })
+            await self.callbacks.event_publish_callback(
+                "runtime.permission_gate",
+                {
+                    "sessionID": self.session.id,
+                    "step": self._step,
+                    "toolName": getattr(request, "permission", ""),
+                    "alwaysLoad": tool_metadata.always_load,
+                    "patterns": list(getattr(request, "patterns", None) or []),
+                },
+            )
 
         from flocks.permission.next import PermissionNext
         from flocks.permission.rule import PermissionRule, PermissionLevel
@@ -3112,11 +3314,13 @@ class SessionRunner:
                 level = PermissionLevel(str(raw_level))
             except Exception:
                 level = PermissionLevel.ASK
-            session_rules.append(PermissionRule(
-                permission=getattr(rule, "permission", "*"),
-                level=level,
-                pattern=getattr(rule, "pattern", "*"),
-            ))
+            session_rules.append(
+                PermissionRule(
+                    permission=getattr(rule, "permission", "*"),
+                    level=level,
+                    pattern=getattr(rule, "pattern", "*"),
+                )
+            )
 
         metadata = dict(getattr(request, "metadata", None) or {})
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")

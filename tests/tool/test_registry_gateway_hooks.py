@@ -18,6 +18,38 @@ def _register_test_tool(name: str, handler):
 
 
 @pytest.mark.asyncio
+async def test_registry_blocks_direct_execution_outside_tool_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ToolRegistry.init()
+    tool_name = "b4_registry_tool_policy_direct"
+    executed = False
+
+    async def _handler(ctx: ToolContext, value: str) -> ToolResult:
+        nonlocal executed
+        executed = True
+        return ToolResult(success=True, output=value)
+
+    _register_test_tool(tool_name, _handler)
+    try:
+        policy_allows = AsyncMock(return_value=False)
+        monkeypatch.setattr(registry_mod, "_runtime_tool_policy_allows", policy_allows)
+
+        result = await ToolRegistry.execute(
+            tool_name,
+            ctx=ToolContext(session_id="s-tool-policy", message_id="m-tool-policy", agent="rex"),
+            value="hello",
+        )
+    finally:
+        ToolRegistry.unregister(tool_name)
+
+    assert result.success is False
+    assert result.error == "tool_blocked_by_policy"
+    assert executed is False
+    policy_allows.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_registry_executes_before_after_hooks_and_emits_audit(monkeypatch: pytest.MonkeyPatch):
     ToolRegistry.init()
     tool_name = "b2_registry_hook_allow"
@@ -87,7 +119,9 @@ async def test_registry_respects_constrain_decision(monkeypatch: pytest.MonkeyPa
             ]
         )
         monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
-        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_after", AsyncMock(return_value=SimpleNamespace(output={})))
+        monkeypatch.setattr(
+            "flocks.hooks.pipeline.HookPipeline.run_tool_after", AsyncMock(return_value=SimpleNamespace(output={}))
+        )
         monkeypatch.setattr(registry_mod, "_emit_tool_audit", AsyncMock())
 
         result = await ToolRegistry.execute(
@@ -291,7 +325,9 @@ async def test_registry_returns_pending_metadata_for_approval_mode(monkeypatch: 
             )
         )
         monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_before", run_before)
-        monkeypatch.setattr("flocks.hooks.pipeline.HookPipeline.run_tool_after", AsyncMock(return_value=SimpleNamespace(output={})))
+        monkeypatch.setattr(
+            "flocks.hooks.pipeline.HookPipeline.run_tool_after", AsyncMock(return_value=SimpleNamespace(output={}))
+        )
         monkeypatch.setattr(registry_mod, "_emit_tool_audit", AsyncMock())
 
         result = await ToolRegistry.execute(

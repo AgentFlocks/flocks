@@ -51,6 +51,33 @@ async def test_capability_filter_returns_base_pool_when_no_hook_is_registered() 
 
 
 @pytest.mark.asyncio
+async def test_capability_filter_applies_global_tool_policy_without_sandbox() -> None:
+    """tool_policy is a B4 capability constraint, not only sandbox metadata."""
+    from flocks.security.capability_pool import filter_capability_pool
+
+    base = resolve_capability_pool(
+        declared_tools=["read", "bash"],
+        enabled_tools=["read", "bash"],
+    )
+
+    filtered = await filter_capability_pool(
+        base,
+        context={
+            "agent": "rex",
+            "_config_data": {
+                "sandbox": {
+                    "mode": "off",
+                    "tools": {"allow": ["read"]},
+                },
+            },
+        },
+    )
+
+    assert filtered.tools == ("read",)
+    assert "sandbox.tool_policy" in filtered.filtered_by
+
+
+@pytest.mark.asyncio
 async def test_capability_filter_discovers_cold_hooks_before_returning_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

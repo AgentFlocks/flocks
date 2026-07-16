@@ -88,9 +88,7 @@ async def build_workflow_tool_context(
         effective_message_id = message.id
 
     delegation_context: dict[str, Any] = {}
-    delegated_session = bool(
-        parent_session and getattr(parent_session, "delegation_context_required", False)
-    )
+    delegated_session = bool(parent_session and getattr(parent_session, "delegation_context_required", False))
     if delegated_session:
         try:
             from flocks.security.capability_pool import (
@@ -147,6 +145,11 @@ async def build_workflow_tool_context(
         if source_ceiling is not None:
             delegation_context["parent_ceiling"] = sanitize_parent_ceiling(source_ceiling)
 
+    # Resolve the current trusted subject before deriving a root ceiling.  The
+    # workflow entrypoint can also run without an ambient request context, in
+    # which case its parent-session owner gives us the narrowest safe identity
+    # record available.  This lets the ceiling retain permission-mode limits
+    # instead of losing them during root-context construction.
     subject_payload: dict[str, Any] = {}
     current_subject = get_current_subject()
     if current_subject is not None:
@@ -159,8 +162,29 @@ async def build_workflow_tool_context(
             "subject_id": str(parent_session.owner_subject_id),
             "subject_type": "human",
             "entry": "unknown",
-            "permission_mode": str(getattr(parent_session, "permission_mode", "default_interactive") or "default_interactive"),
+            "permission_mode": str(
+                getattr(parent_session, "permission_mode", "default_interactive") or "default_interactive"
+            ),
         }
+
+    if not delegated_session:
+        try:
+            from flocks.security.execution_context import build_root_execution_security_context
+
+            # A workflow-created temporary parent is a root execution boundary
+            # too.  Derive its pool server-side, preserving only a preexisting
+            # parent ceiling as an additional narrowing constraint.
+            delegation_context = await build_root_execution_security_context(
+                session_id=effective_session_id,
+                agent_name=effective_agent or "rex",
+                workspace=workspace_dir,
+                supplied_context={
+                    **delegation_context,
+                    "subject": subject_payload,
+                },
+            )
+        except Exception:
+            delegation_context = {"parent_ceiling": {"invalid": True}}
 
     return ToolContext(
         session_id=effective_session_id,

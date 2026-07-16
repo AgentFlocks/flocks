@@ -11,6 +11,99 @@ def _make_ctx() -> ToolContext:
 
 
 class TestDelegateTaskTolerance:
+    @pytest.mark.asyncio
+    async def test_category_executor_ceiling_preserves_parent_callable_tools(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A dynamic category executor may discover only parent-permitted tools."""
+        from flocks.tool.agent.delegate_task import _build_delegated_security_context
+
+        child_agent = SimpleNamespace(
+            tools=[],
+            capability_tools="all_enabled",
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=child_agent),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.toolset.get_all_enabled_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        parent_ceiling = {
+            "tools": ["read", "bash", "tool_search"],
+            "permission_mode": "readonly",
+            "execution_mode": "foreground",
+            "development_mode": "locked",
+            "network_profile": "internal-only",
+            "data_domains": ["tenant-a"],
+            "secret_scopes": ["read-only"],
+        }
+
+        context = await _build_delegated_security_context(
+            ToolContext(
+                session_id="parent-session",
+                message_id="parent-message",
+                agent="rex",
+                extra={
+                    "_capability_pool": parent_ceiling,
+                },
+            ),
+            "rex-junior",
+        )
+
+        assert context is not None
+        assert context["parent_ceiling"]["tools"] == ["read", "bash", "tool_search"]
+        for key in (
+            "permission_mode",
+            "execution_mode",
+            "development_mode",
+            "network_profile",
+            "data_domains",
+            "secret_scopes",
+        ):
+            assert context[key] == parent_ceiling[key]
+
+    @pytest.mark.asyncio
+    async def test_root_delegate_builds_a_trusted_execution_ceiling(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Direct/service callers cannot create an unbounded child session."""
+        from flocks.tool.agent.delegate_task import _build_delegated_security_context
+
+        parent_session = SimpleNamespace(
+            id="root-session",
+            agent="rex",
+            directory="/tmp/workspace",
+        )
+        child_agent = SimpleNamespace(tools=["read"])
+        monkeypatch.setattr(
+            "flocks.tool.agent.delegate_task.Session.get_by_id",
+            AsyncMock(return_value=parent_session),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=child_agent),
+        )
+        monkeypatch.setattr(
+            "flocks.security.execution_context.build_root_execution_security_context",
+            AsyncMock(return_value={"parent_ceiling": {"tools": ["read"]}}),
+        )
+
+        context = await _build_delegated_security_context(
+            ToolContext(
+                session_id="root-session",
+                message_id="root-message",
+                agent="rex",
+            ),
+            "asset-survey",
+        )
+
+        assert context is not None
+        assert context["parent_ceiling"] == {"tools": ["read"]}
+
     def test_delegate_task_schema_allows_omitting_optional_fields(self):
         schema = ToolRegistry.get_schema("delegate_task")
         assert schema is not None
@@ -33,17 +126,26 @@ class TestDelegateTaskTolerance:
         child_session = SimpleNamespace(id="ses-child")
         with (
             patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
-            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
+            patch(
+                "flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))
+            ),
             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
             patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()) as skill_get,
             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
-            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)) as create_session,
+            patch(
+                "flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)
+            ) as create_session,
             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
-            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
-                action="stop",
-                error=None,
-                last_message=None,
-            ))),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                    )
+                ),
+            ),
         ):
             result = await ToolRegistry.execute(
                 "delegate_task",
@@ -79,21 +181,33 @@ class TestDelegateTaskTolerance:
         }
         with (
             patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
-            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
+            patch(
+                "flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))
+            ),
             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
             patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()),
             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
             patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
-            patch("flocks.tool.agent.delegate_task._build_delegated_security_context", AsyncMock(return_value={
-                "parent_ceiling": parent_ceiling,
-            })),
+            patch(
+                "flocks.tool.agent.delegate_task._build_delegated_security_context",
+                AsyncMock(
+                    return_value={
+                        "parent_ceiling": parent_ceiling,
+                    }
+                ),
+            ),
             patch("flocks.tool.agent.delegate_task.store_delegation_security_context", AsyncMock()) as store_context,
-            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
-                action="stop",
-                error=None,
-                last_message=None,
-            ))) as loop_run,
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                    )
+                ),
+            ) as loop_run,
         ):
             result = await ToolRegistry.execute(
                 "delegate_task",
@@ -112,6 +226,76 @@ class TestDelegateTaskTolerance:
         assert loop_run.await_args.kwargs["security_context"] == {"parent_ceiling": parent_ceiling}
 
     @pytest.mark.asyncio
+    async def test_delegate_task_audits_safe_capability_ceiling_summary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        parent_session = SimpleNamespace(
+            id="test-session",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+            agent="rex",
+        )
+        child_session = SimpleNamespace(id="ses-child")
+        audit_emit = AsyncMock()
+        monkeypatch.setattr("flocks.tool.agent.delegate_task.emit_audit_event", audit_emit)
+
+        with (
+            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
+            patch(
+                "flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))
+            ),
+            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()),
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
+            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch(
+                "flocks.tool.agent.delegate_task._build_delegated_security_context",
+                AsyncMock(
+                    return_value={
+                        "parent_ceiling": {"tools": ["read"], "secret_scopes": ["read-only"]},
+                        "subject": {"subject_id": "user-1", "secret": "must-not-leak"},
+                    }
+                ),
+            ),
+            patch("flocks.tool.agent.delegate_task.store_delegation_security_context", AsyncMock()),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                    )
+                ),
+            ),
+        ):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=ToolContext(
+                    session_id="test-session",
+                    message_id="test-message",
+                    agent="rex",
+                    extra={"_capability_pool": {"tools": ["read"]}},
+                ),
+                subagent_type="asset-survey",
+                prompt="Investigate assets",
+            )
+
+        assert result.success is True
+        audit_emit.assert_awaited_once()
+        event_type, payload = audit_emit.await_args.args
+        assert event_type == "capability.delegate"
+        assert payload["parent_session_id"] == "test-session"
+        assert payload["child_session_id"] == "ses-child"
+        assert payload["capability"]["tool_count"] == 1
+        assert "read" not in str(payload)
+        assert "must-not-leak" not in str(payload)
+
+    @pytest.mark.asyncio
     async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):
         parent_session = SimpleNamespace(
             id="test-session",
@@ -121,27 +305,41 @@ class TestDelegateTaskTolerance:
             model=None,
         )
         child_session = SimpleNamespace(id="ses-quick")
-        cfg = SimpleNamespace(categories={
-            "quick": {
-                "model": "anthropic/claude-haiku-4-5",
-                "prompt_append": None,
+        cfg = SimpleNamespace(
+            categories={
+                "quick": {
+                    "model": "anthropic/claude-haiku-4-5",
+                    "prompt_append": None,
+                }
             }
-        })
+        )
 
-        with patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)), \
-             patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=cfg)), \
-             patch("flocks.tool.agent.delegate_task._validate_category_model", return_value={
-                 "providerID": "anthropic",
-                 "modelID": "claude-haiku-4-5",
-             }), \
-             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
-             patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)) as create_session, \
-             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
-             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
-                 action="stop",
-                 error=None,
-                 last_message=None,
-             ))) as loop_run:
+        with (
+            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
+            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=cfg)),
+            patch(
+                "flocks.tool.agent.delegate_task._validate_category_model",
+                return_value={
+                    "providerID": "anthropic",
+                    "modelID": "claude-haiku-4-5",
+                },
+            ),
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
+            patch(
+                "flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)
+            ) as create_session,
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                    )
+                ),
+            ) as loop_run,
+        ):
             result = await ToolRegistry.execute(
                 "delegate_task",
                 ctx=_make_ctx(),
@@ -209,14 +407,23 @@ class TestDelegateTaskTolerance:
             agent="asset-survey",
         )
 
-        with patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))), \
-             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=session)), \
-             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
-             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
-                 action="stop",
-                 error=None,
-                 last_message=None,
-             ))):
+        with (
+            patch(
+                "flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))
+            ),
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=session)),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                    )
+                ),
+            ),
+        ):
             result = await ToolRegistry.execute(
                 "delegate_task",
                 ctx=_make_ctx(),
