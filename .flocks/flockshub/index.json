@@ -14573,7 +14573,7 @@
       "type": "device",
       "name": "Chaitin SafeLine WAF",
       "description": "Chaitin SafeLine WAF OpenAPI integration.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "category": "integration",
       "tags": [
         "waf",
