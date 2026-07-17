@@ -403,6 +403,9 @@ export default function SessionPage() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(new Set());
   const [projectDialogMode, setProjectDialogMode] = useState<ProjectDialogMode | null>(null);
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const [projectPendingDelete, setProjectPendingDelete] = useState<ProjectSessionGroup | null>(null);
+  const [projectDeleting, setProjectDeleting] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [projectNameValue, setProjectNameValue] = useState('');
   const [projectSubmitting, setProjectSubmitting] = useState(false);
@@ -596,7 +599,10 @@ export default function SessionPage() {
 
       projectMap.set(project.id, {
         id: project.id,
-        label: isDefaultProject ? t('defaultProjectName') : getProjectLabel(project),
+        label: isDefaultProject
+          && (!project.name?.trim() || project.name.trim() === getPathBasename(project.worktree))
+          ? t('defaultProjectName')
+          : getProjectLabel(project),
         worktree: project.worktree,
         sessions: [],
       });
@@ -701,8 +707,10 @@ export default function SessionPage() {
     if (currentProject?.id && !nextProjects.some((project) => project.id === currentProject.id)) {
       nextProjects = [currentProject, ...nextProjects];
     }
-    if (ensureProject?.id && !nextProjects.some((project) => project.id === ensureProject.id)) {
-      nextProjects = [ensureProject, ...nextProjects];
+    if (ensureProject?.id) {
+      nextProjects = nextProjects.some((project) => project.id === ensureProject.id)
+        ? nextProjects.map((project) => (project.id === ensureProject.id ? ensureProject : project))
+        : [ensureProject, ...nextProjects];
     }
     const nextCurrentProjectId = currentResult.status === 'fulfilled'
       ? currentResult.value.data?.id ?? null
@@ -716,6 +724,13 @@ export default function SessionPage() {
   useEffect(() => {
     void fetchProjects();
   }, [fetchProjects]);
+
+  useEffect(() => {
+    if (!openProjectMenuId) return;
+    const closeMenu = () => setOpenProjectMenuId(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [openProjectMenuId]);
 
   // Keep the selected session in sync with URL query params (e.g. onboarding
   // or other in-app navigation to `/sessions?session=...`). Clear the params
@@ -1094,10 +1109,14 @@ export default function SessionPage() {
   }, []);
 
   const handleOpenRenameProject = useCallback((project: ProjectSessionGroup) => {
+    const persistedName = projects.find((item) => item.id === project.id)?.name?.trim();
+    setOpenProjectMenuId(null);
     setProjectDialogMode('rename');
     setEditingProjectId(project.id);
-    setProjectNameValue(project.label);
-  }, []);
+    setProjectNameValue(persistedName && persistedName !== getPathBasename(project.worktree)
+      ? persistedName
+      : project.label);
+  }, [projects]);
 
   const handleCloseProjectDialog = useCallback(() => {
     if (projectSubmitting) return;
@@ -1105,6 +1124,35 @@ export default function SessionPage() {
     setEditingProjectId(null);
     setProjectNameValue('');
   }, [projectSubmitting]);
+
+  const handleOpenDeleteProject = useCallback((project: ProjectSessionGroup) => {
+    setOpenProjectMenuId(null);
+    setProjectPendingDelete(project);
+  }, []);
+
+  const handleDeleteProject = useCallback(async () => {
+    if (!projectPendingDelete || projectDeleting) return;
+
+    setProjectDeleting(true);
+    try {
+      await client.delete(`/api/project/${projectPendingDelete.id}`);
+      setProjects((current) => current.filter((project) => project.id !== projectPendingDelete.id));
+      setCollapsedProjectIds((current) => {
+        const next = new Set(current);
+        next.delete(projectPendingDelete.id);
+        return next;
+      });
+      setSelectedProjectId((current) => (
+        current === projectPendingDelete.id ? defaultProjectId : current
+      ));
+      setProjectPendingDelete(null);
+      toast.success(t('projectDialog.deleteSuccess'));
+    } catch (err: any) {
+      toast.error(t('projectDialog.deleteFailed'), err.message);
+    } finally {
+      setProjectDeleting(false);
+    }
+  }, [defaultProjectId, projectDeleting, projectPendingDelete, t, toast]);
 
   const handleSubmitProject = useCallback(async () => {
     if (!projectDialogMode || projectSubmitting) return;
@@ -1132,8 +1180,8 @@ export default function SessionPage() {
         });
         await fetchProjects(createdProject);
       } else if (editingProjectId) {
-        await client.patch(`/api/project/${editingProjectId}`, { name: nextName });
-        await fetchProjects();
+        const response = await client.patch(`/api/project/${editingProjectId}`, { name: nextName });
+        await fetchProjects(response.data as ProjectSummary);
       }
       setProjectDialogMode(null);
       setEditingProjectId(null);
@@ -1428,9 +1476,8 @@ export default function SessionPage() {
                   const isDefaultProject = defaultProjectId === group.id;
                   const isSelectedProject = selectedProjectId === group.id;
                   const persistedProject = projects.find((project) => project.id === group.id);
-                  const canRenameProject = Boolean(persistedProject && !isDefaultProject);
                   return (
-                    <div key={group.id} className="group/project">
+                    <div key={group.id} className="group/project relative">
                       <div
                         className={`mx-2 flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm transition-colors ${
                           isSelectedProject
@@ -1454,11 +1501,15 @@ export default function SessionPage() {
                           type="button"
                           onClick={() => {
                             setSelectedProjectId(group.id);
-                            setCollapsedProjectIds(prev => {
-                              const next = new Set(prev);
-                              next.delete(group.id);
-                              return next;
-                            });
+                            if (isSelectedProject) {
+                              toggleProjectCollapsed(group.id);
+                            } else {
+                              setCollapsedProjectIds(prev => {
+                                const next = new Set(prev);
+                                next.delete(group.id);
+                                return next;
+                              });
+                            }
                           }}
                           className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
                           aria-label={t('selectProject', { project: group.label })}
@@ -1485,24 +1536,54 @@ export default function SessionPage() {
                         >
                           {creating && isSelectedProject ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
                         </button>
-                        {canRenameProject && (
+                        {persistedProject && (
                           <button
                             type="button"
                             onClick={(event) => {
                               event.stopPropagation();
-                              handleOpenRenameProject(group);
+                              setOpenProjectMenuId((current) => current === group.id ? null : group.id);
                             }}
                             className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-                            title={t('projectDialog.renameTitle')}
-                            aria-label={t('projectDialog.renameTitle')}
+                            title={t('projectActions')}
+                            aria-label={t('projectActions')}
+                            aria-expanded={openProjectMenuId === group.id}
                           >
-                            <PencilLine className="h-3 w-3" />
+                            <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
                         <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
                           {group.sessions.length}
                         </span>
                       </div>
+                      {persistedProject && openProjectMenuId === group.id && (
+                        <div
+                          className="absolute right-8 top-8 z-30 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                          role="menu"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => handleOpenRenameProject(group)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <PencilLine className="h-3.5 w-3.5" />
+                            {t('projectDialog.renameAction')}
+                          </button>
+                          <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => handleOpenDeleteProject(group)}
+                            disabled={isDefaultProject}
+                            title={isDefaultProject ? t('projectDialog.defaultDeleteDisabled') : undefined}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/40"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t('projectDialog.deleteAction')}
+                          </button>
+                        </div>
+                      )}
                       {!collapsed && (
                         <div className="mt-1">
                           {group.sessions.length > 0 ? (
@@ -1919,6 +2000,40 @@ export default function SessionPage() {
                 className="inline-flex min-w-16 items-center justify-center rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
               >
                 {projectSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : t('save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {projectPendingDelete && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                {t('projectDialog.deleteTitle')}
+              </h3>
+            </div>
+            <div className="px-4 py-4 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+              {t('projectDialog.deleteDescription', { project: projectPendingDelete.label })}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setProjectPendingDelete(null)}
+                disabled={projectDeleting}
+                className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteProject()}
+                disabled={projectDeleting}
+                className="inline-flex min-w-16 items-center justify-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {projectDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                {t('projectDialog.confirmDelete')}
               </button>
             </div>
           </div>

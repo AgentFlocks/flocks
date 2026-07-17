@@ -8,7 +8,13 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from flocks.project.project import Project, ProjectInfo, ProjectIcon
+from flocks.project.project import (
+    Project,
+    ProjectDeletionError,
+    ProjectIcon,
+    ProjectInfo,
+    ProjectNameConflictError,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -74,6 +80,8 @@ async def create_project(request: ProjectCreateRequest):
             icon=request.icon,
         )
         return project
+    except ProjectNameConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -111,7 +119,10 @@ async def update_project(project_id: str, update: ProjectUpdateRequest):
         # Update fields
         update_data = {}
         if update.name is not None:
-            update_data["name"] = update.name
+            name = update.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Project name cannot be empty")
+            update_data["name"] = name
         if update.icon is not None:
             update_data["icon"] = update.icon
         
@@ -120,11 +131,27 @@ async def update_project(project_id: str, update: ProjectUpdateRequest):
         log.info("project.updated", {"id": project_id})
         
         return updated_project
+    except ProjectNameConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
         log.error("project.update.error", {"error": str(e), "id": project_id})
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{project_id}", response_model=bool, summary="Delete project")
+async def delete_project(project_id: str):
+    """Delete an empty user-managed project."""
+    try:
+        return await Project.delete(project_id)
+    except ProjectDeletionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        log.error("project.delete.error", {"error": str(e), "id": project_id})
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/{project_id}", response_model=ProjectInfo, summary="Get project")

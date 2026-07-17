@@ -23,6 +23,7 @@ const {
   toast,
 } = vi.hoisted(() => ({
   client: {
+    delete: vi.fn(),
     get: vi.fn(),
     patch: vi.fn(),
     post: vi.fn(),
@@ -362,11 +363,11 @@ describe('SessionPage session actions menu', () => {
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
     client.get.mockImplementation((url: string) => {
       if (url === '/api/project/current') {
-        return Promise.resolve({ data: { id: 'project-1', worktree: '/tmp/project', name: 'Security Project' } });
+        return Promise.resolve({ data: { id: 'project-1', worktree: '/tmp/project', name: 'project' } });
       }
       return Promise.resolve({
         data: [
-          { id: 'project-1', worktree: '/tmp/project', name: 'Security Project' },
+          { id: 'project-1', worktree: '/tmp/project', name: 'project' },
         ],
       });
     });
@@ -407,6 +408,25 @@ describe('SessionPage session actions menu', () => {
 
     await user.click(screen.getByRole('button', { name: 'toggleProject' }));
 
+    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+  });
+
+  it('toggles project sessions when clicking the selected project row', async () => {
+    const user = userEvent.setup();
+
+    renderSessionPage();
+
+    await screen.findByText('defaultProjectName');
+    const toggle = screen.getByRole('button', { name: 'toggleProject' });
+    const projectRow = screen.getByRole('button', { name: 'selectProject' });
+
+    await user.click(toggle);
+    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+
+    await user.click(projectRow);
+    expect(screen.getByText('Original Session')).toBeInTheDocument();
+
+    await user.click(projectRow);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
   });
 
@@ -501,8 +521,8 @@ describe('SessionPage session actions menu', () => {
       }
       return Promise.resolve({
         data: [
-          { id: 'project-1', worktree: '/tmp/project', name: 'flocks' },
-          { id: 'old-project-id', worktree: '/tmp/project', name: 'flocks' },
+          { id: 'project-1', worktree: '/tmp/project', name: 'project' },
+          { id: 'old-project-id', worktree: '/tmp/project', name: 'project' },
         ],
       });
     });
@@ -676,7 +696,8 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectDialog.renameTitle' }));
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
+    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.renameAction' }));
     const input = screen.getByLabelText('projectDialog.nameLabel');
     await user.clear(input);
     await user.type(input, 'Renamed Project');
@@ -684,6 +705,60 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(client.patch).toHaveBeenCalledWith('/api/project/historical-project-id', { name: 'Renamed Project' });
+    });
+  });
+
+  it('opens project actions and renames the default project', async () => {
+    const user = userEvent.setup();
+    client.patch.mockResolvedValue({
+      data: { id: 'project-1', worktree: '/tmp/project', name: 'Main Project' },
+    });
+
+    renderSessionPage();
+
+    const projectLabel = await screen.findByText('defaultProjectName');
+    const projectRow = projectLabel.closest('[class*="group/project"]');
+    expect(projectRow).not.toBeNull();
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
+    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.renameAction' }));
+
+    const input = screen.getByLabelText('projectDialog.nameLabel');
+    await user.clear(input);
+    await user.type(input, 'Main Project');
+    await user.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenCalledWith('/api/project/project-1', { name: 'Main Project' });
+    });
+    expect(await screen.findByText('Main Project')).toBeInTheDocument();
+  });
+
+  it('deletes an empty user-managed project after confirmation', async () => {
+    const user = userEvent.setup();
+    const currentProject = { id: 'project-1', worktree: '/tmp/project', name: 'project' };
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/project/current') return Promise.resolve({ data: currentProject });
+      return Promise.resolve({
+        data: [
+          currentProject,
+          { id: 'prj_project2', worktree: '/tmp/project', name: 'Labs' },
+        ],
+      });
+    });
+    client.delete.mockResolvedValue({ data: true });
+
+    renderSessionPage();
+
+    const projectLabel = await screen.findByText('Labs');
+    const projectRow = projectLabel.closest('[class*="group/project"]');
+    expect(projectRow).not.toBeNull();
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
+    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.deleteAction' }));
+    await user.click(screen.getByRole('button', { name: 'projectDialog.confirmDelete' }));
+
+    await waitFor(() => {
+      expect(client.delete).toHaveBeenCalledWith('/api/project/prj_project2');
+      expect(screen.queryByText('Labs')).not.toBeInTheDocument();
     });
   });
 

@@ -17,6 +17,14 @@ from flocks.utils.id import Identifier
 log = Log.create(service="project")
 
 
+class ProjectNameConflictError(ValueError):
+    """Raised when a project name is already used in the same worktree."""
+
+
+class ProjectDeletionError(ValueError):
+    """Raised when a project cannot be deleted safely."""
+
+
 class ProjectIcon(BaseModel):
     """Project icon configuration"""
     url: Optional[str] = None
@@ -47,6 +55,33 @@ class Project:
     
     _current: Optional[ProjectInfo] = None
 
+    @staticmethod
+    def _normalized_worktree(worktree: str) -> str:
+        return os.path.normcase(os.path.realpath(worktree))
+
+    @classmethod
+    async def _ensure_unique_name(
+        cls,
+        *,
+        name: str,
+        worktree: str,
+        exclude_project_id: Optional[str] = None,
+    ) -> None:
+        entries = await Storage.list_entries(prefix="project/", model=ProjectInfo)
+        normalized_name = name.casefold()
+        normalized_worktree = cls._normalized_worktree(worktree)
+
+        for _, project in entries:
+            if project.id == exclude_project_id or not project.name:
+                continue
+            if (
+                project.name.strip().casefold() == normalized_name
+                and cls._normalized_worktree(project.worktree) == normalized_worktree
+            ):
+                raise ProjectNameConflictError(
+                    f"Project name '{name}' already exists in this workspace"
+                )
+
     @classmethod
     async def create(
         cls,
@@ -62,13 +97,19 @@ class Project:
         project ID so sessions can be organized independently from the default
         auto-discovered project.
         """
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Project name cannot be empty")
+
+        await cls._ensure_unique_name(name=normalized_name, worktree=worktree)
+
         now = int(datetime.now().timestamp() * 1000)
         project_id = Identifier.ascending("slug").replace("slg_", "prj_", 1)
         project = ProjectInfo(
             id=project_id,
             worktree=worktree,
             vcs=None,
-            name=name,
+            name=normalized_name,
             icon=icon,
             sandboxes=[],
             time=ProjectTime(
@@ -268,16 +309,8 @@ class Project:
             List of project info
         """
         try:
-            projects = await Storage.list_by_prefix(["project"])
-            result = []
-            
-            for key, value in projects.items():
-                if isinstance(value, dict):
-                    try:
-                        project = ProjectInfo(**value)
-                        result.append(project)
-                    except Exception as e:
-                        log.warn("project.parse.error", {"key": key, "error": str(e)})
+            entries = await Storage.list_entries(prefix="project/", model=ProjectInfo)
+            result = [project for _, project in entries]
             
             # Sort by updated time (newest first)
             result.sort(key=lambda p: p.time.updated, reverse=True)
@@ -318,6 +351,17 @@ class Project:
         project = await cls.get(project_id)
         if not project:
             raise ValueError(f"Project {project_id} not found")
+
+        if "name" in kwargs and kwargs["name"] is not None:
+            normalized_name = str(kwargs["name"]).strip()
+            if not normalized_name:
+                raise ValueError("Project name cannot be empty")
+            await cls._ensure_unique_name(
+                name=normalized_name,
+                worktree=project.worktree,
+                exclude_project_id=project_id,
+            )
+            kwargs["name"] = normalized_name
         
         # Update fields
         update_data = project.model_dump()
@@ -341,6 +385,32 @@ class Project:
         log.info("project.updated", {"id": project_id})
         
         return updated_project
+
+    @classmethod
+    async def delete(cls, project_id: str) -> bool:
+        """Delete an empty user-managed project."""
+        project = await cls.get(project_id)
+        if not project:
+            raise ValueError(f"Project {project_id} not found")
+        if not project_id.startswith("prj_"):
+            raise ProjectDeletionError("The default project cannot be deleted")
+
+        from flocks.session.session import SessionInfo
+
+        entries = await Storage.list_entries(
+            prefix=f"session:{project_id}:",
+            model=SessionInfo,
+        )
+        if any(session.status != "deleted" for _, session in entries):
+            raise ProjectDeletionError(
+                "Delete all conversations in this project before deleting it"
+            )
+
+        deleted = await Storage.delete(f"project/{project_id}")
+        if cls._current and cls._current.id == project_id:
+            cls._current = None
+        log.info("project.deleted", {"id": project_id})
+        return deleted
     
     @classmethod
     def current(cls) -> Optional[ProjectInfo]:
