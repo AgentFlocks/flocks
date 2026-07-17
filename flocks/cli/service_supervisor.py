@@ -119,8 +119,6 @@ class SupervisorDaemon:
         self._shutdown_requested = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
-        self._backend_paused = False
-        self._webui_paused = False
         self.backend = ManagedService(
             name="backend",
             label="后端",
@@ -277,15 +275,6 @@ class SupervisorDaemon:
                     if parsed.path == "/stop/webui":
                         self._send_json({"error": "static WebUI is served by Flocks service and cannot be stopped separately"}, status=409)
                         return
-                    if parsed.path == "/upgrade/prepare":
-                        daemon.prepare_upgrade(reason="control upgrade prepare")
-                        self._send_json(daemon.status_payload())
-                        return
-                    if parsed.path == "/upgrade/resume":
-                        daemon.update_config(payload)
-                        daemon.resume_upgrade(reason="control upgrade resume")
-                        self._send_json(daemon.status_payload())
-                        return
                     self._send_json({"error": "not found"}, status=404)
                 except _CLIENT_DISCONNECT_ERRORS:
                     return
@@ -320,8 +309,8 @@ class SupervisorDaemon:
                     "state": "stopping" if self._shutdown_requested.is_set() else "running",
                     "log_path": str(supervisor_log_path(self.paths)),
                 },
-                "backend": _service_payload(self.backend, paused=self._backend_paused),
-                "webui": _service_payload(self.webui, paused=self._webui_paused),
+                "backend": _service_payload(self.backend),
+                "webui": _service_payload(self.webui),
                 "config": service_config_payload(self.config),
             }
 
@@ -411,48 +400,23 @@ class SupervisorDaemon:
 
     def restart_all(self, *, reason: str) -> None:
         with self._lock:
-            self._backend_paused = False
-            self._webui_paused = False
             self._restart_service(self.backend, reason=reason, immediate=True)
             self._start_backend_locked(immediate=True)
             self._sync_static_webui_state()
 
     def restart_backend(self, *, reason: str) -> None:
         with self._lock:
-            self._backend_paused = False
             self._restart_service(self.backend, reason=reason, immediate=True)
             self._start_backend_locked(immediate=True)
             self._sync_static_webui_state()
 
     def restart_webui(self, *, reason: str, force_frontend_build: bool = False) -> None:
         with self._lock:
-            self._webui_paused = False
             if force_frontend_build:
                 from flocks.cli.service_config import with_frontend_build
 
                 self.config = with_frontend_build(self.config, skip_frontend_build=False)
             self._restart_service(self.backend, reason=f"{reason}: static webui", immediate=True)
-            self._start_backend_locked(immediate=True)
-            self._sync_static_webui_state()
-
-    def prepare_upgrade(self, *, reason: str) -> None:
-        with self._lock:
-            self._backend_paused = True
-            self._webui_paused = True
-            _daemon_log("service_pause", {"service": "backend", "reason": reason})
-            _daemon_log("service_pause", {"service": "webui", "reason": reason})
-            self.backend.last_error = reason
-            self.webui.last_error = reason
-            self._stop_service(self.backend)
-            self.webui.state = "paused"
-
-    def resume_upgrade(self, *, reason: str) -> None:
-        with self._lock:
-            self._backend_paused = False
-            self._webui_paused = False
-            _daemon_log("service_resume", {"service": "backend", "reason": reason})
-            _daemon_log("service_resume", {"service": "webui", "reason": reason})
-            self._probe_backend_locked()
             self._start_backend_locked(immediate=True)
             self._sync_static_webui_state()
 
@@ -463,10 +427,8 @@ class SupervisorDaemon:
 
     def tick(self) -> None:
         with self._lock:
-            if not self._backend_paused:
-                self._probe_backend_locked()
-            if not self._backend_paused:
-                self._start_backend_locked(immediate=False)
+            self._probe_backend_locked()
+            self._start_backend_locked(immediate=False)
             self._sync_static_webui_state()
 
     def _restart_service(self, service: ManagedService, *, reason: str, immediate: bool) -> None:
@@ -547,9 +509,6 @@ class SupervisorDaemon:
         self.webui.log_path = self.paths.backend_log
         self.webui.process = None
         self.webui.command = ()
-        if self._webui_paused:
-            self.webui.state = "paused"
-            return
         if self.backend.state == "healthy":
             self.webui.state = "static"
             self.webui.last_error = None

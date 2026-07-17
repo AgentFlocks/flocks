@@ -472,18 +472,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
-    try:
-        from flocks.updater.updater import recover_upgrade_state
-
-        await _run_startup_phase(
-            log,
-            "updater.recover_upgrade_state",
-            lambda: asyncio.to_thread(recover_upgrade_state),
-        )
-        log.info("updater.recovery.checked")
-    except Exception as e:
-        log.warning("updater.recovery.failed", {"error": str(e)})
-
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
         "blocking_duration_ms": blocking_startup_ms,

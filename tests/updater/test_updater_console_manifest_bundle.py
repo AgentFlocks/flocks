@@ -811,7 +811,7 @@ async def test_download_console_bundle_reports_http_status_and_body(
 
 
 @pytest.mark.asyncio
-async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
+async def test_core_pro_bundle_requires_source_upgrade_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -884,20 +884,12 @@ async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     monkeypatch.setattr(updater, "_run_async", _fake_run_async)
 
     progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
-    assert progresses[-1].stage == "done"
-    assert (install_root / "new_core.py").is_file()
-    assert not (install_root / "old_core.py").exists()
-    assert any(cmd[:2] == ["/usr/bin/uv", "sync"] for cmd in captured)
-    pip_installs = [cmd for cmd in captured if cmd[:3] == ["/usr/bin/uv", "pip", "install"]]
-    assert pip_installs
-    assert "--no-deps" in pip_installs[-1]
-    assert str(wheel.name) in pip_installs[-1][-1]
-    marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
-    assert marker.is_file()
-    marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
-    assert version_writes == ["2026.5.10"]
-    assert marker_payload["bundle_version"] == "v2026.5.11"
-    assert marker_payload["core_version"] == "v2026.5.10"
+    assert progresses[-1].stage == "error"
+    assert "detached handoff" in progresses[-1].message
+    assert not (install_root / "new_core.py").exists()
+    assert (install_root / "old_core.py").exists()
+    assert captured == []
+    assert version_writes == []
 
 
 @pytest.mark.asyncio

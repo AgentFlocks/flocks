@@ -1,4 +1,6 @@
+import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,11 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from flocks.cli import service_manager
+from flocks.cli.service_config import service_config_payload
 from flocks.updater import restart_handoff
 from tests.helpers.service_supervisor import make_short_runtime_root, start_supervisor, stop_supervisor, wait_for_supervisor
 
 
-def _handoff_args(tmp_path: Path, restart_argv: list[str], *, prepare_handover: bool = False) -> list[str]:
+def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
     args = [
         "--parent-pid",
         "1234",
@@ -33,9 +36,281 @@ def _handoff_args(tmp_path: Path, restart_argv: list[str], *, prepare_handover: 
         "--current-version",
         "2026.3.31",
     ]
-    if prepare_handover:
-        args.append("--prepare-handover")
     return [*args, "--", *restart_argv]
+
+
+def _simple_upgrade_handoff_args(tmp_path: Path) -> list[str]:
+    content_root = tmp_path / "staged"
+    content_root.mkdir()
+    config = service_manager.ServiceConfig(
+        backend_host="10.0.0.8",
+        backend_port=5273,
+        frontend_host="10.0.0.8",
+        frontend_port=5273,
+        legacy_backend_host="0.0.0.0",
+        legacy_backend_port=9000,
+        no_browser=True,
+        skip_frontend_build=True,
+    )
+    return [
+        "--mode",
+        "upgrade",
+        "--parent-pid",
+        "1234",
+        "--backend-host",
+        config.backend_host,
+        "--backend-port",
+        str(config.backend_port),
+        "--frontend-host",
+        config.frontend_host,
+        "--frontend-port",
+        str(config.frontend_port),
+        "--install-root",
+        str(tmp_path / "install"),
+        "--content-root",
+        str(content_root),
+        "--backup-retain-count",
+        "3",
+        "--was-running",
+        "--daemon-pid",
+        "2468",
+        "--service-config-json",
+        json.dumps(service_config_payload(config)),
+        "--uv-path",
+        "uv",
+        "--sync-timeout",
+        "300",
+        "--version",
+        "2026.4.1",
+        "--current-version",
+        "2026.3.31",
+        "--",
+        "/install/.venv/bin/python",
+    ]
+
+
+def test_upgrade_handoff_owns_stop_backup_replace_install_and_restart_order(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    cleanup_dir = tmp_path / "cleanup"
+    cleanup_dir.mkdir()
+    args = _simple_upgrade_handoff_args(tmp_path)
+    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_services_before_upgrade",
+        lambda args: events.append(f"stop:{args.daemon_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_backup_current_source",
+        lambda args: events.append("backup") or tmp_path / "backup.tar.gz",
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_apply_new_source",
+        lambda args: events.append("replace"),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_run_upgrade_tasks",
+        lambda args: events.append("install") or None,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_start_service_after_upgrade",
+        lambda args: events.append("start") or (True, "", ""),
+    )
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **_kwargs: None)
+
+    assert restart_handoff.run(args) == 0
+    assert events == [
+        "wait-parent:1234",
+        "stop:2468",
+        "backup",
+        "replace",
+        "install",
+        "start",
+    ]
+    assert not cleanup_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [
+        ("127.0.0.1", 5173),
+        ("0.0.0.0", 5273),
+        ("10.20.30.40", 9527),
+        ("::", 6173),
+        ("2001:db8::20", 7173),
+    ],
+)
+def test_upgrade_start_argv_uses_captured_host_port_without_control_api(host: str, port: int) -> None:
+    config = service_manager.ServiceConfig(
+        backend_host=host,
+        backend_port=port,
+        frontend_host=host,
+        frontend_port=port,
+        legacy_backend_host="0.0.0.0",
+        legacy_backend_port=9000,
+        no_browser=True,
+        skip_frontend_build=True,
+    )
+    args = SimpleNamespace(
+        restart_argv=["/install/.venv/bin/python"],
+        service_config_json=json.dumps(service_config_payload(config)),
+    )
+
+    assert restart_handoff._build_captured_start_argv(args) == [
+        "/install/.venv/bin/python",
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--no-browser",
+        "--skip-webui-build",
+        "--server-host",
+        "0.0.0.0",
+        "--server-port",
+        "9000",
+    ]
+
+
+def test_upgrade_backup_failure_restarts_old_source_without_replacing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    cleanup_dir = tmp_path / "cleanup"
+    cleanup_dir.mkdir()
+    args = _simple_upgrade_handoff_args(tmp_path)
+    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_backup_current_source",
+        lambda _args: events.append("backup") or None,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_apply_new_source",
+        lambda _args: events.append("replace"),
+    )
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: events.append("install"))
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "run",
+        lambda argv, **_kwargs: events.append(f"start:{argv}")
+        or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+
+    assert restart_handoff.run(args) == 1
+    assert events[0] == "backup"
+    assert events[1].startswith("start:")
+    assert "replace" not in events
+    assert "install" not in events
+    assert not cleanup_dir.exists()
+
+
+def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    results: list[dict[str, object]] = []
+    cleanup_dir = tmp_path / "cleanup"
+    cleanup_dir.mkdir()
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
+    args = _simple_upgrade_handoff_args(tmp_path)
+    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(restart_handoff, "_backup_current_source", lambda _args: backup_path)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_apply_new_source",
+        lambda _args: events.append("replace"),
+    )
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: "npm build failed")
+    monkeypatch.setattr(
+        restart_handoff,
+        "_start_service_after_upgrade",
+        lambda _args: events.append("start") or (True, "", ""),
+    )
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(message))
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+
+    assert restart_handoff.run(args) == 1
+    assert events[0] == "replace"
+    assert "start" not in events
+    assert not any("rollback" in event for event in events)
+    assert cleanup_dir.exists()
+    assert backup_path.exists()
+    assert results[-1]["failed_stage"] == "install"
+    assert results[-1]["backup_path"] == backup_path
+
+
+def test_upgrade_start_failure_records_process_output_and_keeps_temp(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    results: list[dict[str, object]] = []
+    cleanup_dir = tmp_path / "cleanup"
+    cleanup_dir.mkdir()
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
+    args = _simple_upgrade_handoff_args(tmp_path)
+    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(restart_handoff, "_backup_current_source", lambda _args: backup_path)
+    monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: None)
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: None)
+    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_start_service_after_upgrade",
+        lambda _args: (False, "start stdout", "start stderr"),
+    )
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+
+    assert restart_handoff.run(args) == 1
+    assert cleanup_dir.exists()
+    assert results[-1]["failed_stage"] == "start"
+    assert results[-1]["stdout"] == "start stdout"
+    assert results[-1]["stderr"] == "start stderr"
+
+
+def test_upgrade_that_was_stopped_does_not_start_service(monkeypatch, tmp_path: Path) -> None:
+    args = _simple_upgrade_handoff_args(tmp_path)
+    args.remove("--was-running")
+    parsed = restart_handoff._parse_args(args)
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("stopped service must remain stopped"),
+    )
+
+    assert restart_handoff._start_service_after_upgrade(parsed) == (True, "", "")
 
 
 def test_run_waits_for_parent_and_backend_port_before_spawning(
@@ -160,7 +435,7 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
     assert f"spawn:{restart_argv}:{tmp_path}:True" in events
 
 
-def test_run_prepares_handover_after_parent_exit_without_waiting_for_page_port(
+def test_restart_only_waits_for_port_after_parent_exit(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -172,11 +447,6 @@ def test_run_prepares_handover_after_parent_exit_without_waiting_for_page_port(
         restart_handoff,
         "_wait_for_parent_exit",
         lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
-    )
-    monkeypatch.setattr(
-        restart_handoff,
-        "_prepare_upgrade_handover",
-        lambda args: events.append(f"prepare:{args.version}") or True,
     )
     monkeypatch.setattr(
         restart_handoff,
@@ -196,12 +466,12 @@ def test_run_prepares_handover_after_parent_exit_without_waiting_for_page_port(
         or SimpleNamespace(pid=4321),
     )
 
-    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv, prepare_handover=True))
+    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
 
     assert code == 0
     assert events[1:] == [
         "wait-parent:1234",
-        "prepare:2026.4.1",
+        "free-port:8000",
         "tasks",
         "stop-supervisor",
         f"spawn:{restart_argv}:{tmp_path}:True",
@@ -223,7 +493,7 @@ def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port, backend_pid_file: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
     monkeypatch.setattr(
         restart_handoff,
@@ -235,12 +505,11 @@ def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
         "Popen",
         lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}") or SimpleNamespace(pid=4321),
     )
-    monkeypatch.setattr(restart_handoff, "_record_backend_runtime_if_direct_serve", lambda *_args, **_kwargs: None)
-
     code = restart_handoff.run(args)
 
     assert code == 0
-    assert events[1:4] == ["tasks", "receipt", f"spawn:{restart_argv}"]
+    assert events.index("tasks") < events.index("receipt")
+    assert any(event.startswith("spawn:") for event in events)
 
 
 def test_run_does_not_spawn_when_parent_exit_times_out(monkeypatch, tmp_path: Path) -> None:
@@ -269,7 +538,6 @@ def test_run_does_not_spawn_when_upgrade_tasks_fail(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: "sync failed")
-    monkeypatch.setattr(restart_handoff, "_rollback_failed_upgrade", lambda args, error: events.append(f"rollback:{error}"))
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
@@ -279,11 +547,11 @@ def test_run_does_not_spawn_when_upgrade_tasks_fail(monkeypatch, tmp_path: Path)
     code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
 
     assert code == 1
-    assert "rollback:sync failed" in events
+    assert "log:upgrade_tasks_failed error=sync failed" in events
     assert "spawn" not in events
 
 
-def test_run_rolls_back_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_path: Path) -> None:
+def test_run_logs_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
     cleanup_dir = tmp_path / "cleanup"
     cleanup_dir.mkdir()
@@ -300,7 +568,6 @@ def test_run_rolls_back_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", crash)
-    monkeypatch.setattr(restart_handoff, "_rollback_failed_upgrade", lambda args, error: events.append(f"rollback:{error}"))
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
@@ -310,7 +577,7 @@ def test_run_rolls_back_and_cleans_up_when_upgrade_tasks_crash(monkeypatch, tmp_
     code = restart_handoff.run(args)
 
     assert code == 1
-    assert "rollback:upgrade tasks crashed: boom" in events
+    assert "log:upgrade_tasks_failed error=upgrade tasks crashed: boom" in events
     assert not cleanup_dir.exists()
     assert "spawn" not in events
 
@@ -337,50 +604,48 @@ def test_run_does_not_spawn_when_supervisor_stop_fails(monkeypatch, tmp_path: Pa
     assert "spawn" not in events
 
 
-def test_run_rolls_back_prepared_handover_when_supervisor_stop_fails(monkeypatch, tmp_path: Path) -> None:
+def test_restart_only_does_not_rollback_when_supervisor_stop_fails(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
     restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_prepare_upgrade_handover", lambda args: events.append("prepare") or True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: None)
     monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda: False)
-    monkeypatch.setattr(restart_handoff, "_rollback_upgrade_handover", lambda: events.append("rollback-handover"))
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
         lambda *_args, **_kwargs: events.append("spawn"),
     )
 
-    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv, prepare_handover=True))
+    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
 
     assert code == 1
-    assert "rollback-handover" in events
+    assert not any("rollback" in event for event in events)
     assert "spawn" not in events
 
 
-def test_run_rolls_back_prepared_handover_when_restart_spawn_fails(monkeypatch, tmp_path: Path) -> None:
+def test_restart_only_does_not_rollback_when_restart_spawn_fails(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
     restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_prepare_upgrade_handover", lambda args: events.append("prepare") or True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: None)
     monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda: True)
-    monkeypatch.setattr(restart_handoff, "_rollback_upgrade_handover", lambda: events.append("rollback-handover"))
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
     )
 
-    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv, prepare_handover=True))
+    code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
 
     assert code == 1
     assert "log:restart_spawn_failed error=spawn failed" in events
-    assert "rollback-handover" in events
+    assert not any("rollback" in event for event in events)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
