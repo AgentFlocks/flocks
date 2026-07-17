@@ -19,8 +19,17 @@ class _DummyLogger:
 
 
 @pytest.mark.asyncio
-async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
+@pytest.mark.parametrize(
+    ("managed_service", "expected_events"),
+    [
+        (False, ["cleanup_replaced_files", "recover_upgrade_state"]),
+        (True, ["cleanup_replaced_files"]),
+    ],
+)
+async def test_lifespan_recovers_upgrade_state_only_outside_managed_service(
     monkeypatch: pytest.MonkeyPatch,
+    managed_service: bool,
+    expected_events: list[str],
 ) -> None:
     events: list[str] = []
 
@@ -50,6 +59,10 @@ async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
     monkeypatch.setattr(app_module.Config, "get", fake_config_get)
     monkeypatch.setattr(app_module.asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(app_module.asyncio, "sleep", fake_async_noop)
+    if managed_service:
+        monkeypatch.setenv("_FLOCKS_SERVICE_CONFIG", "{}")
+    else:
+        monkeypatch.delenv("_FLOCKS_SERVICE_CONFIG", raising=False)
 
     monkeypatch.setitem(
         sys.modules,
@@ -149,4 +162,4 @@ async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
     async with app_module.lifespan(SimpleNamespace()):
         pass
 
-    assert events == ["cleanup_replaced_files", "recover_upgrade_state"]
+    assert events == expected_events
