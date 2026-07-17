@@ -149,7 +149,6 @@ macOS / Linux
 docker run -d \
   --name flocks \
   -e TZ=Asia/Shanghai \
-  -p 8000:8000 \
   -p 5173:5173 \
   --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
@@ -161,14 +160,13 @@ Windows PowerShell
 docker run -d `
   --name flocks `
   -e TZ=Asia/Shanghai `
-  -p 8000:8000 `
   -p 5173:5173 `
   --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```
 
-镜像中的 `EXPOSE` 仅用于声明容器端口；要从宿主机浏览器访问服务，仍需使用 `-p 8000:8000 -p 5173:5173` 映射端口。
+镜像中的 `EXPOSE` 仅用于声明容器端口；要从宿主机浏览器访问服务，仍需使用 `-p 5173:5173` 映射端口。
 
 ## 4. 常见问题
 

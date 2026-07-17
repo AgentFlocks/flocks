@@ -9,8 +9,8 @@ ARG VITE_APP_VERSION=docker
 
 ENV DEBIAN_FRONTEND=noninteractive \
     FLOCKS_DEPLOY_MODE=docker \
-    FLOCKS_BACKEND_HOST=0.0.0.0 \
-    FLOCKS_FRONTEND_HOST=0.0.0.0 \
+    FLOCKS_HOST=0.0.0.0 \
+    FLOCKS_PORT=5173 \
     FLOCKS_FRONTEND_DIST_DIR=/opt/flocks/webui/dist \
     FLOCKS_ROOT=/home/flocks/.flocks \
     FLOCKS_CONFIG_DIR=/home/flocks/.flocks/config \
@@ -88,9 +88,9 @@ RUN sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen \
 RUN mkdir -p "$HOME/.flocks" "$HOME/.flocks/config" "$HOME/.agent-browser" \
     && chown -R flocks:flocks /opt/flocks "$HOME"
 
-EXPOSE 8000 5173
+EXPOSE 5173
 
 USER flocks
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["bash", "./scripts/container-start.sh"]
