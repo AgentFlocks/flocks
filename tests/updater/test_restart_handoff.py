@@ -1,3 +1,4 @@
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -383,6 +384,46 @@ def test_run_rolls_back_prepared_handover_when_restart_spawn_fails(monkeypatch, 
     assert "rollback-handover" in events
 
 
+def test_prepare_upgrade_handover_uses_snapshotted_service_config(monkeypatch, tmp_path: Path) -> None:
+    from flocks.updater import updater
+
+    config_payload = {
+        "backend_host": "10.0.0.8",
+        "backend_port": 5273,
+        "frontend_host": "10.0.0.8",
+        "frontend_port": 5273,
+        "legacy_backend_host": "0.0.0.0",
+        "legacy_backend_port": 9000,
+    }
+    args = restart_handoff._parse_args(
+        [
+            *_handoff_args(tmp_path, ["python", "-m", "flocks.cli.main", "start"], prepare_handover=True)[:-5],
+            "--service-config-json",
+            json.dumps(config_payload),
+            "--",
+            "python",
+            "-m",
+            "flocks.cli.main",
+            "start",
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        updater,
+        "_prepare_upgrade_handover",
+        lambda version, *, config=None: captured.update(version=version, config=config) or {},
+    )
+
+    assert restart_handoff._prepare_upgrade_handover(args) is True
+    assert captured["version"] == "2026.4.1"
+    config = captured["config"]
+    assert config.backend_host == "10.0.0.8"
+    assert config.backend_port == 5273
+    assert config.legacy_backend_host == "0.0.0.0"
+    assert config.legacy_backend_port == 9000
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
 def test_stop_supervisor_before_restart_waits_until_real_control_api_stops(monkeypatch) -> None:
     short_root = make_short_runtime_root("flocks-handoff-")
@@ -394,6 +435,7 @@ def test_stop_supervisor_before_restart_waits_until_real_control_api_stops(monke
 
     try:
         wait_for_supervisor(paths, running=True)
+        monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
 
         assert restart_handoff._stop_supervisor_before_restart(timeout_seconds=5.0, poll_interval_seconds=0.05) is True
 
@@ -403,6 +445,35 @@ def test_stop_supervisor_before_restart_waits_until_real_control_api_stops(monke
     finally:
         stop_supervisor(daemon, thread)
         shutil.rmtree(short_root, ignore_errors=True)
+
+
+def test_stop_supervisor_before_restart_waits_for_daemon_pid_after_control_stops(monkeypatch) -> None:
+    from flocks.cli import service_control
+
+    events: list[str] = []
+    control_states = iter([True, False, False])
+    process_states = iter([True, False])
+
+    monkeypatch.setattr(service_control, "supervisor_is_running", lambda _paths: next(control_states))
+    monkeypatch.setattr(
+        service_control,
+        "read_supervisor_status",
+        lambda **_kwargs: SimpleNamespace(daemon=SimpleNamespace(pid=4321)),
+    )
+    monkeypatch.setattr(
+        service_control,
+        "request_stop",
+        lambda **_kwargs: events.append("stop"),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "pid_is_running",
+        lambda pid: events.append(f"pid:{pid}") or next(process_states),
+    )
+    monkeypatch.setattr(restart_handoff.time, "sleep", lambda _seconds: events.append("sleep"))
+
+    assert restart_handoff._stop_supervisor_before_restart() is True
+    assert events == ["stop", "pid:4321", "sleep", "pid:4321"]
 
 
 def test_ensure_backend_port_free_waits_again_after_timeout(monkeypatch) -> None:

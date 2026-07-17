@@ -54,7 +54,7 @@ _CN_PIP_INDEX_URL = _CN_UV_DEFAULT_INDEX
 _CURL_USER_AGENT = "curl/8.7.1"
 _FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 _FRONTEND_BUILD_TIMEOUT_SECONDS = 300
-_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 180
+_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 _CANCELLATION_RETRY_DELAY_SECONDS = 0.1
 
@@ -538,7 +538,7 @@ def _dependency_sync_timeout_seconds() -> int:
 
 def _build_dependency_sync_command(uv_path: str, *, uv_default_index: str | None = None) -> list[str]:
     """Build the ``uv sync`` command used by the self-updater."""
-    cmd = [uv_path, "sync", "--frozen", "--no-python-downloads"]
+    cmd = [uv_path, "sync", "--no-python-downloads"]
     if uv_default_index:
         cmd.extend(["--default-index", uv_default_index])
     return cmd
@@ -569,10 +569,31 @@ async def _sync_project_dependencies(
     def _timeout_message() -> str:
         return f"Dependency sync timed out after {effective_timeout}s while running uv sync."
 
+    def _log_timeout(exc: subprocess.TimeoutExpired, *, fallback_without_default_index: bool) -> None:
+        log.warning(
+            "updater.dependencies.sync_timeout",
+            {
+                "command": list(exc.cmd) if not isinstance(exc.cmd, str) else exc.cmd,
+                "timeout": effective_timeout,
+                "stdout": _clean_process_output(exc.stdout),
+                "stderr": _clean_process_output(exc.stderr),
+                "fallback_without_default_index": fallback_without_default_index,
+            },
+        )
+
     try:
         code, _, err = await _run_uv_sync(uv_cmd)
-    except subprocess.TimeoutExpired:
-        return _timeout_message()
+    except subprocess.TimeoutExpired as exc:
+        _log_timeout(exc, fallback_without_default_index=bool(uv_default_index))
+        if not uv_default_index:
+            return _timeout_message()
+        uv_cmd = _build_dependency_sync_command(uv_path)
+        uv_default_index = None
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired as fallback_exc:
+            _log_timeout(fallback_exc, fallback_without_default_index=False)
+            return _timeout_message()
 
     if (
         code != 0
@@ -595,7 +616,8 @@ async def _sync_project_dependencies(
         await asyncio.sleep(2)
         try:
             code, _, err = await _run_uv_sync(uv_cmd)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            _log_timeout(exc, fallback_without_default_index=False)
             return _timeout_message()
 
     if code != 0 and uv_default_index:
@@ -610,7 +632,8 @@ async def _sync_project_dependencies(
         uv_cmd = _build_dependency_sync_command(uv_path)
         try:
             code, _, err = await _run_uv_sync(uv_cmd)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            _log_timeout(exc, fallback_without_default_index=False)
             return _timeout_message()
 
     if code != 0:
@@ -618,7 +641,8 @@ async def _sync_project_dependencies(
         await asyncio.sleep(3)
         try:
             code, _, err = await _run_uv_sync(uv_cmd)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            _log_timeout(exc, fallback_without_default_index=False)
             return _timeout_message()
 
     if code != 0:
@@ -1978,8 +2002,22 @@ class _NullConsole:
 
 def _current_service_config():
     from flocks.cli import service_manager
-    from flocks.cli.service_config import service_config_from_status_payload
+    from flocks.cli.service_config import ServiceConfig, service_config_from_payload, service_config_from_status_payload
     from flocks.cli.service_control import read_supervisor_status
+
+    config_json = os.getenv("_FLOCKS_SERVICE_CONFIG")
+    if config_json:
+        try:
+            payload = json.loads(config_json)
+            if isinstance(payload, dict):
+                return service_config_from_payload(
+                    payload,
+                    default=ServiceConfig(),
+                    no_browser=True,
+                    skip_frontend_build=True,
+                )
+        except (TypeError, ValueError):
+            log.warning("updater.service_config.environment_invalid")
 
     try:
         status = read_supervisor_status(paths=service_manager.runtime_paths(), timeout=1.0)
@@ -2047,7 +2085,7 @@ def _upgrade_page_probe_urls(frontend_host: str, frontend_port: int) -> list[str
 
 def _wait_for_upgrade_page(config) -> None:
     page_urls = _upgrade_page_probe_urls(config.frontend_host, config.frontend_port)
-    with httpx.Client(timeout=1.5) as client:
+    with httpx.Client(timeout=1.5, trust_env=False) as client:
         for _ in range(40):
             for page_url in page_urls:
                 try:
@@ -2176,11 +2214,11 @@ def _looks_like_upgrade_page_process(pid: int) -> bool:
     return "http.server" in command_line and "upgrade-page" in command_line and page_dir in command_line
 
 
-def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
+def _prepare_upgrade_handover(version: str, *, config=None) -> dict[str, Any]:
     from flocks.cli import service_manager
     from flocks.cli.service_control import request_prepare_upgrade
 
-    config = _current_service_config()
+    config = config or _current_service_config()
     payload: dict[str, Any] = {
         "version": version,
         "backend_host": config.backend_host,
@@ -2459,6 +2497,7 @@ def _rollback_failed_update(
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
     _stop_upgrade_page_server(frontend_port=config.frontend_port)
+    rollback_error = restore_error
     try:
         _start_frontend_with_fallback(
             config,
@@ -2466,13 +2505,20 @@ def _rollback_failed_update(
             allow_build_fallback=restored_backup,
         )
     except Exception as exc:
+        rollback_error = str(exc)
         log.error(
             "updater.frontend.rollback_failed",
             {"error": str(exc), "restored_backup": restored_backup, "restore_error": restore_error},
         )
-    finally:
+    if rollback_error is None:
         _clear_upgrade_state()
-        shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
+    else:
+        _persist_upgrade_state(
+            payload,
+            phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
+            last_error=rollback_error,
+        )
+    shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
 def recover_upgrade_state() -> None:
@@ -2488,9 +2534,15 @@ def recover_upgrade_state() -> None:
         _start_frontend_with_fallback(config, console, allow_build_fallback=True)
     except Exception as exc:
         log.error("updater.frontend.resume_failed", {"error": str(exc)})
+        _persist_upgrade_state(
+            payload,
+            phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
+            last_error=str(exc),
+        )
         raise
-    finally:
+    else:
         _clear_upgrade_state()
+    finally:
         shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
@@ -2507,8 +2559,14 @@ def rollback_upgrade_handover() -> None:
         _start_frontend_with_fallback(config, console, allow_build_fallback=False)
     except Exception as exc:
         log.error("updater.frontend.rollback_failed", {"error": str(exc)})
-    finally:
+        _persist_upgrade_state(
+            payload,
+            phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
+            last_error=str(exc),
+        )
+    else:
         _clear_upgrade_state()
+    finally:
         shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
@@ -2607,6 +2665,8 @@ def _safe_remove(target: Path) -> None:
 def _replace_install_dir(
     source_dir: Path,
     install_root: Path,
+    *,
+    _relative_parts: tuple[str, ...] = (),
 ) -> None:
     """
     Overwrite *install_root* with the contents of *source_dir*, while
@@ -2623,7 +2683,11 @@ def _replace_install_dir(
         if item.is_dir() and not item.is_symlink():
             if target.exists() or target.is_symlink():
                 if target.is_dir() and not target.is_symlink():
-                    _replace_install_dir(item, target)
+                    _replace_install_dir(
+                        item,
+                        target,
+                        _relative_parts=(*_relative_parts, item.name),
+                    )
                     continue
                 _safe_remove(target)
             shutil.copytree(item, target, symlinks=True)
@@ -2633,7 +2697,8 @@ def _replace_install_dir(
             shutil.copy2(item, target)
 
     for child in install_root.iterdir():
-        if child.name not in source_names and child.name not in _PRESERVE_NAMES:
+        preserve_webui_dist = _relative_parts == ("webui",) and child.name == "dist"
+        if child.name not in source_names and child.name not in _PRESERVE_NAMES and not preserve_webui_dist:
             _safe_remove(child)
 
 
@@ -3629,6 +3694,9 @@ def _build_restart_handoff_argv(
         raise ValueError("restart command is empty")
 
     config = _handoff_service_config()
+    from flocks.cli.service_config import service_config_payload
+
+    config_json = json.dumps(service_config_payload(config), ensure_ascii=True, sort_keys=True)
     managed_restart_argv = [
         restart_argv[0],
         "-m",
@@ -3686,6 +3754,7 @@ def _build_restart_handoff_argv(
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
     if prepare_handover:
         argv.append("--prepare-handover")
+    argv.extend(["--service-config-json", config_json])
     argv.extend(["--", *managed_restart_argv])
     return argv
 

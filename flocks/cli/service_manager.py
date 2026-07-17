@@ -26,7 +26,7 @@ from typing import Any, Iterable, Sequence
 import httpx
 
 from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
-from flocks.cli.service_config import ServiceConfig, loopback_host
+from flocks.cli.service_config import ServiceConfig, loopback_host, service_config_payload
 from flocks.cli.service_control import (
     read_logs,
     read_supervisor_status,
@@ -1130,6 +1130,11 @@ def _backend_command_and_env(root: Path, config: ServiceConfig) -> tuple[list[st
     env = os.environ.copy()
     env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
     env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
+    env["_FLOCKS_SERVICE_CONFIG"] = json.dumps(
+        service_config_payload(config),
+        ensure_ascii=True,
+        sort_keys=True,
+    )
     env["PYTHONUNBUFFERED"] = "1"
     env.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
     return command, env
@@ -1371,6 +1376,8 @@ def _wait_for_supervisor_ready(
     timeout: float = SUPERVISOR_START_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Wait for the supervisor control API and managed services to become ready."""
+    from flocks.cli.service_process import tcp_port_accepts_connections
+
     deadline = time.monotonic() + timeout
     last_payload: dict[str, Any] | None = None
     while time.monotonic() < deadline:
@@ -1381,7 +1388,12 @@ def _wait_for_supervisor_ready(
             last_payload = status.raw
             backend_state = status.backend.state
             webui_state = status.webui.state
-            if backend_state == "healthy" and webui_state in {"healthy", "static"}:
+            if (
+                backend_state == "healthy"
+                and webui_state in {"healthy", "static"}
+                and status.backend.port is not None
+                and tcp_port_accepts_connections(status.backend.host, status.backend.port)
+            ):
                 return status.raw
             if backend_state == "degraded" or webui_state == "degraded":
                 return status.raw
@@ -1426,8 +1438,6 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
     """Spawn the detached service supervisor daemon."""
     root = ensure_install_layout()
     log_path = supervisor_log_path(paths)
-    if not supervisor_uses_tcp_control():
-        supervisor_socket_path(paths).unlink(missing_ok=True)
     command = resolve_flocks_cli_command(root) + [
         "service-daemon",
         "--server-host",
@@ -1449,6 +1459,11 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
         command.append("--skip-webui-build")
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env["_FLOCKS_SERVICE_CONFIG"] = json.dumps(
+        service_config_payload(config),
+        ensure_ascii=True,
+        sort_keys=True,
+    )
     return _spawn_process(command, cwd=root, log_path=log_path, env=env)
 
 
@@ -1513,6 +1528,7 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
     cleanup_config = ServiceConfig()
     legacy_config = _legacy_runtime_config(paths, cleanup_config)
     stop_status = None
+    daemon_pid = None
     if not supervisor_is_running(paths):
         console.print("[flocks] Flocks daemon 未运行。")
         cleanup_legacy_runtime_processes(paths, console)
@@ -1521,6 +1537,7 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
         return
     try:
         stop_status = read_supervisor_status(paths=paths, timeout=1.0)
+        daemon_pid = stop_status.daemon.pid
         cleanup_config = stop_status.config
         legacy_config = _legacy_runtime_config(paths, cleanup_config)
     except Exception:
@@ -1532,7 +1549,9 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
 
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
-        if not supervisor_is_running(paths):
+        control_stopped = not supervisor_is_running(paths)
+        daemon_stopped = not pid_is_running(daemon_pid)
+        if control_stopped and daemon_stopped:
             cleanup_legacy_runtime_processes(paths, console)
             cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
             stop_all_browser_daemons()
@@ -1558,8 +1577,9 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     cleanup_orphan_service_ports(config, console)
     _ensure_webui_dist(ensure_install_layout(), config, console)
     process = _start_supervisor_process(config, paths, console)
-    console.print("[flocks] Flocks daemon 已启动。")
+    console.print("[flocks] Flocks daemon 进程已启动，正在等待服务就绪...")
     payload = _wait_for_supervisor_ready(paths, process=process)
+    console.print("[flocks] Flocks daemon 已启动。")
     _print_status_payload(payload, console, include_daemon_step=False)
     if not _startup_payload_is_ready(payload):
         raise ServiceError(_startup_failure_message(payload))

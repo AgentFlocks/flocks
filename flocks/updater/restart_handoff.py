@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import shutil
 import subprocess
 import time
@@ -83,6 +84,12 @@ def _stop_supervisor_before_restart(
     if not service_control.supervisor_is_running(paths):
         return True
 
+    daemon_pid = None
+    try:
+        daemon_pid = service_control.read_supervisor_status(paths=paths, timeout=1.0).daemon.pid
+    except Exception:
+        pass
+
     try:
         service_control.request_stop(paths=paths, timeout=timeout_seconds)
     except Exception as exc:
@@ -91,10 +98,12 @@ def _stop_supervisor_before_restart(
 
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if not service_control.supervisor_is_running(paths):
+        control_stopped = not service_control.supervisor_is_running(paths)
+        daemon_stopped = not service_manager.pid_is_running(daemon_pid)
+        if control_stopped and daemon_stopped:
             return True
         time.sleep(poll_interval_seconds)
-    return not service_control.supervisor_is_running(paths)
+    return not service_control.supervisor_is_running(paths) and not service_manager.pid_is_running(daemon_pid)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -118,6 +127,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
     parser.add_argument("--prepare-handover", action="store_true")
+    parser.add_argument("--service-config-json")
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.restart_argv and args.restart_argv[0] == "--":
@@ -177,10 +187,22 @@ def _rollback_failed_upgrade(args: argparse.Namespace, error: str) -> None:
 
 
 def _prepare_upgrade_handover(args: argparse.Namespace) -> bool:
+    from flocks.cli.service_config import ServiceConfig, service_config_from_payload
     from flocks.updater import updater
 
     try:
-        updater._prepare_upgrade_handover(args.version)
+        config = None
+        if args.service_config_json:
+            payload = json.loads(args.service_config_json)
+            if not isinstance(payload, dict):
+                raise ValueError("service config snapshot must be a JSON object")
+            config = service_config_from_payload(
+                payload,
+                default=ServiceConfig(),
+                no_browser=True,
+                skip_frontend_build=True,
+            )
+        updater._prepare_upgrade_handover(args.version, config=config)
     except Exception as exc:
         _record_handoff_log(f"prepare_handover_failed error={exc}")
         return False

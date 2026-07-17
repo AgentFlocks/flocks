@@ -920,6 +920,26 @@ def test_startup_status_lines_can_skip_daemon_step() -> None:
     assert lines[:1] == ["[flocks] Flocks service 已启动。"]
 
 
+def test_wait_for_supervisor_ready_waits_for_backend_tcp_listener(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    status = _supervisor_status()
+    listener_states = iter([False, True])
+    probes: list[tuple[str, int]] = []
+
+    def tcp_listener_ready(host: str, port: int) -> bool:
+        probes.append((host, port))
+        return next(listener_states)
+
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: status)
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", tcp_listener_ready)
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _seconds: None)
+
+    payload = service_manager._wait_for_supervisor_ready(paths, timeout=1.0)
+
+    assert payload == status.raw
+    assert probes == [("0.0.0.0", 9000), ("0.0.0.0", 9000)]
+
+
 def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
@@ -1141,6 +1161,7 @@ def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: 
     assert calls == ["daemon", "ready", "status"]
     assert console.messages == [
         "[flocks] Flocks daemon 启动中...",
+        "[flocks] Flocks daemon 进程已启动，正在等待服务就绪...",
         "[flocks] Flocks daemon 已启动。",
     ]
 
@@ -1371,6 +1392,17 @@ def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_pat
     backend_env = spawn_calls[0]["kwargs"]["env"]
     assert backend_env["_FLOCKS_WEBUI_HOST"] == "127.0.0.1"
     assert backend_env["_FLOCKS_WEBUI_PORT"] == "5173"
+    assert json.loads(backend_env["_FLOCKS_SERVICE_CONFIG"]) == {
+        "backend_host": "127.0.0.1",
+        "backend_port": 5173,
+        "frontend_host": "127.0.0.1",
+        "frontend_port": 5173,
+        "legacy_backend_host": "127.0.0.1",
+        "legacy_backend_port": 8000,
+        "no_browser": False,
+        "server_port_migration_hint": False,
+        "skip_frontend_build": False,
+    }
     assert not paths.backend_pid.exists()
     assert backend_env["FLOCKS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL
 
@@ -1611,6 +1643,25 @@ def test_supervisor_rejects_static_webui_stop_control_api(monkeypatch, tmp_path:
         shutil.rmtree(short_root, ignore_errors=True)
 
     assert exc_info.value.response.status_code == 409
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses Unix socket inode ownership")
+def test_supervisor_does_not_unlink_replacement_control_socket(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    socket_path = service_control.supervisor_socket_path(paths)
+    socket_path.write_text("old", encoding="utf-8")
+    old_stat = socket_path.stat()
+    daemon._control_socket_identity = (old_stat.st_dev, old_stat.st_ino)
+    socket_path.unlink()
+    socket_path.write_text("replacement", encoding="utf-8")
+
+    daemon._stop_control_server()
+
+    assert socket_path.read_text(encoding="utf-8") == "replacement"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
@@ -2068,6 +2119,7 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(states))
     monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
     monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop") or {"status": "stopping"})
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
     monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda _paths, _console: calls.append("legacy"))
     monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console, **_kwargs: calls.append("cleanup"))
     monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: calls.append("browser"))
@@ -2079,6 +2131,47 @@ def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> No
     assert console.messages == [
         "[flocks] flocks 已停止（PID=111）。",
         "[flocks] daemon 已停止。",
+    ]
+
+
+def test_stop_all_waits_for_daemon_pid_after_control_api_stops(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    events: list[str] = []
+    control_states = iter([True, False, False])
+    process_states = iter([True, False])
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(control_states))
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status())
+    monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: events.append("stop") or {})
+    monkeypatch.setattr(
+        service_manager,
+        "pid_is_running",
+        lambda pid: events.append(f"pid:{pid}") or next(process_states),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _seconds: events.append("sleep"))
+    monkeypatch.setattr(
+        service_manager,
+        "cleanup_legacy_runtime_processes",
+        lambda *_args, **_kwargs: events.append("legacy"),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "cleanup_orphan_service_ports",
+        lambda *_args, **_kwargs: events.append("cleanup"),
+    )
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: events.append("browser"))
+
+    service_manager.stop_all(DummyConsole())
+
+    assert events == [
+        "stop",
+        "pid:100",
+        "sleep",
+        "pid:100",
+        "legacy",
+        "cleanup",
+        "browser",
     ]
 
 

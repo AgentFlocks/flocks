@@ -119,6 +119,7 @@ class SupervisorDaemon:
         self._shutdown_requested = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
+        self._control_socket_identity: tuple[int, int] | None = None
         self._backend_paused = False
         self._webui_paused = False
         self.backend = ManagedService(
@@ -190,6 +191,8 @@ class SupervisorDaemon:
             socket_path.unlink(missing_ok=True)
             assert _UnixControlServer is not None
             server = _UnixControlServer(str(socket_path), handler)
+            stat_result = socket_path.stat()
+            self._control_socket_identity = (stat_result.st_dev, stat_result.st_ino)
         self._server = server
         self._server_thread = threading.Thread(target=server.serve_forever, name="flocks-supervisor-control", daemon=True)
         self._server_thread.start()
@@ -201,8 +204,17 @@ class SupervisorDaemon:
             self._server.server_close()
         if self._server_thread is not None:
             self._server_thread.join(timeout=5.0)
-        if not supervisor_uses_tcp_control():
-            supervisor_socket_path(self.paths).unlink(missing_ok=True)
+        if not supervisor_uses_tcp_control() and self._control_socket_identity is not None:
+            socket_path = supervisor_socket_path(self.paths)
+            try:
+                stat_result = socket_path.stat()
+            except FileNotFoundError:
+                pass
+            else:
+                current_identity = (stat_result.st_dev, stat_result.st_ino)
+                if current_identity == self._control_socket_identity:
+                    socket_path.unlink(missing_ok=True)
+            self._control_socket_identity = None
 
     def _handler_class(self):
         daemon = self

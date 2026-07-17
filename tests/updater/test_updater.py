@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -63,6 +64,7 @@ def _webui_control_status(
 
 
 def test_current_service_config_requires_supervisor_control_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("_FLOCKS_SERVICE_CONFIG", raising=False)
     monkeypatch.setattr(
         service_control,
         "read_supervisor_status",
@@ -71,6 +73,36 @@ def test_current_service_config_requires_supervisor_control_api(monkeypatch: pyt
 
     with pytest.raises(RuntimeError, match="Supervisor control API is unavailable"):
         updater._current_service_config()
+
+
+def test_current_service_config_uses_environment_snapshot_when_control_api_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "_FLOCKS_SERVICE_CONFIG",
+        json.dumps(
+            {
+                "backend_host": "10.0.0.8",
+                "backend_port": 5273,
+                "frontend_host": "10.0.0.8",
+                "frontend_port": 5273,
+                "legacy_backend_host": "0.0.0.0",
+                "legacy_backend_port": 9000,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        service_control,
+        "read_supervisor_status",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("control down")),
+    )
+
+    config = updater._current_service_config()
+
+    assert config.backend_host == "10.0.0.8"
+    assert config.backend_port == 5273
+    assert config.legacy_backend_host == "0.0.0.0"
+    assert config.legacy_backend_port == 9000
 
 
 def test_run_handles_none_process_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -516,7 +548,6 @@ def test_build_dependency_sync_command_installs_project_on_windows(
     assert updater._build_dependency_sync_command("uv", uv_default_index="https://mirror.example/simple") == [
         "uv",
         "sync",
-        "--frozen",
         "--no-python-downloads",
         "--default-index",
         "https://mirror.example/simple",
@@ -528,7 +559,68 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
 ) -> None:
     monkeypatch.setattr(updater.sys, "platform", "linux")
 
-    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--frozen", "--no-python-downloads"]
+    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--no-python-downloads"]
+
+
+def test_dependency_sync_timeout_is_300_seconds_on_all_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    for platform in ("linux", "darwin", "win32"):
+        monkeypatch.setattr(updater.sys, "platform", platform)
+        assert updater._dependency_sync_timeout_seconds() == 300
+
+
+@pytest.mark.asyncio
+async def test_dependency_sync_timeout_retries_without_mirror_and_logs_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_run_async(cmd, **_kwargs):
+        commands.append(list(cmd))
+        if len(commands) == 1:
+            raise subprocess.TimeoutExpired(
+                cmd=cmd,
+                timeout=300,
+                output=b"downloaded 42 MB",
+                stderr=b"mirror stalled",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater.log, "warning", lambda event, details: warnings.append((event, details)))
+    monkeypatch.setattr(updater.asyncio, "sleep", lambda _seconds: None)
+
+    error = await updater._sync_project_dependencies(
+        uv_path="uv",
+        install_root=tmp_path,
+        uv_default_index="https://mirror.example/simple",
+        sync_timeout=300,
+    )
+
+    assert error is None
+    assert commands == [
+        [
+            "uv",
+            "sync",
+            "--no-python-downloads",
+            "--default-index",
+            "https://mirror.example/simple",
+        ],
+        ["uv", "sync", "--no-python-downloads"],
+    ]
+    assert warnings == [
+        (
+            "updater.dependencies.sync_timeout",
+            {
+                "command": commands[0],
+                "timeout": 300,
+                "stdout": "downloaded 42 MB",
+                "stderr": "mirror stalled",
+                "fallback_without_default_index": True,
+            },
+        )
+    ]
 
 
 def test_wheel_build_config_does_not_force_include_runtime_or_build_outputs() -> None:
@@ -827,6 +919,18 @@ def test_build_restart_handoff_argv_rewrites_serve_to_managed_start(
     )
 
     assert "--prepare-handover" in argv[: argv.index("--")]
+    config_json = argv[argv.index("--service-config-json") + 1]
+    assert json.loads(config_json) == {
+        "backend_host": "10.0.0.8",
+        "backend_port": 5273,
+        "frontend_host": "10.0.0.8",
+        "frontend_port": 5273,
+        "legacy_backend_host": "0.0.0.0",
+        "legacy_backend_port": 9000,
+        "no_browser": False,
+        "server_port_migration_hint": False,
+        "skip_frontend_build": False,
+    }
     assert argv[argv.index("--") + 1 :] == [
         "python",
         "-m",
@@ -1267,7 +1371,7 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
     assert updater._read_upgrade_state() is None
 
 
-def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_page(
+def test_recover_upgrade_state_restart_failure_preserves_failure_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1301,7 +1405,10 @@ def test_recover_upgrade_state_restart_failure_clears_state_without_restarting_p
         updater.recover_upgrade_state()
 
     assert starts == [("resume", True, None), ("restart_webui", False, True)]
-    assert updater._read_upgrade_state() is None
+    state = updater._read_upgrade_state()
+    assert state is not None
+    assert state["phase"] == "rollback_failed"
+    assert state["last_error"] == "still broken"
 
 
 def test_start_upgrade_page_server_binds_configured_frontend_host(
@@ -1399,6 +1506,7 @@ def test_wait_for_upgrade_page_uses_access_host_for_local_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested_urls: list[str] = []
+    client_options: dict[str, object] = {}
 
     class _FakeClient:
         def __enter__(self):
@@ -1411,13 +1519,18 @@ def test_wait_for_upgrade_page_uses_access_host_for_local_probe(
             requested_urls.append(url)
             return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(updater.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(
+        updater.httpx,
+        "Client",
+        lambda **kwargs: client_options.update(kwargs) or _FakeClient(),
+    )
     monkeypatch.setattr(service_manager, "access_host", lambda host: "127.0.0.1" if host == "0.0.0.0" else host)
     monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
 
     updater._wait_for_upgrade_page(service_manager.ServiceConfig(frontend_host="0.0.0.0", frontend_port=5173))
 
     assert requested_urls == ["http://127.0.0.1:5173"]
+    assert client_options == {"timeout": 1.5, "trust_env": False}
 
 
 def test_wait_for_upgrade_page_falls_back_from_ipv6_to_ipv4_probe(
@@ -1438,7 +1551,7 @@ def test_wait_for_upgrade_page_falls_back_from_ipv6_to_ipv4_probe(
                 raise OSError("ipv6 unavailable")
             return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(updater.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(updater.httpx, "Client", lambda **_kwargs: _FakeClient())
     monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
 
     updater._wait_for_upgrade_page(service_manager.ServiceConfig(frontend_host="::", frontend_port=5173))
@@ -1502,7 +1615,7 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
     assert updater._read_upgrade_state() is None
 
 
-def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail(
+def test_rollback_failed_update_preserves_state_when_restore_and_frontend_both_fail(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1549,7 +1662,10 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
         "resume:True",
         "rmtree:upgrade-page",
     ]
-    assert updater._read_upgrade_state() is None
+    state = updater._read_upgrade_state()
+    assert state is not None
+    assert state["phase"] == "rollback_failed"
+    assert state["last_error"] == "frontend still broken"
 
 
 def test_backup_current_version_excludes_all_dist_directories(
@@ -1664,6 +1780,24 @@ def test_replace_install_dir_preserves_webui_node_modules(
 
     assert (target_webui / "dist" / "index.html").read_text(encoding="utf-8") == "new"
     assert locked_binary.read_text(encoding="utf-8") == "locked"
+
+
+def test_replace_install_dir_preserves_existing_webui_dist_when_source_has_no_dist(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    install_root = tmp_path / "install"
+    source_webui = source_dir / "webui"
+    target_webui = install_root / "webui"
+
+    source_webui.mkdir(parents=True)
+    (source_webui / "package.json").write_text('{"name":"webui"}', encoding="utf-8")
+    (target_webui / "dist").mkdir(parents=True)
+    (target_webui / "dist" / "index.html").write_text("old", encoding="utf-8")
+
+    updater._replace_install_dir(source_dir, install_root)
+
+    assert (target_webui / "dist" / "index.html").read_text(encoding="utf-8") == "old"
 
 
 def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
@@ -1870,6 +2004,7 @@ async def test_perform_update_does_not_prepare_handover_before_spawning_handoff(
     monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater, "_handoff_service_config", service_manager.ServiceConfig)
     monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
         updater,
@@ -1965,7 +2100,6 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
             [
                 "/usr/bin/uv",
                 "sync",
-                "--frozen",
                 "--no-python-downloads",
                 "--default-index",
                 "https://mirrors.aliyun.com/pypi/simple",
@@ -2005,7 +2139,6 @@ async def test_perform_update_retries_cn_uv_sync_with_default_source(
         if cmd == [
             "/usr/bin/uv",
             "sync",
-            "--frozen",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
@@ -2039,12 +2172,11 @@ async def test_perform_update_retries_cn_uv_sync_with_default_source(
         [
             "/usr/bin/uv",
             "sync",
-            "--frozen",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
         ],
-        ["/usr/bin/uv", "sync", "--frozen", "--no-python-downloads"],
+        ["/usr/bin/uv", "sync", "--no-python-downloads"],
     ]
 
 
@@ -2636,7 +2768,7 @@ async def test_perform_update_syncs_windows_venv_in_place(
     progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
 
     assert progresses[-1].stage == "done"
-    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--frozen", "--no-python-downloads"], install_root)]
+    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--no-python-downloads"], install_root)]
     assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
     assert not (install_root / ".venv.flocks_backup").exists()
 
@@ -3072,7 +3204,7 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
     assert progresses[-1].message == "Frontend dependency install timed out after 300s while running npm ci."
     assert events == [
         "replace",
-        "/usr/bin/uv sync --frozen --no-python-downloads",
+        "/usr/bin/uv sync --no-python-downloads",
         "/usr/bin/npm install",
         "/usr/bin/npm ci",
         "restore",
