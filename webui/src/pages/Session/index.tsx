@@ -5,7 +5,7 @@ import {
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
-  FolderGit2, FolderPlus,
+  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -32,6 +32,7 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2, Session } from '@/types';
+import { useAuth } from '@/contexts/AuthContext';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -53,6 +54,11 @@ type ProjectSummary = {
   worktree: string;
   vcs?: string | null;
   name?: string | null;
+  isDefault?: boolean;
+  pathStatus?: 'available' | 'missing' | 'unreadable';
+  sessionCount?: number;
+  matchedSessionCount?: number;
+  lastActivityAt?: number | null;
 };
 type ProjectDialogMode = 'create' | 'rename';
 type ProjectSessionGroup = {
@@ -60,7 +66,19 @@ type ProjectSessionGroup = {
   label: string;
   worktree: string;
   sessions: Session[];
+  sessionCount: number;
+  isDefault: boolean;
+  pathStatus: 'available' | 'missing' | 'unreadable';
 };
+type FolderEntry = { name: string; path: string };
+type FolderBrowserResponse = {
+  path: string;
+  parent?: string | null;
+  roots: FolderEntry[];
+  entries: FolderEntry[];
+};
+const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
+const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -148,88 +166,6 @@ function getProjectLabel(project?: ProjectSummary, fallbackDirectory?: string): 
   if (explicitName) return explicitName;
   const directory = project?.worktree || fallbackDirectory || '';
   return getPathBasename(directory);
-}
-
-function normalizeProjectPath(path?: string): string {
-  return (path || '').replace(/[\\/]+$/g, '');
-}
-
-function isLegacyDefaultProjectId(projectId?: string): boolean {
-  return !projectId || projectId === 'default' || projectId === 'global';
-}
-
-export type SessionGroupKey = 'today' | 'yesterday' | 'thisWeek' | 'lastWeek' | 'earlier';
-
-export interface SessionGroup {
-  key: SessionGroupKey;
-  labelKey: string;
-  items: Session[];
-}
-
-const SESSION_GROUP_DEFAULT_LIMIT: Record<SessionGroupKey, number> = {
-  today: Infinity,
-  yesterday: Infinity,
-  thisWeek: 5,
-  lastWeek: 5,
-  earlier: 5,
-};
-
-const SESSION_GROUP_DEFS: Array<Pick<SessionGroup, 'key' | 'labelKey'>> = [
-  { key: 'today', labelKey: 'groupToday' },
-  { key: 'yesterday', labelKey: 'groupYesterday' },
-  { key: 'thisWeek', labelKey: 'groupThisWeek' },
-  { key: 'lastWeek', labelKey: 'groupLastWeek' },
-  { key: 'earlier', labelKey: 'groupEarlier' },
-];
-
-export function groupSessionsByDate(
-  sessions: Session[],
-  searchQuery: string,
-  now = new Date(),
-): SessionGroup[] {
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterdayStart = todayStart - 86400000;
-  const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
-  const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
-  const lastWeekStart = thisWeekStart - 7 * 86400000;
-
-  const q = searchQuery.toLowerCase().trim();
-  const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
-  const buckets: SessionGroup[] = SESSION_GROUP_DEFS.map((group) => ({
-    ...group,
-    items: [],
-  }));
-
-  for (const session of filtered) {
-    const ts = session.time?.updated ?? 0;
-    if (ts >= todayStart) buckets[0].items.push(session);
-    else if (ts >= yesterdayStart) buckets[1].items.push(session);
-    else if (ts >= thisWeekStart) buckets[2].items.push(session);
-    else if (ts >= lastWeekStart) buckets[3].items.push(session);
-    else buckets[4].items.push(session);
-  }
-
-  return buckets.filter(group => group.items.length > 0);
-}
-
-export function getVisibleSessionGroupItems({
-  group,
-  expanded,
-  searching,
-}: {
-  group: SessionGroup;
-  expanded: boolean;
-  searching: boolean;
-}): { visibleItems: Session[]; hiddenCount: number; limit: number } {
-  const limit = searching ? Infinity : SESSION_GROUP_DEFAULT_LIMIT[group.key];
-  const visibleItems = (searching || expanded || group.items.length <= limit)
-    ? group.items
-    : group.items.slice(0, limit);
-  return {
-    visibleItems,
-    hiddenCount: group.items.length - visibleItems.length,
-    limit,
-  };
 }
 
 interface SessionSidebarItemProps {
@@ -371,16 +307,10 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.t === next.t
 ));
 
-function isUserManagedProjectId(projectId?: string | null): boolean {
-  return Boolean(projectId?.startsWith('prj_'));
-}
-
-function isUserManagedProject(project?: ProjectSummary): boolean {
-  return isUserManagedProjectId(project?.id);
-}
-
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
+  const { user } = useAuth();
+  const activeProjectStorageKey = `flocks:sessions:active-project:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -399,7 +329,6 @@ export default function SessionPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(new Set());
   const [projectDialogMode, setProjectDialogMode] = useState<ProjectDialogMode | null>(null);
@@ -408,6 +337,10 @@ export default function SessionPage() {
   const [projectDeleting, setProjectDeleting] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [projectNameValue, setProjectNameValue] = useState('');
+  const [projectWorktreeValue, setProjectWorktreeValue] = useState('');
+  const [projectNameManuallyEdited, setProjectNameManuallyEdited] = useState(false);
+  const [folderBrowser, setFolderBrowser] = useState<FolderBrowserResponse | null>(null);
+  const [folderBrowserLoading, setFolderBrowserLoading] = useState(false);
   const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
@@ -423,9 +356,14 @@ export default function SessionPage() {
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
+  const projectSubmitInFlightRef = useRef(false);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const toast = useToast();
 
+  const sessionProjectIds = useMemo(
+    () => projects.map((project) => project.id),
+    [projects],
+  );
   const {
     sessions,
     loading: loadingSessions,
@@ -434,10 +372,15 @@ export default function SessionPage() {
     removeSession,
     removeSessions,
     addSession,
-    hasMore: hasMoreSessions,
-    loadingMore: loadingMoreSessions,
+    hasMoreByProject = {},
+    loadingMoreProjectIds = new Set<string>(),
     loadMore: loadMoreSessions,
-  } = useSessions(searchQuery);
+  } = useSessions(searchQuery, {
+    projectIds: sessionProjectIds,
+    pageSize: projects.length >= 2
+      ? MULTI_PROJECT_SESSION_PAGE_SIZE
+      : SINGLE_PROJECT_SESSION_PAGE_SIZE,
+  });
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const {
@@ -560,82 +503,49 @@ export default function SessionPage() {
     });
   }, []);
 
-  const defaultProjectId = useMemo(() => {
-    if (currentProjectId) return currentProjectId;
-    const firstAutoProject = projects.find((project) => !isUserManagedProject(project));
-    const firstAutoSession = sessions.find((session) => (
-      session.projectID
-      && !isLegacyDefaultProjectId(session.projectID)
-      && !isUserManagedProjectId(session.projectID)
-    ));
-    return firstAutoProject?.id ?? firstAutoSession?.projectID ?? projects[0]?.id ?? null;
-  }, [currentProjectId, projects, sessions]);
+  const defaultProjectId = useMemo(
+    () => projects.find((project) => project.isDefault)?.id ?? projects[0]?.id ?? null,
+    [projects],
+  );
 
   const projectSessionGroups = useMemo<ProjectSessionGroup[]>(() => {
-    const projectMap = new Map<string, ProjectSessionGroup>();
-    const defaultProject = defaultProjectId
-      ? projects.find((project) => project.id === defaultProjectId)
-      : undefined;
-    const defaultSession = defaultProjectId
-      ? sessions.find((session) => session.projectID === defaultProjectId)
-      : undefined;
-    const defaultProjectWorktree = normalizeProjectPath(defaultProject?.worktree ?? defaultSession?.directory);
-    const userManagedProjectIds = new Set(
-      [
-        ...projects.filter(isUserManagedProject).map((project) => project.id),
-        ...sessions.map((session) => session.projectID).filter(isUserManagedProjectId),
-      ],
-    );
-
-    projects.forEach((project) => {
-      const isDefaultProject = defaultProjectId === project.id;
-      const isSameWorktreeAsDefault = Boolean(
-        defaultProjectWorktree
-        && normalizeProjectPath(project.worktree) === defaultProjectWorktree,
-      );
-      if (!isDefaultProject && isSameWorktreeAsDefault && !isUserManagedProject(project)) {
-        return;
-      }
-
-      projectMap.set(project.id, {
-        id: project.id,
-        label: isDefaultProject
-          && (!project.name?.trim() || project.name.trim() === getPathBasename(project.worktree))
-          ? t('defaultProjectName')
-          : getProjectLabel(project),
-        worktree: project.worktree,
-        sessions: [],
-      });
-    });
-
+    const registeredIds = new Set(projects.map((project) => project.id));
+    const sessionsByProject = new Map<string, Session[]>();
     sessions.forEach((session) => {
-      const sessionDirectory = normalizeProjectPath(session.directory);
-      const shouldUseDefaultProject = defaultProjectId
-        && defaultProjectWorktree
-        && sessionDirectory === defaultProjectWorktree
-        && !userManagedProjectIds.has(session.projectID);
-      const projectId = (isLegacyDefaultProjectId(session.projectID) || shouldUseDefaultProject) && defaultProjectId
-        ? defaultProjectId
-        : session.projectID || session.directory || 'global';
-      const existing = projectMap.get(projectId);
-      if (existing) {
-        existing.sessions.push(session);
-        return;
-      }
-
-      projectMap.set(projectId, {
-        id: projectId,
-        label: projectId === defaultProjectId ? t('defaultProjectName') : getProjectLabel(undefined, session.directory),
-        worktree: session.directory,
-        sessions: [session],
-      });
+      const responseProjectId = session.effectiveProjectID || session.projectID;
+      const projectId = registeredIds.has(responseProjectId)
+        ? responseProjectId
+        : defaultProjectId;
+      if (!projectId) return;
+      const groupSessions = sessionsByProject.get(projectId) ?? [];
+      groupSessions.push(session);
+      sessionsByProject.set(projectId, groupSessions);
     });
 
-    return Array.from(projectMap.values())
-      .filter((group) => group.sessions.length > 0 || !searchQuery.trim() || group.id === selectedProjectId)
+    return projects.map((project) => {
+      const isDefault = project.isDefault ?? project.id === defaultProjectId;
+      const projectSessions = sessionsByProject.get(project.id) ?? [];
+      return {
+        id: project.id,
+        label: isDefault ? t('defaultProjectName') : getProjectLabel(project),
+        worktree: project.worktree,
+        sessions: projectSessions,
+        sessionCount: searchQuery.trim()
+          ? project.matchedSessionCount ?? projectSessions.length
+          : project.sessionCount ?? projectSessions.length,
+        isDefault,
+        pathStatus: project.pathStatus ?? 'available',
+      };
+    })
+      .filter((group) => {
+        if (!searchQuery.trim()) return true;
+        const project = projects.find((item) => item.id === group.id);
+        return (project?.matchedSessionCount ?? group.sessions.length) > 0 || group.id === selectedProjectId;
+      })
       .sort((a, b) => {
-        const aLatest = a.sessions[0]?.time?.updated ?? 0;
-        const bLatest = b.sessions[0]?.time?.updated ?? 0;
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+        const aLatest = projects.find((project) => project.id === a.id)?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
+        const bLatest = projects.find((project) => project.id === b.id)?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
         if (aLatest !== bLatest) return bLatest - aLatest;
         return a.label.localeCompare(b.label);
       });
@@ -653,11 +563,28 @@ export default function SessionPage() {
       return;
     }
 
-    const fallbackProjectId = defaultProjectId && projectSessionGroups.some((group) => group.id === defaultProjectId)
-      ? defaultProjectId
-      : projectSessionGroups[0].id;
+    let storedProjectId: string | null = null;
+    try {
+      storedProjectId = window.localStorage.getItem(activeProjectStorageKey);
+    } catch {
+      storedProjectId = null;
+    }
+    const fallbackProjectId = storedProjectId && projectSessionGroups.some((group) => group.id === storedProjectId)
+      ? storedProjectId
+      : defaultProjectId && projectSessionGroups.some((group) => group.id === defaultProjectId)
+        ? defaultProjectId
+        : projectSessionGroups[0].id;
     setSelectedProjectId(fallbackProjectId);
-  }, [defaultProjectId, projectSessionGroups, selectedProjectId]);
+  }, [activeProjectStorageKey, defaultProjectId, projectSessionGroups, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !projects.some((project) => project.id === selectedProjectId)) return;
+    try {
+      window.localStorage.setItem(activeProjectStorageKey, selectedProjectId);
+    } catch {
+      // Active project persistence must never block the session manager.
+    }
+  }, [activeProjectStorageKey, projects, selectedProjectId]);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
@@ -692,38 +619,22 @@ export default function SessionPage() {
     }
   }, [scheduleSessionListRefetch, updateSessionTitle]);
 
-  const fetchProjects = useCallback(async (ensureProject?: ProjectSummary) => {
-    const [listResult, currentResult] = await Promise.allSettled([
-      client.get('/api/project'),
-      client.get('/api/project/current'),
-    ]);
-
-    let nextProjects = listResult.status === 'fulfilled' && Array.isArray(listResult.value.data)
-      ? listResult.value.data
-      : [];
-    const currentProject = currentResult.status === 'fulfilled'
-      ? currentResult.value.data as ProjectSummary | undefined
-      : undefined;
-    if (currentProject?.id && !nextProjects.some((project) => project.id === currentProject.id)) {
-      nextProjects = [currentProject, ...nextProjects];
-    }
+  const fetchProjects = useCallback(async (ensureProject?: ProjectSummary, query = '') => {
+    const listResult = await client.get('/api/project', {
+      params: { search: query.trim() || undefined },
+    });
+    let nextProjects = Array.isArray(listResult.data) ? listResult.data : [];
     if (ensureProject?.id) {
       nextProjects = nextProjects.some((project) => project.id === ensureProject.id)
         ? nextProjects.map((project) => (project.id === ensureProject.id ? ensureProject : project))
         : [ensureProject, ...nextProjects];
     }
-    const nextCurrentProjectId = currentResult.status === 'fulfilled'
-      ? currentResult.value.data?.id ?? null
-      : null;
-
     setProjects(nextProjects);
-    setCurrentProjectId(nextCurrentProjectId);
-    setSelectedProjectId((current) => current ?? nextCurrentProjectId ?? nextProjects[0]?.id ?? null);
   }, []);
 
   useEffect(() => {
-    void fetchProjects();
-  }, [fetchProjects]);
+    void fetchProjects(undefined, searchQuery);
+  }, [fetchProjects, searchQuery]);
 
   useEffect(() => {
     if (!openProjectMenuId) return;
@@ -907,6 +818,7 @@ export default function SessionPage() {
         ...(projectID ? { projectID } : {}),
       });
       addSession(response.data);
+      await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
       if (projectID) {
         setSelectedProjectId(projectID);
@@ -924,7 +836,7 @@ export default function SessionPage() {
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectIDForCreate, addSession, toast, t]);
+  }, [creating, selectedProjectIDForCreate, addSession, fetchProjects, searchQuery, toast, t]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -962,6 +874,7 @@ export default function SessionPage() {
       const newSessionId = response.data.id;
 
       addSession(response.data);
+      await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
       setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
@@ -979,7 +892,7 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, selectedAgent, selectedProjectIDForCreate, toast, t]);
+  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedProjectIDForCreate, toast, t]);
 
   const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
@@ -1055,10 +968,11 @@ export default function SessionPage() {
       // No need to refetchSessions — removeSession already keeps the list accurate.
       if (selectedSessionId === sessionId) setSelectedSessionId(null);
       removeSession(sessionId);
+      await fetchProjects(undefined, searchQuery);
     } catch (err: any) {
       toast.error(t('deleteFailed'), err.message);
     }
-  }, [selectedSessionId, removeSession, toast, t]);
+  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
 
   const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
     setOpenMenuSessionId(null);
@@ -1103,10 +1017,15 @@ export default function SessionPage() {
   }, [renameValue, sessions, t, toast, updateSessionTitle]);
 
   const handleOpenCreateProject = useCallback(() => {
+    const defaultProject = projects.find((project) => project.isDefault)
+      ?? projects.find((project) => project.id === defaultProjectId);
     setProjectDialogMode('create');
     setEditingProjectId(null);
-    setProjectNameValue('');
-  }, []);
+    setProjectWorktreeValue(defaultProject?.worktree ?? '');
+    setProjectNameValue(defaultProject?.worktree ? getPathBasename(defaultProject.worktree) : '');
+    setProjectNameManuallyEdited(false);
+    setFolderBrowser(null);
+  }, [defaultProjectId, projects]);
 
   const handleOpenRenameProject = useCallback((project: ProjectSessionGroup) => {
     const persistedName = projects.find((item) => item.id === project.id)?.name?.trim();
@@ -1116,6 +1035,9 @@ export default function SessionPage() {
     setProjectNameValue(persistedName && persistedName !== getPathBasename(project.worktree)
       ? persistedName
       : project.label);
+    setProjectWorktreeValue(project.worktree);
+    setProjectNameManuallyEdited(true);
+    setFolderBrowser(null);
   }, [projects]);
 
   const handleCloseProjectDialog = useCallback(() => {
@@ -1123,7 +1045,42 @@ export default function SessionPage() {
     setProjectDialogMode(null);
     setEditingProjectId(null);
     setProjectNameValue('');
+    setProjectWorktreeValue('');
+    setProjectNameManuallyEdited(false);
+    setFolderBrowser(null);
   }, [projectSubmitting]);
+
+  const loadFolderBrowser = useCallback(async (path?: string) => {
+    setFolderBrowserLoading(true);
+    try {
+      const response = await client.get('/api/project/folders', {
+        params: { path: path?.trim() || undefined },
+      });
+      setFolderBrowser(response.data as FolderBrowserResponse);
+    } catch (err: any) {
+      toast.error(t('projectDialog.folderBrowseFailed'), err.message);
+    } finally {
+      setFolderBrowserLoading(false);
+    }
+  }, [t, toast]);
+
+  const handleSelectProjectFolder = useCallback((path: string) => {
+    setProjectWorktreeValue(path);
+    if (!projectNameManuallyEdited) {
+      setProjectNameValue(getPathBasename(path));
+    }
+    setFolderBrowser(null);
+  }, [projectNameManuallyEdited]);
+
+  const handleCopyProjectPath = useCallback(async (project: ProjectSessionGroup) => {
+    setOpenProjectMenuId(null);
+    try {
+      await navigator.clipboard.writeText(project.worktree);
+      toast.success(t('projectDialog.pathCopied'));
+    } catch (err: any) {
+      toast.error(t('projectDialog.copyPathFailed'), err.message);
+    }
+  }, [t, toast]);
 
   const handleOpenDeleteProject = useCallback((project: ProjectSessionGroup) => {
     setOpenProjectMenuId(null);
@@ -1146,26 +1103,38 @@ export default function SessionPage() {
         current === projectPendingDelete.id ? defaultProjectId : current
       ));
       setProjectPendingDelete(null);
+      await Promise.all([
+        fetchProjects(undefined, searchQuery),
+        refetchSessions(),
+      ]);
       toast.success(t('projectDialog.deleteSuccess'));
     } catch (err: any) {
       toast.error(t('projectDialog.deleteFailed'), err.message);
     } finally {
       setProjectDeleting(false);
     }
-  }, [defaultProjectId, projectDeleting, projectPendingDelete, t, toast]);
+  }, [defaultProjectId, fetchProjects, projectDeleting, projectPendingDelete, refetchSessions, searchQuery, t, toast]);
 
   const handleSubmitProject = useCallback(async () => {
-    if (!projectDialogMode || projectSubmitting) return;
+    if (!projectDialogMode || projectSubmitInFlightRef.current) return;
     const nextName = projectNameValue.trim();
     if (!nextName) {
       toast.error(t('projectDialog.saveFailed'), t('projectDialog.nameEmpty'));
       return;
     }
+    if (projectDialogMode === 'create' && !projectWorktreeValue.trim()) {
+      toast.error(t('projectDialog.saveFailed'), t('projectDialog.folderEmpty'));
+      return;
+    }
 
+    projectSubmitInFlightRef.current = true;
     setProjectSubmitting(true);
     try {
       if (projectDialogMode === 'create') {
-        const response = await client.post('/api/project', { name: nextName });
+        const response = await client.post('/api/project', {
+          name: nextName,
+          worktree: projectWorktreeValue.trim(),
+        });
         const createdProject = response.data as ProjectSummary;
         setProjects(prev => (
           prev.some((project) => project.id === createdProject.id)
@@ -1186,12 +1155,20 @@ export default function SessionPage() {
       setProjectDialogMode(null);
       setEditingProjectId(null);
       setProjectNameValue('');
+      setProjectWorktreeValue('');
+      setProjectNameManuallyEdited(false);
+      setFolderBrowser(null);
     } catch (err: any) {
-      toast.error(t('projectDialog.saveFailed'), err.message);
+      const detail = err?.response?.data?.detail;
+      toast.error(
+        t('projectDialog.saveFailed'),
+        typeof detail === 'string' ? detail : err?.message,
+      );
     } finally {
+      projectSubmitInFlightRef.current = false;
       setProjectSubmitting(false);
     }
-  }, [editingProjectId, fetchProjects, projectDialogMode, projectNameValue, projectSubmitting, t, toast]);
+  }, [editingProjectId, fetchProjects, projectDialogMode, projectNameValue, projectWorktreeValue, t, toast]);
 
   const handleDownloadSession = useCallback(async (sessionId: string, title: string) => {
     setOpenMenuSessionId(null);
@@ -1296,6 +1273,7 @@ export default function SessionPage() {
     }));
     if (succeeded.length > 0) {
       removeSessions(succeeded);
+      await fetchProjects(undefined, searchQuery);
       if (selectedSessionId && succeeded.includes(selectedSessionId)) {
         setSelectedSessionId(null);
       }
@@ -1308,7 +1286,7 @@ export default function SessionPage() {
       setSelectMode(false);
     }
     setBatchDeleting(false);
-  }, [checkedIds, batchDeleting, removeSessions, selectedSessionId, toast, t]);
+  }, [batchDeleting, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
 
   const renderSessionListItem = (session: Session) => (
     <div
@@ -1473,8 +1451,11 @@ export default function SessionPage() {
               <div className="space-y-1">
                 {projectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
-                  const isDefaultProject = defaultProjectId === group.id;
+                  const isDefaultProject = group.isDefault;
                   const isSelectedProject = selectedProjectId === group.id;
+                  const hasMoreProjectSessions = projects.length >= 2
+                    ? group.sessions.length < group.sessionCount
+                    : hasMoreByProject[group.id];
                   const persistedProject = projects.find((project) => project.id === group.id);
                   return (
                     <div key={group.id} className="group/project relative">
@@ -1501,25 +1482,17 @@ export default function SessionPage() {
                           type="button"
                           onClick={() => {
                             setSelectedProjectId(group.id);
-                            if (isSelectedProject) {
-                              toggleProjectCollapsed(group.id);
-                            } else {
-                              setCollapsedProjectIds(prev => {
-                                const next = new Set(prev);
-                                next.delete(group.id);
-                                return next;
-                              });
-                            }
+                            toggleProjectCollapsed(group.id);
                           }}
                           className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
                           aria-label={t('selectProject', { project: group.label })}
                         >
                           <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
                           <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
-                          {isDefaultProject && (
-                            <span
-                              className="h-2 w-2 shrink-0 rounded-full bg-blue-400 shadow-[0_0_0_2px_rgba(96,165,250,0.18)]"
-                              title={t('defaultProject')}
+                          {group.pathStatus !== 'available' && (
+                            <AlertTriangle
+                              className="h-3.5 w-3.5 shrink-0 text-amber-500"
+                              aria-label={t('projectPathUnavailable')}
                             />
                           )}
                         </button>
@@ -1529,7 +1502,7 @@ export default function SessionPage() {
                             event.stopPropagation();
                             handleCreateSessionInProject(group.id);
                           }}
-                          disabled={creating}
+                          disabled={creating || group.pathStatus !== 'available'}
                           className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                           title={t('createSessionInProject', { project: group.label })}
                           aria-label={t('createSessionInProject', { project: group.label })}
@@ -1552,7 +1525,7 @@ export default function SessionPage() {
                           </button>
                         )}
                         <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
-                          {group.sessions.length}
+                          {group.sessionCount}
                         </span>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
@@ -1564,24 +1537,37 @@ export default function SessionPage() {
                           <button
                             type="button"
                             role="menuitem"
+                            onClick={() => void handleCopyProjectPath(group)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            {t('projectDialog.copyPathAction')}
+                          </button>
+                          {!isDefaultProject && (
+                          <button
+                            type="button"
+                            role="menuitem"
                             onClick={() => handleOpenRenameProject(group)}
                             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
                           >
                             <PencilLine className="h-3.5 w-3.5" />
                             {t('projectDialog.renameAction')}
                           </button>
+                          )}
+                          {!isDefaultProject && (
                           <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                          )}
+                          {!isDefaultProject && (
                           <button
                             type="button"
                             role="menuitem"
                             onClick={() => handleOpenDeleteProject(group)}
-                            disabled={isDefaultProject}
-                            title={isDefaultProject ? t('projectDialog.defaultDeleteDisabled') : undefined}
                             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/40"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             {t('projectDialog.deleteAction')}
                           </button>
+                          )}
                         </div>
                       )}
                       {!collapsed && (
@@ -1613,24 +1599,27 @@ export default function SessionPage() {
                               {t('noProjectSessions')}
                             </div>
                           )}
+                          {hasMoreProjectSessions && (
+                            <div className="mx-4 py-1">
+                              <button
+                                type="button"
+                                onClick={() => void loadMoreSessions(group.id)}
+                                disabled={loadingMoreProjectIds.has(group.id)}
+                                className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                              >
+                                {loadingMoreProjectIds.has(group.id)
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <ChevronDown className="h-3 w-3" />}
+                                {t('loadMore', 'Load more')}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
                   );
                 })}
               </div>
-            </div>
-          )}
-          {hasMoreSessions && (
-            <div className="px-4 py-3">
-              <button
-                onClick={() => void loadMoreSessions()}
-                disabled={loadingMoreSessions}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900"
-              >
-                {loadingMoreSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                <span>{loadingMoreSessions ? t('loading') : t('loadMore', 'Load more')}</span>
-              </button>
             </div>
           )}
         </div>
@@ -1954,7 +1943,7 @@ export default function SessionPage() {
 
       {projectDialogMode && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+          <div className="w-full max-w-lg rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
             <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
               <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                 {projectDialogMode === 'create' ? t('projectDialog.createTitle') : t('projectDialog.renameTitle')}
@@ -1967,7 +1956,10 @@ export default function SessionPage() {
               <input
                 id="session-project-name"
                 value={projectNameValue}
-                onChange={(event) => setProjectNameValue(event.target.value)}
+                onChange={(event) => {
+                  setProjectNameValue(event.target.value);
+                  setProjectNameManuallyEdited(true);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
@@ -1983,12 +1975,107 @@ export default function SessionPage() {
                 className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
                 autoFocus
               />
+              {projectDialogMode === 'create' && (
+                <>
+                  <div className="flex items-center justify-between pt-1">
+                    <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
+                      {t('projectDialog.folderLabel')}
+                    </label>
+                    <span className="max-w-64 truncate text-[11px] text-zinc-400 dark:text-zinc-600" title={projects.find((project) => project.isDefault)?.worktree}>
+                      {t('projectDialog.defaultFolder', {
+                        path: projects.find((project) => project.isDefault)?.worktree ?? '',
+                      })}
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      id="session-project-worktree"
+                      value={projectWorktreeValue}
+                      onChange={(event) => {
+                        setProjectWorktreeValue(event.target.value);
+                        if (!projectNameManuallyEdited) {
+                          setProjectNameValue(getPathBasename(event.target.value));
+                        }
+                      }}
+                      disabled={projectSubmitting}
+                      placeholder={t('projectDialog.folderPlaceholder')}
+                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void loadFolderBrowser(projectWorktreeValue)}
+                      disabled={projectSubmitting || folderBrowserLoading}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                    >
+                      {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                      {t('projectDialog.chooseFolder')}
+                    </button>
+                  </div>
+                  {folderBrowser && (
+                    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+                      <div className="flex items-center gap-1 border-b border-zinc-100 bg-zinc-50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">
+                        <button
+                          type="button"
+                          onClick={() => folderBrowser.parent && void loadFolderBrowser(folderBrowser.parent)}
+                          disabled={!folderBrowser.parent || folderBrowserLoading}
+                          className="rounded p-1 text-zinc-500 hover:bg-zinc-200 disabled:opacity-30 dark:hover:bg-zinc-800"
+                          title={t('projectDialog.parentFolder')}
+                        >
+                          <ArrowUp className="h-3.5 w-3.5" />
+                        </button>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500" title={folderBrowser.path}>
+                          {folderBrowser.path}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectProjectFolder(folderBrowser.path)}
+                          className="rounded bg-zinc-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+                        >
+                          {t('projectDialog.selectCurrentFolder')}
+                        </button>
+                      </div>
+                      <div className="flex gap-1 overflow-x-auto border-b border-zinc-100 px-2 py-1 dark:border-zinc-800">
+                        {folderBrowser.roots.map((root) => (
+                          <button
+                            key={root.path}
+                            type="button"
+                            onClick={() => void loadFolderBrowser(root.path)}
+                            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                            title={root.path}
+                          >
+                            <HardDrive className="h-3 w-3" />
+                            {root.name}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="max-h-48 overflow-y-auto p-1">
+                        {folderBrowser.entries.length > 0 ? folderBrowser.entries.map((entry) => (
+                          <button
+                            key={entry.path}
+                            type="button"
+                            onClick={() => void loadFolderBrowser(entry.path)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                            title={entry.path}
+                          >
+                            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                            <span className="truncate">{entry.name}</span>
+                          </button>
+                        )) : (
+                          <div className="px-2 py-5 text-center text-xs text-zinc-400">
+                            {t('projectDialog.noSubfolders')}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
               <button
                 type="button"
                 onClick={handleCloseProjectDialog}
-                disabled={projectSubmitting}
+                disabled={projectSubmitting || (projectDialogMode === 'create' && !projectWorktreeValue.trim())}
                 className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
               >
                 {t('cancel')}

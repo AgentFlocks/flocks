@@ -77,6 +77,7 @@ export interface SessionListParams {
   limit?: number;
   offset?: number;
   directory?: string;
+  projectID?: string;
   roots?: boolean;
   start?: number;
   search?: string;

@@ -11,14 +11,18 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
-# Sentinel for explicitly setting a field to None via Session.update()
-_UNSET = object()
-
-from flocks.auth.context import get_current_auth_user
+from flocks.auth.context import (
+    get_current_auth_user,
+    reset_current_auth_user,
+    set_current_auth_user,
+)
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.message import Message, MessageInfo, AssistantMessageInfo
+
+# Sentinel for explicitly setting a field to None via Session.update()
+_UNSET = object()
 
 log = Log.create(service="session")
 
@@ -483,6 +487,16 @@ class Session:
         except Exception as e:
             log.error("session.list_all.error", {"error": str(e)})
             return []
+
+    @classmethod
+    async def list_all_unfiltered(cls) -> List[SessionInfo]:
+        """List all sessions for callers that apply an explicit access policy."""
+
+        token = set_current_auth_user(None)
+        try:
+            return await cls.list_all()
+        finally:
+            reset_current_auth_user(token)
     
     @classmethod
     async def update(

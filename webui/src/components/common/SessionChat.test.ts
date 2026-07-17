@@ -6,7 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '@/types';
 
 import {
-  areChatMessagePartsRenderEqual,
   areChatTimelineItemsRenderEqual,
   buildInstructionDisplayText,
   buildChatTimelineItems,
@@ -35,6 +34,7 @@ import {
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();

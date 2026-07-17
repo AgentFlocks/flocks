@@ -217,11 +217,22 @@ export function applyMessagePartUpdate(
   return updated;
 }
 
-export function useSessions(search = '') {
+type UseSessionsOptions = {
+  projectIds?: string[];
+  pageSize?: number;
+};
+
+function sessionEffectiveProjectId(session: Session): string {
+  return session.effectiveProjectID || session.projectID;
+}
+
+export function useSessions(search = '', options?: UseSessionsOptions) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const [hasMoreByProject, setHasMoreByProject] = useState<Record<string, boolean>>({});
+  const [loadingMoreProjectIds, setLoadingMoreProjectIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   // Track whether the initial fetch has completed — refetches should be silent
   const initializedRef = useRef(false);
@@ -229,12 +240,24 @@ export function useSessions(search = '') {
   const hasLoadedOnceRef = useRef(false);
   const requestSeqRef = useRef(0);
   const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
+  const projectIdsKey = options?.projectIds === undefined
+    ? null
+    : [...options.projectIds].sort().join('\u0000');
+  const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  const fetchSessions = useCallback(async (options?: { append?: boolean }) => {
-    const append = Boolean(options?.append);
+  const fetchSessions = useCallback(async (fetchOptions?: { append?: boolean; projectId?: string }) => {
+    const append = Boolean(fetchOptions?.append);
+    const requestedProjectIds = projectIdsKey === null
+      ? null
+      : projectIdsKey.split('\u0000').filter(Boolean);
+    const targetProjectIds = requestedProjectIds === null
+      ? null
+      : fetchOptions?.projectId
+        ? [fetchOptions.projectId]
+        : requestedProjectIds;
     const requestSeq = ++requestSeqRef.current;
     try {
       // Only show the full-page loading state on the very first fetch.
@@ -242,40 +265,78 @@ export function useSessions(search = '') {
       // to avoid unmounting SessionChat and disrupting the active conversation.
       if (append) {
         setLoadingMore(true);
+        if (fetchOptions?.projectId) {
+          setLoadingMoreProjectIds((current) => new Set(current).add(fetchOptions.projectId as string));
+        }
       } else if (!initializedRef.current) {
         setLoading(true);
       }
       setError(null);
+      if (targetProjectIds?.length === 0) {
+        setSessions([]);
+        setHasMore(false);
+        setHasMoreByProject({});
+        hasLoadedOnceRef.current = true;
+        return;
+      }
       // Fetch only root sessions: child sessions are internal and never shown
       // in the sidebar, so excluding them avoids extra payload and filtering.
       const startMark = append ? 'sessions:list:older-start' : 'sessions:list:first-start';
       if (typeof performance !== 'undefined') performance.mark(startMark);
-      const response = await sessionApi.list({
-        view: 'list',
-        manager: true,
-        roots: true,
-        limit: SESSION_LIST_PAGE_SIZE,
-        offset: append
-          ? sessionsRef.current.filter(session => !optimisticSessionsRef.current.has(session.id)).length
-          : 0,
-        search: search.trim() || undefined,
-      });
+      const projectTargets = targetProjectIds ?? [undefined];
+      const responses = await Promise.all(projectTargets.map(async (projectId) => {
+        const offset = append
+          ? sessionsRef.current.filter((session) => (
+            !optimisticSessionsRef.current.has(session.id)
+            && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
+          )).length
+          : 0;
+        const response = await sessionApi.list({
+          view: 'list',
+          manager: true,
+          roots: true,
+          limit: pageSize,
+          offset,
+          search: search.trim() || undefined,
+          projectID: projectId,
+        });
+        return { projectId, response };
+      }));
       if (requestSeq !== requestSeqRef.current) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
-      if (Array.isArray(response)) {
-        const nextSessions = response.filter(
+      const nextSessions = responses.flatMap(({ response }) => (
+        Array.isArray(response) ? response.filter(
           (s: any) => (!s.category || VISIBLE_CATEGORIES.has(s.category)) && !s.parentID,
+        ) : []
+      ));
+      nextSessions.forEach((session: Session) => optimisticSessionsRef.current.delete(session.id));
+      const nextHasMoreByProject = Object.fromEntries(
+        responses
+          .filter(({ projectId }) => projectId !== undefined)
+          .map(({ projectId, response }) => [
+            projectId as string,
+            Array.isArray(response) && response.length >= pageSize,
+          ]),
+      );
+      setHasMoreByProject((current) => append
+        ? { ...current, ...nextHasMoreByProject }
+        : nextHasMoreByProject);
+      setSessions((previous) => {
+        if (append) return appendSessionList(previous, nextSessions);
+        if (targetProjectIds === null) {
+          return mergeSessionListWithOptimistic(nextSessions, optimisticSessionsRef.current);
+        }
+        const optimistic = new Map(
+          Array.from(optimisticSessionsRef.current.entries()).filter(([, session]) => (
+            targetProjectIds.includes(sessionEffectiveProjectId(session))
+          )),
         );
-        nextSessions.forEach((session: Session) => optimisticSessionsRef.current.delete(session.id));
-        setSessions(prev => append
-          ? appendSessionList(prev, nextSessions)
-          : mergeSessionListWithOptimistic(nextSessions, optimisticSessionsRef.current));
-        setHasMore(response.length >= SESSION_LIST_PAGE_SIZE);
-        hasLoadedOnceRef.current = true;
-      } else {
-        if (!append && !hasLoadedOnceRef.current) setSessions([]);
-        setHasMore(false);
-      }
+        return mergeSessionListWithOptimistic(nextSessions, optimistic);
+      });
+      setHasMore(targetProjectIds === null
+        ? responses.some(({ response }) => Array.isArray(response) && response.length >= pageSize)
+        : Object.values(nextHasMoreByProject).some(Boolean));
+      hasLoadedOnceRef.current = true;
     } catch (err: any) {
       if (requestSeq !== requestSeqRef.current) return;
       setError(err.message || 'Failed to fetch sessions');
@@ -284,10 +345,17 @@ export function useSessions(search = '') {
       if (requestSeq === requestSeqRef.current) {
         setLoading(false);
         setLoadingMore(false);
+        if (fetchOptions?.projectId) {
+          setLoadingMoreProjectIds((current) => {
+            const next = new Set(current);
+            next.delete(fetchOptions.projectId as string);
+            return next;
+          });
+        }
         initializedRef.current = true;
       }
     }
-  }, [search]);
+  }, [pageSize, projectIdsKey, search]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
     const optimistic = optimisticSessionsRef.current.get(sessionId);
@@ -338,8 +406,10 @@ export function useSessions(search = '') {
     removeSessions,
     addSession,
     hasMore,
+    hasMoreByProject,
     loadingMore,
-    loadMore: () => fetchSessions({ append: true }),
+    loadingMoreProjectIds,
+    loadMore: (projectId?: string) => fetchSessions({ append: true, projectId }),
   };
 }
 

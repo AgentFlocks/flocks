@@ -877,7 +877,9 @@ class _InstanceContextMiddleware:
         if not directory:
             directory = request.headers.get("x-flocks-directory")
         if not directory:
-            directory = os.getcwd()
+            from flocks.project.project import Project
+
+            directory = Project.default_worktree_candidate()
 
         try:
             directory = unquote(directory)

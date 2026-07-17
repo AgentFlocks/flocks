@@ -1015,4 +1015,133 @@ describe('useSessions list loading', () => {
       resolveSearch([]);
     });
   });
+
+  it('loads and tracks pages independently for each project', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.projectID === 'default') {
+        return Array.from({ length: 100 }, (_, index) => ({
+          id: `default-${index}`,
+          projectID: 'legacy-project',
+          effectiveProjectID: 'default',
+          title: `Default ${index}`,
+          time: { created: index, updated: index },
+          category: 'user',
+        })) as any;
+      }
+      return [{
+        id: 'labs-1',
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        title: 'Labs',
+        time: { created: 1, updated: 1 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(101);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: false,
+    });
+  });
+
+  it('uses a custom page size for project session pagination', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(12);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: true,
+    });
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 6,
+    }));
+  });
+
+  it('uses the selected project offset when loading more sessions', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [{
+          id: `${params.projectID}-1`,
+          projectID: params.projectID,
+          effectiveProjectID: params.projectID,
+          title: 'First page',
+          time: { created: 1, updated: 1 },
+          category: 'user',
+        }] as any;
+      }
+      return [{
+        id: `${params.projectID}-2`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: 'Second page',
+        time: { created: 2, updated: 2 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 1,
+    }));
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'prj_labs-2',
+    ]);
+  });
 });

@@ -7,6 +7,7 @@ export interface Session {
   id: string;
   slug: string;
   projectID: string;
+  effectiveProjectID?: string;
   directory: string;
   parentID?: string;
   summary?: SessionSummary;

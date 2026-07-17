@@ -20,11 +20,18 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
     """
     data_dir = tmp_path / "flocks_data"
     data_dir.mkdir(parents=True, exist_ok=True)
+    flocks_root = tmp_path / ".flocks"
+    workspace_dir = flocks_root / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(workspace_dir))
+    monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
 
     from flocks.config.config import Config
     from flocks.storage.storage import Storage
     from flocks.project.instance import Instance, _state_manager
+    from flocks.project.project import Project
 
     Config._global_config = None
     Config._cached_config = None
@@ -38,6 +45,7 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
 
     original_cache = dict(Instance._cache)
     Instance._cache.clear()
+    Project.invalidate_session_stats()
     for key in list(_state_manager._states.keys()):
         _state_manager._states.pop(key, None)
         _state_manager._disposers.pop(key, None)
@@ -69,6 +77,7 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
     AuthService._has_users_cached = False
     Instance._cache.clear()
     Instance._cache.update(original_cache)
+    Project.invalidate_session_stats()
     for key in list(_state_manager._states.keys()):
         _state_manager._states.pop(key, None)
         _state_manager._disposers.pop(key, None)
