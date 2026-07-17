@@ -760,6 +760,8 @@ def _resolve_upgrade_runtime(console, *, frontend_port: int, attempt_recover: bo
     error = result.get("error")
     if action == "recovered":
         _console_print(console, "[flocks] 已恢复未完成升级，正式 WebUI 将继续接管端口。")
+    elif action == "failure_preserved":
+        _console_print(console, "[flocks] 已清理升级临时页，并保留回滚失败状态。")
     elif action != "noop":
         _console_print(console, "[flocks] 已清理升级临时页残留。")
 
@@ -1401,7 +1403,7 @@ def _wait_for_supervisor_ready(
             pass
         time.sleep(0.5)
     if last_payload is not None:
-        return last_payload
+        raise ServiceError("Flocks daemon 启动超时：后端 TCP 端口未就绪，请检查日志。")
     raise ServiceError("Flocks daemon 启动超时，请检查日志。")
 
 

@@ -940,6 +940,20 @@ def test_wait_for_supervisor_ready_waits_for_backend_tcp_listener(monkeypatch, t
     assert probes == [("0.0.0.0", 9000), ("0.0.0.0", 9000)]
 
 
+def test_wait_for_supervisor_ready_fails_when_tcp_listener_never_starts(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    status = _supervisor_status()
+    monotonic_values = iter([0.0, 0.0, 2.0])
+
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: status)
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: False)
+    monkeypatch.setattr(service_manager.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(service_manager.ServiceError, match="TCP"):
+        service_manager._wait_for_supervisor_ready(paths, timeout=1.0)
+
+
 def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []

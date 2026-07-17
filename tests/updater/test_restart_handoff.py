@@ -424,6 +424,49 @@ def test_prepare_upgrade_handover_uses_snapshotted_service_config(monkeypatch, t
     assert config.legacy_backend_port == 9000
 
 
+def test_prepare_upgrade_handover_builds_config_from_legacy_handoff_args(monkeypatch, tmp_path: Path) -> None:
+    from flocks.updater import updater
+
+    args = restart_handoff._parse_args(
+        _handoff_args(
+            tmp_path,
+            [
+                "python",
+                "-m",
+                "flocks.cli.main",
+                "start",
+                "--no-browser",
+                "--skip-webui-build",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--server-host",
+                "0.0.0.0",
+                "--server-port",
+                "9000",
+            ],
+            prepare_handover=True,
+        )
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        updater,
+        "_prepare_upgrade_handover",
+        lambda version, *, config=None: captured.update(version=version, config=config) or {},
+    )
+
+    assert restart_handoff._prepare_upgrade_handover(args) is True
+    config = captured["config"]
+    assert config.backend_host == "127.0.0.1"
+    assert config.backend_port == 8000
+    assert config.frontend_host == "127.0.0.1"
+    assert config.frontend_port == 5173
+    assert config.legacy_backend_host == "0.0.0.0"
+    assert config.legacy_backend_port == 9000
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
 def test_stop_supervisor_before_restart_waits_until_real_control_api_stops(monkeypatch) -> None:
     short_root = make_short_runtime_root("flocks-handoff-")

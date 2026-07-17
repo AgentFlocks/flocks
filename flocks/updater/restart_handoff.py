@@ -191,17 +191,30 @@ def _prepare_upgrade_handover(args: argparse.Namespace) -> bool:
     from flocks.updater import updater
 
     try:
-        config = None
+        config_payload = {
+            "backend_host": args.backend_host,
+            "backend_port": args.backend_port,
+            "frontend_host": args.frontend_host,
+            "frontend_port": args.frontend_port,
+        }
         if args.service_config_json:
             payload = json.loads(args.service_config_json)
             if not isinstance(payload, dict):
                 raise ValueError("service config snapshot must be a JSON object")
-            config = service_config_from_payload(
-                payload,
-                default=ServiceConfig(),
-                no_browser=True,
-                skip_frontend_build=True,
-            )
+            config_payload.update(payload)
+        else:
+            legacy_host = _argv_option(args.restart_argv, "--server-host")
+            legacy_port = _argv_option(args.restart_argv, "--server-port")
+            if legacy_host:
+                config_payload["legacy_backend_host"] = legacy_host
+            if legacy_port:
+                config_payload["legacy_backend_port"] = int(legacy_port)
+        config = service_config_from_payload(
+            config_payload,
+            default=ServiceConfig(),
+            no_browser=True,
+            skip_frontend_build=True,
+        )
         updater._prepare_upgrade_handover(args.version, config=config)
     except Exception as exc:
         _record_handoff_log(f"prepare_handover_failed error={exc}")
@@ -232,6 +245,17 @@ def _cli_subcommand(argv: Sequence[str]) -> str | None:
     return None
 
 
+def _argv_option(argv: Sequence[str], option: str) -> str | None:
+    """Return a CLI option value from either ``--name value`` or ``--name=value``."""
+    prefix = f"{option}="
+    for index, value in enumerate(argv):
+        if value.startswith(prefix):
+            return value[len(prefix) :]
+        if value == option and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
 def _restart_argv_for_current_runtime(args: argparse.Namespace, restart_argv: Sequence[str]) -> list[str]:
     if _cli_subcommand(restart_argv) != "serve":
         return list(restart_argv)
@@ -259,6 +283,7 @@ def _restart_argv_for_current_runtime(args: argparse.Namespace, restart_argv: Se
 def run(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     restart_argv = _restart_argv_for_current_runtime(args, args.restart_argv)
+    args.restart_argv = restart_argv
     if not restart_argv:
         _record_handoff_log("missing_restart_argv")
         return 2

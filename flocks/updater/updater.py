@@ -2216,15 +2216,13 @@ def _looks_like_upgrade_page_process(pid: int) -> bool:
 
 def _prepare_upgrade_handover(version: str, *, config=None) -> dict[str, Any]:
     from flocks.cli import service_manager
+    from flocks.cli.service_config import service_config_payload
     from flocks.cli.service_control import request_prepare_upgrade
 
     config = config or _current_service_config()
     payload: dict[str, Any] = {
         "version": version,
-        "backend_host": config.backend_host,
-        "backend_port": config.backend_port,
-        "frontend_host": config.frontend_host,
-        "frontend_port": config.frontend_port,
+        **service_config_payload(config),
         "skip_frontend_build": True,
         "phase": _UPGRADE_PHASE_HANDOVER_PREPARING,
     }
@@ -2385,7 +2383,11 @@ def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool
         raise RuntimeError(result.webui.last_error or "WebUI restart did not become healthy")
 
 
-def cleanup_orphan_upgrade_state(*, frontend_port: int | None = None) -> bool:
+def cleanup_orphan_upgrade_state(
+    *,
+    frontend_port: int | None = None,
+    preserve_upgrade_state: bool = False,
+) -> bool:
     state = read_upgrade_runtime_state(frontend_port=frontend_port)
     if not state["has_artifacts"]:
         return False
@@ -2396,7 +2398,8 @@ def cleanup_orphan_upgrade_state(*, frontend_port: int | None = None) -> bool:
     else:
         _stop_upgrade_page_server(frontend_port=resolved_port)
 
-    _clear_upgrade_state()
+    if not preserve_upgrade_state:
+        _clear_upgrade_state()
     _upgrade_server_pid_path().unlink(missing_ok=True)
     shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
     return True
@@ -2416,6 +2419,8 @@ def resolve_upgrade_runtime_state(
         }
 
     resolved_port = state["frontend_port"]
+    payload = state.get("payload")
+    rollback_failed = isinstance(payload, dict) and payload.get("phase") == _UPGRADE_PHASE_ROLLBACK_FAILED
     if attempt_recover and state["payload_present"]:
         try:
             recover_upgrade_state()
@@ -2425,14 +2430,26 @@ def resolve_upgrade_runtime_state(
                 "error": None,
             }
         except Exception as exc:
-            cleanup_orphan_upgrade_state(frontend_port=resolved_port)
+            cleanup_orphan_upgrade_state(
+                frontend_port=resolved_port,
+                preserve_upgrade_state=True,
+            )
             return {
                 **state,
                 "action": "cleanup_after_failed_recover",
                 "error": str(exc),
             }
 
-    cleanup_orphan_upgrade_state(frontend_port=resolved_port)
+    cleanup_orphan_upgrade_state(
+        frontend_port=resolved_port,
+        preserve_upgrade_state=rollback_failed,
+    )
+    if rollback_failed:
+        return {
+            **state,
+            "action": "failure_preserved",
+            "error": str(payload.get("last_error") or "Rollback failed"),
+        }
     return {
         **state,
         "action": "cleaned",

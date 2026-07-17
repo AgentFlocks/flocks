@@ -1208,6 +1208,36 @@ def test_prepare_upgrade_handover_writes_state_and_stops_frontend_with_real_cont
         shutil.rmtree(short_root, ignore_errors=True)
 
 
+def test_prepare_upgrade_handover_persists_complete_service_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
+    config = service_manager.ServiceConfig(
+        backend_host="10.0.0.8",
+        backend_port=5273,
+        frontend_host="10.0.0.8",
+        frontend_port=5273,
+        legacy_backend_host="0.0.0.0",
+        legacy_backend_port=9000,
+        server_port_migration_hint=True,
+        no_browser=True,
+    )
+
+    monkeypatch.setattr(service_control, "request_prepare_upgrade", lambda **_kwargs: None)
+    monkeypatch.setattr(updater, "_start_upgrade_page_server", lambda *_args: {})
+
+    updater._prepare_upgrade_handover("2026.4.1", config=config)
+
+    state = updater._read_upgrade_state()
+    assert state is not None
+    assert state["legacy_backend_host"] == "0.0.0.0"
+    assert state["legacy_backend_port"] == 9000
+    assert state["server_port_migration_hint"] is True
+    assert state["no_browser"] is True
+    assert state["skip_frontend_build"] is True
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
 def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails_with_real_control_api(
     monkeypatch: pytest.MonkeyPatch,
@@ -1409,6 +1439,44 @@ def test_recover_upgrade_state_restart_failure_preserves_failure_state(
     assert state is not None
     assert state["phase"] == "rollback_failed"
     assert state["last_error"] == "still broken"
+
+
+def test_resolve_upgrade_runtime_state_preserves_rollback_failure_during_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    flocks_root = tmp_path / ".flocks"
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    stopped: list[int | None] = []
+    updater._write_upgrade_state(
+        {
+            "version": "2026.4.1",
+            "backend_host": "127.0.0.1",
+            "backend_port": 5173,
+            "frontend_host": "127.0.0.1",
+            "frontend_port": 5173,
+            "phase": "rollback_failed",
+            "last_error": "still broken",
+        }
+    )
+    updater._upgrade_server_pid_path().write_text("4321", encoding="utf-8")
+    updater._upgrade_page_dir().mkdir(parents=True)
+    monkeypatch.setattr(
+        updater,
+        "_stop_upgrade_page_server",
+        lambda *, frontend_port=None: stopped.append(frontend_port),
+    )
+
+    result = updater.resolve_upgrade_runtime_state(attempt_recover=False, frontend_port=5173)
+
+    state = updater._read_upgrade_state()
+    assert result["action"] == "failure_preserved"
+    assert result["error"] == "still broken"
+    assert state is not None
+    assert state["phase"] == "rollback_failed"
+    assert stopped == [5173]
+    assert not updater._upgrade_server_pid_path().exists()
+    assert not updater._upgrade_page_dir().exists()
 
 
 def test_start_upgrade_page_server_binds_configured_frontend_host(
