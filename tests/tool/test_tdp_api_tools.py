@@ -212,7 +212,7 @@ async def test_tdp_threat_intelligent_aggregation_can_use_secret_manager_credent
     assert method == "POST"
     assert request_url == "https://tdp.internal/api/v1/incident/search"
     condition = request_kwargs["json"]["condition"]
-    assert condition["duration"] == {"begin_duration": 0, "end_duration": 24}
+    assert condition["duration"] == {"begin_duration": 0}
     assert condition["time_from"] < condition["time_to"]
 
 

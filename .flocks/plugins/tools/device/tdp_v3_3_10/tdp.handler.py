@@ -479,7 +479,7 @@ def _condition_time_body(body: dict[str, Any]) -> dict[str, Any]:
 def _incident_search_body(body: dict[str, Any]) -> dict[str, Any]:
     defaults = _body_with_condition_time(
         {
-            "condition": {"duration": {"begin_duration": 0, "end_duration": 24}},
+            "condition": {"duration": {"begin_duration": 0}},
             "page": {"cur_page": 1, "page_size": 20, "sort": [{"sort_by": "last_time", "sort_order": "desc"}]},
         }
     )
