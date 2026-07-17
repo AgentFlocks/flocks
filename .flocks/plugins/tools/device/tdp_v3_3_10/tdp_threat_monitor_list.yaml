@@ -1,6 +1,6 @@
 name: tdp_threat_monitor_list
 description: >
-  查询 TDP 威胁监控列表，对应“威胁-实时监控”功能及正式 API `/api/v1/monitor/threat/list`。
+  查询 TDP 威胁事件列表，即“威胁-实时监控”中的威胁实时监控列表，对应正式 API `/api/v1/monitor/threat/list`。
   查询时间范围不得超过 24 小时；未传时间时 handler 动态使用最近 24 小时。
   `sql` 是 TDP 过滤表达式，不是包含 SELECT/FROM 的完整 SQL。
 category: custom

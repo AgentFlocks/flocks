@@ -1,7 +1,8 @@
 name: tdp_threat_intelligent_aggregation
 description: >
-  查询 TDP 智能聚合相关接口。默认返回聚合威胁事件列表（不是原始告警），也可查询攻击成功统计、攻击时间线、
-  攻击过程告警、结果分布、受攻击实体和攻击者 IP 信息。优先使用顶层语义化参数，不要手写
+  查询 TDP“威胁-智能聚合”中的聚合攻击事件及其详情。默认查询智能聚合后的攻击事件，也可查询指定聚合事件的
+  攻击成功统计、攻击时间线、攻击过程告警、结果分布、受攻击实体和攻击者 IP 信息。本 tool 不用于查询
+  “威胁-实时监控”中的威胁事件列表；该意图应使用 `tdp_threat_monitor_list`。优先使用顶层语义化参数，不要手写
   `condition.id`、`condition.duration`、`condition.fuzzy` 这类嵌套字段；只有在显式参数未覆盖时才使用 `condition` / `page`。
 category: custom
 enabled: true
@@ -14,15 +15,16 @@ inputSchema:
     action:
       type: string
       description: >
-        `incident_search` 查询聚合威胁事件列表；`top_attacked_entity` 查询单个事件 TOP 受攻击域名或主机；
-        `attack_success` 查询单个事件的攻击成功统计；`attack_timeline` 查询单个事件的攻击过程时间线；
-        `attack_alert_list` 根据攻击过程中的告警 ID 查询告警详情；`attack_result_distribution` 查询成功、失败、尝试的数量分布；
-        `attacker_ip_list` 查询单个事件的攻击来源 IP；`attacker_ip_detail` 查询指定攻击 IP 的情报和活跃时间段。
+        `incident_search` 查询智能聚合后的攻击事件列表；`top_attacked_entity` 查询指定聚合事件 TOP 受攻击域名或主机；
+        `attack_success` 查询指定聚合事件的攻击成功统计；`attack_timeline` 查询指定聚合事件的攻击过程时间线；
+        `attack_alert_list` 根据攻击过程返回的告警 ID 查询对应告警详情；`attack_result_distribution` 查询指定聚合事件中
+        成功、失败、尝试的数量分布；`attacker_ip_list` 查询指定聚合事件的攻击来源 IP；
+        `attacker_ip_detail` 查询指定聚合事件中指定攻击 IP 的情报和活跃时间段。
       enum: [incident_search, top_attacked_entity, attack_success, attack_timeline, attack_alert_list, attack_result_distribution, attacker_ip_list, attacker_ip_detail]
       default: incident_search
     incident_id:
       type: string
-      description: 事件 ID，适用于除 `incident_search` 和 `attack_alert_list` 外的事件详情动作；应先从 `incident_search` 返回结果中获取。
+      description: 智能聚合事件 ID，适用于除 `incident_search` 和 `attack_alert_list` 外的详情动作；应先从 `incident_search` 返回结果中获取。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_from`。可以使用python datetime动态计算。

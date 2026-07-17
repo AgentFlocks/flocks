@@ -9,8 +9,8 @@
 | 看安全态势、趋势、TOP 统计 | `tdp_dashboard_status` | `status` / `security` / `threat_event` / `alert_level_trend` | 通常可空参；列表类 action 可补 `machine_type`、`severity`、分页参数 |
 | 查原始告警日志 | `tdp_log_search` | `search` | `time_from`、`time_to`、`sql` |
 | 查字段聚合统计 | `tdp_log_search` | `terms` | `time_from`、`time_to`、`term` |
-| 查威胁事件列表 | `tdp_threat_intelligent_aggregation` | `incident_search` | `time_from`、`time_to`；可补 `severity`、`phase`、`result`、`keyword`、分页参数 |
-| 查威胁实时监控列表 | `tdp_threat_monitor_list` | 默认 | 时间范围不超过 24 小时；可补 `sql`、`net_data_type`、`assets_group`、分页参数 |
+| 查智能聚合事件 / 聚合攻击事件 | `tdp_threat_intelligent_aggregation` | `incident_search` | `time_from`、`time_to`；可补 `severity`、`phase`、`result`、`keyword`、分页参数 |
+| 查威胁事件列表 / 威胁实时监控列表 | `tdp_threat_monitor_list` | 默认 | 时间范围不超过 24 小时；可补 `sql`、`net_data_type`、`assets_group`、分页参数 |
 | 看事件时间线 / 结果分布 / 攻击者明细 | `tdp_threat_intelligent_aggregation` | `attack_timeline` / `attack_result_distribution` / `attacker_ip_detail` | 通常先要 `incident_id` |
 | 查外部攻击严重性分布 | `tdp_threat_external_attack` | 默认 | `time_from`、`time_to`；可补 `severity`、`result_list`、`keyword` |
 | 查告警主机列表 / 指定主机威胁列表 | `tdp_threat_alert_host` | `alert_host_list` / `host_threat_list` | `alert_host_list` 可补 `severity`、`direction`、`threat_type`、`keyword`；`host_threat_list` 至少要 `asset_machine` |
@@ -109,9 +109,9 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 
 | 用户实际要查什么 | 推荐 tool | 说明 |
 |---|---|---|
-| 威胁事件 / 攻击事件 / 事件总览 | `tdp_threat_intelligent_aggregation` | 事件维度，平台已聚合 |
+| 智能聚合事件 / 聚合攻击事件 / 攻击过程 | `tdp_threat_intelligent_aggregation` | 智能聚合维度，一条事件可关联多条告警 |
 | 外部攻击严重性分布 | `tdp_threat_external_attack` | 外部攻击统计维度 |
-| 实时监控 / 威胁监控列表 | `tdp_threat_monitor_list` | 实时威胁监控列表，单次时间范围不得超过 24 小时 |
+| 威胁事件列表 / 实时监控 / 威胁监控列表 | `tdp_threat_monitor_list` | 威胁实时监控列表，单次时间范围不得超过 24 小时 |
 | 告警 / 告警日志 / 原始检测记录 | `tdp_log_search` | 告警维度，一条就是一条原始记录 |
 | 告警主机 / 受害主机 / 主机下事件 | `tdp_threat_alert_host` | 主机维度，按主机聚合 |
 | 漏洞、弱口令、登录入口、API 风险等 | 对应资产或风险类 tool | 资产/风险维度，不要混进日志查询 |
@@ -119,11 +119,11 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 建议按下面的用词来路由：
 
 - 提到“告警”“最近一小时告警”“查某 IP 的告警”时，默认优先 `tdp_log_search`
-- 提到“智能聚合”“威胁事件”“攻击事件”“看下最近有什么事件”时，优先 `tdp_threat_intelligent_aggregation`
+- 明确提到“智能聚合”“聚合攻击事件”“智能聚合事件”“攻击过程”时，优先 `tdp_threat_intelligent_aggregation`
 - 提到“外部攻击”“外部攻击严重性分布”时，优先 `tdp_threat_external_attack`
-- 提到“实时监控”“威胁监控列表”时，优先 `tdp_threat_monitor_list`
+- 提到“威胁事件列表”“实时监控”“威胁实时监控列表”“威胁监控列表”时，优先 `tdp_threat_monitor_list`
 - 提到“哪些主机被打了”“告警主机”“受害主机”时，优先 `tdp_threat_alert_host`
-- 用户没说清时，默认把“明细”理解为告警日志，把“总览/聚合”理解为事件
+- 用户没说清时，默认把“事件列表/实时监控”理解为威胁监控列表，把“总览/聚合”理解为智能聚合事件
 
 ## 高频场景
 
@@ -281,7 +281,7 @@ machine = '192.168.1.100'
 - 统计某时间段内最多的威胁名称
 - 聚合源 IP、目的 IP、URL、威胁类型
 
-### 4. 威胁事件列表
+### 4. 智能聚合事件查询
 
 推荐：
 
@@ -310,7 +310,7 @@ machine = '192.168.1.100'
 
 高频 action：
 
-- `incident_search`: 智能聚合威胁事件列表
+- `incident_search`: 查询智能聚合后的攻击事件列表；不是“威胁-实时监控”中的威胁事件列表
 - `top_attacked_entity`: 受攻击实体
 - `attack_success`: 攻击成功统计
 - `attack_timeline`: 攻击过程时间线
@@ -359,7 +359,7 @@ machine = '192.168.1.100'
 }
 ```
 
-注意：这里的攻击结果字段是 `result_list`，来自 API 文档的 `condition.result_list`；不要使用事件列表里的 `result` 参数名。
+注意：这里的攻击结果字段是 `result_list`，来自 API 文档的 `condition.result_list`；不要使用智能聚合事件查询里的 `result` 参数名。
 
 告警主机汇总：
 
