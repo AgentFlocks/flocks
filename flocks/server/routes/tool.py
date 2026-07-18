@@ -80,7 +80,7 @@ class ToolExecuteRequest(BaseModel):
         description="Optional message ID used for permission-gated execution",
     )
     agent: Optional[str] = Field(
-        "rex",
+        None,
         description="Agent name recorded for the execution context",
     )
 
@@ -118,7 +118,7 @@ class BatchExecuteRequest(BaseModel):
         description="Optional message ID used for permission-gated execution",
     )
     agent: Optional[str] = Field(
-        "rex",
+        None,
         description="Agent name recorded for the execution context",
     )
 
@@ -305,22 +305,43 @@ async def _build_http_tool_context(
                 # not receive SessionLoop's restoration step.  Restore only
                 # the server-persisted child context; an absent/corrupt record
                 # yields the explicit invalid marker used by B3 to fail closed.
+                # A delegated session's execution identity is also server
+                # controlled, so a request parameter cannot replace its
+                # target agent while retaining the delegated ceiling.
+                agent_name = str(getattr(session, "agent", None) or "rex")
                 security_context = await resolve_session_security_context(
                     session_id,
                     delegation_context_required=True,
                 )
             else:
-                from flocks.security.execution_context import build_root_execution_security_context
+                from flocks.security.execution_context import (
+                    build_root_execution_security_context,
+                    resolve_execution_agent,
+                )
+
+                try:
+                    agent_name = await resolve_execution_agent(
+                        agent,
+                        getattr(session, "agent", None),
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(exc),
+                    ) from exc
 
                 # Root HTTP execution must have the same effective ceiling as
                 # the session's callable schema.  Request parameters never
-                # supply this authorization state.
+                # supply this authorization state, and the resolved execution
+                # agent binds both the ceiling and ToolContext.
                 security_context = await build_root_execution_security_context(
                     session_id=session.id,
-                    agent_name=str(getattr(session, "agent", None) or agent_name),
+                    agent_name=agent_name,
                     workspace=str(getattr(session, "directory", None) or ""),
                     supplied_context={},
                 )
+        except HTTPException:
+            raise
         except Exception as exc:
             log.warning(
                 "tool.http.delegation_context.load_failed",
@@ -358,6 +379,16 @@ async def _build_http_tool_context(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_DIRECT_HTTP_BLOCKED_MESSAGE,
         )
+
+    try:
+        from flocks.security.execution_context import resolve_execution_agent
+
+        agent_name = await resolve_execution_agent(agent, None)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
     async def deny_permission_callback(request) -> None:
         raise PermissionError("This HTTP execution context cannot auto-approve tool permissions.")
