@@ -9,7 +9,6 @@ import json
 import re
 import asyncio
 import time as _time
-from copy import deepcopy
 from datetime import datetime
 from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
 from dataclasses import dataclass
@@ -120,7 +119,6 @@ class StreamProcessor:
         workspace_dir: Optional[str] = None,
         langfuse_generation: Optional[Any] = None,
         step_index: Optional[int] = None,
-        security_context: Optional[Dict[str, Any]] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -138,7 +136,6 @@ class StreamProcessor:
         self._workspace_dir = workspace_dir
         self._langfuse_generation = langfuse_generation
         self._step_index = step_index
-        self._security_context = deepcopy(security_context or {})
         self._sandbox_runtime_cache = None
         self._sandbox_config_cache = None
         self._sandbox_context_cache = None
@@ -175,16 +172,6 @@ class StreamProcessor:
         # model response can launch too; the runner drains these before the step
         # returns.
         self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
-
-    def _tool_context_extra(self, sandbox_extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Combine trusted entry context with optional sandbox metadata.
-
-        Security context is applied last so sandbox plumbing can never replace
-        the authenticated subject or declared execution domain.
-        """
-        extra = deepcopy(sandbox_extra or {})
-        extra.update(deepcopy(self._security_context))
-        return extra
     
     async def process_event(self, event: StreamEvent) -> None:
         """
@@ -670,6 +657,28 @@ class StreamProcessor:
             except Exception as e:
                 log.error("stream.tool_start_callback.error", {"error": str(e)})
         
+        # Hook pipeline: tool.execute.before
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            hook_ctx = await HookPipeline.run_tool_before({
+                "sessionID": self.session_id,
+                "workspace": self._workspace_dir,
+                "agent": self.agent.name,
+                "tool": {
+                    "name": tool_name,
+                    "input": tool_input,
+                    "callID": tool_call_id,
+                },
+            })
+            if hook_ctx and isinstance(hook_ctx.input, dict):
+                updated = hook_ctx.input.get("tool", {}).get("input")
+                if isinstance(updated, dict):
+                    tool_input = updated
+            hook_skip = hook_ctx.output.get("skip") if hook_ctx else False
+        except Exception as e:
+            log.error("stream.tool_before_hook.error", {"error": str(e)})
+            hook_skip = False
+
         # Execute tool synchronously
         tool_span_ctx = None
         if self._langfuse_generation is not None:
@@ -690,143 +699,170 @@ class StreamProcessor:
             except Exception as exc:
                 log.debug("stream.tool_span.init_failed", {"error": str(exc)})
         try:
-            sandbox_meta = await self._resolve_sandbox_meta(tool_name)
-            if sandbox_meta["blocked"]:
+            if hook_skip:
                 result = ToolResult(
                     success=False,
-                    error=sandbox_meta["error"],
-                    metadata={"sandbox": True, "blocked_by_policy": True},
+                    error="Tool execution blocked by hook",
                 )
             else:
-                def _make_metadata_cb(
-                    _part_id=tool_state.part_id,
-                    _call_id=tool_call_id,
-                    _tool=tool_name,
-                    _input=tool_input,
-                    _start=tool_start_time,
-                ):
-                    import copy
+                sandbox_meta = await self._resolve_sandbox_meta(tool_name)
+                if sandbox_meta["blocked"]:
+                    result = ToolResult(
+                        success=False,
+                        error=sandbox_meta["error"],
+                        metadata={"sandbox": True, "blocked_by_policy": True},
+                    )
+                else:
+                    def _make_metadata_cb(
+                        _part_id=tool_state.part_id,
+                        _call_id=tool_call_id,
+                        _tool=tool_name,
+                        _input=tool_input,
+                        _start=tool_start_time,
+                    ):
+                        import copy
 
-                    _finished = [False]
-                    _pending_tasks: set[asyncio.Task[Any]] = set()
+                        _finished = [False]
+                        _pending_tasks: set[asyncio.Task[Any]] = set()
 
-                    def _track_task(coro: Awaitable[None]) -> None:
-                        task = asyncio.create_task(coro)
-                        _pending_tasks.add(task)
+                        def _track_task(coro: Awaitable[None]) -> None:
+                            task = asyncio.create_task(coro)
+                            _pending_tasks.add(task)
 
-                        def _cleanup(done_task: asyncio.Task[Any]) -> None:
-                            _pending_tasks.discard(done_task)
-                            try:
-                                done_task.result()
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception as exc:
-                                log.debug("stream.metadata_task.error", {"error": str(exc)})
+                            def _cleanup(done_task: asyncio.Task[Any]) -> None:
+                                _pending_tasks.discard(done_task)
+                                try:
+                                    done_task.result()
+                                except asyncio.CancelledError:
+                                    pass
+                                except Exception as exc:
+                                    log.debug("stream.metadata_task.error", {"error": str(exc)})
 
-                        task.add_done_callback(_cleanup)
+                            task.add_done_callback(_cleanup)
 
-                    def _cb(metadata: Dict[str, Any]):
-                        if _finished[0]:
-                            return
-                        snapshot = copy.deepcopy(metadata)
-                        state_dict = {
-                            "status": "running",
-                            "input": _input,
-                            "time": {"start": _start},
-                            "metadata": snapshot,
-                        }
-                        if snapshot.get("title"):
-                            state_dict["title"] = snapshot["title"]
-                        if self.event_publish_callback:
-                            async def _safe_publish():
+                        def _cb(metadata: Dict[str, Any]):
+                            if _finished[0]:
+                                return
+                            snapshot = copy.deepcopy(metadata)
+                            state_dict = {
+                                "status": "running",
+                                "input": _input,
+                                "time": {"start": _start},
+                                "metadata": snapshot,
+                            }
+                            if snapshot.get("title"):
+                                state_dict["title"] = snapshot["title"]
+                            if self.event_publish_callback:
+                                async def _safe_publish():
+                                    if _finished[0]:
+                                        return
+                                    try:
+                                        await self.event_publish_callback(
+                                            "message.part.updated",
+                                            {
+                                                "part": {
+                                                    "id": _part_id,
+                                                    "messageID": self.assistant_message.id,
+                                                    "sessionID": self.session_id,
+                                                    "type": "tool",
+                                                    "callID": _call_id,
+                                                    "tool": _tool,
+                                                    "state": state_dict,
+                                                }
+                                            },
+                                        )
+                                    except asyncio.CancelledError:
+                                        return
+                                    except Exception as exc:
+                                        log.debug("stream.metadata_publish.error", {"error": str(exc)})
+                                _track_task(_safe_publish())
+
+                            # Persist updated running state so metadata (e.g. sessionId)
+                            # survives page reload / session switch
+                            async def _persist_running_metadata():
                                 if _finished[0]:
                                     return
                                 try:
-                                    await self.event_publish_callback(
-                                        "message.part.updated",
-                                        {
-                                            "part": {
-                                                "id": _part_id,
-                                                "messageID": self.assistant_message.id,
-                                                "sessionID": self.session_id,
-                                                "type": "tool",
-                                                "callID": _call_id,
-                                                "tool": _tool,
-                                                "state": state_dict,
-                                            }
-                                        },
+                                    running_state = ToolStateRunning(
+                                        status="running",
+                                        input=_input,
+                                        title=snapshot.get("title"),
+                                        metadata=snapshot,
+                                        time={"start": _start},
+                                    )
+                                    part = ToolPart(
+                                        id=_part_id,
+                                        sessionID=self.session_id,
+                                        messageID=self.assistant_message.id,
+                                        type="tool",
+                                        callID=_call_id,
+                                        tool=_tool,
+                                        state=running_state,
+                                    )
+                                    await Message.store_part(
+                                        self.session_id,
+                                        self.assistant_message.id,
+                                        part,
                                     )
                                 except asyncio.CancelledError:
                                     return
                                 except Exception as exc:
-                                    log.debug("stream.metadata_publish.error", {"error": str(exc)})
-                            _track_task(_safe_publish())
+                                    log.debug("stream.metadata_persist.error", {"error": str(exc)})
+                            _track_task(_persist_running_metadata())
 
-                        # Persist updated running state so metadata (e.g. sessionId)
-                        # survives page reload / session switch
-                        async def _persist_running_metadata():
-                            if _finished[0]:
-                                return
-                            try:
-                                running_state = ToolStateRunning(
-                                    status="running",
-                                    input=_input,
-                                    title=snapshot.get("title"),
-                                    metadata=snapshot,
-                                    time={"start": _start},
-                                )
-                                part = ToolPart(
-                                    id=_part_id,
-                                    sessionID=self.session_id,
-                                    messageID=self.assistant_message.id,
-                                    type="tool",
-                                    callID=_call_id,
-                                    tool=_tool,
-                                    state=running_state,
-                                )
-                                await Message.store_part(
-                                    self.session_id,
-                                    self.assistant_message.id,
-                                    part,
-                                )
-                            except asyncio.CancelledError:
-                                return
-                            except Exception as exc:
-                                log.debug("stream.metadata_persist.error", {"error": str(exc)})
-                        _track_task(_persist_running_metadata())
+                        def _mark_finished() -> None:
+                            _finished[0] = True
+                            for task in list(_pending_tasks):
+                                task.cancel()
 
-                    def _mark_finished() -> None:
-                        _finished[0] = True
-                        for task in list(_pending_tasks):
-                            task.cancel()
+                        _cb.mark_finished = _mark_finished
+                        return _cb
 
-                    _cb.mark_finished = _mark_finished
-                    return _cb
-
-                ctx = ToolContext(
-                    session_id=self.session_id,
-                    message_id=self.assistant_message.id,
-                    agent=self.agent.name,
-                    call_id=tool_call_id,
-                    abort_event=self.abort_event,
-                    permission_callback=self.permission_callback,
-                    extra=self._tool_context_extra(sandbox_meta["extra"]),
-                    metadata_callback=_make_metadata_cb(),
-                    event_publish_callback=self.event_publish_callback,
-                )
-                cb = ctx._metadata_callback
-                try:
-                    result = await ToolRegistry.execute(
-                        tool_name=tool_name,
-                        ctx=ctx,
-                        **tool_input
+                    ctx = ToolContext(
+                        session_id=self.session_id,
+                        message_id=self.assistant_message.id,
+                        agent=self.agent.name,
+                        call_id=tool_call_id,
+                        abort_event=self.abort_event,
+                        permission_callback=self.permission_callback,
+                        extra=sandbox_meta["extra"],
+                        metadata_callback=_make_metadata_cb(),
+                        event_publish_callback=self.event_publish_callback,
                     )
-                finally:
-                    # Mark metadata callback as finished so pending async
-                    # running-state updates cannot overwrite completed,
-                    # errored, or interrupted tool state.
-                    if cb and hasattr(cb, 'mark_finished'):
-                        cb.mark_finished()
+                    cb = ctx._metadata_callback
+                    try:
+                        result = await ToolRegistry.execute(
+                            tool_name=tool_name,
+                            ctx=ctx,
+                            **tool_input
+                        )
+                    finally:
+                        # Mark metadata callback as finished so pending async
+                        # running-state updates cannot overwrite completed,
+                        # errored, or interrupted tool state.
+                        if cb and hasattr(cb, 'mark_finished'):
+                            cb.mark_finished()
+
+            # Hook pipeline: tool.execute.after
+            try:
+                from flocks.hooks.pipeline import HookPipeline
+                hook_ctx = await HookPipeline.run_tool_after({
+                    "sessionID": self.session_id,
+                    "workspace": self._workspace_dir,
+                    "agent": self.agent.name,
+                    "tool": {
+                        "name": tool_name,
+                        "input": tool_input,
+                        "callID": tool_call_id,
+                    },
+                    "result": result.model_dump(),
+                })
+                if hook_ctx and isinstance(hook_ctx.output, dict):
+                    override = hook_ctx.output.get("result")
+                    if isinstance(override, dict):
+                        result = ToolResult(**override)
+            except Exception as e:
+                log.error("stream.tool_after_hook.error", {"error": str(e)})
             
             # Update tool state
             tool_state.status = "completed" if result.success else "error"
@@ -1129,11 +1165,7 @@ class StreamProcessor:
                     f"Tool '{tool_name}' is blocked by sandbox tool policy. "
                     "Update sandbox.tools.allow/deny in ~/.flocks/config/flocks.json if needed."
                 )
-                result["extra"]["tool_policy_constraint"] = {
-                    "allowed": False,
-                    "tool": tool_name,
-                    "source": "sandbox.tool_policy",
-                }
+                return result
 
             # Sandbox metadata is needed for sandbox-aware tools, including workflow
             # entrypoint so workflow runtime can execute python nodes in sandbox.
@@ -1160,10 +1192,12 @@ class StreamProcessor:
                 container_workdir=sandbox_ctx.container_workdir,
                 env=sandbox_ctx.docker.env,
             )
-            result["extra"]["sandbox"] = {
-                **sandbox.model_dump(exclude_none=True),
-                "workspace_access": sandbox_ctx.workspace_access,
-                "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
+            result["extra"] = {
+                "sandbox": {
+                    **sandbox.model_dump(exclude_none=True),
+                    "workspace_access": sandbox_ctx.workspace_access,
+                    "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
+                }
             }
             elevated_cfg = getattr(self._sandbox_config_cache, "elevated", None)
             if elevated_cfg and elevated_cfg.enabled:

@@ -64,53 +64,7 @@ async def test_sandbox_tool_policy_blocks_tool() -> None:
 
     assert meta["blocked"] is True
     assert "blocked by sandbox tool policy" in (meta["error"] or "")
-    assert meta["extra"]["tool_policy_constraint"] == {
-        "allowed": False,
-        "tool": "bash",
-        "source": "sandbox.tool_policy",
-    }
-
-
-@pytest.mark.asyncio
-async def test_sandbox_denied_bash_merges_constraint_with_sandbox_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    processor = _build_processor(
-        {
-            "sandbox": {
-                "mode": "on",
-                "workspace_access": "none",
-                "docker": {"workdir": "/workspace"},
-                "tools": {"allow": ["read"], "deny": []},
-            }
-        }
-    )
-
-    from flocks.sandbox.types import SandboxContext, SandboxDockerConfig, SandboxToolPolicy
-
-    async def fake_resolve_sandbox_context(**_kwargs):
-        return SandboxContext(
-            enabled=True,
-            session_key="session-sandbox-test",
-            workspace_dir="/tmp/.flocks/sandboxes/session-sandbox-test",
-            agent_workspace_dir="/tmp",
-            workspace_access="none",
-            container_name="flocks-sbx-test",
-            container_workdir="/workspace",
-            docker=SandboxDockerConfig(env={"FOO": "BAR"}),
-            tools=SandboxToolPolicy(allow=["read"], deny=[]),
-        )
-
-    monkeypatch.setattr(
-        "flocks.sandbox.context.resolve_sandbox_context",
-        fake_resolve_sandbox_context,
-    )
-
-    meta = await processor._resolve_sandbox_meta("bash")
-
-    assert meta["blocked"] is True
-    assert meta["extra"]["tool_policy_constraint"]["allowed"] is False
-    assert meta["extra"]["sandbox"]["container_name"] == "flocks-sbx-test"
+    assert meta["extra"] == {}
 
 
 @pytest.mark.asyncio

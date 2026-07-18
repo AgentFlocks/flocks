@@ -6,15 +6,11 @@ Compatible with Flocks's TypeScript Tool system.
 """
 
 import asyncio
-from copy import deepcopy
-import hashlib
 import importlib
 import json
 import os
 import sys
 import threading
-import time
-import uuid
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -24,300 +20,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 
-from flocks.security.canonical import (
-    CANONICAL_PARSER_VERSION,
-    canonical_hash,
-    canonicalize_command,
-    canonicalize_json,
-    canonicalize_path,
-)
 from flocks.utils.log import Log
 
 log = Log.create(service="tool-registry")
 
 
-async def _runtime_tool_policy_allows(ctx: "ToolContext", tool_name: str) -> bool:
-    """Return whether global ∩ agent tool_policy allows this execution.
-
-    The policy is a capability boundary independent of sandbox mode.  Config
-    failures preserve legacy OSS behavior; an active Pro gate supplies its own
-    fail-closed policy-source handling.
-    """
-    try:
-        from flocks.sandbox.runtime_status import resolve_sandbox_runtime_status
-        from flocks.sandbox.tool_policy import is_tool_allowed
-
-        extra = ctx.extra if isinstance(ctx.extra, dict) else {}
-        config_data = extra.get("_config_data")
-        if not isinstance(config_data, dict):
-            from flocks.config import Config
-
-            config = await Config.get()
-            config_data = config.model_dump(by_alias=True, exclude_none=True)
-        runtime = resolve_sandbox_runtime_status(
-            config_data=config_data,
-            session_key=str(ctx.session_id or ""),
-            agent_id=str(ctx.agent or "rex"),
-            main_session_key=str(extra.get("main_session_key") or ctx.session_id or ""),
-        )
-        return is_tool_allowed(runtime.tool_policy, tool_name)
-    except Exception:
-        return True
-
-
-def _resolve_subject_payload(ctx: "ToolContext") -> Dict[str, Any]:
-    from flocks.identity.subject import get_current_subject
-
-    subject_payload: Dict[str, Any] = {}
-    current_subject = get_current_subject()
-    if current_subject is not None:
-        try:
-            subject_payload = current_subject.model_dump()
-        except Exception:
-            subject_payload = {}
-
-    if not subject_payload:
-        extra_subject = (ctx.extra or {}).get("subject")
-        if isinstance(extra_subject, dict):
-            subject_payload = dict(extra_subject)
-    return subject_payload
-
-
-def _build_tool_hook_payload(
-    *,
-    phase: str,
-    ctx: "ToolContext",
-    tool: "Tool",
-    tool_name: str,
-    tool_input: Dict[str, Any],
-    trace_id: str,
-    decision: Optional[Dict[str, Any]] = None,
-    result: Optional["ToolResult"] = None,
-    duration_ms: Optional[int] = None,
-    permission_checked: Optional[bool] = None,
-    include_content: bool = True,
-    resource: Optional[Dict[str, Any]] = None,
-    execution_domain: Optional[str] = None,
-) -> Dict[str, Any]:
-    subject_payload = _resolve_subject_payload(ctx)
-    entry = (
-        str(subject_payload.get("entry") or "").strip()
-        or str((ctx.extra or {}).get("entry") or "").strip()
-        or "unknown"
-    )
-    resolved_execution_domain = (
-        str(execution_domain or (ctx.extra or {}).get("execution_domain") or "").strip() or "unknown"
-    )
-    resolved_resource = deepcopy(resource or {"type": "tool", "id": tool_name})
-    policy_input = deepcopy(tool_input)
-    canonical_payload = _build_canonical_payload(
-        tool_name=tool_name,
-        tool_input=policy_input,
-        ctx=ctx,
-        resource=resolved_resource,
-        execution_domain=resolved_execution_domain,
-    )
-    payload: Dict[str, Any] = {
-        "phase": phase,
-        "trace_id": trace_id,
-        "entry": entry,
-        "sessionID": ctx.session_id,
-        "messageID": ctx.message_id,
-        "agent": ctx.agent,
-        "subject": subject_payload,
-        "tool": {
-            "name": tool_name,
-            "callID": ctx.call_id,
-            "provider": tool.info.provider,
-            "source": tool.info.source,
-            "category": tool.info.category.value,
-            "enabled": tool.info.enabled,
-        },
-        "resource": resolved_resource,
-        "execution_domain": resolved_execution_domain,
-        "canonical": canonical_payload,
-        "canonical_hash": canonical_payload.get("hash"),
-    }
-    tool_policy_constraint = (ctx.extra or {}).get("tool_policy_constraint")
-    if isinstance(tool_policy_constraint, dict):
-        # Keep the execution context's ``extra`` untouched while exposing the
-        # structured sandbox constraint at the hook contract boundary.
-        payload["tool_policy_constraint"] = deepcopy(tool_policy_constraint)
-    raw_capability_context = ctx.extra or {}
-    raw_parent_ceiling = raw_capability_context.get("parent_ceiling")
-    if raw_parent_ceiling is None:
-        # Runner records the current effective pool under this internal name.
-        # It is the same trusted execution boundary for a root tool call and
-        # must reach B3, otherwise a direct invocation bypasses visibility.
-        raw_parent_ceiling = raw_capability_context.get("_capability_pool")
-    if raw_parent_ceiling is not None:
-        from flocks.security.capability_pool import sanitize_parent_ceiling
-
-        # Parent ceilings are an authorization boundary, so preserve an
-        # explicit invalid marker for B3 while discarding every unknown/raw
-        # field (including secrets) from the hook contract.
-        payload["parent_ceiling"] = sanitize_parent_ceiling(raw_parent_ceiling)
-        capability_attributes: Dict[str, Any] = {}
-        for key in (
-            "permission_mode",
-            "execution_mode",
-            "development_mode",
-            "network_profile",
-        ):
-            value = raw_capability_context.get(key)
-            if isinstance(value, str) and value.strip():
-                capability_attributes[key] = value.strip()
-        for key in ("data_domains", "secret_scopes"):
-            value = raw_capability_context.get(key)
-            if isinstance(value, (list, tuple, set, frozenset)):
-                capability_attributes[key] = [item.strip() for item in value if isinstance(item, str) and item.strip()]
-        if capability_attributes:
-            payload["capability_attributes"] = capability_attributes
-    if decision is not None:
-        payload["decision"] = dict(decision)
-    if permission_checked is not None:
-        payload["permission_checked"] = bool(permission_checked)
-    if include_content:
-        payload["tool"]["input"] = deepcopy(policy_input)
-    else:
-        payload["tool"]["input_hash"] = _payload_sha256(tool_input)
-    if result is not None:
-        payload["result_status"] = "success" if result.success else "failed"
-        if include_content:
-            payload["result"] = result.model_dump()
-        else:
-            payload["output_hash"] = _payload_sha256(result.output)
-            payload["error_hash"] = _payload_sha256(result.error)
-    if duration_ms is not None:
-        payload["duration_ms"] = int(duration_ms)
-    return payload
-
-
-def _build_canonical_payload(
-    *,
-    tool_name: str,
-    tool_input: Dict[str, Any],
-    ctx: Optional["ToolContext"] = None,
-    resource: Optional[Dict[str, Any]] = None,
-    execution_domain: Optional[str] = None,
-) -> Dict[str, Any]:
-    resolved_resource = dict(resource or {"type": "tool", "id": tool_name})
-    resolved_execution_domain = (
-        str(execution_domain or ((ctx.extra or {}).get("execution_domain") if ctx else "") or "").strip() or "unknown"
-    )
-
-    command = None
-    path = None
-    cwd = None
-    if tool_name == "bash":
-        command = canonicalize_command(str(tool_input.get("command") or "")).as_dict()
-        from flocks.tool.path_utils import get_tool_base_dir, resolve_host_path
-
-        base_dir = get_tool_base_dir()
-        candidate_workdir = tool_input.get("workdir")
-        resolved_cwd = resolve_host_path(
-            candidate_workdir if isinstance(candidate_workdir, str) else base_dir,
-            base_dir=base_dir,
-        )
-        cwd = canonicalize_path(resolved_cwd).as_dict()
-    elif tool_name in {"read", "write", "edit", "glob"}:
-        candidate_path = resolved_resource.get("id") if resolved_resource.get("type") == "file" else None
-        candidate_path = candidate_path or (
-            tool_input.get("filePath")
-            or tool_input.get("path")
-            or tool_input.get("file_path")
-            or tool_input.get("target")
-        )
-        if tool_name == "glob" and not candidate_path:
-            candidate_path = "."
-        if isinstance(candidate_path, str) and candidate_path.strip():
-            from flocks.tool.path_utils import resolve_host_path
-
-            try:
-                candidate_path = resolve_host_path(candidate_path)
-            except (OSError, ValueError):
-                pass
-        resolved_resource = {"type": "file", "id": candidate_path}
-        path = canonicalize_path(candidate_path).as_dict()
-
-    generic_value: Dict[str, Any] = {
-        "tool": tool_name,
-        "input": tool_input,
-        "resource": resolved_resource,
-        "execution_domain": resolved_execution_domain,
-    }
-    if cwd is not None:
-        generic_value["cwd"] = cwd.get("value")
-    generic = canonicalize_json(generic_value).as_dict()
-    resource_result = canonicalize_json(resolved_resource).as_dict()
-
-    child_results = [generic, resource_result]
-    child_results.extend(result for result in (command, cwd, path) if result is not None)
-    uncertain_child = next(
-        (result for result in child_results if result.get("status") != "ok"),
-        None,
-    )
-    canonical = {
-        "status": "uncertain" if uncertain_child else "ok",
-        "parser_version": CANONICAL_PARSER_VERSION,
-        "reason": str((uncertain_child or {}).get("reason") or ""),
-        "generic": generic.get("value"),
-        "resource": resolved_resource,
-        "resource_status": resource_result.get("status"),
-        "resource_hash": resource_result.get("hash"),
-        "execution_domain": resolved_execution_domain,
-        "hash": None,
-    }
-    if command:
-        canonical["command"] = command.get("value")
-        canonical["command_status"] = command.get("status")
-        canonical["command_hash"] = command.get("hash")
-    if cwd:
-        canonical["cwd"] = cwd.get("value")
-        canonical["cwd_status"] = cwd.get("status")
-        canonical["cwd_hash"] = cwd.get("hash")
-    if path:
-        canonical["path"] = path.get("value")
-        canonical["path_status"] = path.get("status")
-        canonical["path_hash"] = path.get("hash")
-    if uncertain_child is None:
-        canonical["hash"] = canonical_hash(
-            {
-                "generic": generic.get("hash"),
-                "resource": resource_result.get("hash"),
-                "command": canonical.get("command_hash"),
-                "cwd": canonical.get("cwd_hash"),
-                "path": canonical.get("path_hash"),
-            }
-        )
-    if canonical["hash"] is None:
-        canonical["status"] = "uncertain"
-        canonical["reason"] = canonical["reason"] or "canonical_hash_missing"
-    return canonical
-
-
-async def _emit_tool_audit(event_type: str, payload: Dict[str, Any]) -> None:
-    try:
-        from flocks.audit import emit_audit_event
-
-        await emit_audit_event(event_type=event_type, payload=payload)
-    except Exception as exc:
-        log.debug("tool.audit.emit_failed", {"event_type": event_type, "error": str(exc)})
-
-
-def _payload_sha256(value: Any) -> str | None:
-    if value is None:
-        return None
-    try:
-        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    except Exception:
-        return None
-    return hashlib.sha256(raw).hexdigest()
-
-
 class ToolCategory(str, Enum):
     """Tool categories"""
-
     FILE = "file"
     TERMINAL = "terminal"
     BROWSER = "browser"
@@ -329,7 +38,6 @@ class ToolCategory(str, Enum):
 
 class ParameterType(str, Enum):
     """Parameter types for tool schema"""
-
     STRING = "string"
     INTEGER = "integer"
     NUMBER = "number"
@@ -340,7 +48,6 @@ class ParameterType(str, Enum):
 
 class ToolParameter(BaseModel):
     """Tool parameter definition"""
-
     name: str = Field(..., description="Parameter name")
     type: ParameterType = Field(..., description="Parameter type")
     description: str = Field("", description="Parameter description")
@@ -359,7 +66,6 @@ class ToolParameter(BaseModel):
 
 class ToolSchema(BaseModel):
     """Tool JSON Schema"""
-
     type: str = Field("object", description="Schema type")
     properties: Dict[str, Any] = Field(default_factory=dict, description="Parameter properties")
     required: List[str] = Field(default_factory=list, description="Required parameters")
@@ -378,7 +84,6 @@ class ToolSchema(BaseModel):
 
 class ToolInfo(BaseModel):
     """Tool information"""
-
     name: str = Field(..., description="Tool name (unique identifier)")
     description: str = Field(..., description="Tool description")
     description_cn: Optional[str] = Field(None, description="Chinese UI description")
@@ -395,17 +100,12 @@ class ToolInfo(BaseModel):
             "tool description so the model can pick version-appropriate behavior."
         ),
     )
-    source: Optional[str] = Field(
-        None, description="Tool source: builtin, dynamic, plugin_py, plugin_yaml, mcp, api, device"
-    )
-    native: bool = Field(
-        False,
-        description=(
-            "True for built-in tools (registered via @register_function) and project-level "
-            "plugin tools (<cwd>/.flocks/plugins/tools/). False for user-level plugin tools "
-            "(~/.flocks/plugins/tools/). Determined by loading context, not declared in YAML."
-        ),
-    )
+    source: Optional[str] = Field(None, description="Tool source: builtin, dynamic, plugin_py, plugin_yaml, mcp, api, device")
+    native: bool = Field(False, description=(
+        "True for built-in tools (registered via @register_function) and project-level "
+        "plugin tools (<cwd>/.flocks/plugins/tools/). False for user-level plugin tools "
+        "(~/.flocks/plugins/tools/). Determined by loading context, not declared in YAML."
+    ))
     always_load: Optional[bool] = Field(
         None,
         description="Whether the tool should always be exposed in each request",
@@ -483,7 +183,6 @@ class ToolInfo(BaseModel):
 
 class ToolResult(BaseModel):
     """Tool execution result"""
-
     success: bool = Field(..., description="Execution successful")
     output: Any = Field(None, description="Output data")
     error: Optional[str] = Field(None, description="Error message if failed")
@@ -496,7 +195,6 @@ class ToolResult(BaseModel):
 @dataclass
 class PermissionRequest:
     """Permission request for tool execution"""
-
     permission: str  # Type: read, edit, bash, grep, glob, list, external_directory
     patterns: List[str]  # Patterns to match
     always: List[str] = dataclass_field(default_factory=list)  # Always allow patterns
@@ -549,7 +247,7 @@ class ToolContext:
         permission: str,
         patterns: List[str],
         always: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Request permission for an operation
@@ -563,34 +261,18 @@ class ToolContext:
         request = PermissionRequest(
             permission=permission,
             patterns=patterns,
-            always=["*"] if always is None else list(always),
-            metadata=metadata or {},
+            always=always or ["*"],
+            metadata=metadata or {}
         )
 
         if self._permission_callback:
             await self._permission_callback(request)
         else:
-            rollout_mode = str(os.environ.get("FLOCKSPRO_POLICY_ROLLOUT_MODE", "shadow")).strip().lower()
-            if rollout_mode != "enforce":
-                log.warn(
-                    "permission.callback_missing_compat_auto_approve",
-                    {
-                        "permission": permission,
-                        "patterns": patterns,
-                        "rollout_mode": rollout_mode,
-                    },
-                )
-                return
-            log.warn(
-                "permission.callback_missing",
-                {
-                    "permission": permission,
-                    "patterns": patterns,
-                },
-            )
-            raise PermissionError(
-                f"Permission callback is required for `{permission}`; silent auto-approve is disabled."
-            )
+            # Default: auto-approve (for testing/non-interactive mode)
+            log.debug("permission.auto_approved", {
+                "permission": permission,
+                "patterns": patterns
+            })
 
     def metadata(self, input_data: Dict[str, Any]) -> None:
         """
@@ -644,15 +326,10 @@ def _coerce_params(
                 v = json.dumps(v, ensure_ascii=False)
             else:
                 v = str(v)
-            log.debug(
-                "tool.execute.coerce_param",
-                {
-                    "tool": tool_name,
-                    "param": k,
-                    "original_type": original_type,
-                    "coerced_to": "str",
-                },
-            )
+            log.debug("tool.execute.coerce_param", {
+                "tool": tool_name, "param": k,
+                "original_type": original_type, "coerced_to": "str",
+            })
         elif declared == ParameterType.BOOLEAN and not isinstance(v, bool):
             v = str(v).lower() in ("true", "1", "yes")
         elif declared == ParameterType.INTEGER and not isinstance(v, int):
@@ -669,28 +346,18 @@ def _coerce_params(
             coerced_value = _coerce_json_string(v, dict)
             if coerced_value is not v:
                 v = coerced_value
-                log.debug(
-                    "tool.execute.coerce_param",
-                    {
-                        "tool": tool_name,
-                        "param": k,
-                        "original_type": "str",
-                        "coerced_to": "dict",
-                    },
-                )
+                log.debug("tool.execute.coerce_param", {
+                    "tool": tool_name, "param": k,
+                    "original_type": "str", "coerced_to": "dict",
+                })
         elif declared == ParameterType.ARRAY and isinstance(v, str):
             coerced_value = _coerce_json_string(v, list)
             if coerced_value is not v:
                 v = coerced_value
-                log.debug(
-                    "tool.execute.coerce_param",
-                    {
-                        "tool": tool_name,
-                        "param": k,
-                        "original_type": "str",
-                        "coerced_to": "list",
-                    },
-                )
+                log.debug("tool.execute.coerce_param", {
+                    "tool": tool_name, "param": k,
+                    "original_type": "str", "coerced_to": "list",
+                })
         coerced[k] = v
     return coerced
 
@@ -768,16 +435,6 @@ def _schema_hint_from_properties(
     return f"Allowed parameters: {allowed_preview}. Required: {required_preview}."
 
 
-@dataclass
-class PreparedToolInput:
-    """Schema-normalized input and identities used by policy and execution."""
-
-    kwargs: Dict[str, Any]
-    aliases: Dict[str, str]
-    resource: Dict[str, Any]
-    validation_error: Optional[ToolResult] = None
-
-
 class Tool:
     """Tool wrapper class"""
 
@@ -789,196 +446,105 @@ class Tool:
         self.info = info
         self.handler = handler
 
-    def prepare_input(
-        self,
-        kwargs: Dict[str, Any],
-        *,
-        device_id: Optional[str] = None,
-    ) -> PreparedToolInput:
-        """Normalize input once before policy so the handler sees identical values."""
-        schema = self.info.get_schema()
-        schema_properties = schema.properties if isinstance(schema.properties, dict) else {}
-        declared_param_names = list(schema_properties.keys())
-        aliases: Dict[str, str] = {}
-        effective_kwargs = dict(kwargs)
+    async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
+        """Execute the tool with given parameters and context"""
+        try:
+            # Log tool execution start
+            log.info("tool.execute.start", {
+                "tool": self.info.name,
+                "agent": ctx.agent,
+                "session": ctx.session_id,
+                "params": list(kwargs.keys()),
+            })
 
-        if declared_param_names:
-            effective_kwargs, aliases = _remap_schema_kwargs(
-                effective_kwargs,
-                declared_param_names,
-                tool_name=self.info.name,
-            )
-            if aliases:
-                log.info(
-                    "tool.execute.param_remapped",
-                    {
-                        "tool": self.info.name,
-                        "aliases": aliases,
-                    },
-                )
+            schema = self.info.get_schema()
+            schema_properties = schema.properties if isinstance(schema.properties, dict) else {}
+            declared_param_names = list(schema_properties.keys())
 
-        resource = self._resolve_resource(effective_kwargs, device_id=device_id)
-        unknown = sorted(key for key in effective_kwargs if key not in schema_properties)
-        if declared_param_names and unknown:
-            schema_hint = _schema_hint_from_properties(
-                declared_param_names,
-                list(schema.required),
-            )
-            return PreparedToolInput(
-                kwargs=effective_kwargs,
-                aliases=aliases,
-                resource=resource,
-                validation_error=ToolResult(
-                    success=False,
-                    error=(
-                        f"Invalid arguments for {self.info.name}: unknown parameters: "
-                        f"{', '.join(unknown)}. {schema_hint}"
-                    ),
-                    metadata={
-                        "schema_precheck": {
-                            "tool": self.info.name,
-                            "source": self.info.source,
-                            "unknown": unknown,
-                            "allowed": declared_param_names,
-                            "required": list(schema.required),
-                            "aliases": aliases,
-                        }
-                    },
-                ),
-            )
-
-        for required_param in schema.required:
-            if required_param in effective_kwargs:
-                continue
-            log.error(
-                "tool.execute.missing_param",
-                {
-                    "tool": self.info.name,
-                    "missing": required_param,
-                    "provided": list(effective_kwargs.keys()),
-                },
-            )
-            schema_hint = _schema_hint_from_properties(
-                declared_param_names,
-                list(schema.required),
-            )
-            return PreparedToolInput(
-                kwargs=effective_kwargs,
-                aliases=aliases,
-                resource=resource,
-                validation_error=ToolResult(
-                    success=False,
-                    error=f"Missing required parameter: {required_param}. {schema_hint}",
-                    metadata={
-                        "schema_precheck": {
-                            "tool": self.info.name,
-                            "source": self.info.source,
-                            "provided": sorted(effective_kwargs.keys()),
-                            "allowed": declared_param_names,
-                            "required": list(schema.required),
-                            "aliases": aliases,
-                        }
-                    },
-                ),
-            )
-
-        coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
-        if self.info.name in {"read", "write", "edit"}:
-            file_path = coerced_kwargs.get("filePath")
-            if not isinstance(file_path, str) or not file_path.strip():
-                resource = self._resolve_resource(coerced_kwargs, device_id=device_id)
-                schema_hint = _schema_hint_from_properties(
+            # Strict schema precheck: remap obvious aliases first, then validate.
+            # This reduces first-call failures caused by case/separator drift
+            # (e.g. file_path -> filePath) without allowing speculative params.
+            remap_aliases: Dict[str, str] = {}
+            effective_kwargs = dict(kwargs)
+            if declared_param_names:
+                effective_kwargs, remap_aliases = _remap_schema_kwargs(
+                    effective_kwargs,
                     declared_param_names,
-                    list(schema.required),
+                    tool_name=self.info.name,
                 )
-                return PreparedToolInput(
-                    kwargs=coerced_kwargs,
-                    aliases=aliases,
-                    resource=resource,
-                    validation_error=ToolResult(
+                if remap_aliases:
+                    log.info("tool.execute.param_remapped", {
+                        "tool": self.info.name,
+                        "aliases": remap_aliases,
+                    })
+
+                unknown = sorted(
+                    key for key in effective_kwargs.keys() if key not in schema_properties
+                )
+                if unknown:
+                    schema_hint = _schema_hint_from_properties(
+                        declared_param_names,
+                        list(schema.required),
+                    )
+                    return ToolResult(
                         success=False,
-                        error=f"Missing required parameter: filePath. {schema_hint}",
+                        error=(
+                            f"Invalid arguments for {self.info.name}: unknown parameters: "
+                            f"{', '.join(unknown)}. {schema_hint}"
+                        ),
                         metadata={
                             "schema_precheck": {
                                 "tool": self.info.name,
                                 "source": self.info.source,
-                                "provided": sorted(coerced_kwargs.keys()),
+                                "unknown": unknown,
                                 "allowed": declared_param_names,
                                 "required": list(schema.required),
-                                "aliases": aliases,
+                                "aliases": remap_aliases,
                             }
                         },
-                    ),
-                )
-        return PreparedToolInput(
-            kwargs=coerced_kwargs,
-            aliases=aliases,
-            resource=self._resolve_resource(coerced_kwargs, device_id=device_id),
-        )
+                    )
 
-    def _resolve_resource(
-        self,
-        kwargs: Dict[str, Any],
-        *,
-        device_id: Optional[str],
-    ) -> Dict[str, Any]:
-        if self.info.source == "device":
-            return {
-                "type": "device",
-                "id": device_id or "unknown",
-                "provider": self.info.provider or "unknown",
-            }
-        if self.info.name == "bash":
-            return {"type": "command", "id": self.info.name}
-        if self.info.name in {"read", "write", "edit", "glob"}:
-            candidate = kwargs.get("filePath") or kwargs.get("path") or kwargs.get("file_path") or kwargs.get("target")
-            if self.info.name == "glob" and not candidate:
-                candidate = "."
-            if isinstance(candidate, str) and candidate.strip():
-                from flocks.tool.path_utils import resolve_host_path
+            # Validate required parameters
+            for required_param in schema.required:
+                if required_param not in effective_kwargs:
+                    log.error("tool.execute.missing_param", {
+                        "tool": self.info.name,
+                        "missing": required_param,
+                        "provided": list(effective_kwargs.keys()),
+                    })
+                    schema_hint = _schema_hint_from_properties(
+                        declared_param_names,
+                        list(schema.required),
+                    )
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"Missing required parameter: {required_param}. "
+                            f"{schema_hint}"
+                        ),
+                        metadata={
+                            "schema_precheck": {
+                                "tool": self.info.name,
+                                "source": self.info.source,
+                                "provided": sorted(effective_kwargs.keys()),
+                                "allowed": declared_param_names,
+                                "required": list(schema.required),
+                                "aliases": remap_aliases,
+                            }
+                        },
+                    )
 
-                try:
-                    resolved = resolve_host_path(candidate)
-                except (OSError, ValueError):
-                    resolved = candidate
-                return {"type": "file", "id": resolved}
-            return {"type": "file", "id": candidate}
-        return {"type": "tool", "id": self.info.name}
+            coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
 
-    async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
-        """Prepare and execute a direct tool call."""
-        prepared = self.prepare_input(kwargs)
-        if prepared.validation_error is not None:
-            return prepared.validation_error
-        return await self.execute_prepared(ctx, prepared)
-
-    async def execute_prepared(
-        self,
-        ctx: ToolContext,
-        prepared: PreparedToolInput,
-    ) -> ToolResult:
-        """Execute input already normalized and evaluated by the registry gateway."""
-        try:
-            log.info(
-                "tool.execute.start",
-                {
-                    "tool": self.info.name,
-                    "agent": ctx.agent,
-                    "session": ctx.session_id,
-                    "params": list(prepared.kwargs.keys()),
-                },
-            )
-
-            result = await self.handler(ctx, **prepared.kwargs)
+            # Execute handler
+            result = await self.handler(ctx, **coerced_kwargs)
 
             # Auto-truncate output unless the tool already handled it
             if result.success and not result.truncated:
                 from flocks.tool.truncation import truncate_output
-
                 output_text = result.output
                 if output_text is not None and not isinstance(output_text, str):
                     import json as _json
-
                     try:
                         output_text = _json.dumps(output_text, ensure_ascii=False, indent=2)
                         result.output = output_text
@@ -997,30 +563,27 @@ class Tool:
                             "output_path": tr.output_path,
                         }
 
-            log.info(
-                "tool.execute.complete",
-                {
-                    "tool": self.info.name,
-                    "success": result.success,
-                    "has_output": bool(result.output),
-                    "truncated": result.truncated,
-                },
-            )
+            log.info("tool.execute.complete", {
+                "tool": self.info.name,
+                "success": result.success,
+                "has_output": bool(result.output),
+                "truncated": result.truncated,
+            })
 
             return result
 
         except Exception as e:
             if isinstance(e, FuturesTimeoutError):
                 raise
-            log.error(
-                "tool.execute.error",
-                {
-                    "tool": self.info.name,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                },
+            log.error("tool.execute.error", {
+                "tool": self.info.name,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            })
+            return ToolResult(
+                success=False,
+                error=str(e)
             )
-            return ToolResult(success=False, error=str(e))
 
 
 class ToolRegistry:
@@ -1067,13 +630,10 @@ class ToolRegistry:
 
             tool.info = apply_tool_catalog_defaults(tool.info)
         except Exception as e:
-            log.debug(
-                "tool.policy_defaults.apply_failed",
-                {
-                    "name": tool.info.name,
-                    "error": str(e),
-                },
-            )
+            log.debug("tool.policy_defaults.apply_failed", {
+                "name": tool.info.name,
+                "error": str(e),
+            })
         # Capture the factory default BEFORE anything else can touch
         # ``info.enabled``.  ``apply_tool_catalog_defaults`` above only
         # fills metadata like ``always_load`` and never flips
@@ -1088,13 +648,10 @@ class ToolRegistry:
         # truth instead of the first value ever observed.
         cls._enabled_defaults[tool.info.name] = bool(tool.info.enabled)
         cls._tools[tool.info.name] = tool
-        log.debug(
-            "tool.registered",
-            {
-                "name": tool.info.name,
-                "category": tool.info.category.value,
-            },
-        )
+        log.debug("tool.registered", {
+            "name": tool.info.name,
+            "category": tool.info.category.value,
+        })
 
     @classmethod
     def revision(cls) -> int:
@@ -1111,7 +668,6 @@ class ToolRegistry:
         cls._revision += 1
         try:
             from flocks.agent.registry import Agent
-
             Agent.invalidate_cache()
         except Exception as e:
             log.debug("tool.revision.agent_invalidate_failed", {"error": str(e)})
@@ -1149,7 +705,6 @@ class ToolRegistry:
             async def read_tool(ctx: ToolContext, filePath: str) -> ToolResult:
                 ...
         """
-
         def decorator(func: ToolHandler) -> ToolHandler:
             info_kwargs: Dict[str, Any] = {
                 "name": name,
@@ -1168,7 +723,6 @@ class ToolRegistry:
             tool = Tool(info=info, handler=func)
             cls.register(tool)
             return func
-
         return decorator
 
     @classmethod
@@ -1211,33 +765,31 @@ class ToolRegistry:
         return None
 
     @classmethod
-    async def execute(cls, tool_name: str, ctx: Optional[ToolContext] = None, **kwargs) -> ToolResult:
+    async def execute(
+        cls,
+        tool_name: str,
+        ctx: Optional[ToolContext] = None,
+        **kwargs
+    ) -> ToolResult:
         """Execute a tool by name"""
         tool = cls.get(tool_name)
         if not tool:
-            return ToolResult(success=False, error=f"Tool not found: {tool_name}")
+            return ToolResult(
+                success=False,
+                error=f"Tool not found: {tool_name}"
+            )
 
         # Create default context if not provided
         if ctx is None:
-            ctx = ToolContext(session_id="default", message_id="default")
-
-        if not await _runtime_tool_policy_allows(ctx, tool_name):
-            return ToolResult(
-                success=False,
-                error="tool_blocked_by_policy",
-                metadata={"blocked_by_policy": True, "source": "sandbox.tool_policy"},
+            ctx = ToolContext(
+                session_id="default",
+                message_id="default"
             )
 
-        log.info(
-            "tool.execute",
-            {
-                "name": tool_name,
-                "params": list(kwargs.keys()),
-            },
-        )
-        trace_id = (
-            str(ctx.call_id or "").strip() or str((ctx.extra or {}).get("trace_id") or "").strip() or str(uuid.uuid4())
-        )
+        log.info("tool.execute", {
+            "name": tool_name,
+            "params": list(kwargs.keys()),
+        })
 
         device_id = None
         per_device_enabled = None
@@ -1250,15 +802,12 @@ class ToolRegistry:
                     requested_device_id=str(requested_device_id).strip() if requested_device_id else None,
                 )
             except Exception as exc:
-                log.warn(
-                    "tool.device.target_resolve_failed",
-                    {
-                        "tool": tool_name,
-                        "provider": tool.info.provider,
-                        "device_id": requested_device_id,
-                        "error": str(exc),
-                    },
-                )
+                log.warn("tool.device.target_resolve_failed", {
+                    "tool": tool_name,
+                    "provider": tool.info.provider,
+                    "device_id": requested_device_id,
+                    "error": str(exc),
+                })
                 resolved_device_id = None
                 resolution_error = "设备目标解析失败，请通过 device_manage(action='list') 确认设备后重试。"
 
@@ -1266,10 +815,16 @@ class ToolRegistry:
                 return ToolResult(success=False, error=resolution_error)
             device_id = resolved_device_id
         elif not tool.info.enabled:
-            return ToolResult(success=False, error=f"Tool is disabled: {tool_name}")
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
 
         if not tool.info.enabled:
-            return ToolResult(success=False, error=f"Tool is disabled: {tool_name}")
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
 
         if device_id:
             # Per-device tool enable gate: a device instance may carry a
@@ -1278,7 +833,6 @@ class ToolRegistry:
             # as no override; it must not bypass the global disabled state.
             try:
                 from flocks.tool.device.store import get_device_tool_enabled
-
                 per_device_enabled = await get_device_tool_enabled(device_id, tool_name)
                 if per_device_enabled is False:
                     return ToolResult(
@@ -1289,223 +843,26 @@ class ToolRegistry:
                         ),
                     )
             except Exception as _gate_err:
-                log.debug(
-                    "tool.device.per_device_gate_error",
-                    {
-                        "tool": tool_name,
-                        "device_id": device_id,
-                        "error": str(_gate_err),
-                    },
-                )
+                log.debug("tool.device.per_device_gate_error", {
+                    "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
+                })
 
-        from flocks.hooks.pipeline import (
-            HookPipeline,
-            ToolDecision,
-            merge_tool_decisions,
-            normalize_tool_decision,
-        )
-
-        execution_domain = str((ctx.extra or {}).get("execution_domain") or "").strip() or "unknown"
-        prepared_input = tool.prepare_input(dict(kwargs), device_id=device_id)
-        if prepared_input.validation_error is not None:
-            return prepared_input.validation_error
-
-        current_tool_input = dict(prepared_input.kwargs)
-        before_payload = _build_tool_hook_payload(
-            phase="before_execute",
-            ctx=ctx,
-            tool=tool,
-            tool_name=tool_name,
-            tool_input=current_tool_input,
-            trace_id=trace_id,
-            include_content=True,
-            resource=prepared_input.resource,
-            execution_domain=execution_domain,
-        )
-        before_ctx = await HookPipeline.run_tool_before(before_payload)
-        before_output = before_ctx.output if before_ctx else None
-        policy_engine_present = bool(isinstance(before_output, dict) and before_output.get("policy_engine_present"))
-        current_decision = normalize_tool_decision(
-            before_output,
-            decision_expected=policy_engine_present,
-        )
-        policy_engine_present = bool(
-            policy_engine_present
-            or current_decision.action in {"deny", "ask", "constrain"}
-            or current_decision.matched_rule
-            or current_decision.policy_version
-            or current_decision.grant_ref
-        )
-
-        if current_decision.action == "constrain" and isinstance(current_decision.updated_input, dict):
-            prepared_input = tool.prepare_input(
-                dict(current_decision.updated_input),
-                device_id=device_id,
-            )
-            if prepared_input.validation_error is not None:
-                return prepared_input.validation_error
-            current_tool_input = dict(prepared_input.kwargs)
-            current_decision.updated_input = dict(current_tool_input)
-            before_payload = _build_tool_hook_payload(
-                phase="before_execute",
-                ctx=ctx,
-                tool=tool,
-                tool_name=tool_name,
-                tool_input=current_tool_input,
-                trace_id=trace_id,
-                include_content=True,
-                resource=prepared_input.resource,
-                execution_domain=execution_domain,
-            )
-            recheck_ctx = await HookPipeline.run_tool_before(before_payload)
-            recheck_output = recheck_ctx.output if recheck_ctx else None
-            recheck_policy_present = bool(
-                isinstance(recheck_output, dict) and recheck_output.get("policy_engine_present")
-            )
-            recheck_decision = normalize_tool_decision(
-                recheck_output,
-                decision_expected=policy_engine_present or recheck_policy_present,
-            )
-            merged_decision = merge_tool_decisions(current_decision, recheck_decision)
-            if recheck_decision.action == "constrain":
-                current_decision = ToolDecision(
-                    action="deny",
-                    reason="constraint_recheck_limit",
-                    updated_input=merged_decision.updated_input,
-                    mode=merged_decision.mode,
-                    grant_ref=merged_decision.grant_ref,
-                    matched_rule=merged_decision.matched_rule,
-                    policy_version=merged_decision.policy_version,
-                )
-            else:
-                current_decision = merged_decision
-            policy_engine_present = bool(
-                policy_engine_present
-                or recheck_policy_present
-                or recheck_decision.action in {"deny", "ask", "constrain"}
-                or recheck_decision.matched_rule
-                or recheck_decision.policy_version
-                or recheck_decision.grant_ref
-            )
-
-        decision = current_decision.as_dict()
-
-        before_audit_payload = _build_tool_hook_payload(
-            phase="before_execute",
-            ctx=ctx,
-            tool=tool,
-            tool_name=tool_name,
-            tool_input=current_tool_input,
-            trace_id=trace_id,
-            decision=decision,
-            permission_checked=policy_engine_present,
-            include_content=False,
-            resource=prepared_input.resource,
-            execution_domain=execution_domain,
-        )
-        await _emit_tool_audit("tool.before_execute", before_audit_payload)
-
-        if decision.get("action") == "deny":
-            return ToolResult(
-                success=False,
-                error=decision.get("reason") or "Tool execution blocked by hook decision",
-                metadata={
-                    "decision": decision,
-                    "trace_id": trace_id,
-                    "blocked_by_policy": True,
-                },
-            )
-        if decision.get("action") == "ask":
-            mode = str(decision.get("mode") or "confirm")
-            error = decision.get("reason") or "Tool execution requires additional approval"
-            metadata: Dict[str, Any] = {
-                "decision": decision,
-                "trace_id": trace_id,
-                "blocked_by_policy": True,
-                "pending": True,
-                "pending_mode": mode,
-            }
-            if mode == "approval":
-                metadata["pending_approval"] = {
-                    "request_id": decision.get("grant_ref"),
-                    "policy_version": decision.get("policy_version"),
-                    "matched_rule": decision.get("matched_rule"),
-                    "canonical_hash": before_payload.get("canonical_hash"),
-                }
-                if decision.get("grant_ref"):
-                    error = f"Approval required. request_id={decision.get('grant_ref')}. 请审批通过后使用相同输入重试。"
-            return ToolResult(success=False, error=error, metadata=metadata)
-
-        tool_started_at = time.perf_counter()
         if device_id:
             from flocks.tool.credential_context import activate_device_credentials
-
             async with activate_device_credentials(device_id) as activated:
                 if not activated:
                     return ToolResult(
                         success=False,
                         error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
-                result = await tool.execute_prepared(ctx, prepared_input)
+                result = await tool.execute(ctx, **kwargs)
         else:
-            result = await tool.execute_prepared(ctx, prepared_input)
-
-        after_payload = _build_tool_hook_payload(
-            phase="after_execute",
-            ctx=ctx,
-            tool=tool,
-            tool_name=tool_name,
-            tool_input=current_tool_input,
-            trace_id=trace_id,
-            decision=decision,
-            result=result,
-            duration_ms=int((time.perf_counter() - tool_started_at) * 1000),
-            permission_checked=policy_engine_present,
-            include_content=True,
-            resource=prepared_input.resource,
-            execution_domain=execution_domain,
-        )
-        after_ctx = await HookPipeline.run_tool_after(after_payload)
-        if after_ctx and isinstance(after_ctx.output, dict):
-            override = after_ctx.output.get("result")
-            if isinstance(override, dict):
-                result = ToolResult(**override)
-                after_payload = _build_tool_hook_payload(
-                    phase="after_execute",
-                    ctx=ctx,
-                    tool=tool,
-                    tool_name=tool_name,
-                    tool_input=current_tool_input,
-                    trace_id=trace_id,
-                    decision=decision,
-                    result=result,
-                    duration_ms=after_payload.get("duration_ms"),
-                    permission_checked=policy_engine_present,
-                    include_content=True,
-                    resource=prepared_input.resource,
-                    execution_domain=execution_domain,
-                )
-        after_audit_payload = _build_tool_hook_payload(
-            phase="after_execute",
-            ctx=ctx,
-            tool=tool,
-            tool_name=tool_name,
-            tool_input=current_tool_input,
-            trace_id=trace_id,
-            decision=decision,
-            result=result,
-            duration_ms=after_payload.get("duration_ms"),
-            permission_checked=policy_engine_present,
-            include_content=False,
-            resource=prepared_input.resource,
-            execution_domain=execution_domain,
-        )
-        await _emit_tool_audit("tool.after_execute", after_audit_payload)
+            result = await tool.execute(ctx, **kwargs)
 
         if result.success:
             cls._reset_failure_state(tool_name)
         else:
-            disabled = cls._record_failure(tool, current_tool_input, result.error)
+            disabled = cls._record_failure(tool, kwargs, result.error)
             if disabled:
                 result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
                 suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"
@@ -1532,7 +889,10 @@ class ToolRegistry:
             devices = await list_devices()
         except Exception:
             return None
-        candidates = [d for d in devices if d.storage_key == storage_key and d.enabled]
+        candidates = [
+            d for d in devices
+            if d.storage_key == storage_key and d.enabled
+        ]
         if len(candidates) == 1:
             return candidates[0].id
         return None
@@ -1555,7 +915,10 @@ class ToolRegistry:
         except Exception:
             return None, "读取设备列表失败，请稍后重试。"
 
-        enabled_candidates = [device for device in devices if device.storage_key == storage_key and device.enabled]
+        enabled_candidates = [
+            device for device in devices
+            if device.storage_key == storage_key and device.enabled
+        ]
 
         if requested_device_id:
             requested = next((device for device in devices if device.id == requested_device_id), None)
@@ -1571,13 +934,10 @@ class ToolRegistry:
 
         if len(enabled_candidates) == 1:
             resolved = enabled_candidates[0].id
-            log.info(
-                "tool.device.default_resolved",
-                {
-                    "provider": storage_key,
-                    "device_id": resolved,
-                },
-            )
+            log.info("tool.device.default_resolved", {
+                "provider": storage_key,
+                "device_id": resolved,
+            })
             return resolved, None
 
         if not enabled_candidates:
@@ -1590,7 +950,10 @@ class ToolRegistry:
 
     @classmethod
     async def execute_batch(
-        cls, calls: List[Dict[str, Any]], ctx: Optional[ToolContext] = None, parallel: bool = True
+        cls,
+        calls: List[Dict[str, Any]],
+        ctx: Optional[ToolContext] = None,
+        parallel: bool = True
     ) -> List[ToolResult]:
         """
         Execute multiple tools
@@ -1604,7 +967,10 @@ class ToolRegistry:
             List of results in same order
         """
         if parallel:
-            tasks = [cls.execute(tool_name=call["name"], ctx=ctx, **call.get("params", {})) for call in calls]
+            tasks = [
+                cls.execute(tool_name=call["name"], ctx=ctx, **call.get("params", {}))
+                for call in calls
+            ]
             return await asyncio.gather(*tasks)
         else:
             results = []
@@ -1639,7 +1005,6 @@ class ToolRegistry:
         API Services UI by mistake.
         """
         from flocks.tool.tool_loader import API_LIKE_SOURCES
-
         ids: set = set()
         for tool_info in cls.list_tools():
             if tool_info.source in API_LIKE_SOURCES and tool_info.provider:
@@ -1771,7 +1136,12 @@ class ToolRegistry:
         seen_providers: set = set()
         for tool in cls._tools.values():
             info = tool.info
-            if info.source not in API_LIKE_SOURCES or not info.provider or info.native or not info.enabled:
+            if (
+                info.source not in API_LIKE_SOURCES
+                or not info.provider
+                or info.native
+                or not info.enabled
+            ):
                 continue
             provider = info.provider
             if provider in seen_providers:
@@ -1781,23 +1151,15 @@ class ToolRegistry:
             existing = ConfigWriter.get_api_service_raw(provider)
             if existing is None:
                 ConfigWriter.set_api_service(provider, {"enabled": True})
-                log.info(
-                    "tool_registry.bootstrap_api_service",
-                    {
-                        "provider": provider,
-                        "action": "created_enabled",
-                    },
-                )
+                log.info("tool_registry.bootstrap_api_service", {
+                    "provider": provider, "action": "created_enabled",
+                })
             elif "enabled" not in existing:
                 existing["enabled"] = True
                 ConfigWriter.set_api_service(provider, existing)
-                log.info(
-                    "tool_registry.bootstrap_api_service",
-                    {
-                        "provider": provider,
-                        "action": "added_enabled",
-                    },
-                )
+                log.info("tool_registry.bootstrap_api_service", {
+                    "provider": provider, "action": "added_enabled",
+                })
 
     @classmethod
     def _sync_api_service_states(cls) -> None:
@@ -1826,7 +1188,6 @@ class ToolRegistry:
         """
         try:
             from flocks.config.config_writer import ConfigWriter
-
             api_services = ConfigWriter.list_api_services_raw()
         except Exception:
             return
@@ -1853,15 +1214,15 @@ class ToolRegistry:
                     restored_count += 1
 
         if disabled_count or restored_count:
-            disabled_providers = [p for p, svc in api_services.items() if not svc.get("enabled", False)]
-            log.debug(
-                "tool_registry.api_service_sync",
-                {
-                    "disabled_tools": disabled_count,
-                    "restored_tools": restored_count,
-                    "disabled_providers": disabled_providers,
-                },
-            )
+            disabled_providers = [
+                p for p, svc in api_services.items()
+                if not svc.get("enabled", False)
+            ]
+            log.debug("tool_registry.api_service_sync", {
+                "disabled_tools": disabled_count,
+                "restored_tools": restored_count,
+                "disabled_providers": disabled_providers,
+            })
 
     @classmethod
     def _snapshot_enabled_defaults(cls) -> None:
@@ -1927,7 +1288,6 @@ class ToolRegistry:
         """
         try:
             from flocks.config.config_writer import ConfigWriter
-
             settings = ConfigWriter.list_tool_settings()
             api_services = ConfigWriter.list_api_services_raw()
         except Exception:
@@ -1960,14 +1320,11 @@ class ToolRegistry:
             applied += 1
 
         if applied or unknown or blocked:
-            log.info(
-                "tool_registry.tool_settings_applied",
-                {
-                    "applied": applied,
-                    "stale": unknown,
-                    "blocked_by_service": blocked,
-                },
-            )
+            log.info("tool_registry.tool_settings_applied", {
+                "applied": applied,
+                "stale": unknown,
+                "blocked_by_service": blocked,
+            })
 
     @classmethod
     def _register_plugin_extension_point(cls) -> None:
@@ -1992,7 +1349,7 @@ class ToolRegistry:
                 Path(source).relative_to(_user_plugin_root)
                 return False  # Under ~/.flocks/plugins/ → user-level → not native
             except ValueError:
-                return True  # Under <cwd>/.flocks/plugins/ or elsewhere → project-level → native
+                return True   # Under <cwd>/.flocks/plugins/ or elsewhere → project-level → native
 
         def _consume_tools(items: list, source: str) -> None:
             is_native = _is_native_source(source)
@@ -2009,14 +1366,11 @@ class ToolRegistry:
                         # source.
                         existing_source = getattr(existing.info, "source", None)
                         if existing_source not in (None, "plugin_yaml", "plugin_py"):
-                            log.warn(
-                                "plugin.tool.duplicate",
-                                {
-                                    "source": source,
-                                    "name": spec.info.name,
-                                    "existing_source": existing_source,
-                                },
-                            )
+                            log.warn("plugin.tool.duplicate", {
+                                "source": source,
+                                "name": spec.info.name,
+                                "existing_source": existing_source,
+                            })
                         continue
                     if spec.info.source is None:
                         spec.info.source = "plugin_yaml"
@@ -2030,13 +1384,10 @@ class ToolRegistry:
                 name = spec.get("name")
                 handler = spec.get("handler")
                 if not name or not handler:
-                    log.warn(
-                        "plugin.tool.missing_fields",
-                        {
-                            "source": source,
-                            "spec_keys": list(spec.keys()),
-                        },
-                    )
+                    log.warn("plugin.tool.missing_fields", {
+                        "source": source,
+                        "spec_keys": list(spec.keys()),
+                    })
                     continue
                 existing = cls._tools.get(name)
                 if existing is not None:
@@ -2045,36 +1396,29 @@ class ToolRegistry:
                     # on genuine cross-source collisions.
                     existing_source = getattr(existing.info, "source", None)
                     if existing_source not in (None, "plugin_yaml", "plugin_py"):
-                        log.warn(
-                            "plugin.tool.duplicate",
-                            {
-                                "source": source,
-                                "name": name,
-                                "existing_source": existing_source,
-                            },
-                        )
+                        log.warn("plugin.tool.duplicate", {
+                            "source": source,
+                            "name": name,
+                            "existing_source": existing_source,
+                        })
                     continue
 
                 if isinstance(handler, str):
                     import importlib as _imp
-
                     mod = _imp.import_module(source) if "." in source else None
                     handler = getattr(mod, handler, None) if mod else None
                     if handler is None:
-                        log.warn(
-                            "plugin.tool.handler_not_found",
-                            {
-                                "source": source,
-                                "handler": spec.get("handler"),
-                            },
-                        )
+                        log.warn("plugin.tool.handler_not_found", {
+                            "source": source, "handler": spec.get("handler"),
+                        })
                         continue
 
-                params = [ToolParameter(**p) if isinstance(p, dict) else p for p in spec.get("parameters", [])]
+                params = [
+                    ToolParameter(**p) if isinstance(p, dict) else p
+                    for p in spec.get("parameters", [])
+                ]
                 cat_str = spec.get("category", "custom")
-                category = (
-                    ToolCategory(cat_str) if cat_str in ToolCategory.__members__.values() else ToolCategory.CUSTOM
-                )
+                category = ToolCategory(cat_str) if cat_str in ToolCategory.__members__.values() else ToolCategory.CUSTOM
 
                 info = ToolInfo(
                     name=name,
@@ -2093,19 +1437,17 @@ class ToolRegistry:
                 return item.get("name", "")
             return ""
 
-        PluginLoader.register_extension_point(
-            ExtensionPoint(
-                attr_name="TOOLS",
-                subdir="tools",
-                consumer=_consume_tools,
-                item_type=None,
-                dedup_key=_dedup_key,
-                yaml_item_factory=yaml_to_tool,
-                recursive=True,
-                max_depth=2,
-                exclude_subdirs=frozenset({"mcp", "generated"}),
-            )
-        )
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="TOOLS",
+            subdir="tools",
+            consumer=_consume_tools,
+            item_type=None,
+            dedup_key=_dedup_key,
+            yaml_item_factory=yaml_to_tool,
+            recursive=True,
+            max_depth=2,
+            exclude_subdirs=frozenset({"mcp", "generated"}),
+        ))
 
     @classmethod
     def _register_builtin_tools(cls) -> None:
@@ -2129,23 +1471,17 @@ class ToolRegistry:
             # agent/ — agent delegation/coordination
             ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            (
-                "flocks.tool.task",
-                [
-                    "schedule_task_center",
-                    "todo",
-                    "run_workflow",
-                    "run_workflow_node",
-                    "workflow_config_manage",
-                ],
-            ),
+            ("flocks.tool.task", [
+                "schedule_task_center",
+                "todo",
+                "run_workflow",
+                "run_workflow_node",
+                "workflow_config_manage",
+            ]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
             # system/ — questions, model config, memory, MCP management, session management, slash commands
-            (
-                "flocks.tool.system",
-                ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"],
-            ),
+            ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context and status probes
@@ -2177,18 +1513,19 @@ class ToolRegistry:
 
         # Sample tools for testing (only register if not already registered)
         if "get_time" not in cls._tools:
-
             @cls.register_function(
                 name="get_time",
                 description="Get current date and time",
                 category=ToolCategory.SYSTEM,
                 native=True,
-                parameters=[],
+                parameters=[]
             )
             async def get_time(ctx: ToolContext) -> ToolResult:
                 from datetime import datetime
-
-                return ToolResult(success=True, output=datetime.now().isoformat())
+                return ToolResult(
+                    success=True,
+                    output=datetime.now().isoformat()
+                )
 
     @classmethod
     def _unregister_plugin_tools(cls) -> List[str]:
@@ -2263,7 +1600,9 @@ class ToolRegistry:
         device instance.
         """
         return (
-            tool.info.category == ToolCategory.CUSTOM and tool.info.name != "invalid" and tool.info.source != "device"
+            tool.info.category == ToolCategory.CUSTOM
+            and tool.info.name != "invalid"
+            and tool.info.source != "device"
         )
 
     @classmethod
@@ -2312,14 +1651,11 @@ class ToolRegistry:
 
         if state["count"] >= cls._failure_disable_threshold:
             tool.info.enabled = False
-            log.warn(
-                "tool.disabled.repeated_error",
-                {
-                    "tool": tool_name,
-                    "count": state["count"],
-                    "error": error,
-                },
-            )
+            log.warn("tool.disabled.repeated_error", {
+                "tool": tool_name,
+                "count": state["count"],
+                "error": error,
+            })
             return True
 
         return False
@@ -2375,13 +1711,10 @@ class ToolRegistry:
             # ``_register_dynamic_tools``) nothing re-adds it, so without
             # this pop a stale factory default would linger forever.
             cls._enabled_defaults.pop(tool_name, None)
-        log.info(
-            "tool.dynamic.unregistered",
-            {
-                "module": module_name,
-                "tools": old_tools,
-            },
-        )
+        log.info("tool.dynamic.unregistered", {
+            "module": module_name,
+            "tools": old_tools,
+        })
 
     @classmethod
     def _register_dynamic_tools(cls) -> None:
@@ -2406,27 +1739,21 @@ class ToolRegistry:
                     importlib.import_module(module_name)
                     action = "imported"
             except Exception as e:
-                log.warn(
-                    "tool.dynamic.import_failed",
-                    {
-                        "module": module_name,
-                        "error": str(e),
-                    },
-                )
+                log.warn("tool.dynamic.import_failed", {
+                    "module": module_name,
+                    "error": str(e),
+                })
                 continue
 
             after = set(cls._tools.keys())
             new_tools = sorted(after - before)
             cls._dynamic_modules[module_name] = str(path)
             cls._dynamic_tools_by_module[module_name] = new_tools
-            log.debug(
-                "tool.dynamic.registered",
-                {
-                    "module": module_name,
-                    "tools": new_tools,
-                    "action": action,
-                },
-            )
+            log.debug("tool.dynamic.registered", {
+                "module": module_name,
+                "tools": new_tools,
+                "action": action,
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -2602,7 +1929,9 @@ class ToolFileWatcher:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
             self._device_changed = getattr(self, "_device_changed", False) or device_changed
-            self._debounce_timer = threading.Timer(self._DEBOUNCE_SECONDS, self._do_refresh)
+            self._debounce_timer = threading.Timer(
+                self._DEBOUNCE_SECONDS, self._do_refresh
+            )
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 
@@ -2637,7 +1966,6 @@ class ToolFileWatcher:
         dirs: Set[str] = set()
         try:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-
             user_plugin_root = DEFAULT_PLUGIN_ROOT
         except Exception:
             user_plugin_root = Path.home() / ".flocks" / "plugins"

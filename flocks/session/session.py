@@ -98,8 +98,6 @@ class SessionInfo(BaseModel):
     # admins can see all sessions; there is no cross-user sharing).
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID", description="Owner local user id")
     owner_username: Optional[str] = Field(None, alias="ownerUsername", description="Owner local username")
-    owner_subject_id: Optional[str] = Field(None, alias="ownerSubjectID", description="Owner subject id")
-    permission_mode: str = Field("default_interactive", alias="permissionMode")
 
     # File change summary
     summary: Optional[SessionChangeStats] = Field(None, description="File change summary")
@@ -118,11 +116,6 @@ class SessionInfo(BaseModel):
 
     # Session category: "user" for human-initiated conversations, "task" for task-triggered sessions
     category: str = Field("user", description="Session category: user or task")
-
-    # Server-created delegated sessions require an internal context record.
-    # Keep the marker separate from user-visible metadata so metadata can
-    # never become an authorization source.
-    delegation_context_required: bool = Field(False)
 
     # Legacy fields for backwards compatibility
     metadata: Dict[str, Any] = Field(default_factory=dict)

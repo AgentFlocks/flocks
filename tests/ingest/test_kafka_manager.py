@@ -17,7 +17,6 @@ import asyncio
 import json
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -198,65 +197,6 @@ async def test_restart_missing_broker_reports_failed(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_restart_without_service_account_keeps_legacy_config_running(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = kafka_manager.KafkaManager()
-
-    async def _fake_get_config(workflow_id: str, *, kind: str) -> dict:
-        assert workflow_id == "wf-no-service-account"
-        assert kind == "workflow_kafka_config"
-        return {
-            "enabled": True,
-            "inputBroker": "localhost:9092",
-            "inputTopic": "workflow-input",
-        }
-
-    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
-    monkeypatch.setattr(
-        kafka_manager,
-        "read_workflow_from_fs",
-        lambda _workflow_id: {
-            "workflowJson": {
-                "start": "n1",
-                "nodes": [{"id": "n1", "type": "python", "code": "outputs['ok'] = True"}],
-                "edges": [],
-            }
-        },
-    )
-    monkeypatch.setattr(
-        manager,
-        "_consumer_loop",
-        AsyncMock(return_value=None),
-    )
-
-    status = await manager.restart_workflow("wf-no-service-account")
-    assert status["state"] in {"connecting", "running", "stopped"}
-
-
-@pytest.mark.asyncio
-async def test_restart_requires_service_account_when_field_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = kafka_manager.KafkaManager()
-
-    async def _fake_get_config(workflow_id: str, *, kind: str) -> dict:
-        assert workflow_id == "wf-invalid-service-account"
-        assert kind == "workflow_kafka_config"
-        return {
-            "enabled": True,
-            "inputBroker": "localhost:9092",
-            "inputTopic": "workflow-input",
-            "serviceAccount": {},
-        }
-
-    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
-    status = await manager.restart_workflow("wf-invalid-service-account")
-    assert status["state"] == "failed"
-    assert status["error"] == "service_account_required"
-
-
-@pytest.mark.asyncio
 async def test_restart_workflow_cleans_resources_after_connect_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -274,9 +214,6 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
             "inputTopic": "workflow-input",
             "inputGroupId": "wf-group",
             "inputKey": "kafka_message",
-            "serviceAccount": {
-                "subjectId": "svc_kafka",
-            },
         }
 
     class _Consumer:
@@ -458,9 +395,6 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
     assert captured_run_kwargs["inputs"]["kafka_output_topic"] == "topic_soc_flocks_result_log"
     assert captured_run_kwargs["inputs"]["_trigger"] == "kafka"
     assert captured_run_kwargs["inputs"]["_flocks"]["trigger"]["id"] == "kafka-default"
-    workflow_ctx = captured_run_kwargs["tool_context"]
-    assert workflow_ctx.extra["entry"] == "headless"
-    assert workflow_ctx.extra["subject"] == {}
     assert recorded_input_params["_trigger"] == "kafka"
     assert recorded_input_params["kafka_output_enabled"] is True
     assert recorded_input_params["kafka_output_topic"] == "topic_soc_flocks_result_log"
@@ -535,50 +469,3 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         source="orders-topic",
     )
     assert captured_run_kwargs == {}
-
-
-@pytest.mark.asyncio
-async def test_trigger_workflow_passes_service_account_subject_into_tool_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = kafka_manager.KafkaManager()
-    captured_run_kwargs: dict = {}
-
-    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
-        return {"id": "exec-sa", "workflowId": workflow_id, "inputParams": input_params}
-
-    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
-        return None
-
-    def _fake_run_workflow(**kwargs):  # noqa: ANN003
-        captured_run_kwargs.update(kwargs)
-        return SimpleNamespace(
-            status="SUCCEEDED",
-            error=None,
-            outputs={"ok": True},
-            history=[],
-            last_node_id="done",
-            steps=1,
-        )
-
-    monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
-    monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
-    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
-
-    service_account = {
-        "subject_id": "svc.kafka",
-        "subject_type": "service_account",
-        "entry": "kafka",
-        "permission_mode": "headless_fail_closed",
-    }
-    await manager._trigger_workflow(
-        "wf-sa",
-        {"start": "receive_alert", "nodes": [], "edges": []},
-        {"alarmData": {"id": 1}},
-        "kafka_message",
-        service_account=service_account,
-    )
-
-    workflow_ctx = captured_run_kwargs["tool_context"]
-    assert workflow_ctx.extra["entry"] == "headless"
-    assert workflow_ctx.extra["subject"]["subject_id"] == "svc.kafka"

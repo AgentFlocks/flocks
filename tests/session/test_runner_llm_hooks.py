@@ -9,9 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 import flocks.session.runner as runner_mod
-from flocks.hooks.pipeline import HookBase, HookPipeline, normalize_tool_decision
+from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.provider.provider import ChatMessage
-from flocks.session.callable_schema import CallableSchemaResult
 from flocks.session.runner import SessionRunner
 from flocks.session.session import SessionInfo
 
@@ -32,49 +31,6 @@ def _make_runner(session_id: str = "ses_runner_llm_hooks") -> SessionRunner:
         provider_id="anthropic",
         model_id="claude-sonnet",
     )
-
-
-def test_runner_construction_deep_copies_security_context() -> None:
-    security_context = {"subject": {"id": "user-1"}}
-
-    runner = SessionRunner(
-        session=_make_session(),
-        provider_id="anthropic",
-        model_id="claude-sonnet",
-        security_context=security_context,
-    )
-
-    security_context["subject"]["id"] = "changed-after-construction"
-
-    assert runner._security_context == {"subject": {"id": "user-1"}}
-
-
-@pytest.mark.asyncio
-async def test_runner_passes_copied_trusted_context_to_callable_schema(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner = SessionRunner(
-        session=_make_session("ses_runner_capability_context"),
-        provider_id="anthropic",
-        model_id="claude-sonnet",
-        security_context={"subject": {"subject_id": "user-1"}, "entry": "api"},
-    )
-    schema_resolver = AsyncMock(return_value=CallableSchemaResult(tool_infos=[], metadata={}))
-    monkeypatch.setattr(runner_mod, "list_session_callable_tool_infos", schema_resolver)
-    agent = SimpleNamespace(name="rex", tools=["read"])
-
-    await runner._list_callable_tool_infos_for_turn(agent, messages=[])
-
-    capability_context = schema_resolver.await_args.kwargs["capability_context"]
-    assert capability_context == {
-        "subject": {"subject_id": "user-1"},
-        "entry": "api",
-        "agent": "rex",
-        "workspace": "/tmp",
-        "sessionID": "ses_runner_capability_context",
-    }
-    capability_context["subject"]["subject_id"] = "mutated"
-    assert runner._security_context["subject"]["subject_id"] == "user-1"
 
 
 class _FakeProcessor:
@@ -102,9 +58,6 @@ class _FakeProcessor:
 
     def get_finish_reason(self):
         return self.finish_reason
-
-    async def drain_parallel_tool_calls(self) -> None:
-        return None
 
 
 class _FakeToolAccumulator:
@@ -185,55 +138,6 @@ async def test_hook_pipeline_timeout_can_propagate():
         HookPipeline.unregister("test-critical-slow-hook")
 
 
-def test_normalize_tool_decision_compat_skip():
-    decision = normalize_tool_decision({"skip": True})
-    assert decision.action == "deny"
-    assert decision.reason == "blocked_by_hook_skip"
-
-
-@pytest.mark.asyncio
-async def test_hook_pipeline_tool_before_deny_short_circuits():
-    seen: list[str] = []
-
-    class _DenyHook(HookBase):
-        async def tool_before(self, ctx) -> None:
-            seen.append("deny")
-            ctx.output["decision"] = {"action": "deny", "reason": "blocked"}
-
-    class _LaterHook(HookBase):
-        async def tool_before(self, ctx) -> None:
-            seen.append("later")
-            ctx.output["decision"] = {"action": "allow"}
-
-    HookPipeline.register("test-tool-before-deny", _DenyHook(), order=1)
-    HookPipeline.register("test-tool-before-later", _LaterHook(), order=2)
-    try:
-        hook_ctx = await HookPipeline.run_tool_before({"tool": {"name": "read"}})
-    finally:
-        HookPipeline.unregister("test-tool-before-deny")
-        HookPipeline.unregister("test-tool-before-later")
-
-    assert seen == ["deny"]
-    assert hook_ctx.output["decision"]["action"] == "deny"
-    assert hook_ctx.output["decision"]["reason"] == "blocked"
-
-
-@pytest.mark.asyncio
-async def test_hook_pipeline_tool_before_skip_is_denied_decision():
-    class _SkipHook(HookBase):
-        async def tool_before(self, ctx) -> None:
-            ctx.output["skip"] = True
-
-    HookPipeline.register("test-tool-before-skip", _SkipHook())
-    try:
-        hook_ctx = await HookPipeline.run_tool_before({"tool": {"name": "write"}})
-    finally:
-        HookPipeline.unregister("test-tool-before-skip")
-
-    assert hook_ctx.output["decision"]["action"] == "deny"
-    assert hook_ctx.output["decision"]["reason"] == "blocked_by_hook_skip"
-
-
 @pytest.mark.asyncio
 async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_success")
@@ -268,11 +172,6 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
         runner_mod.HookPipeline,
         "run_llm_after",
         AsyncMock(side_effect=_after),
-    )
-    monkeypatch.setattr(
-        runner_mod.HookPipeline,
-        "has_stage_handlers",
-        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         runner_mod.SessionRunner,
@@ -368,11 +267,6 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         runner_mod.HookPipeline,
         "run_llm_after",
         AsyncMock(side_effect=_after),
-    )
-    monkeypatch.setattr(
-        runner_mod.HookPipeline,
-        "has_stage_handlers",
-        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         runner_mod.SessionRunner,

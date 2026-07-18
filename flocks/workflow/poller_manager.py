@@ -28,7 +28,6 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.store import WorkflowStore
-from flocks.workflow.triggers.security import execute_trigger_action
 
 WORKFLOW_POLLER_CONFIG_PREFIX = "workflow_poller_config/"
 DEFAULT_INTERVAL_SECONDS = 30
@@ -436,25 +435,16 @@ class WorkflowPollerManager:
         self._status[workflow_id] = current
 
         try:
-            async def _run_workflow_effect() -> RunWorkflowResult:
-                return await asyncio.to_thread(
-                    run_workflow,
-                    workflow=workflow_json,
-                    inputs=inputs,
-                    run_id=exec_id,
-                    timeout_s=config["timeoutSeconds"],
-                    trace=False,
-                    execution_profile="high_frequency",
-                    cancel=cancel_event.is_set,
-                    on_step_complete=step_recorder.on_step_complete,
-                )
-
-            result = await execute_trigger_action(
-                workflow_id=workflow_id,
-                trigger_id="schedule-default",
-                trigger_type="schedule",
-                mapped_inputs=inputs,
-                effect=_run_workflow_effect,
+            result = await asyncio.to_thread(
+                run_workflow,
+                workflow=workflow_json,
+                inputs=inputs,
+                run_id=exec_id,
+                timeout_s=config["timeoutSeconds"],
+                trace=False,
+                execution_profile="high_frequency",
+                cancel=cancel_event.is_set,
+                on_step_complete=step_recorder.on_step_complete,
             )
             if not isinstance(result, RunWorkflowResult):
                 result = RunWorkflowResult(status="failed", error="invalid_run_result")

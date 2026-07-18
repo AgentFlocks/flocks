@@ -17,8 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
-from flocks.channel.inbound.security import get_ingress_subject
-from flocks.channel.inbound.session_binding import SessionBindingService, resolve_channel_subject
+from flocks.channel.inbound.session_binding import SessionBindingService
 from flocks.config.config import ChannelConfig
 from flocks.utils.log import Log
 
@@ -171,25 +170,6 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
     return True
 
 
-def _normalize_visible_agents(channel_config: ChannelConfig) -> list[str]:
-    visible: list[str] = []
-    for candidate in channel_config.visible_agents or []:
-        if not isinstance(candidate, str):
-            continue
-        normalized = candidate.strip()
-        if normalized and normalized not in visible:
-            visible.append(normalized)
-    return visible
-
-
-def _enforce_visible_agent(agent_id: Optional[str], visible_agents: list[str]) -> Optional[str]:
-    if not visible_agents:
-        return agent_id
-    if agent_id and agent_id in visible_agents:
-        return agent_id
-    return visible_agents[0]
-
-
 # =====================================================================
 # ChannelDeliveryCallbacks — bridges SessionLoop output → IM delivery
 # =====================================================================
@@ -340,19 +320,13 @@ class InboundDispatcher:
         # ``rex`` only via ``Agent.get(name) or Agent.get("rex")``, hiding the
         # real default and making behaviour diverge between WebUI and channel.
         default_agent = channel_config.default_agent
-        permission_mode = (channel_config.permission_mode or "readonly").strip() or "readonly"
-        visible_agents = _normalize_visible_agents(channel_config)
         scope_override = None
         if msg.channel_id == "feishu" and msg.chat_type == ChatType.GROUP:
-            scope_override, feishu_agent, feishu_permission_mode, feishu_visible_agents = _resolve_feishu_group_overrides_ext(
+            scope_override, feishu_agent = _resolve_feishu_group_overrides(
                 channel_config, msg.chat_id,
             )
             if feishu_agent:
                 default_agent = feishu_agent
-            if feishu_permission_mode:
-                permission_mode = feishu_permission_mode
-            if feishu_visible_agents:
-                visible_agents = feishu_visible_agents
         if not default_agent:
             try:
                 from flocks.agent.registry import Agent as _Agent
@@ -362,22 +336,12 @@ class InboundDispatcher:
                     "error": str(exc),
                 })
                 default_agent = "rex"
-        default_agent = _enforce_visible_agent(default_agent, visible_agents)
-
-        # A Pro ingress hook can attach an already-verified subject to the
-        # plugin task.  Keep it through the asynchronous dispatch boundary;
-        # otherwise retain the long-standing local channel identity mapping.
-        msg.resolved_subject = get_ingress_subject() or await resolve_channel_subject(
-            msg,
-            permission_mode=permission_mode,
-        )
 
         binding = await self.binding_service.resolve_or_create(
             msg,
             default_agent=default_agent,
             scope_override=scope_override,
             directory=channel_config.workspace_dir,
-            permission_mode=permission_mode,
         )
 
         user_text = msg.mention_text if msg.mention_text else msg.text
@@ -508,13 +472,10 @@ class InboundDispatcher:
 
             # 12. run Agent (inside lock to keep same-session serial)
             # Wrap with Typing Indicator for feishu channels when enabled
-            security_context = self._security_context_for_message(msg)
             if msg.channel_id == "feishu":
-                await self._run_agent_with_typing(
-                    binding, callbacks, msg, channel_config, security_context=security_context,
-                )
+                await self._run_agent_with_typing(binding, callbacks, msg, channel_config)
             else:
-                await self._run_agent(binding, callbacks, security_context=security_context)
+                await self._run_agent(binding, callbacks)
 
     # --- helpers ---
 
@@ -896,11 +857,7 @@ class InboundDispatcher:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
-        owner_kwargs = await resolve_channel_session_owner_kwargs(
-            session,
-            msg=msg,
-            permission_mode=binding.permission_mode or "readonly",
-        )
+        owner_kwargs = await resolve_channel_session_owner_kwargs(session)
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
@@ -1054,39 +1011,16 @@ class InboundDispatcher:
             return ChannelConfig()
 
     @staticmethod
-    def _security_context_for_message(msg: InboundMessage) -> Optional[dict[str, Any]]:
-        subject = msg.resolved_subject
-        if subject is None:
-            return None
-        try:
-            subject_payload = subject.model_dump()
-        except Exception:
-            return None
-        return {
-            "entry": "channel",
-            "execution_domain": "channel",
-            "subject": subject_payload,
-        }
-
-    @staticmethod
-    async def _run_agent(
-        binding,
-        callbacks: ChannelDeliveryCallbacks,
-        *,
-        security_context: Optional[dict[str, Any]] = None,
-    ) -> None:
+    async def _run_agent(binding, callbacks: ChannelDeliveryCallbacks) -> None:
         """Run Agent and deliver the final assistant reply."""
         try:
             from flocks.session.session_loop import SessionLoop
             loop_callbacks = callbacks.to_loop_callbacks()
-            run_kwargs: dict[str, Any] = {
-                "session_id": binding.session_id,
-                "agent_name": binding.agent_id,
-                "callbacks": loop_callbacks,
-            }
-            if security_context is not None:
-                run_kwargs["security_context"] = security_context
-            result = await SessionLoop.run(**run_kwargs)
+            result = await SessionLoop.run(
+                session_id=binding.session_id,
+                agent_name=binding.agent_id,
+                callbacks=loop_callbacks,
+            )
 
             if result.last_message:
                 text = await _extract_message_text(
@@ -1107,8 +1041,6 @@ class InboundDispatcher:
         callbacks: ChannelDeliveryCallbacks,
         msg: InboundMessage,
         channel_config: ChannelConfig,
-        *,
-        security_context: Optional[dict[str, Any]] = None,
     ) -> None:
         """Run Agent wrapped with Feishu Typing Indicator and optional Streaming Card."""
         raw_cfg: dict = channel_config.model_dump(by_alias=True, exclude_none=True)
@@ -1117,7 +1049,7 @@ class InboundDispatcher:
         if streaming_enabled:
             try:
                 await InboundDispatcher._run_agent_with_streaming(
-                    binding, callbacks, msg, raw_cfg, security_context=security_context,
+                    binding, callbacks, msg, raw_cfg,
                 )
                 return
             except Exception:
@@ -1130,13 +1062,9 @@ class InboundDispatcher:
             async with feishu_typing_indicator(
                 raw_cfg, msg.message_id, msg.account_id or "default",
             ):
-                await InboundDispatcher._run_agent(
-                    binding, callbacks, security_context=security_context,
-                )
+                await InboundDispatcher._run_agent(binding, callbacks)
         except Exception:
-            await InboundDispatcher._run_agent(
-                binding, callbacks, security_context=security_context,
-            )
+            await InboundDispatcher._run_agent(binding, callbacks)
 
     @staticmethod
     async def _run_agent_with_streaming(
@@ -1144,8 +1072,6 @@ class InboundDispatcher:
         callbacks: ChannelDeliveryCallbacks,
         msg: InboundMessage,
         raw_cfg: dict,
-        *,
-        security_context: Optional[dict[str, Any]] = None,
     ) -> None:
         """Run Agent with Feishu Streaming Card for real-time text output."""
         from flocks.channel.builtin.feishu.streaming_card import StreamingCard
@@ -1166,9 +1092,7 @@ class InboundDispatcher:
             async with feishu_typing_indicator(
                 raw_cfg, msg.message_id, msg.account_id or "default",
             ):
-                await InboundDispatcher._run_agent(
-                    binding, callbacks, security_context=security_context,
-                )
+                await InboundDispatcher._run_agent(binding, callbacks)
             return
 
         try:
@@ -1181,14 +1105,11 @@ class InboundDispatcher:
             loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)
 
             from flocks.session.session_loop import SessionLoop
-            run_kwargs: dict[str, Any] = {
-                "session_id": binding.session_id,
-                "agent_name": binding.agent_id,
-                "callbacks": loop_callbacks,
-            }
-            if security_context is not None:
-                run_kwargs["security_context"] = security_context
-            result = await SessionLoop.run(**run_kwargs)
+            result = await SessionLoop.run(
+                session_id=binding.session_id,
+                agent_name=binding.agent_id,
+                callbacks=loop_callbacks,
+            )
 
             final_text = None
             if result.last_message:
@@ -1433,19 +1354,9 @@ def _resolve_feishu_group_overrides(
     channel_config: ChannelConfig,
     chat_id: str,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Backward-compatible helper returning ``(scope_override, agent_override)``."""
-    scope, agent, _, _ = _resolve_feishu_group_overrides_ext(channel_config, chat_id)
-    return scope, agent
+    """Read per-group ``groupSessionScope`` and ``defaultAgent`` from the feishu config.
 
-
-def _resolve_feishu_group_overrides_ext(
-    channel_config: ChannelConfig,
-    chat_id: str,
-) -> tuple[Optional[str], Optional[str], Optional[str], Optional[list[str]]]:
-    """Read per-group ``groupSessionScope`` and ``defaultAgent`` from feishu config.
-
-    Returns ``(scope_override, agent_override, permission_mode, visible_agents)``.
-    Each item may be ``None`` if not
+    Returns ``(scope_override, agent_override)``.  Either may be ``None`` if not
     configured for the given *chat_id*.
 
     Resolution order (highest priority first):
@@ -1455,7 +1366,7 @@ def _resolve_feishu_group_overrides_ext(
 
     merged = merge_group_overrides(channel_config.get_extra("groups"), chat_id)
     if not merged:
-        return None, None, None, None
+        return None, None
 
     scope = (
         merged.get("groupSessionScope")
@@ -1463,18 +1374,7 @@ def _resolve_feishu_group_overrides_ext(
         or None
     )
     agent = merged.get("defaultAgent") or None
-    permission_mode = merged.get("permissionMode") or None
-    visible = merged.get("visibleAgents")
-    visible_agents = None
-    if isinstance(visible, list):
-        cleaned: list[str] = []
-        for item in visible:
-            if isinstance(item, str):
-                normalized = item.strip()
-                if normalized and normalized not in cleaned:
-                    cleaned.append(normalized)
-        visible_agents = cleaned or None
-    return scope, agent, permission_mode, visible_agents
+    return scope, agent
 
 
 async def _expand_merge_forward(

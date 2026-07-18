@@ -8,6 +8,3 @@ color: "#20B2AA"
 delegatable: true
 # Explicit tool allowlist for the focused executor.
 tools: []
-# The focused executor starts with only always-load tools and uses tool_search.
-# Its discoverable maximum is still intersected with its delegator's ceiling.
-capability_tools: all_enabled

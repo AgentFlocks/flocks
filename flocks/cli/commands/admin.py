@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from datetime import UTC, datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 import typer
@@ -104,112 +103,6 @@ def set_api_token(
     console.print("[yellow]API token written to local secret store[/yellow]")
     console.print(f"[dim]Stored at: {secret_file}[/dim]")
     console.print(f"[dim]secret_id: {API_TOKEN_SECRET_ID}[/dim]")
-
-
-@admin_app.command("create-api-key")
-def create_api_key(
-    name: str = typer.Option(..., "--name", help="API key name"),
-    role: str = typer.Option("member", "--role", help="Role for this API key (admin/member)"),
-    tenant_id: str = typer.Option("", "--tenant-id", help="Tenant scope"),
-    department: str = typer.Option("", "--department", help="Department scope"),
-    permission_mode: str = typer.Option("readonly", "--permission-mode", help="Permission mode"),
-    expires_hours: int = typer.Option(0, "--expires-hours", min=0, help="Expiration hours, 0 means never"),
-):
-    """
-    Create a scoped API key in auth database.
-    """
-
-    async def _run():
-        await AuthService.init()
-        expires_at = None
-        if expires_hours > 0:
-            expires_at = (datetime.now(UTC) + timedelta(hours=expires_hours)).isoformat()
-        return await AuthService.create_api_key(
-            name=name,
-            role=role,
-            tenant_id=tenant_id,
-            department=department,
-            permission_mode=permission_mode,
-            expires_at=expires_at,
-            created_by="cli:admin",
-        )
-
-    try:
-        record, secret = asyncio.run(_run())
-    except Exception as exc:
-        console.print(f"[red]Failed to create API key: {exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    console.print("[yellow]API key created (secret is shown once)[/yellow]")
-    console.print(f"[bold]{secret}[/bold]")
-    console.print(f"[dim]id: {record.id}[/dim]")
-    console.print(f"[dim]role: {record.role}[/dim]")
-    console.print(f"[dim]permission_mode: {record.permission_mode}[/dim]")
-
-
-@admin_app.command("list-api-keys")
-def list_api_keys():
-    """
-    List API keys stored in auth database.
-    """
-
-    async def _run():
-        await AuthService.init()
-        return await AuthService.list_api_keys()
-
-    try:
-        keys = asyncio.run(_run())
-    except Exception as exc:
-        console.print(f"[red]Failed to load API keys: {exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    if not keys:
-        console.print("[yellow]No API keys found[/yellow]")
-        return
-
-    table = Table(title="API Keys")
-    table.add_column("ID", style="bold")
-    table.add_column("Name")
-    table.add_column("Role")
-    table.add_column("Permission")
-    table.add_column("Tenant")
-    table.add_column("Department")
-    table.add_column("Expires")
-    table.add_column("Disabled")
-    table.add_column("Last used")
-    for item in keys:
-        table.add_row(
-            item.id,
-            item.name or "-",
-            item.role,
-            item.permission_mode,
-            item.tenant_id or "-",
-            item.department or "-",
-            item.expires_at or "-",
-            "yes" if item.disabled else "no",
-            item.last_used_at or "-",
-        )
-    console.print(table)
-
-
-@admin_app.command("revoke-api-key")
-def revoke_api_key(
-    key_id: str = typer.Option(..., "--key-id", help="API key id"),
-):
-    """
-    Disable an API key.
-    """
-
-    async def _run():
-        await AuthService.init()
-        await AuthService.revoke_api_key(key_id)
-
-    try:
-        asyncio.run(_run())
-    except Exception as exc:
-        console.print(f"[red]Failed to revoke API key: {exc}[/red]")
-        raise typer.Exit(1) from exc
-    console.print(f"[green]API key revoked: {key_id}[/green]")
 
 
 @admin_app.command("reassign-orphan-sessions")

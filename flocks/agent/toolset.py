@@ -9,10 +9,9 @@ This module owns the static layer of the tool-loading model:
 
 from __future__ import annotations
 
-from typing import Any, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Iterable, List, Optional, Set, Tuple
 
 from flocks.permission import from_config as permission_from_config
-from flocks.security.capability_pool import CapabilityPool
 from flocks.utils.log import Log
 
 log = Log.create(service="agent.toolset")
@@ -98,22 +97,6 @@ def expand_legacy_permission_to_tool_names(
     return resolved, permission_rules
 
 
-def resolve_capability_pool(
-    declared_tools: Optional[Iterable[str]],
-    enabled_tools: Optional[Iterable[str]],
-    parent_ceiling_tools: Optional[Iterable[str]] = None,
-    hook_context: Optional[Mapping[str, Any]] = None,
-) -> CapabilityPool:
-    """Resolve the synchronous OSS base capability ceiling for an agent."""
-    declared_pool = CapabilityPool.from_tools(declared_tools, context=hook_context)
-    enabled_pool = CapabilityPool.from_tools(enabled_tools, context=hook_context)
-    effective_pool = declared_pool.intersect(enabled_pool, source="enabled_tools")
-    if parent_ceiling_tools is not None:
-        parent_pool = CapabilityPool.from_tools(parent_ceiling_tools, context=hook_context)
-        effective_pool = effective_pool.intersect(parent_pool, source="parent_ceiling")
-    return effective_pool
-
-
 def resolve_agent_initial_tools(
     raw_tools: Optional[List[str]],
     legacy_permission_config: Any,
@@ -123,23 +106,14 @@ def resolve_agent_initial_tools(
     available = list(available_tool_names or get_all_enabled_tool_names())
     if raw_tools is not None:
         if agent_name == "rex" and not raw_tools:
-            pool = resolve_capability_pool(
-                get_all_enabled_builtin_tool_names(),
-                available,
-            )
-            return list(pool.tools), []
+            return get_all_enabled_builtin_tool_names(), []
         tools = normalize_declared_tool_names(raw_tools, available)
         permission_rules = []
         if isinstance(legacy_permission_config, dict):
             permission_rules = permission_from_config(legacy_permission_config)
-        pool = resolve_capability_pool(tools, available)
-        return list(pool.tools), permission_rules
+        return tools, permission_rules
     if isinstance(legacy_permission_config, dict):
-        tools, permission_rules = expand_legacy_permission_to_tool_names(
-            legacy_permission_config,
-            available,
-        )
-        return list(resolve_capability_pool(tools, available).tools), permission_rules
+        return expand_legacy_permission_to_tool_names(legacy_permission_config, available)
     # Stricter default: agents without an explicit tools list only receive
     # always-load tools at session/schema time instead of inheriting all tools.
     return [], []

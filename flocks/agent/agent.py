@@ -25,7 +25,6 @@ from flocks.permission import Ruleset
 # LLM model configuration
 # ---------------------------------------------------------------------------
 
-
 class AgentModel(BaseModel):
     """Agent model configuration (LLM to use for this agent)."""
 
@@ -37,11 +36,9 @@ class AgentModel(BaseModel):
 # Delegation prompt metadata  (moved from prompts/builder/dynamic.py)
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class DelegationTrigger:
     """A single delegation trigger rule (domain + trigger phrase)."""
-
     domain: str
     trigger: str
 
@@ -53,7 +50,6 @@ class AgentPromptMetadata:
 
     Used by Rex / Hephaestus prompt builders to generate the delegation table.
     """
-
     category: str
     cost: str
     triggers: List[DelegationTrigger] = field(default_factory=list)
@@ -68,11 +64,9 @@ class AgentPromptMetadata:
 # Prompt-builder context types  (moved from prompts/builder/dynamic.py)
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class AvailableAgent:
     """Delegation candidate, passed into prompt_builder inject() functions."""
-
     name: str
     description: str
     metadata: AgentPromptMetadata
@@ -81,7 +75,6 @@ class AvailableAgent:
 @dataclass
 class AvailableTool:
     """Tool available to the current session."""
-
     name: str
     category: str
 
@@ -89,7 +82,6 @@ class AvailableTool:
 @dataclass
 class AvailableSkill:
     """Skill available for injection into delegated tasks."""
-
     name: str
     description: str
     location: str
@@ -98,7 +90,6 @@ class AvailableSkill:
 @dataclass
 class AvailableCategory:
     """Task delegation category (model preset + domain label)."""
-
     name: str
     description: str
 
@@ -106,7 +97,6 @@ class AvailableCategory:
 @dataclass
 class AvailableWorkflow:
     """Workflow available for execution via run_workflow tool."""
-
     name: str
     description: str
     path: str
@@ -116,7 +106,6 @@ class AvailableWorkflow:
 # ---------------------------------------------------------------------------
 # Core agent configuration model
 # ---------------------------------------------------------------------------
-
 
 class AgentInfo(BaseModel):
     """
@@ -153,11 +142,6 @@ class AgentInfo(BaseModel):
 
     # Concrete callable tool names resolved from agent.yaml.
     tools: Optional[List[str]] = Field(default=None)
-
-    # Optional B4 declaration for agents whose callable set is populated by
-    # ``tool_search``.  ``tools`` remains the initial schema; this field states
-    # the maximum set that may be discovered later in the session.
-    capability_tools: Optional[List[str] | Literal["all_enabled"]] = Field(default=None)
 
     model: Optional[AgentModel] = None
     prompt: Optional[str] = None

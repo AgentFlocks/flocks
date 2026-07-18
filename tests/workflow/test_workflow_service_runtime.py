@@ -5,8 +5,6 @@ from fastapi.testclient import TestClient
 
 import flocks.workflow.service_runtime as service_runtime
 from flocks.tool import ToolContext
-from flocks.security.action_gateway import ActionDeniedError
-from flocks.hooks.pipeline import ToolDecision
 
 
 def test_service_runtime_lifespan_initializes_and_shuts_down_mcp(
@@ -84,28 +82,6 @@ def test_service_runtime_lifespan_reports_mcp_init_failure(
     init_mock.assert_awaited_once()
     shutdown_mock.assert_awaited_once()
     run_workflow_mock.assert_not_called()
-
-
-def test_service_runtime_lifespan_reports_mcp_init_policy_deny(monkeypatch) -> None:
-    init_mock = AsyncMock(
-        side_effect=ActionDeniedError(ToolDecision(action="deny", reason="mcp_init_denied"))
-    )
-    shutdown_mock = AsyncMock()
-    monkeypatch.setattr(service_runtime.MCP, "init", init_mock)
-    monkeypatch.setattr(service_runtime, "get_manager", lambda: SimpleNamespace(shutdown=shutdown_mock))
-
-    app = service_runtime.create_service_app(
-        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
-        workflow_id="wf-1",
-        release_id="rel-1",
-    )
-
-    with TestClient(app, raise_server_exceptions=True) as client:
-        response = client.get("/health")
-
-    assert response.status_code == 503
-    assert response.json()["mcp_error"] == "mcp_init_denied:mcp_init_denied"
-    shutdown_mock.assert_awaited_once()
 
 
 def test_service_runtime_invoke_builds_real_tool_context(

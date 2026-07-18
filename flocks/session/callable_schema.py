@@ -7,15 +7,9 @@ and the function schema exposed to the model for the current turn.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Set
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
-from flocks.security.capability_pool import (
-    CapabilityPool,
-    build_capability_ceiling,
-    filter_capability_pool,
-    normalize_capability_ceiling,
-)
 from flocks.tool.catalog import get_always_load_tool_names
 from flocks.session.callable_state import (
     get_session_callable_tools,
@@ -28,9 +22,6 @@ from flocks.tool.registry import ToolRegistry
 class CallableSchemaResult:
     tool_infos: List[Any]
     metadata: Dict[str, Any]
-    # Keep older resolver test doubles/source integrations constructible while
-    # treating an omitted B4 ceiling as an explicit fail-closed empty pool.
-    capability_ceiling: Dict[str, Any] = field(default_factory=lambda: {"tools": []})
 
 
 def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], int]:
@@ -85,7 +76,6 @@ async def list_session_callable_tool_infos(
     *,
     step: int = 0,
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
-    capability_context: Optional[Mapping[str, Any]] = None,
 ) -> CallableSchemaResult:
     callable_tool_names = await get_session_callable_tools(session_id)
     always_load_names = get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
@@ -99,24 +89,6 @@ async def list_session_callable_tool_infos(
         )
 
     effective_callable_names = set(callable_tool_names) | always_load_names
-    capability_pool = CapabilityPool.from_tools(
-        sorted(effective_callable_names),
-        context=capability_context,
-    )
-    raw_context = capability_context if isinstance(capability_context, Mapping) else {}
-    if "parent_ceiling" in raw_context:
-        parent_ceiling = normalize_capability_ceiling(raw_context.get("parent_ceiling"))
-        if parent_ceiling is None:
-            capability_pool = CapabilityPool.from_tools([], context=capability_context)
-        else:
-            capability_pool = capability_pool.intersect(
-                CapabilityPool.from_tools(parent_ceiling["tools"], context=capability_context),
-                source="parent_ceiling",
-            )
-    filtered_pool = await filter_capability_pool(capability_pool, context=capability_context)
-    effective_callable_names = set(filtered_pool.tools)
-    callable_tool_names &= effective_callable_names
-    always_load_names &= effective_callable_names
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
 
     metadata = {
@@ -134,11 +106,4 @@ async def list_session_callable_tool_infos(
             **metadata,
         })
 
-    return CallableSchemaResult(
-        tool_infos=tool_infos,
-        metadata=metadata,
-        capability_ceiling=build_capability_ceiling(
-            tools=filtered_pool.tools,
-            context=capability_context,
-        ),
-    )
+    return CallableSchemaResult(tool_infos=tool_infos, metadata=metadata)

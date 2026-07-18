@@ -9,14 +9,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import inspect
 import json
 import os
 import shutil
 import threading
 import time
 from dataclasses import dataclass
-from functools import wraps
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, Body, HTTPException, Request, status, Query
@@ -90,106 +88,13 @@ from flocks.workflow.triggers.compat import (
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
-from flocks.security.action_gateway import (
-    ActionDecisionError,
-    SecurityAction,
-    execute_action,
-)
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
 
 
-log = Log.create(service="workflow-routes")
-
-
-def _workflow_control_action_name(endpoint_name: str) -> str:
-    """Preserve stable action names for existing publish lifecycle policy."""
-    if endpoint_name in {"workflow_center_publish", "publish_workflow_as_api"}:
-        return "publish"
-    if endpoint_name in {"workflow_center_stop", "unpublish_workflow_api"}:
-        return "unpublish"
-    return f"workflow.{endpoint_name}"
-
-
-def _control_value_fingerprint(value: Any) -> str:
-    """Fingerprint request data without forwarding it to policy/audit hooks."""
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json", exclude_none=True)
-    try:
-        encoded = json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError):
-        encoded = repr(type(value)).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _workflow_control_context(endpoint, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
-    """Build a compact, secret-free canonical input for a control endpoint."""
-    try:
-        arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
-    except TypeError:
-        arguments = dict(kwargs)
-
-    workflow_id = str(arguments.get("workflow_id") or "collection")
-    canonical_args: Dict[str, Any] = {}
-    for name, value in arguments.items():
-        if name == "request":
-            # Never canonicalize raw HTTP request data at this generic layer.
-            continue
-        if name in {"workflow_id", "trigger_id", "exec_id"}:
-            canonical_args[name] = str(value)
-            continue
-        canonical_args[name] = {
-            "type": type(value).__name__,
-            "sha256": _control_value_fingerprint(value),
-        }
-    return workflow_id, canonical_args
-
-
-def _wrap_workflow_control_endpoint(endpoint):
-    action_name = _workflow_control_action_name(endpoint.__name__)
-
-    @wraps(endpoint)
-    async def _wrapped(*args, **kwargs):
-        workflow_id, canonical_args = _workflow_control_context(endpoint, args, kwargs)
-        action = SecurityAction(
-            action=action_name,
-            resource={"type": "workflow", "id": workflow_id},
-            canonical_input={"operation": action_name, "arguments": canonical_args},
-            execution_domain="control_plane",
-            metadata={"entry": "api", "operation": endpoint.__name__},
-        )
-        try:
-            return await execute_action(action, lambda: endpoint(*args, **kwargs))
-        except ActionDecisionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-    return _wrapped
-
-
-class _WorkflowControlRouter(APIRouter):
-    """Apply the neutral action gateway to every mutating workflow API route.
-
-    Webhook receiver routes deliberately live on ``webhook_router`` instead:
-    their retirement is outside the B1/B3 acceptance boundary.
-    """
-
-    def api_route(self, path: str, *args, **kwargs):
-        methods = kwargs.get("methods") or []
-        method_set = {str(item).upper() for item in methods}
-        base_decorator = super().api_route(path, *args, **kwargs)
-
-        def _decorate(endpoint):
-            wrapped = endpoint
-            if method_set & {"POST", "PUT", "PATCH", "DELETE"}:
-                wrapped = _wrap_workflow_control_endpoint(endpoint)
-            base_decorator(wrapped)
-            return wrapped
-
-        return _decorate
-
-
-router = _WorkflowControlRouter()
+router = APIRouter()
 webhook_router = APIRouter()
+log = Log.create(service="workflow-routes")
 
 _PROGRESS_FLUSH_EVERY_STEPS = 5
 

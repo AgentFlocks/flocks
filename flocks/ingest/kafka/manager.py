@@ -27,7 +27,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
-from flocks.tool import ToolContext
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     DEFAULT_LARGE_LIST_KEYS,
@@ -52,7 +51,6 @@ from flocks.workflow.triggers.models import (
     workflow_json_declares_triggers,
     workflow_trigger_definitions_from_json,
 )
-from flocks.workflow.triggers.security import execute_trigger_action
 
 log = Log.create(service="kafka.manager")
 
@@ -249,7 +247,6 @@ class KafkaManager:
         # successfully or failed; used by ``restart_workflow``.
         self._ready: dict[str, asyncio.Event] = {}
         self._dispatcher = EventDispatcher()
-        self._service_accounts: dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -325,34 +322,6 @@ class KafkaManager:
         self._queues.pop(workflow_id, None)
         self._abort_events.pop(workflow_id, None)
         self._ready.pop(workflow_id, None)
-        self._service_accounts.pop(workflow_id, None)
-
-    @staticmethod
-    def _resolve_service_account(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        account = data.get("serviceAccount")
-        if not isinstance(account, dict):
-            return None
-        subject_id = str(account.get("subjectId") or "").strip()
-        if not subject_id:
-            return None
-        return {
-            "subject_id": subject_id,
-            "subject_type": str(account.get("subjectType") or "service_account"),
-            "role": str(account.get("role") or "member"),
-            "tenant_id": str(account.get("tenantId") or ""),
-            "department": str(account.get("department") or ""),
-            "scopes": account.get("scopes") if isinstance(account.get("scopes"), list) else [],
-            "entry": "kafka",
-            "auth_source": "service_account",
-            "permission_mode": "headless_fail_closed",
-            "verified": True,
-        }
-
-    @staticmethod
-    def _should_enforce_service_account(data: Dict[str, Any]) -> bool:
-        # Backward compatibility: legacy configs without this field continue to run.
-        # New configs should provide serviceAccount; when the field is present we enforce it.
-        return "serviceAccount" in data
 
     def get_consumer_status(self, workflow_id: str) -> Dict[str, Any]:
         """Return a snapshot of the consumer runtime state for ``workflow_id``.
@@ -416,17 +385,6 @@ class KafkaManager:
             log.warning("kafka.config_incomplete", {"workflow_id": workflow_id})
             return {"state": "failed", "error": err}
 
-        service_account = self._resolve_service_account(data)
-        if service_account is None:
-            if self._should_enforce_service_account(data):
-                err = "service_account_required"
-                self._status[workflow_id] = {"state": "failed", "error": err}
-                log.warning("kafka.service_account_missing", {"workflow_id": workflow_id})
-                return {"state": "failed", "error": err}
-            log.warning("kafka.service_account_legacy_mode", {"workflow_id": workflow_id})
-        else:
-            self._service_accounts[workflow_id] = service_account
-
         # Load and cache the workflow JSON once; avoids a disk read per message.
         wf_data = read_workflow_from_fs(workflow_id)
         if not wf_data:
@@ -483,7 +441,6 @@ class KafkaManager:
                         queue,
                         abort,
                         input_topic,
-                        service_account,
                     ),
                     name=f"kafka-worker-{workflow_id}-{i}",
                 )
@@ -654,7 +611,6 @@ class KafkaManager:
         queue: asyncio.Queue,
         abort: asyncio.Event,
         source: str,
-        service_account: Optional[Dict[str, Any]] = None,
     ) -> None:
         while not abort.is_set():
             try:
@@ -674,7 +630,6 @@ class KafkaManager:
                     configured_inputs,
                     trigger=trigger,
                     source=source,
-                    service_account=service_account,
                 )
             except asyncio.CancelledError:
                 return
@@ -694,7 +649,6 @@ class KafkaManager:
         *,
         trigger: Optional[TriggerDefinition] = None,
         source: Optional[str] = None,
-        service_account: Optional[Dict[str, Any]] = None,
     ) -> None:
         trigger = trigger or TriggerDefinition.model_validate(
             {
@@ -720,13 +674,6 @@ class KafkaManager:
         )
 
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
-            if service_account:
-                mapped_inputs = dict(mapped_inputs)
-                flocks_meta = mapped_inputs.get("_flocks")
-                if not isinstance(flocks_meta, dict):
-                    flocks_meta = {}
-                flocks_meta["subject"] = service_account
-                mapped_inputs["_flocks"] = flocks_meta
             summarized_inputs = {"_trigger": trigger.type}
             for key, value in mapped_inputs.items():
                 summarized_inputs[key] = _summarize_large_value(value)
@@ -752,42 +699,14 @@ class KafkaManager:
                 ),
             )
             try:
-                flocks_meta = mapped_inputs.get("_flocks", {})
-                workflow_subject = None
-                if isinstance(flocks_meta, dict):
-                    maybe_subject = flocks_meta.get("subject")
-                    if isinstance(maybe_subject, dict):
-                        workflow_subject = dict(maybe_subject)
-                workflow_ctx = ToolContext(
-                    session_id=f"workflow:{workflow_id}",
-                    message_id=f"workflow:{exec_id}",
-                    agent="workflow",
-                    extra={
-                        "entry": "headless",
-                        "trace_id": str(exec_id),
-                        "subject": workflow_subject or {},
-                        "legacy_compat": True,
-                    },
-                )
-                async def _run_workflow_effect():
-                    return await asyncio.to_thread(
-                        run_workflow,
-                        workflow=workflow_plan,
-                        inputs=mapped_inputs,
-                        run_id=exec_id,
-                        trace=False,
-                        execution_profile="high_frequency",
-                        on_step_complete=step_recorder.on_step_complete,
-                        tool_context=workflow_ctx,
-                    )
-
-                result = await execute_trigger_action(
-                    workflow_id=workflow_id,
-                    trigger_id=trigger.id,
-                    trigger_type=trigger.type,
-                    mapped_inputs=mapped_inputs,
-                    effect=_run_workflow_effect,
-                    subject=workflow_subject,
+                result = await asyncio.to_thread(
+                    run_workflow,
+                    workflow=workflow_plan,
+                    inputs=mapped_inputs,
+                    run_id=exec_id,
+                    trace=False,
+                    execution_profile="high_frequency",
+                    on_step_complete=step_recorder.on_step_complete,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time

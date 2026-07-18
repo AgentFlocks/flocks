@@ -165,7 +165,6 @@ class TaskExecutor:
         cls, execution: TaskExecution, scheduler: TaskScheduler
     ) -> Optional[str]:
         from flocks.workflow.fs_store import read_workflow_from_fs
-        from flocks.workflow.triggers.security import execute_trigger_action
 
         if not execution.workflow_id:
             raise ValueError("workflow execution_mode requires workflow_id")
@@ -174,20 +173,11 @@ class TaskExecutor:
             raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
         snapshot = execution.execution_input_snapshot or {}
         inputs = snapshot.get("context") or scheduler.context or {}
-        async def _run_workflow_effect():
-            return await asyncio.to_thread(
-                cls._run_workflow_sync,
-                execution.id,
-                workflow_data["workflowJson"],
-                inputs,
-            )
-
-        result = await execute_trigger_action(
-            workflow_id=execution.workflow_id,
-            trigger_id=scheduler.id,
-            trigger_type="task_scheduler",
-            mapped_inputs=inputs,
-            effect=_run_workflow_effect,
+        result = await asyncio.to_thread(
+            cls._run_workflow_sync,
+            execution.id,
+            workflow_data["workflowJson"],
+            inputs,
         )
         result_status = getattr(result, "status", None)
         if result_status == "CANCELLED":

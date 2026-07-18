@@ -355,8 +355,8 @@ class TestToolPolicy:
         assert is_tool_allowed(policy, "sessions_list") is True
         assert is_tool_allowed(policy, "bash") is False
 
-    def test_agent_allow_intersects_global_allow(self):
-        """Agent allow 与 global allow 求交集，不能扩大权限."""
+    def test_agent_overrides_global(self):
+        """Agent 覆盖 global 策略."""
         from flocks.sandbox.tool_policy import resolve_tool_policy
 
         policy = resolve_tool_policy(
@@ -364,70 +364,6 @@ class TestToolPolicy:
             agent_allow=["bash"],
         )
         assert policy.allow == ["bash"]
-
-    def test_agent_allow_cannot_expand_global_allow(self):
-        """Agent allow 只能收窄，不能扩大 global allow."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
-
-        policy = resolve_tool_policy(
-            global_allow=["read"],
-            agent_allow=["bash", "read"],
-        )
-
-        assert is_tool_allowed(policy, "read")
-        assert not is_tool_allowed(policy, "bash")
-
-    def test_empty_agent_allow_keeps_existing_global_ceiling(self):
-        """agent 空 allow 不能把已有 global allow 退化为全允许."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
-
-        policy = resolve_tool_policy(
-            global_allow=["read"],
-            agent_allow=[],
-        )
-
-        assert is_tool_allowed(policy, "read")
-        assert not is_tool_allowed(policy, "bash")
-
-    def test_denies_are_combined_across_global_and_agent_layers(self):
-        """任一层 deny 均应优先于 allow."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
-
-        policy = resolve_tool_policy(
-            global_allow=["read", "bash"],
-            global_deny=["read"],
-            agent_deny=["bash"],
-        )
-
-        assert not is_tool_allowed(policy, "read")
-        assert not is_tool_allowed(policy, "bash")
-
-    def test_global_and_agent_glob_allows_are_both_enforced(self):
-        """无法化简的通配符交集也不能退化为全允许."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
-
-        policy = resolve_tool_policy(
-            global_allow=["session*"],
-            agent_allow=["*list"],
-        )
-
-        assert is_tool_allowed(policy, "sessions_list")
-        assert not is_tool_allowed(policy, "sessions_get")
-        assert not is_tool_allowed(policy, "bash")
-
-    def test_glob_allow_intersection_survives_policy_round_trip(self):
-        """allow_layers 不能在持久化后丢失，否则会扩大工具权限."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
-        from flocks.sandbox.types import SandboxToolPolicy
-
-        policy = resolve_tool_policy(
-            global_allow=["session*"],
-            agent_allow=["*list"],
-        )
-        restored = SandboxToolPolicy.model_validate(policy.model_dump())
-
-        assert is_tool_allowed(restored, "sessions_list")
-        assert not is_tool_allowed(restored, "sessions_get")
 
 
 # ==================== 5. Docker 参数构建测试 ====================
@@ -1176,11 +1112,6 @@ class TestStreamProcessorSandboxMeta:
         result = await processor._resolve_sandbox_meta("delegate_task")
         assert result["blocked"] is True
         assert "blocked by sandbox tool policy" in result["error"]
-        assert result["extra"]["tool_policy_constraint"] == {
-            "allowed": False,
-            "tool": "delegate_task",
-            "source": "sandbox.tool_policy",
-        }
 
     @pytest.mark.asyncio
     async def test_sandbox_meta_non_file_tool_passes(self):

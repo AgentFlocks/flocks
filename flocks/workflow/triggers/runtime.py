@@ -37,10 +37,8 @@ from .models import (
     workflow_json_declares_triggers,
     workflow_trigger_definitions_from_json,
 )
-from .security import execute_trigger_action
 
 log = Log.create(service="workflow.trigger.runtime")
-
 
 
 def _now_ms() -> int:
@@ -207,31 +205,6 @@ class TriggerRuntime:
         return statuses
 
     async def _execute_workflow(
-        self,
-        *,
-        workflow_id: str,
-        workflow_json: Dict[str, Any],
-        trigger: TriggerDefinition,
-        mapped_inputs: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Execute non-webhook triggers through the neutral action gateway."""
-        async def _effect() -> Dict[str, Any]:
-            return await self._execute_workflow_effect(
-                workflow_id=workflow_id,
-                workflow_json=workflow_json,
-                trigger=trigger,
-                mapped_inputs=mapped_inputs,
-            )
-
-        return await execute_trigger_action(
-            workflow_id=workflow_id,
-            trigger_id=trigger.id,
-            trigger_type=trigger.type,
-            mapped_inputs=mapped_inputs,
-            effect=_effect,
-        )
-
-    async def _execute_workflow_effect(
         self,
         *,
         workflow_id: str,

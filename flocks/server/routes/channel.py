@@ -4,7 +4,6 @@ Channel HTTP routes: webhook callbacks, health/status, and outbound send APIs.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,15 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from flocks.channel.gateway.manager import default_manager
-from flocks.channel.inbound.security import reset_ingress_subject, set_ingress_subject
 from flocks.channel.registry import default_registry
-from flocks.hooks.pipeline import HookPipeline, HookStage
-from flocks.identity.subject import (
-    Subject,
-    get_current_subject,
-    reset_current_subject,
-    set_current_subject,
-)
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -169,76 +160,7 @@ async def channel_webhook(channel_id: str, request: Request):
     body = await request.body()
     headers = dict(request.headers)
 
-    if getattr(plugin, "requires_signature", False):
-        verifier = getattr(plugin, "verify_inbound", None)
-        if verifier is None:
-            raise HTTPException(status_code=403, detail="Webhook 签名校验未实现")
-        try:
-            verified = await verifier(body, headers)
-        except NotImplementedError as exc:
-            raise HTTPException(status_code=403, detail="Webhook 签名校验未实现") from exc
-        if not verified:
-            raise HTTPException(status_code=403, detail="Webhook 签名校验失败")
-
-    authenticated_subject = get_current_subject()
-    authenticated_subject_payload = None
-    if authenticated_subject is not None:
-        try:
-            candidate = authenticated_subject.model_dump()
-        except Exception:
-            candidate = None
-        if isinstance(candidate, dict) and candidate.get("verified") is not False:
-            authenticated_subject_payload = candidate
-
-    ingress_payload = {
-        "phase": "before_action",
-        "entry": "channel_webhook",
-        "channel_id": channel_id,
-        "plugin": plugin.meta().id if hasattr(plugin, "meta") else channel_id,
-        "body_sha256": hashlib.sha256(body).hexdigest(),
-        "authentication": {
-            "plugin_authenticated": bool(getattr(plugin, "requires_signature", False)),
-            # Existing API key/Token authentication remains owned by the
-            # normal middleware.  Pro receives only this verified fact and
-            # subject, never raw credential material.
-            "existing_authenticated": authenticated_subject_payload is not None,
-        },
-    }
-    if authenticated_subject_payload is not None:
-        ingress_payload["authenticated_subject"] = authenticated_subject_payload
-    security_subject = None
-    if HookPipeline.has_registered_stage_handlers(HookStage.CHANNEL_WEBHOOK_BEFORE):
-        ingress_ctx = await HookPipeline.run_channel_webhook_before(ingress_payload)
-        raw_decision = ingress_ctx.output.get("decision") if isinstance(ingress_ctx.output, dict) else None
-        decision = raw_decision if isinstance(raw_decision, dict) else {}
-        if str(decision.get("action") or "").lower() == "deny":
-            raise HTTPException(status_code=403, detail=decision.get("reason") or "Webhook ingress denied")
-        subject = ingress_ctx.output.get("subject") if isinstance(ingress_ctx.output, dict) else None
-        if isinstance(subject, dict):
-            try:
-                security_subject = Subject.model_validate(subject)
-            except Exception as exc:
-                log.warning("channel.webhook.invalid_pro_subject", {
-                    "channel_id": channel_id,
-                    "error": type(exc).__name__,
-                })
-            else:
-                request.state.channel_security_subject = security_subject.model_dump()
-
-    subject_token = None
-    ingress_token = None
-    if security_subject is not None:
-        # The general subject context supports immediate plugin work; the
-        # channel-specific context is what the dispatcher consumes later.
-        subject_token = set_current_subject(security_subject)
-        ingress_token = set_ingress_subject(security_subject)
-    try:
-        result = await plugin.handle_webhook(body, headers)
-    finally:
-        if ingress_token is not None:
-            reset_ingress_subject(ingress_token)
-        if subject_token is not None:
-            reset_current_subject(subject_token)
+    result = await plugin.handle_webhook(body, headers)
     if isinstance(result, dict) and isinstance(result.get("status_code"), int):
         status_code = int(result["status_code"])
         payload = {k: v for k, v in result.items() if k != "status_code"}

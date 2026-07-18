@@ -5,17 +5,12 @@ Remaining route tests: Workflow, Provider, Task, Config, Permission
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
-import hashlib
-import json
 from pathlib import Path
 
 import pytest
 from fastapi import status
 from httpx import AsyncClient
 from unittest.mock import AsyncMock
-
-from flocks.hooks.pipeline import HookBase, HookPipeline
 
 
 # ---------------------------------------------------------------------------
@@ -512,73 +507,6 @@ class TestConfigRoutes:
         assert len(present) > 0, (
             f"No expected keys found. Got: {list(data.keys())}"
         )
-
-    @pytest.mark.asyncio
-    async def test_update_config_action_hook_receives_only_safe_summary(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Action hooks receive config structure and a digest, never credentials."""
-        from flocks.server.routes import config as config_routes
-
-        config_data = {
-            "channels": {
-                "slack": {
-                    "botToken": "xoxb-top-secret-token",
-                    "headers": {"Authorization": "Bearer sensitive-header"},
-                    "url": "https://hooks.example.test/secret-endpoint",
-                }
-            },
-            "provider": {"openai": {"apiKey": "provider-secret"}},
-        }
-        observed: list[dict] = []
-
-        class _CaptureConfigAction(HookBase):
-            async def action_before(self, ctx) -> None:
-                observed.append(deepcopy(ctx.input))
-
-        HookPipeline.reset()
-        monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
-        HookPipeline.register("capture-config-action", _CaptureConfigAction(), critical=True)
-        monkeypatch.setattr(config_routes.ConfigInfoModel, "model_validate", lambda _data: object())
-        monkeypatch.setattr(config_routes.Config, "update", AsyncMock())
-        monkeypatch.setattr(config_routes.Config, "clear_cache", lambda: None)
-        monkeypatch.setattr(config_routes, "get_config", AsyncMock(return_value={"updated": True}))
-        try:
-            result = await config_routes.update_config(config_data)
-        finally:
-            HookPipeline.reset()
-
-        digest = hashlib.sha256(
-            json.dumps(
-                config_data,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
-        safe_input = observed[0]["canonical"]["generic"]["input"]
-
-        assert result == {"updated": True}
-        assert safe_input == {
-            "sections": [
-                {"name": "channels", "type": "dict"},
-                {"name": "provider", "type": "dict"},
-            ],
-            "sha256": digest,
-        }
-        observed_text = json.dumps(observed, sort_keys=True)
-        for sensitive_value in (
-            "xoxb-top-secret-token",
-            "sensitive-header",
-            "https://hooks.example.test/secret-endpoint",
-            "provider-secret",
-            "botToken",
-            "Authorization",
-            "headers",
-            "apiKey",
-        ):
-            assert sensitive_value not in observed_text
 
     @pytest.mark.asyncio
     async def test_ui_display_defaults_and_updates(

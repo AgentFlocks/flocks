@@ -836,7 +836,6 @@ class TestExecuteSubtask:
             provider_id="test-provider",
             model_id="test-model",
             agent_name="rex",
-            security_context={"parent_ceiling": {"tools": ["read"]}},
         )
         last_user = SimpleNamespace(
             id="msg_parent",
@@ -852,7 +851,8 @@ class TestExecuteSubtask:
             model=None,
         )
 
-        execute_task = AsyncMock(return_value=SimpleNamespace(
+        task_tool = MagicMock()
+        task_tool.execute = AsyncMock(return_value=SimpleNamespace(
             output="done",
             title="task complete",
             metadata={"sessionId": "child-session"},
@@ -862,20 +862,18 @@ class TestExecuteSubtask:
         synthetic_msg = SimpleNamespace(id="msg_synthetic")
 
         with patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=SimpleNamespace(name="helper"))), \
-             patch("flocks.tool.registry.ToolRegistry.execute", execute_task), \
+             patch("flocks.tool.registry.ToolRegistry.get", return_value=task_tool), \
              patch("flocks.session.session_loop.Message.create", AsyncMock(side_effect=[assistant_msg, synthetic_msg])), \
              patch("flocks.session.session_loop.Message.add_part", AsyncMock()), \
              patch("flocks.session.session_loop.Message.update", AsyncMock()), \
              patch("flocks.session.session_loop.Message.update_part", AsyncMock()):
             await SessionLoop._execute_subtask(ctx, last_user, task_part)
 
-        execute_task.assert_awaited_once()
-        assert execute_task.await_args.args[0] == "task"
-        tool_ctx = execute_task.await_args.kwargs["ctx"]
+        task_tool.execute.assert_awaited_once()
+        tool_ctx = task_tool.execute.await_args.args[0]
         assert tool_ctx.session_id == session_info.id
         assert tool_ctx.message_id == assistant_msg.id
-        assert tool_ctx.extra == {"parent_ceiling": {"tools": ["read"]}}
-        assert {k: v for k, v in execute_task.await_args.kwargs.items() if k != "ctx"} == {
+        assert task_tool.execute.await_args.kwargs == {
             "prompt": "do the thing",
             "description": "test task",
             "subagent_type": "helper",
