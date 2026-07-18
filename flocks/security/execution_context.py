@@ -12,6 +12,22 @@ from typing import Any, Mapping, Optional
 from flocks.session.callable_schema import list_session_callable_tool_infos
 
 
+async def resolve_execution_agent(
+    requested_agent: str | None,
+    session_agent: str | None,
+) -> str:
+    """Return the requested execution agent or the trusted session fallback."""
+    explicit = str(requested_agent or "").strip()
+    fallback = str(session_agent or "").strip() or "rex"
+    candidate = explicit or fallback
+    if explicit:
+        from flocks.agent.registry import Agent
+
+        if await Agent.get(candidate) is None:
+            raise ValueError(f"Unknown execution agent: {candidate}")
+    return candidate
+
+
 async def build_root_execution_security_context(
     *,
     session_id: str,
@@ -57,4 +73,7 @@ async def build_root_execution_security_context(
     return context
 
 
-__all__ = ["build_root_execution_security_context"]
+__all__ = [
+    "build_root_execution_security_context",
+    "resolve_execution_agent",
+]

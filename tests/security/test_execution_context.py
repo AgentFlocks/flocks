@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import flocks.security.execution_context as execution_context
+
 
 @pytest.mark.asyncio
 async def test_root_execution_context_binds_current_capability_ceiling(
@@ -59,3 +61,31 @@ async def test_root_execution_context_binds_current_capability_ceiling(
             "sessionID": "root-session",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_execution_agent_prefers_a_valid_explicit_request_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+
+    assert (
+        await execution_context.resolve_execution_agent("worker", "rex")
+        == "worker"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execution_agent_rejects_an_unknown_explicit_request_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=None),
+    )
+
+    with pytest.raises(ValueError, match="Unknown execution agent"):
+        await execution_context.resolve_execution_agent("missing", "rex")
