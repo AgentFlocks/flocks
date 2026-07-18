@@ -355,7 +355,6 @@ function defaultSlackConfig(): SlackChannelConfig {
   return {
     enabled: false,
     groupTrigger: 'mention',
-    allowFrom: [],
     replyInThread: true,
     replyBroadcast: false,
     allowBots: 'none',
@@ -1734,6 +1733,13 @@ function SlackPanel({
       onChange({ ...config, [key]: value }),
     [config, onChange]
   );
+  const allowFromEnabled = config.allowFrom !== undefined;
+  const toggleAllowFrom = useCallback(
+    (enabled: boolean) => {
+      onChange({ ...config, allowFrom: enabled ? (config.allowFrom ?? []) : undefined });
+    },
+    [config, onChange]
+  );
   const handleDownloadManifest = useCallback(async () => {
     try {
       const res = await client.get('/api/channel/slack/manifest/download', {
@@ -1848,13 +1854,22 @@ function SlackPanel({
             ]}
           />
         </FieldRow>
-        <FieldRow label={t('slack.allowFrom')} hint={t('slack.allowFromHint')}>
-          <TagsInput
-            value={config.allowFrom ?? []}
-            onChange={(v) => set('allowFrom', v)}
-            placeholder={t('slack.allowFromPlaceholder')}
+        <FieldRow label={t('slack.allowFromEnabled')} hint={t('slack.allowFromEnabledHint')}>
+          <Toggle
+            checked={allowFromEnabled}
+            onChange={toggleAllowFrom}
+            label={t('slack.allowFromEnabledLabel')}
           />
         </FieldRow>
+        {allowFromEnabled && (
+          <FieldRow label={t('slack.allowFrom')} hint={t('slack.allowFromHint')}>
+            <TagsInput
+              value={config.allowFrom ?? []}
+              onChange={(v) => set('allowFrom', v)}
+              placeholder={t('slack.allowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
       </Section>
 
       <Section title={t('slack.advanced')} description={t('slack.advancedDesc')} defaultOpen={false}>
