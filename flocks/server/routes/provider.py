@@ -13,13 +13,15 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ConfigDict
 
+from flocks.audit import emit_audit_event
+from flocks.auth.context import AuthUser
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
-from flocks.server.auth import require_admin
+from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
@@ -1656,6 +1658,43 @@ class ProviderCredentialResponse(BaseModel):
     has_credential: bool
 
 
+def _load_llm_provider_credentials(
+    provider_id: str,
+    *,
+    reveal_api_key: bool = False,
+) -> ProviderCredentialResponse:
+    from flocks.security import get_secret_manager
+
+    secrets = get_secret_manager()
+
+    secret_id = f"{provider_id}_llm_key"
+    api_key = secrets.get(secret_id)
+    if not api_key:
+        secret_id = f"{provider_id}_api_key"
+        api_key = secrets.get(secret_id)
+    if not api_key:
+        api_key = _get_inline_provider_api_key(provider_id)
+
+    base_url = None
+    raw_provider = ConfigWriter.get_provider_raw(provider_id)
+    if raw_provider:
+        options = raw_provider.get("options", {})
+        base_url = options.get("baseURL") or options.get("base_url")
+    if not base_url:
+        base_url = secrets.get(f"{provider_id}_base_url")
+
+    is_placeholder = _is_placeholder_api_key(api_key)
+    ui_api_key = None if is_placeholder else api_key
+
+    return ProviderCredentialResponse(
+        secret_id=secret_id if api_key else None,
+        api_key=ui_api_key if reveal_api_key else None,
+        api_key_masked=SecretManager.mask(ui_api_key) if ui_api_key else None,
+        base_url=base_url,
+        has_credential=bool(api_key),
+    )
+
+
 @router.get(
     "/{provider_id}/credentials",
     response_model=ProviderCredentialResponse,
@@ -1673,51 +1712,53 @@ async def get_provider_credentials(
 
     For API services use GET /{provider_id}/service-credentials instead.
     """
-    from flocks.security import get_secret_manager
-
     try:
-        secrets = get_secret_manager()
-
-        # LLM provider convention: _llm_key first, fall back to legacy _api_key
-        secret_id = f"{provider_id}_llm_key"
-        api_key = secrets.get(secret_id)
-        if not api_key:
-            secret_id = f"{provider_id}_api_key"
-            api_key = secrets.get(secret_id)
-        if not api_key:
-            api_key = _get_inline_provider_api_key(provider_id)
-
-        # base_url from flocks.json raw (not resolved)
-        base_url = None
-        raw_provider = ConfigWriter.get_provider_raw(provider_id)
-        if raw_provider:
-            options = raw_provider.get("options", {})
-            base_url = options.get("baseURL") or options.get("base_url")
-        # Fallback: check legacy .secret.json entry (migration may not have run yet)
-        if not base_url:
-            base_url = secrets.get(f"{provider_id}_base_url")
-
-        # When the stored value is the no-auth sentinel, hide it from the
-        # response so the UI doesn't pre-fill the password input with the
-        # literal string "not-needed". We still report ``has_credential=True``
-        # because a credential record DOES exist; the user just chose to leave
-        # the key blank for an internal/no-auth gateway.
-        is_placeholder = _is_placeholder_api_key(api_key)
-        ui_api_key = None if is_placeholder else api_key
-
-        return ProviderCredentialResponse(
-            secret_id=secret_id if api_key else None,
-            api_key=None,
-            api_key_masked=(
-                SecretManager.mask(ui_api_key)
-                if ui_api_key
-                else None
-            ),
-            base_url=base_url,
-            has_credential=bool(api_key),
-        )
+        return _load_llm_provider_credentials(provider_id)
     except Exception as e:
         log.error("provider.credentials.get.error", {"provider_id": provider_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/{provider_id}/credentials/reveal",
+    response_model=ProviderCredentialResponse,
+    summary="Reveal provider credentials",
+    description="Reveal credential information for a registered LLM provider to an administrator.",
+)
+async def reveal_provider_credentials(
+    provider_id: str,
+    request: Request,
+    response: Response,
+    admin: AuthUser = Depends(require_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+    try:
+        credentials = _load_llm_provider_credentials(provider_id, reveal_api_key=True)
+        try:
+            await emit_audit_event(
+                "provider.credentials_reveal",
+                {
+                    "action": "credentials_reveal",
+                    "actor_id": admin.id,
+                    "actor_name": admin.username,
+                    "user_id": admin.id,
+                    "username": admin.username,
+                    "provider_id": provider_id,
+                    "secret_id": credentials.secret_id,
+                    "ip": get_request_ip(request),
+                    "user_agent": get_request_user_agent(request),
+                },
+            )
+        except Exception as audit_error:
+            log.warn(
+                "provider.credentials.reveal.audit_failed",
+                {"provider_id": provider_id, "error": str(audit_error)},
+            )
+        return credentials
+    except Exception as e:
+        log.error("provider.credentials.reveal.error", {"provider_id": provider_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 

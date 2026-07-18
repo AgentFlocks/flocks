@@ -31,15 +31,36 @@ def test_channel_message_normalizes_slack_aliases() -> None:
     assert _normalize_channel_type("sl") == "slack"
 
 
+def test_channel_message_normalizes_telegram_whatsapp_email_aliases() -> None:
+    assert _normalize_channel_type("telegram") == "telegram"
+    assert _normalize_channel_type("tg") == "telegram"
+    assert _normalize_channel_type("tele") == "telegram"
+    assert _normalize_channel_type("whatsapp") == "whatsapp"
+    assert _normalize_channel_type("wa") == "whatsapp"
+    assert _normalize_channel_type("email") == "email"
+    assert _normalize_channel_type("mail") == "email"
+    assert _normalize_channel_type("邮件") == "email"
+
+
 def test_channel_message_schema_includes_builtin_channels() -> None:
     schema = ToolRegistry.get_schema("channel_message")
 
     assert schema is not None
-    assert "wecom" in schema.properties["channel_type"]["enum"]
-    assert "企业微信" in schema.properties["channel_type"]["enum"]
-    assert "weixin" in schema.properties["channel_type"]["enum"]
-    assert "微信" in schema.properties["channel_type"]["enum"]
-    assert "slack" in schema.properties["channel_type"]["enum"]
+    channel_enum = schema.properties["channel_type"]["enum"]
+    for value in (
+        "wecom",
+        "企业微信",
+        "weixin",
+        "微信",
+        "feishu",
+        "dingtalk",
+        "telegram",
+        "whatsapp",
+        "email",
+        "slack",
+        "邮件",
+    ):
+        assert value in channel_enum
 
 
 @pytest.mark.asyncio

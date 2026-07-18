@@ -80,6 +80,30 @@ def main() -> int:
             if not (package_dir / entrypoint).exists():
                 fail(f"Missing entrypoint {entrypoint} in {manifest_rel}")
 
+        python_files = {
+            package_dir / entrypoint
+            for entrypoint in manifest.get("entrypoints", [])
+            if Path(entrypoint).suffix == ".py"
+        }
+        if plugin_type in {"tool", "device"}:
+            python_files.update(
+                path
+                for path in package_dir.rglob("*.py")
+                if not any(
+                    part in {".git", "__pycache__"}
+                    for part in path.relative_to(package_dir).parts
+                )
+            )
+        for path in sorted(python_files):
+            if not path.is_file():
+                continue
+            try:
+                source = path.read_text(encoding="utf-8")
+                compile(source, str(path), "exec")
+            except (SyntaxError, UnicodeDecodeError) as exc:
+                relative_path = path.relative_to(package_dir).as_posix()
+                fail(f"Invalid Python source {relative_path} in {manifest_rel}: {exc}")
+
         for path in package_dir.rglob("*"):
             rel = path.relative_to(package_dir).as_posix()
             ensure_relative(rel)

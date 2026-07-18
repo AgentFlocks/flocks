@@ -11,6 +11,7 @@ import flocks.channel.builtin.slack.channel as slack_mod
 from flocks.channel.builtin.slack.channel import SlackChannel
 from flocks.channel.builtin.slack.format import markdown_to_slack_mrkdwn
 from flocks.channel.builtin.slack.inbound import build_inbound_message
+from flocks.channel.builtin.slack.manifest import build_slack_app_manifest
 
 
 def test_plugin_exports_slack_channel():
@@ -18,6 +19,35 @@ def test_plugin_exports_slack_channel():
     assert plugin.meta().id == "slack"
     assert plugin.meta().label == "Slack"
     assert "sl" in plugin.meta().aliases
+
+
+def test_slack_manifest_matches_socket_mode_setup_needs():
+    manifest = build_slack_app_manifest()
+
+    assert manifest["settings"]["socket_mode_enabled"] is True
+    scopes = set(manifest["oauth_config"]["scopes"]["bot"])
+    assert {
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "users:read",
+    }.issubset(scopes)
+    events = set(manifest["settings"]["event_subscriptions"]["bot_events"])
+    assert {
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+    }.issubset(events)
 
 
 def test_validate_config_requires_tokens(monkeypatch):

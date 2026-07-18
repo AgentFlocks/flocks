@@ -50,7 +50,7 @@ MAX_SERVICE_LOG_BYTES = 1024 * 1024 * 1024
 LOG_TRIM_CHUNK_BYTES = 1024 * 1024
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
 DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portalflocks.threatbook.cn"
-DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portalflocks.threatbook.cn"
+DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "127.0.0.1,localhost,portalflocks.threatbook.cn"
 MISSING_PORT_OWNER_TOOLS_WARNING = (
     "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
     "可尝试安装：apt/yum install lsof -y"
@@ -838,6 +838,8 @@ def port_is_in_use(port: int, listeners: Sequence[int] | None = None) -> bool:
     current_listeners = list(listeners) if listeners is not None else port_owner_pids(port)
     if current_listeners:
         return True
+    if sys.platform == "win32":
+        return not _bind_port_available(port)
     if _port_owner_lookup_available():
         return False
     return not _bind_port_available(port)
@@ -2169,7 +2171,7 @@ def _run_windows_netstat(port: int) -> str:
         return ""
     target = f":{port}"
     lines = []
-    for line in completed.stdout.splitlines():
+    for line in (completed.stdout or "").splitlines():
         if "LISTENING" not in line.upper():
             continue
         if target not in line:
