@@ -226,6 +226,7 @@ async def _validate_verified_session_message_context(
     requires_verified_context: bool,
     session_id: Optional[str],
     message_id: Optional[str],
+    agent: Optional[str],
 ) -> tuple[Optional[str], Optional[str]]:
     """Validate that session/message context exists and the message belongs to the session."""
     effective_session_id = str(session_id or "").strip() or None
@@ -258,6 +259,17 @@ async def _validate_verified_session_message_context(
             detail=f"Message {effective_message_id} not found in session {effective_session_id}",
         )
 
+    if agent is not None and not getattr(session, "delegation_context_required", False):
+        from flocks.security.execution_context import resolve_execution_agent
+
+        try:
+            await resolve_execution_agent(agent, getattr(session, "agent", None))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
     return effective_session_id, effective_message_id
 
 
@@ -266,12 +278,14 @@ async def _validate_session_message_context(
     tool_info: ToolInfo,
     session_id: Optional[str],
     message_id: Optional[str],
+    agent: Optional[str],
 ) -> tuple[Optional[str], Optional[str]]:
     """Validate context for a single tool execution request."""
     return await _validate_verified_session_message_context(
         requires_verified_context=_requires_session_backed_context(tool_info),
         session_id=session_id,
         message_id=message_id,
+        agent=agent,
     )
 
 
@@ -421,6 +435,7 @@ async def _execute_with_http_context(
         tool_info=tool_info,
         session_id=session_id,
         message_id=message_id,
+        agent=agent,
     )
     ctx = await _build_http_tool_context(
         tool_name=tool_name,
@@ -1001,7 +1016,7 @@ class ToolTestRequest(BaseModel):
         description="Optional message ID used for permission-gated execution",
     )
     agent: Optional[str] = Field(
-        "rex",
+        None,
         description="Agent name recorded for the execution context",
     )
 
