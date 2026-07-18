@@ -905,6 +905,7 @@ async def execute_batch(request: BatchExecuteRequest):
         requires_verified_context=requires_verified_context,
         session_id=request.session_id,
         message_id=request.message_id,
+        agent=request.agent,
     )
 
     try:

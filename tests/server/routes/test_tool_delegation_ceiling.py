@@ -13,6 +13,7 @@ from flocks.server.routes.tool import (
     ToolTestRequest,
     _build_http_tool_context,
     _execute_with_http_context,
+    execute_batch,
 )
 from flocks.session.message import Message
 from flocks.session.session import Session
@@ -42,6 +43,13 @@ def test_http_requests_leave_omitted_agent_unset_for_session_fallback() -> None:
     assert ToolExecuteRequest().agent is None
     assert BatchExecuteRequest(calls=[]).agent is None
     assert ToolTestRequest().agent is None
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_handles_an_empty_request() -> None:
+    response = await execute_batch(BatchExecuteRequest(calls=[]))
+
+    assert response.results == []
 
 
 @pytest.mark.asyncio
