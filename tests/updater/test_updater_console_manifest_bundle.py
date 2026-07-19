@@ -527,6 +527,7 @@ async def test_perform_pro_bundle_downgrade_continues_when_report_callback_fails
     monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
     monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
     monkeypatch.setattr(updater, "_uninstall_pro_component", _fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _version: None)
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _install_root: None)
 
     progresses = [
@@ -969,6 +970,8 @@ async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_cor
     progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
 
     assert progresses[-1].stage == "done"
+    assert "backing_up" not in [step.stage for step in progresses]
+    assert "syncing" not in [step.stage for step in progresses]
     assert any("Keeping local Flocks v2026.6.18" in step.message for step in progresses)
     assert (install_root / "current_core.py").is_file()
     assert not (install_root / "older_core.py").exists()

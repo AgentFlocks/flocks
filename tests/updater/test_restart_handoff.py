@@ -339,6 +339,51 @@ def test_upgrade_start_failure_records_process_output_and_keeps_temp(
     assert results[-1]["stderr"] == "start stderr"
 
 
+def test_upgrade_writes_running_after_parent_exits(monkeypatch, tmp_path: Path) -> None:
+    events: list[str] = []
+    args = _simple_upgrade_handoff_args(tmp_path)
+
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda _pid: events.append("parent-exited") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_write_upgrade_result",
+        lambda **kwargs: events.append(f"write:{kwargs['phase']}"),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_services_before_upgrade",
+        lambda _args: events.append("stop") or False,
+    )
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+
+    assert restart_handoff.run(args) == 1
+    assert events[:3] == ["parent-exited", "write:running", "stop"]
+
+
+def test_upgrade_result_write_failure_is_non_fatal(monkeypatch, tmp_path: Path) -> None:
+    events: list[str] = []
+    args = restart_handoff._parse_args(_simple_upgrade_handoff_args(tmp_path))
+
+    monkeypatch.setattr(
+        restart_handoff.updater_module,
+        "_write_upgrade_result_state",
+        lambda _payload: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_record_handoff_log",
+        lambda message: events.append(message),
+    )
+
+    restart_handoff._write_upgrade_result(args=args, phase="running")
+
+    assert events == ["upgrade_result_write_failed phase=running error=disk unavailable"]
+
+
 def test_upgrade_that_was_stopped_does_not_start_service(monkeypatch, tmp_path: Path) -> None:
     args = _simple_upgrade_handoff_args(tmp_path)
     args.remove("--was-running")

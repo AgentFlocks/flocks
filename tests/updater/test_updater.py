@@ -1333,6 +1333,7 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     events: list[str] = []
     popen_calls: list[list[str]] = []
     download_sources: list[str] = []
+    progress_stages: list[str] = []
 
     async def fake_get_updater_config():
         return SimpleNamespace(
@@ -1401,10 +1402,11 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
     with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1", locale=locale):
-            pass
+        async for step in updater.perform_update("2026.4.1", locale=locale):
+            progress_stages.append(step.stage)
 
     assert events == ["backup", "sleep"]
+    assert progress_stages == ["fetching", "backing_up", "applying", "restarting"]
     assert download_sources == expected_sources
     assert len(popen_calls) == 1
     handoff_argv = popen_calls[0]
@@ -3149,6 +3151,7 @@ async def test_perform_update_yields_error_when_build_restart_argv_fails(
     progresses = [step async for step in updater.perform_update("2026.4.1")]
 
     assert progresses[-1].stage == "error"
+    assert "restarting" not in [step.stage for step in progresses]
     assert "Failed to prepare restart handoff" in progresses[-1].message
     assert "handover" not in events
 

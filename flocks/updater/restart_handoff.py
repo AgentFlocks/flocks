@@ -305,7 +305,13 @@ def _write_upgrade_result(
         payload["stdout"] = stdout
     if stderr:
         payload["stderr"] = stderr
-    updater_module._write_upgrade_result_state(payload)
+    try:
+        updater_module._write_upgrade_result_state(payload)
+    except Exception as exc:
+        try:
+            _record_handoff_log(f"upgrade_result_write_failed phase={phase} error={exc}")
+        except Exception:
+            pass
 
 
 def _report_pending_pro_bundle_install_receipt(args: argparse.Namespace) -> None:
@@ -340,13 +346,13 @@ def _run_simple_upgrade(args: argparse.Namespace) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    _write_upgrade_result(args=args, phase="running")
-
     if not _wait_for_parent_exit(args.parent_pid):
         error = f"parent exit timed out: {args.parent_pid}"
         _record_handoff_log(error)
         _write_upgrade_result(args=args, phase="failed", failed_stage="wait_parent", error=error)
         return 1
+
+    _write_upgrade_result(args=args, phase="running")
 
     if not _stop_services_before_upgrade(args):
         error = "service stop timed out"

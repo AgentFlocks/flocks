@@ -100,9 +100,9 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
     console.print()
     stage_labels = {
         "fetching":    "下载最新源码包",
-        "applying":    f"校验 v{info.latest_version}",
-        "syncing":     "准备升级环境",
-        "restarting":  "切换至独立升级进程",
+        "backing_up":  "备份当前版本",
+        "applying":    "应用新版本",
+        "restarting":  "重启服务",
         "done":        "完成",
     }
     total_steps = 4

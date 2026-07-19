@@ -2705,23 +2705,6 @@ async def perform_update(
     else:
         effective_update_version = latest_tag
 
-    # ------------------------------------------------------------------ #
-    # Step 3 – stage the validated source for the detached handoff
-    # ------------------------------------------------------------------ #
-    yield UpdateProgress(
-        stage="applying",
-        message=(
-            f"Keeping local Flocks {_version_label(current_version)} and installing the Pro component..."
-            if skip_core_replace
-            else f"Staging v{latest_tag} for handoff..."
-        ),
-    )
-
-    # ------------------------------------------------------------------ #
-    # Step 4 – prepare dependency sync
-    # ------------------------------------------------------------------ #
-    yield UpdateProgress(stage="syncing", message="Preparing dependency sync...")
-
     uv_path = _find_executable("uv")
     if not uv_path:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2746,9 +2729,15 @@ async def perform_update(
         )
 
     # ------------------------------------------------------------------ #
-    # Step 5 – pure Pro installs may stay in process; source changes are backed
+    # Step 3 – pure Pro installs may stay in process; source changes are backed
     # up here and then always use the detached handoff.
     # ------------------------------------------------------------------ #
+    if skip_core_replace:
+        yield UpdateProgress(
+            stage="applying",
+            message=f"Keeping local Flocks {_version_label(current_version)} and installing the Pro component...",
+        )
+
     if skip_core_replace and not restart:
         try:
             await install_or_repair_source(
@@ -2786,6 +2775,7 @@ async def perform_update(
 
     backup_path: Path | None = None
     if not skip_core_replace:
+        yield UpdateProgress(stage="backing_up", message="Backing up current version...")
         try:
             backup_path = await asyncio.to_thread(
                 _backup_current_version,
@@ -2801,6 +2791,41 @@ async def perform_update(
             _record_update_journal(f"ERROR {message}")
             yield UpdateProgress(stage="error", message=message, success=False)
             return
+
+        yield UpdateProgress(
+            stage="applying",
+            message=f"Staging v{latest_tag} for handoff...",
+        )
+
+    try:
+        restart_argv = _build_restart_argv(install_root)
+        service_snapshot = _capture_service_snapshot() if not skip_core_replace else None
+        handoff_argv = _build_restart_handoff_argv(
+            restart_argv,
+            install_root,
+            uv_path=uv_path,
+            sync_timeout=sync_timeout,
+            version=effective_update_version,
+            current_version=current_version,
+            content_root=content_root if not skip_core_replace else None,
+            service_snapshot=service_snapshot,
+            backup_path=backup_path,
+            uv_default_index=profile.uv_default_index,
+            npm_registry=profile.npm_registry,
+            pro_wheel_path=pro_wheel_path,
+            pro_bundle_manifest_path=pro_bundle_manifest_path,
+            bundle_sha256=bundle_sha256,
+            cleanup_dir=tmp_dir,
+        )
+    except Exception as exc:
+        log.error("updater.restart.build_argv_failed", {"error": str(exc)})
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        yield UpdateProgress(
+            stage="error",
+            message=f"Failed to prepare restart handoff: {exc}",
+            success=False,
+        )
+        return
 
     yield UpdateProgress(stage="restarting", message="Restarting service...")
 
@@ -2821,36 +2846,6 @@ async def perform_update(
         sys.exit(3)
 
     try:
-        restart_argv = _build_restart_argv(install_root)
-        service_snapshot = _capture_service_snapshot() if not skip_core_replace else None
-    except Exception as exc:
-        log.error("updater.restart.build_argv_failed", {"error": str(exc)})
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        yield UpdateProgress(
-            stage="error",
-            message=f"Failed to prepare restart handoff: {exc}",
-            success=False,
-        )
-        return
-
-    try:
-        handoff_argv = _build_restart_handoff_argv(
-            restart_argv,
-            install_root,
-            uv_path=uv_path,
-            sync_timeout=sync_timeout,
-            version=effective_update_version,
-            current_version=current_version,
-            content_root=content_root if not skip_core_replace else None,
-            service_snapshot=service_snapshot,
-            backup_path=backup_path,
-            uv_default_index=profile.uv_default_index,
-            npm_registry=profile.npm_registry,
-            pro_wheel_path=pro_wheel_path,
-            pro_bundle_manifest_path=pro_bundle_manifest_path,
-            bundle_sha256=bundle_sha256,
-            cleanup_dir=tmp_dir,
-        )
         log.info(
             "updater.restart.handoff_spawn",
             {
