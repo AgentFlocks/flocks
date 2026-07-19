@@ -258,6 +258,7 @@ async def apply_auth_for_request(request: HTTPConnection):
         lambda: _apply_auth_for_request(request),
         before=HookPipeline.run_ingress_before,
         after=HookPipeline.run_ingress_after,
+        subject_sink=lambda subject: setattr(request.state, "subject", subject),
     )
 
 

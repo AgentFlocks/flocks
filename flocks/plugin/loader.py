@@ -39,6 +39,28 @@ from flocks.utils.log import Log
 log = Log.create(service="plugin")
 
 DEFAULT_PLUGIN_ROOT = Path.home() / ".flocks" / "plugins"
+_PLUGIN_ENTRYPOINT_GROUP = "flocks.plugins"
+_CRITICAL_PLUGIN_ENTRYPOINT_GROUP = "flocks.plugins.critical"
+
+
+class CriticalPluginEntrypointFailure(RuntimeError):
+    """Marker an entrypoint may raise when required initialization fails.
+
+    The loader does not attach policy meaning to this marker.  It merely
+    reports it separately from ordinary, isolated plugin-load warnings so a
+    host can decide whether serving is safe for its own runtime.
+    """
+
+
+@dataclass
+class PluginLoadResult:
+    """Outcome of a generic plugin-loading pass."""
+
+    critical_entrypoint_failures: List[str] = field(default_factory=list)
+
+    @property
+    def has_critical_entrypoint_failure(self) -> bool:
+        return bool(self.critical_entrypoint_failures)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +213,7 @@ class PluginLoader:
 
     _extension_points: Dict[str, ExtensionPoint] = {}
     _plugin_root: Path = DEFAULT_PLUGIN_ROOT
+    _runtime_critical_entrypoint_failure = False
 
     # ------------------------------------------------------------------
     # Extension-point registration
@@ -213,6 +236,16 @@ class PluginLoader:
         """Reset all extension points (useful for testing)."""
         cls._extension_points.clear()
 
+    @classmethod
+    def has_runtime_critical_entrypoint_failure(cls) -> bool:
+        """Return whether the most recent full load found a critical failure."""
+        return cls._runtime_critical_entrypoint_failure
+
+    @classmethod
+    def clear_runtime_critical_entrypoint_failure(cls) -> None:
+        """Clear the generic runtime failure signal before an explicit reload."""
+        cls._runtime_critical_entrypoint_failure = False
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
@@ -222,7 +255,7 @@ class PluginLoader:
         cls,
         extra_sources: Optional[List[str]] = None,
         project_dir: Optional[Path] = None,
-    ) -> None:
+    ) -> PluginLoadResult:
         """Unified loading entry point.
 
         For each registered extension point:
@@ -232,6 +265,7 @@ class PluginLoader:
         4. Validate, dedup, and dispatch to the consumer.
         """
         project_dir = project_dir or Path.cwd()
+        result = PluginLoadResult()
 
         for ext in cls._extension_points.values():
             cls._load_extension_point(
@@ -245,7 +279,9 @@ class PluginLoader:
                 ext._loaded = True
 
         # 4. Installed package entry-points
-        cls._load_entry_points()
+        cls._load_entry_points(result)
+        cls._runtime_critical_entrypoint_failure = result.has_critical_entrypoint_failure
+        return result
 
     @classmethod
     def load_extension(
@@ -412,41 +448,94 @@ class PluginLoader:
             ext._loaded = True
 
     @classmethod
-    def _load_entry_points(cls) -> None:
+    def _load_entry_points(cls, result: PluginLoadResult | None = None) -> PluginLoadResult:
         """
-        Load installed package entry-points under ``flocks.plugins``.
+        Load installed package entry-points.
 
         Entry-point target is expected to be callable, supporting either:
         - ``fn(loader_cls)``, or
         - ``fn()``.
+
+        Plugins opt into host-visible startup failure with the generic
+        ``flocks.plugins.critical`` group.  The loader does not interpret why
+        the plugin is critical; it only reports failures in that declared
+        group through :class:`PluginLoadResult`.
         """
-        group = "flocks.plugins"
+        result = result or PluginLoadResult()
         try:
-            eps = importlib.metadata.entry_points().select(group=group)
+            entry_points = importlib.metadata.entry_points()
         except Exception as e:
-            log.debug("plugin.entrypoints.scan_failed", {"group": group, "error": str(e)})
-            return
+            log.debug("plugin.entrypoints.scan_failed", {"error": str(e)})
+            return result
 
-        for ep in eps:
+        for group, declared_critical in (
+            (_PLUGIN_ENTRYPOINT_GROUP, False),
+            (_CRITICAL_PLUGIN_ENTRYPOINT_GROUP, True),
+        ):
             try:
-                target = ep.load()
-            except Exception as e:
-                log.warning("plugin.entrypoint.load_failed", {"name": ep.name, "error": str(e)})
-                continue
-
-            if not callable(target):
-                log.warning("plugin.entrypoint.not_callable", {"name": ep.name})
-                continue
-
-            try:
-                signature = inspect.signature(target)
-                if len(signature.parameters) >= 1:
-                    target(cls)
+                eps = entry_points.select(group=group)
+            except Exception as exc:
+                if declared_critical:
+                    result.critical_entrypoint_failures.append(group)
+                    log.error(
+                        "plugin.entrypoint.critical_group_scan_failed",
+                        {"group": group, "error": str(exc)},
+                    )
                 else:
-                    target()
-                log.info("plugin.entrypoint.loaded", {"name": ep.name, "group": group})
-            except Exception as e:
-                log.warning("plugin.entrypoint.invoke_failed", {"name": ep.name, "error": str(e)})
+                    log.warning(
+                        "plugin.entrypoint.group_scan_failed",
+                        {"group": group, "error": str(exc)},
+                    )
+                continue
+
+            for ep in eps:
+                try:
+                    target = ep.load()
+                except Exception as exc:
+                    if declared_critical or isinstance(exc, CriticalPluginEntrypointFailure):
+                        result.critical_entrypoint_failures.append(ep.name)
+                        log.error(
+                            "plugin.entrypoint.critical_load_failed",
+                            {"name": ep.name, "group": group, "error": str(exc)},
+                        )
+                    else:
+                        log.warning(
+                            "plugin.entrypoint.load_failed",
+                            {"name": ep.name, "error": str(exc)},
+                        )
+                    continue
+
+                if not callable(target):
+                    if declared_critical:
+                        result.critical_entrypoint_failures.append(ep.name)
+                        log.error(
+                            "plugin.entrypoint.critical_not_callable",
+                            {"name": ep.name, "group": group},
+                        )
+                    else:
+                        log.warning("plugin.entrypoint.not_callable", {"name": ep.name})
+                    continue
+
+                try:
+                    signature = inspect.signature(target)
+                    if len(signature.parameters) >= 1:
+                        target(cls)
+                    else:
+                        target()
+                    log.info("plugin.entrypoint.loaded", {"name": ep.name, "group": group})
+                except Exception as exc:
+                    if declared_critical or isinstance(exc, CriticalPluginEntrypointFailure):
+                        result.critical_entrypoint_failures.append(ep.name)
+                        log.error(
+                            "plugin.entrypoint.critical_invoke_failed",
+                            {"name": ep.name, "group": group, "error": str(exc)},
+                        )
+                    else:
+                        log.warning(
+                            "plugin.entrypoint.invoke_failed",
+                            {"name": ep.name, "error": str(exc)},
+                        )
+        return result
 
     @classmethod
     def _load_sources_for_ext(

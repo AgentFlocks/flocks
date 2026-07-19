@@ -25,6 +25,7 @@ from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
 from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
+from flocks.hooks.execution import ExecutionStopped
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
 from flocks.server.static_webui import maybe_serve_static_webui
 
@@ -617,6 +618,8 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+app.state.critical_plugin_entrypoint_failure = False
+app.state.critical_plugin_entrypoint_failures = ()
 
 # Logger
 log = Log.create(service="server")
@@ -909,9 +912,30 @@ async def log_requests(request: Request, call_next):
 @app.middleware("http")
 async def auth_guard_middleware(request: Request, call_next):
     """Guard requests with local account auth, except public endpoints."""
+    request_app = request.scope.get("app")
+    if getattr(
+        getattr(request_app, "state", None),
+        "critical_plugin_entrypoint_failure",
+        False,
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": "ServiceUnavailable",
+                "message": "critical plugin entrypoint failure",
+            },
+        )
     try:
         await _run_http_middleware_hooks(request, {"stage": "before_auth"})
         _blocked, token, _user = await apply_auth_for_request(request)
+    except ExecutionStopped:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": "ServiceUnavailable",
+                "message": "critical plugin entrypoint failure",
+            },
+        )
     except StarletteHTTPException as exc:
         return JSONResponse(
             status_code=exc.status_code,
@@ -927,9 +951,13 @@ async def auth_guard_middleware(request: Request, call_next):
             content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
         )
 
+    from flocks.identity import reset_current_subject, set_current_subject
+
+    subject_token = set_current_subject(getattr(request.state, "subject", None))
     try:
         return await call_next(request)
     finally:
+        reset_current_subject(subject_token)
         clear_auth_context(token)
 
 
@@ -1194,11 +1222,23 @@ app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
 
 def _load_installed_package_plugins() -> None:
     """Load package entry-point plugins before the app starts serving requests."""
+    app.state.critical_plugin_entrypoint_failure = False
+    app.state.critical_plugin_entrypoint_failures = ()
     try:
         from flocks.plugin import PluginLoader
 
-        PluginLoader.load_all(project_dir=Path.cwd())
-        log.info("plugins.installed.loaded")
+        result = PluginLoader.load_all(project_dir=Path.cwd())
+        if result.has_critical_entrypoint_failure:
+            app.state.critical_plugin_entrypoint_failure = True
+            app.state.critical_plugin_entrypoint_failures = tuple(
+                result.critical_entrypoint_failures
+            )
+            log.error(
+                "plugins.installed.critical_failure",
+                {"entrypoints": result.critical_entrypoint_failures},
+            )
+        else:
+            log.info("plugins.installed.loaded")
     except Exception as e:
         log.warning("plugins.installed.load_failed", {"error": str(e)})
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 import json
 import time
@@ -7,16 +8,21 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from starlette.requests import Request
+from starlette.responses import Response
 
 from flocks.channel.base import InboundMessage
 from flocks.channel.inbound.dispatcher import InboundDispatcher
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
 from flocks.hooks.pipeline import HookBase, HookPipeline
+from flocks.identity import get_current_subject
 from flocks.ingest.kafka.manager import KafkaManager
 from flocks.ingest.syslog.manager import SyslogManager
+from flocks.plugin import PluginLoader
 from flocks.server import auth
+import flocks.server.app as server_app_module
+from flocks.server.app import auth_guard_middleware
 from flocks.server.routes import config as config_routes
 from flocks.server.routes import mcp as mcp_routes
 from flocks.server.routes import workflow as workflow_routes
@@ -98,6 +104,194 @@ async def test_unregistered_action_hook_leaves_operation_and_result_unmodified()
     assert actual is result
     assert payload == {"operation": "tool.execute", "arguments": {"none": None}}
     effect.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_binds_and_resets_valid_neutral_subject() -> None:
+    class SubjectLifecycle(HookBase):
+        async def ingress_before(self, _ctx):
+            return {
+                "context": {
+                    "subject": {
+                        "subject_id": "principal_42",
+                        "subject_type": "channel_user",
+                    }
+                }
+            }
+
+    HookPipeline.register("subject-lifecycle", SubjectLifecycle())
+    observed = []
+
+    async def effect() -> str:
+        observed.append(get_current_subject())
+        return "ok"
+
+    assert await execute_with_hooks(
+        {"operation": "channel.dispatch"},
+        effect,
+        before=HookPipeline.run_ingress_before,
+        after=HookPipeline.run_ingress_after,
+    ) == "ok"
+    assert observed[0].subject_id == "principal_42"
+    assert get_current_subject() is None
+
+
+@pytest.mark.asyncio
+async def test_untrusted_subject_context_never_bypasses_http_authentication() -> None:
+    class UntrustedContextHook(HookBase):
+        async def ingress_before(self, _ctx):
+            return {
+                "context": {
+                    "subject": {
+                        "subject_id": "untrusted-hook",
+                        "subject_type": "caller_metadata",
+                        "attributes": {"role": "admin"},
+                    }
+                }
+            }
+
+    HookPipeline.register("untrusted-context", UntrustedContextHook())
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/config",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        }
+    )
+
+    with pytest.raises(HTTPException, match="API Token"):
+        await auth.apply_auth_for_request(request)
+
+    assert request.state.subject.subject_id == "untrusted-hook"
+    assert not hasattr(request.state, "auth_user")
+    assert get_current_subject() is None
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_resets_neutral_subject_on_cancellation() -> None:
+    class SubjectLifecycle(HookBase):
+        async def ingress_before(self, _ctx):
+            return {
+                "context": {
+                    "subject": {
+                        "subject_id": "principal_42",
+                        "subject_type": "channel_user",
+                    }
+                }
+            }
+
+    HookPipeline.register("subject-lifecycle", SubjectLifecycle())
+
+    async def effect() -> None:
+        assert get_current_subject() is not None
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_with_hooks(
+            {"operation": "channel.dispatch"},
+            effect,
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    assert get_current_subject() is None
+
+
+@pytest.mark.asyncio
+async def test_main_server_critical_plugin_state_returns_503_before_auth(monkeypatch) -> None:
+    class _CriticalResult:
+        has_critical_entrypoint_failure = True
+        critical_entrypoint_failures = ["declared-critical-plugin"]
+
+    monkeypatch.setattr(
+        PluginLoader,
+        "load_all",
+        lambda **_kwargs: _CriticalResult(),
+    )
+    server_app_module._load_installed_package_plugins()
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/health",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "app": server_app_module.app,
+        }
+    )
+    call_next = AsyncMock(return_value=Response(status_code=204))
+
+    response = await auth_guard_middleware(request, call_next)
+
+    assert response.status_code == 503
+    assert server_app_module.app.state.critical_plugin_entrypoint_failure is True
+    call_next.assert_not_awaited()
+    server_app_module.app.state.critical_plugin_entrypoint_failure = False
+    server_app_module.app.state.critical_plugin_entrypoint_failures = ()
+
+
+@pytest.mark.asyncio
+async def test_channel_dispatcher_does_not_effect_after_critical_plugin_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", True)
+    dispatcher = InboundDispatcher()
+    dispatcher._dispatch = AsyncMock()
+    message = InboundMessage(
+        channel_id="test",
+        account_id="default",
+        message_id="critical-plugin-message",
+        sender_id="sender-1",
+        text="must not dispatch",
+    )
+
+    with pytest.raises(ExecutionStopped, match="critical plugin entrypoint failure"):
+        await dispatcher.dispatch(message)
+
+    dispatcher._dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_main_server_critical_loader_result_stops_channel_without_a_hook(
+    monkeypatch,
+) -> None:
+    """A failed main-server plugin load cannot leave Channel ingress open."""
+
+    class _CriticalResult:
+        has_critical_entrypoint_failure = True
+        critical_entrypoint_failures = ["declared-critical-plugin"]
+
+    def load_critical(**_kwargs):
+        PluginLoader._runtime_critical_entrypoint_failure = True
+        return _CriticalResult()
+
+    monkeypatch.setattr(PluginLoader, "load_all", load_critical)
+    server_app_module._load_installed_package_plugins()
+    dispatcher = InboundDispatcher()
+    dispatcher._dispatch = AsyncMock()
+
+    try:
+        with pytest.raises(ExecutionStopped, match="critical plugin entrypoint failure"):
+            await dispatcher.dispatch(
+                InboundMessage(
+                    channel_id="test",
+                    account_id="default",
+                    message_id="main-server-critical-plugin-message",
+                    sender_id="sender-1",
+                    text="must not dispatch",
+                )
+            )
+        dispatcher._dispatch.assert_not_awaited()
+    finally:
+        PluginLoader.clear_runtime_critical_entrypoint_failure()
+        server_app_module.app.state.critical_plugin_entrypoint_failure = False
+        server_app_module.app.state.critical_plugin_entrypoint_failures = ()
 
 
 @pytest.mark.asyncio

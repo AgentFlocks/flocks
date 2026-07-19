@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from flocks.hooks.execution import execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_history_for_storage,
@@ -213,19 +214,29 @@ class TriggerRuntime:
         trigger: TriggerDefinition,
         mapped_inputs: Dict[str, Any],
     ) -> Dict[str, Any]:
+        action_payload = {
+            "operation": "workflow.trigger.execute",
+            "workflow_id": workflow_id,
+            "trigger": trigger,
+            "inputs": mapped_inputs,
+        }
         return await execute_with_hooks(
             {
-                "operation": "workflow.trigger.execute",
-                "workflow_id": workflow_id,
-                "trigger": trigger,
-                "inputs": mapped_inputs,
+                **action_payload,
+                "transport": "headless",
+                "entry": "workflow_trigger",
             },
-            lambda: self._execute_workflow_effect(
-                workflow_id=workflow_id,
-                workflow_json=workflow_json,
-                trigger=trigger,
-                mapped_inputs=mapped_inputs,
+            lambda: execute_with_hooks(
+                action_payload,
+                lambda: self._execute_workflow_effect(
+                    workflow_id=workflow_id,
+                    workflow_json=workflow_json,
+                    trigger=trigger,
+                    mapped_inputs=mapped_inputs,
+                ),
             ),
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
         )
 
     async def _execute_workflow_effect(

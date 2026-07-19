@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import hmac
 import json
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from flocks.hooks.execution import execute_with_hooks
+from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
@@ -23,6 +26,24 @@ from flocks.workflow.tool_context import build_workflow_tool_context
 
 log = Log.create(service="workflow.service_runtime")
 _SERVICE_API_KEY_ENV = "FLOCKS_WORKFLOW_SERVICE_API_KEY"
+
+
+def api_key_fingerprint(api_key: str) -> str:
+    """Return the secret-safe stable ID emitted for a validated service key."""
+    return f"sha256:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()}"
+
+
+def _load_runtime_plugins() -> str | None:
+    """Load generic plugins, returning only a generic critical error marker."""
+    try:
+        from flocks.plugin import PluginLoader
+
+        result = PluginLoader.load_all(project_dir=Path.cwd())
+        if result.has_critical_entrypoint_failure:
+            return "critical plugin entrypoint failure"
+    except Exception as exc:
+        log.warning("workflow_service.plugins.load_failed", {"error": str(exc)})
+    return None
 
 
 class InvokeRequest(BaseModel):
@@ -47,13 +68,17 @@ def create_service_app(
     async def lifespan(_app: FastAPI):
         _app.state.mcp_ready = False
         _app.state.mcp_error = None
-        try:
-            await MCP.init()
-        except Exception as exc:
-            _app.state.mcp_error = str(exc)
-            log.warning("workflow_service.mcp.init_failed", {"error": str(exc)})
+        critical_plugin_error = _load_runtime_plugins()
+        if critical_plugin_error is not None:
+            _app.state.mcp_error = critical_plugin_error
         else:
-            _app.state.mcp_ready = True
+            try:
+                await MCP.init()
+            except Exception as exc:
+                _app.state.mcp_error = str(exc)
+                log.warning("workflow_service.mcp.init_failed", {"error": str(exc)})
+            else:
+                _app.state.mcp_ready = True
         try:
             yield
         finally:
@@ -122,14 +147,28 @@ def create_service_app(
                     tool_context=tool_context,
                 )
 
+            action_payload = {
+                "operation": "workflow.service.invoke",
+                "workflow_id": app.state.workflow_id,
+                "release_id": app.state.release_id,
+                "inputs": req.inputs,
+            }
+            ingress_payload = {
+                **action_payload,
+                "transport": "headless",
+                "entry": "workflow_service",
+            }
+            if expected_api_key:
+                ingress_payload["evidence"] = {
+                    "auth_scheme": "api_key",
+                    "api_key_id": api_key_fingerprint(str(expected_api_key)),
+                }
+
             result = await execute_with_hooks(
-                {
-                    "operation": "workflow.service.invoke",
-                    "workflow_id": app.state.workflow_id,
-                    "release_id": app.state.release_id,
-                    "inputs": req.inputs,
-                },
-                _effect,
+                ingress_payload,
+                lambda: execute_with_hooks(action_payload, _effect),
+                before=HookPipeline.run_ingress_before,
+                after=HookPipeline.run_ingress_after,
             )
             return {
                 "request_id": req.request_id,
@@ -141,6 +180,11 @@ def create_service_app(
                 "error": result.error,
                 "duration_ms": int((time.time() - started) * 1000),
             }
+        except ExecutionStopped as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Workflow invocation stopped by extension",
+            ) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=500,

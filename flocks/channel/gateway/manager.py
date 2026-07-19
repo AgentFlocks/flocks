@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 from flocks.channel.base import ChannelPlugin, ChannelStatus
 from flocks.channel.inbound.dispatcher import InboundDispatcher
+from flocks.identity import mint_channel_ingress_provenance
 from flocks.channel.registry import ChannelRegistry, default_registry
 from flocks.utils.log import Log
 
@@ -333,10 +334,21 @@ class GatewayManager:
         plugin: ChannelPlugin,
         dispatch: Callable,
     ) -> Callable:
-        """Wrap *dispatch* so that each inbound message records a timestamp."""
+        """Mint neutral provenance before forwarding a gateway message."""
         async def _on_message(msg) -> None:
             plugin.record_message()
-            await dispatch(msg)
+            await dispatch(
+                msg,
+                provenance=mint_channel_ingress_provenance(
+                    channel_id=msg.channel_id,
+                    account_id=msg.account_id,
+                    message_id=msg.message_id,
+                    sender_id=msg.sender_id,
+                    chat_type=msg.chat_type.value,
+                    message=msg,
+                    evidence=msg.raw,
+                ),
+            )
         return _on_message
 
     def record_message(self, channel_id: str) -> None:

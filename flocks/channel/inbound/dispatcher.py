@@ -19,6 +19,7 @@ from typing import Any, Optional
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
 from flocks.channel.inbound.session_binding import SessionBindingService
 from flocks.config.config import ChannelConfig
+from flocks.identity import ChannelIngressProvenance
 from flocks.utils.log import Log
 
 log = Log.create(service="channel.dispatcher")
@@ -271,7 +272,12 @@ class InboundDispatcher:
         self._session_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._group_context: OrderedDict[str, deque[_GroupContextEntry]] = OrderedDict()
 
-    async def dispatch(self, msg: InboundMessage) -> None:
+    async def dispatch(
+        self,
+        msg: InboundMessage,
+        *,
+        provenance: ChannelIngressProvenance | None = None,
+    ) -> None:
         from flocks.hooks.execution import execute_with_hooks
         from flocks.hooks.pipeline import HookPipeline
 
@@ -288,6 +294,7 @@ class InboundDispatcher:
                 "message": msg,
                 "text": msg.text,
                 "evidence": msg.raw,
+                "provenance": provenance,
             },
             lambda: self._dispatch(msg),
             before=HookPipeline.run_ingress_before,

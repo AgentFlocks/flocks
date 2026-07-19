@@ -8,6 +8,7 @@ import uuid
 from typing import Any, Dict, List
 
 from flocks.hooks.execution import execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
@@ -602,18 +603,33 @@ class SyslogManager:
             return exec_data
 
         try:
+            action_payload = {
+                "operation": "workflow.trigger.syslog",
+                "workflow_id": workflow_id,
+                "trigger": trigger,
+                "event": event,
+                "metadata": {
+                    "legacy_compat": True,
+                    "trigger_type": "syslog",
+                },
+            }
             await execute_with_hooks(
                 {
-                    "operation": "workflow.trigger.syslog",
-                    "workflow_id": workflow_id,
-                    "trigger": trigger,
-                    "event": event,
+                    **action_payload,
+                    "transport": "headless",
+                    "entry": "syslog",
+                    "legacy_compat": True,
                 },
-                lambda: self._dispatcher.dispatch(
-                    trigger=trigger,
-                    event=event,
-                    executor=_executor,
+                lambda: execute_with_hooks(
+                    action_payload,
+                    lambda: self._dispatcher.dispatch(
+                        trigger=trigger,
+                        event=event,
+                        executor=_executor,
+                    ),
                 ),
+                before=HookPipeline.run_ingress_before,
+                after=HookPipeline.run_ingress_after,
             )
         except TriggerDispatchError as exc:
             log.warning(
