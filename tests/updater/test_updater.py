@@ -1294,9 +1294,29 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "expected_sources", "expected_mirror_args"),
+    [
+        pytest.param("en-US", ["github", "gitee"], [], id="english-upgrade"),
+        pytest.param(
+            "zh-CN",
+            ["gitee", "github"],
+            [
+                "--uv-default-index",
+                "https://mirrors.aliyun.com/pypi/simple",
+                "--npm-registry",
+                "https://registry.npmmirror.com/",
+            ],
+            id="chinese-upgrade",
+        ),
+    ],
+)
 async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    locale: str,
+    expected_sources: list[str],
+    expected_mirror_args: list[str],
 ) -> None:
     archive_path = tmp_path / "flocks.zip"
     archive_path.write_text("archive", encoding="utf-8")
@@ -1312,11 +1332,12 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
 
     events: list[str] = []
     popen_calls: list[list[str]] = []
+    download_sources: list[str] = []
 
     async def fake_get_updater_config():
         return SimpleNamespace(
             archive_format="zip",
-            sources=["github"],
+            sources=["github", "gitee"],
             repo="AgentFlocks/Flocks",
             token=None,
             gitee_token=None,
@@ -1325,7 +1346,8 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
             gitee_repo=None,
         )
 
-    async def fake_download_with_fallback(**_kwargs):
+    async def fake_download_with_fallback(**kwargs):
+        download_sources.extend(kwargs["sources"])
         return archive_path
 
     async def fake_sleep(_seconds) -> None:
@@ -1379,10 +1401,11 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
     with pytest.raises(SystemExit, match="0"):
-        async for _step in updater.perform_update("2026.4.1"):
+        async for _step in updater.perform_update("2026.4.1", locale=locale):
             pass
 
     assert events == ["backup", "sleep"]
+    assert download_sources == expected_sources
     assert len(popen_calls) == 1
     handoff_argv = popen_calls[0]
     assert handoff_argv[:3] == ["/usr/bin/python3", "-m", "flocks.updater.restart_handoff"]
@@ -1395,6 +1418,12 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     assert handoff_argv[handoff_argv.index("--daemon-pid") + 1] == "2468"
     assert "--was-running" in handoff_argv
     assert "--prepare-handover" not in handoff_argv
+    if expected_mirror_args:
+        mirror_index = handoff_argv.index("--uv-default-index")
+        assert handoff_argv[mirror_index : mirror_index + len(expected_mirror_args)] == expected_mirror_args
+    else:
+        assert "--uv-default-index" not in handoff_argv
+        assert "--npm-registry" not in handoff_argv
     assert handoff_argv[handoff_argv.index("--") + 1 :] == ["/usr/bin/python3"]
 
 

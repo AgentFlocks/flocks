@@ -16,6 +16,18 @@ from flocks.cli.service_config import service_config_payload
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="uses Unix executable shims and symlinks")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCALE_HANDOFF_ARGS = [
+    pytest.param([], id="english-upgrade"),
+    pytest.param(
+        [
+            "--uv-default-index",
+            "https://mirrors.aliyun.com/pypi/simple",
+            "--npm-registry",
+            "https://registry.npmmirror.com/",
+        ],
+        id="chinese-upgrade",
+    ),
+]
 
 
 def _free_port() -> int:
@@ -128,7 +140,11 @@ def _wait_for_marker(marker: Path, expected: str) -> None:
     raise AssertionError(f"restart marker was not written: {marker}")
 
 
-def test_v2026_7_1_real_handoff_command_restarts_with_current_code(tmp_path: Path) -> None:
+@pytest.mark.parametrize("locale_args", LOCALE_HANDOFF_ARGS)
+def test_v2026_7_1_real_handoff_command_restarts_with_current_code(
+    tmp_path: Path,
+    locale_args: list[str],
+) -> None:
     install_root, fake_uv, env = _prepare_isolated_runtime(tmp_path)
     marker = tmp_path / "v2026.7.1-restarted"
     backup_path = tmp_path / "backup.tar.gz"
@@ -149,6 +165,7 @@ def test_v2026_7_1_real_handoff_command_restarts_with_current_code(tmp_path: Pat
     ]
     command.extend(
         [
+            *locale_args,
             "--backup-path",
             str(backup_path),
             "--",
@@ -163,7 +180,11 @@ def test_v2026_7_1_real_handoff_command_restarts_with_current_code(tmp_path: Pat
     _wait_for_marker(marker, "v2026.7.1")
 
 
-def test_v2026_7_15_real_handoff_command_restarts_with_current_code(tmp_path: Path) -> None:
+@pytest.mark.parametrize("locale_args", LOCALE_HANDOFF_ARGS)
+def test_v2026_7_15_real_handoff_command_restarts_with_current_code(
+    tmp_path: Path,
+    locale_args: list[str],
+) -> None:
     install_root, fake_uv, env = _prepare_isolated_runtime(tmp_path)
     marker = tmp_path / "v2026.7.15-restarted"
     backup_path = tmp_path / "backup.tar.gz"
@@ -179,6 +200,7 @@ def test_v2026_7_15_real_handoff_command_restarts_with_current_code(tmp_path: Pa
     )
     command.extend(
         [
+            *locale_args,
             "--backup-path",
             str(backup_path),
             "--prepare-handover",
@@ -194,7 +216,11 @@ def test_v2026_7_15_real_handoff_command_restarts_with_current_code(tmp_path: Pa
     _wait_for_marker(marker, "v2026.7.15")
 
 
-def test_current_real_upgrade_handoff_command_restarts_with_replaced_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("locale_args", LOCALE_HANDOFF_ARGS)
+def test_current_real_upgrade_handoff_command_restarts_with_replaced_source(
+    tmp_path: Path,
+    locale_args: list[str],
+) -> None:
     install_root, fake_uv, env = _prepare_isolated_runtime(tmp_path)
     marker = tmp_path / "current-restarted"
     env["FLOCKS_RESTART_MARKER"] = str(marker)
@@ -235,6 +261,7 @@ def test_current_real_upgrade_handoff_command_restarts_with_replaced_source(tmp_
     )
     command.extend(
         [
+            *locale_args,
             "--mode",
             "upgrade",
             "--content-root",
