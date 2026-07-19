@@ -133,6 +133,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pro-bundle-manifest-path")
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
+    parser.add_argument("--prepare-handover", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.restart_argv and args.restart_argv[0] == "--":
@@ -464,7 +465,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    if not _ensure_backend_port_free(args.backend_port):
+    supervisor_stopped = False
+    if args.prepare_handover:
+        supervisor_stopped = _stop_supervisor_before_restart(
+            backend_port=args.backend_port,
+            service_ports=(args.frontend_port,),
+        )
+        if not supervisor_stopped:
+            _record_handoff_log("legacy_handover_stop_timeout")
+            _cleanup_dir(args.cleanup_dir)
+            return 1
+    elif not _ensure_backend_port_free(args.backend_port):
         _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
         _cleanup_dir(args.cleanup_dir)
         return 1
@@ -479,7 +490,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 1
     _report_pending_pro_bundle_install_receipt(args)
 
-    if not _stop_supervisor_before_restart():
+    if not supervisor_stopped and not _stop_supervisor_before_restart():
         _record_handoff_log("supervisor_stop_timeout")
         _cleanup_dir(args.cleanup_dir)
         return 1

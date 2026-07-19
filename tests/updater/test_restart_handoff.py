@@ -91,7 +91,34 @@ def _simple_upgrade_handoff_args(tmp_path: Path) -> list[str]:
     ]
 
 
-def test_upgrade_handoff_owns_stop_replace_install_and_restart_order(
+def _v2026_7_1_handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
+    """Build the handoff protocol emitted by the v2026.7.1 updater."""
+    args = _handoff_args(tmp_path, restart_argv)
+    args[args.index("--install-root"):args.index("--install-root")] = [
+        "--backend-pid-file",
+        str(tmp_path / "backend.pid"),
+    ]
+    separator_index = args.index("--")
+    args[separator_index:separator_index] = [
+        "--backup-path",
+        str(tmp_path / "backup.tar.gz"),
+    ]
+    return args
+
+
+def _v2026_7_15_handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
+    """Build the handoff protocol emitted by the v2026.7.15 updater."""
+    args = _handoff_args(tmp_path, restart_argv)
+    separator_index = args.index("--")
+    args[separator_index:separator_index] = [
+        "--backup-path",
+        str(tmp_path / "backup.tar.gz"),
+        "--prepare-handover",
+    ]
+    return args
+
+
+def test_current_version_upgrade_handoff_stops_replaces_installs_and_restarts(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -393,6 +420,94 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
 
     assert code == 0
     assert f"spawn:{restart_argv}:{tmp_path}:True" in events
+
+
+def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path: Path) -> None:
+    events: list[str] = []
+    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start", "--no-browser"]
+    args = _v2026_7_1_handoff_args(tmp_path, restart_argv)
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_ensure_backend_port_free",
+        lambda backend_port: events.append(f"free-port:{backend_port}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_run_upgrade_tasks",
+        lambda _args: events.append("install") or None,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda: events.append("stop-supervisor") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
+        or SimpleNamespace(pid=4321),
+    )
+
+    assert restart_handoff.run(args) == 0
+    assert events == [
+        "wait-parent:1234",
+        "free-port:8000",
+        "install",
+        "stop-supervisor",
+        f"spawn:{restart_argv}:{tmp_path}:True",
+    ]
+
+
+def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start", "--no-browser"]
+    args = _v2026_7_15_handoff_args(tmp_path, restart_argv)
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_ensure_backend_port_free",
+        lambda _backend_port: pytest.fail("legacy handover must stop the supervisor first"),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda **kwargs: events.append(f"stop-supervisor:{kwargs}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_run_upgrade_tasks",
+        lambda _args: events.append("install") or None,
+    )
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
+        or SimpleNamespace(pid=4321),
+    )
+
+    assert restart_handoff.run(args) == 0
+    assert events == [
+        "wait-parent:1234",
+        "stop-supervisor:{'backend_port': 8000, 'service_ports': (5173,)}",
+        "install",
+        f"spawn:{restart_argv}:{tmp_path}:True",
+    ]
 
 
 def test_restart_only_waits_for_port_after_parent_exit(
