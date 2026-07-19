@@ -1887,19 +1887,11 @@ def _spawn_detached_process(
 
 
 def _spawn_restart_handoff(command: list[str], *, cwd: Path) -> subprocess.Popen:
-    creationflags = 0
-    kwargs: dict[str, object] = {}
-    if sys.platform == "win32":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
-        if startupinfo_cls is not None:
-            startupinfo = startupinfo_cls()
-            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
-            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
-            kwargs["startupinfo"] = startupinfo
-    else:
-        kwargs["start_new_session"] = True
-    return subprocess.Popen(command, cwd=cwd, close_fds=True, creationflags=creationflags, **kwargs)
+    return _spawn_detached_process(
+        command,
+        cwd=cwd,
+        log_path=_flocks_root() / "logs" / "backend.log",
+    )
 
 
 def _handoff_service_config():
@@ -2506,11 +2498,7 @@ async def perform_pro_bundle_downgrade(
             current_version=current_version,
         )
         log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv})
-        subprocess.Popen(
-            handoff_argv,
-            cwd=install_root,
-            close_fds=True,
-        )
+        _spawn_restart_handoff(handoff_argv, cwd=install_root)
         os._exit(0)
     except Exception as exc:
         log.error("updater.downgrade.restart_failed", {"error": str(exc)})
@@ -2535,6 +2523,7 @@ async def perform_update(
     locale: str | None = None,
     region: str | None = None,
     force_console_manifest: bool = False,
+    wait_for_handoff: bool = False,
 ) -> AsyncGenerator[UpdateProgress, None]:
     """
     Async generator that executes the upgrade steps and yields progress events.
@@ -2816,6 +2805,7 @@ async def perform_update(
             pro_bundle_manifest_path=pro_bundle_manifest_path,
             bundle_sha256=bundle_sha256,
             cleanup_dir=tmp_dir,
+            wait_for_parent=not wait_for_handoff,
         )
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
@@ -2853,7 +2843,22 @@ async def perform_update(
                 "restart_argv": restart_argv,
             },
         )
-        _spawn_restart_handoff(handoff_argv, cwd=install_root)
+        handoff_process = _spawn_restart_handoff(handoff_argv, cwd=install_root)
+        if wait_for_handoff:
+            returncode = await asyncio.to_thread(handoff_process.wait)
+            if returncode != 0:
+                yield UpdateProgress(
+                    stage="error",
+                    message=f"Upgrade handoff failed with exit code {returncode}. See backend.log for details.",
+                    success=False,
+                )
+                return
+            yield UpdateProgress(
+                stage="done",
+                message=f"Upgraded to {_version_label(effective_update_version)}",
+                success=True,
+            )
+            return
         os._exit(0)
     except Exception as exc:
         log.error("updater.restart.handoff_spawn_failed", {"error": str(exc)})
@@ -2980,6 +2985,7 @@ def _build_restart_handoff_argv(
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
     cleanup_dir: Path | None = None,
+    wait_for_parent: bool = True,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
     if not restart_argv:
@@ -3022,27 +3028,31 @@ def _build_restart_handoff_argv(
         restart_argv[0],
         "-m",
         "flocks.updater.restart_handoff",
-        "--parent-pid",
-        str(os.getpid()),
-        "--backend-host",
-        str(config.backend_host),
-        "--backend-port",
-        str(config.backend_port),
-        "--frontend-host",
-        str(config.frontend_host),
-        "--frontend-port",
-        str(config.frontend_port),
-        "--install-root",
-        str(install_root),
-        "--uv-path",
-        uv_path,
-        "--sync-timeout",
-        str(sync_timeout),
-        "--version",
-        version,
-        "--current-version",
-        current_version,
     ]
+    if wait_for_parent:
+        argv.extend(["--parent-pid", str(os.getpid())])
+    argv.extend(
+        [
+            "--backend-host",
+            str(config.backend_host),
+            "--backend-port",
+            str(config.backend_port),
+            "--frontend-host",
+            str(config.frontend_host),
+            "--frontend-port",
+            str(config.frontend_port),
+            "--install-root",
+            str(install_root),
+            "--uv-path",
+            uv_path,
+            "--sync-timeout",
+            str(sync_timeout),
+            "--version",
+            version,
+            "--current-version",
+            current_version,
+        ]
+    )
     if source_upgrade:
         argv.extend(
             [

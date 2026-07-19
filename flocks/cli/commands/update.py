@@ -128,6 +128,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         bundle_format=info.bundle_format,
         restart=True,
         region=region,
+        wait_for_handoff=True,
     ):
         if progress.stage == "error":
             _finish_active(success=False)

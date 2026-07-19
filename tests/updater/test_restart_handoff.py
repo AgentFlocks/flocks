@@ -173,6 +173,43 @@ def test_current_version_upgrade_handoff_stops_replaces_installs_and_restarts(
     assert not cleanup_dir.exists()
 
 
+def test_current_version_upgrade_handoff_can_run_without_waiting_for_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    args = _simple_upgrade_handoff_args(tmp_path)
+    parent_index = args.index("--parent-pid")
+    del args[parent_index : parent_index + 2]
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda _parent_pid: pytest.fail("parent wait must be skipped"),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_services_before_upgrade",
+        lambda _args: events.append("stop") or True,
+    )
+    monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: events.append("replace"))
+    monkeypatch.setattr(
+        restart_handoff,
+        "_run_upgrade_tasks",
+        lambda _args: events.append("install") or None,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_start_service_after_upgrade",
+        lambda _args: events.append("start") or (True, "", ""),
+    )
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **_kwargs: None)
+
+    assert restart_handoff.run(args) == 0
+    assert events == ["stop", "replace", "install", "start"]
+
+
 @pytest.mark.parametrize(
     ("host", "port"),
     [

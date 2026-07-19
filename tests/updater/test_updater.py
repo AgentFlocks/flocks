@@ -114,6 +114,30 @@ def test_capture_service_snapshot_preserves_complete_supervisor_config(
     assert snapshot.was_running is True
 
 
+def test_spawn_restart_handoff_redirects_output_to_backend_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    flocks_root = tmp_path / "flocks-root"
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('handoff stdout'); print('handoff stderr', file=sys.stderr)",
+    ]
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+
+    process = updater._spawn_restart_handoff(command, cwd=tmp_path)
+
+    assert process.wait(timeout=10) == 0
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    backend_output = (flocks_root / "logs" / "backend.log").read_text(encoding="utf-8")
+    assert "handoff stdout" in backend_output
+    assert "handoff stderr" in backend_output
+
+
 def test_capture_service_snapshot_allows_stopped_service_without_control_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -851,6 +875,29 @@ def test_build_restart_handoff_argv_rewrites_serve_to_managed_start(
     ]
 
 
+def test_build_restart_handoff_argv_can_skip_parent_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        updater,
+        "_handoff_service_config",
+        lambda: service_manager.ServiceConfig(),
+    )
+
+    argv = updater._build_restart_handoff_argv(
+        ["python"],
+        tmp_path,
+        uv_path="uv",
+        sync_timeout=300,
+        version="2026.4.1",
+        current_version="2026.3.31",
+        wait_for_parent=False,
+    )
+
+    assert "--parent-pid" not in argv
+
+
 def test_refresh_global_cli_entry_creates_symlink_on_unix(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1295,9 +1342,9 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("locale", "expected_sources", "expected_mirror_args"),
+    ("locale", "expected_sources", "expected_mirror_args", "wait_for_handoff"),
     [
-        pytest.param("en-US", ["github", "gitee"], [], id="english-upgrade"),
+        pytest.param("en-US", ["github", "gitee"], [], False, id="english-detached-upgrade"),
         pytest.param(
             "zh-CN",
             ["gitee", "github"],
@@ -1307,7 +1354,8 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
                 "--npm-registry",
                 "https://registry.npmmirror.com/",
             ],
-            id="chinese-upgrade",
+            True,
+            id="chinese-waited-upgrade",
         ),
     ],
 )
@@ -1317,6 +1365,7 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     locale: str,
     expected_sources: list[str],
     expected_mirror_args: list[str],
+    wait_for_handoff: bool,
 ) -> None:
     archive_path = tmp_path / "flocks.zip"
     archive_path.write_text("archive", encoding="utf-8")
@@ -1397,16 +1446,31 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     monkeypatch.setattr(
         updater,
         "_spawn_restart_handoff",
-        lambda argv, **_kwargs: popen_calls.append(list(argv)) or SimpleNamespace(pid=4321),
+        lambda argv, **_kwargs: popen_calls.append(list(argv))
+        or SimpleNamespace(pid=4321, wait=lambda: events.append("wait") or 0),
     )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
-    with pytest.raises(SystemExit, match="0"):
-        async for step in updater.perform_update("2026.4.1", locale=locale):
+    if wait_for_handoff:
+        async for step in updater.perform_update(
+            "2026.4.1",
+            locale=locale,
+            wait_for_handoff=True,
+        ):
             progress_stages.append(step.stage)
+    else:
+        with pytest.raises(SystemExit, match="0"):
+            async for step in updater.perform_update("2026.4.1", locale=locale):
+                progress_stages.append(step.stage)
 
-    assert events == ["backup", "sleep"]
-    assert progress_stages == ["fetching", "backing_up", "applying", "restarting"]
+    expected_events = ["backup", "sleep"]
+    expected_stages = ["fetching", "backing_up", "applying", "restarting"]
+    if wait_for_handoff:
+        expected_events.append("wait")
+        expected_stages.append("done")
+
+    assert events == expected_events
+    assert progress_stages == expected_stages
     assert download_sources == expected_sources
     assert len(popen_calls) == 1
     handoff_argv = popen_calls[0]
@@ -1420,6 +1484,7 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     assert handoff_argv[handoff_argv.index("--daemon-pid") + 1] == "2468"
     assert "--was-running" in handoff_argv
     assert "--prepare-handover" not in handoff_argv
+    assert ("--parent-pid" in handoff_argv) is not wait_for_handoff
     if expected_mirror_args:
         mirror_index = handoff_argv.index("--uv-default-index")
         assert handoff_argv[mirror_index : mirror_index + len(expected_mirror_args)] == expected_mirror_args

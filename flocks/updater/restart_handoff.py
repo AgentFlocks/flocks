@@ -111,7 +111,7 @@ def _stop_supervisor_before_restart(
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flocks restart handoff helper")
     parser.add_argument("--mode", choices=("restart", "upgrade"), default="restart")
-    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-pid", type=int)
     parser.add_argument("--backend-host", required=True)
     parser.add_argument("--backend-port", type=int, required=True)
     parser.add_argument("--frontend-host", required=True)
@@ -346,7 +346,7 @@ def _run_simple_upgrade(args: argparse.Namespace) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    if not _wait_for_parent_exit(args.parent_pid):
+    if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
         error = f"parent exit timed out: {args.parent_pid}"
         _record_handoff_log(error)
         _write_upgrade_result(args=args, phase="failed", failed_stage="wait_parent", error=error)
@@ -466,7 +466,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         f"frontend={args.frontend_host}:{args.frontend_port}"
     )
 
-    if not _wait_for_parent_exit(args.parent_pid):
+    if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
         _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
         _cleanup_dir(args.cleanup_dir)
         return 1

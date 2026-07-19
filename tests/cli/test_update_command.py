@@ -120,6 +120,7 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch, t
         restart: bool = True,
         locale: str | None = None,
         region: str | None = None,
+        wait_for_handoff: bool = False,
     ):
         captured["latest_tag"] = latest_tag
         captured["zipball_url"] = zipball_url
@@ -128,6 +129,7 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch, t
         captured["bundle_format"] = bundle_format
         captured["perform_region"] = region
         captured["restart"] = restart
+        captured["wait_for_handoff"] = wait_for_handoff
         async for step in _fake_progress():
             yield step
 
@@ -154,12 +156,16 @@ def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch, t
         "bundle_format": None,
         "perform_region": "cn",
         "restart": True,
+        "wait_for_handoff": True,
     }
     assert "已切换为中国镜像源" not in output.getvalue()
 
 
 async def _fake_progress():
     yield UpdateProgress(stage="fetching", message="fetching")
+    yield UpdateProgress(stage="backing_up", message="backing up")
+    yield UpdateProgress(stage="applying", message="applying")
+    yield UpdateProgress(stage="restarting", message="restarting")
     yield UpdateProgress(stage="done", message="done", success=True)
 
 
@@ -195,6 +201,7 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         restart: bool = True,
         locale: str | None = None,
         region: str | None = None,
+        wait_for_handoff: bool = False,
     ):
         captured["latest_tag"] = latest_tag
         captured["zipball_url"] = zipball_url
@@ -203,6 +210,7 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         captured["bundle_format"] = bundle_format
         captured["perform_region"] = region
         captured["restart"] = restart
+        captured["wait_for_handoff"] = wait_for_handoff
         async for step in _fake_progress():
             yield step
 
@@ -223,8 +231,10 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         "check_region": "cn",
         "perform_region": "cn",
         "restart": True,
+        "wait_for_handoff": True,
     }
     assert "强制重新安装 v2026.4.2" in output.getvalue()
+    assert "[4/4] 重启服务...  ✓" in output.getvalue()
     assert "升级完成" in output.getvalue()
 
 
@@ -263,8 +273,9 @@ def test_update_delegates_stop_install_build_and_restart_to_handoff(monkeypatch,
         restart: bool = True,
         locale: str | None = None,
         region: str | None = None,
+        wait_for_handoff: bool = False,
     ):
-        events.append("perform_update")
+        events.append(f"perform_update:{wait_for_handoff}")
         async for step in _fake_progress():
             yield step
 
@@ -282,7 +293,7 @@ def test_update_delegates_stop_install_build_and_restart_to_handoff(monkeypatch,
     asyncio.run(update_cmd._update(check=False, yes=False, force=False, region=None))
 
     assert confirm_prompts == ["\n是否使用中国镜像进行升级？", "\n是否立即升级？"]
-    assert events == ["perform_update"]
+    assert events == ["perform_update:True"]
     assert "已执行 flocks stop" not in output.getvalue()
 
 
@@ -317,6 +328,7 @@ def test_update_reports_handoff_preparation_failure(monkeypatch, tmp_path) -> No
         restart: bool = True,
         locale: str | None = None,
         region: str | None = None,
+        wait_for_handoff: bool = False,
     ):
         yield UpdateProgress(stage="error", message="handoff preparation failed", success=False)
 

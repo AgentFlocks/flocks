@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import zipfile
 import json
+import sys
+import zipfile
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -544,6 +545,68 @@ async def test_perform_pro_bundle_downgrade_continues_when_report_callback_fails
     assert not install_marker.exists()
     archived_marker = list((run_dir / "archive").glob("pro-bundle-installed-*.json"))
     assert len(archived_marker) == 1
+
+
+@pytest.mark.asyncio
+async def test_perform_pro_bundle_downgrade_uses_restart_handoff_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from flocks.updater import deploy as deploy_mod
+
+    flocks_root = tmp_path / "flocks-root"
+    run_dir = flocks_root / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "pro-bundle-installed.json").write_text(
+        json.dumps(
+            {
+                "bundle_version": "v2026.6.24",
+                "core_version": "v2026.6.21",
+                "flockspro_component_version": "v2026.6.24-pro",
+                "installed_at": "2026-06-24T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    handoff_argv = [sys.executable, "-m", "flocks.updater.restart_handoff"]
+    spawn_calls: list[tuple[list[str], Path]] = []
+
+    async def fake_uninstall_pro_component(*, uv_path, install_root, env):
+        return None
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.6.24")
+    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_uninstall_pro_component", fake_uninstall_pro_component)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _version: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda _install_root: [sys.executable])
+    monkeypatch.setattr(updater, "_build_restart_handoff_argv", lambda *_args, **_kwargs: handoff_argv)
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, *, cwd: spawn_calls.append((argv, cwd)) or SimpleNamespace(pid=4321),
+    )
+    monkeypatch.setattr(
+        updater.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("downgrade must use the restart handoff spawn helper"),
+    )
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_pro_bundle_downgrade():
+            pass
+
+    assert spawn_calls == [(handoff_argv, install_root)]
 
 
 @pytest.mark.asyncio
