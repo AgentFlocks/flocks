@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,6 +20,15 @@ from flocks.server import auth
 from flocks.server.routes import config as config_routes
 from flocks.server.routes import mcp as mcp_routes
 from flocks.server.routes import workflow as workflow_routes
+from flocks.tool.registry import (
+    ParameterType,
+    Tool,
+    ToolCategory,
+    ToolContext,
+    ToolInfo,
+    ToolParameter,
+    ToolResult,
+)
 from flocks.workflow import service_runtime
 from flocks.workflow.triggers.models import TriggerDefinition
 from flocks.workflow.triggers.runtime import TriggerRuntime
@@ -88,6 +98,53 @@ async def test_unregistered_action_hook_leaves_operation_and_result_unmodified()
     assert actual is result
     assert payload == {"operation": "tool.execute", "arguments": {"none": None}}
     effect.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_tool_lifecycle_preserves_original_arguments_before_remapping_and_coercion() -> None:
+    observed: list[dict] = []
+    handler_kwargs: dict = {}
+
+    class LifecycleRecorder(HookBase):
+        async def action_before(self, ctx):
+            observed.append(dict(ctx.input))
+
+    async def handler(_ctx: ToolContext, **kwargs) -> ToolResult:
+        handler_kwargs.update(kwargs)
+        return ToolResult(success=True, output="ok")
+
+    HookPipeline.register("lifecycle-recorder", LifecycleRecorder())
+    tool = Tool(
+        info=ToolInfo(
+            name="raw-lifecycle-arguments",
+            description="Preserve raw lifecycle arguments",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(name="stringValue", type=ParameterType.STRING),
+                ToolParameter(name="mappingValue", type=ParameterType.STRING),
+                ToolParameter(name="listValue", type=ParameterType.STRING),
+            ],
+        ),
+        handler=handler,
+    )
+    raw_mapping = {"nested": [1]}
+    raw_list = ["item", {"enabled": True}]
+
+    result = await tool.execute(
+        ToolContext(session_id="session-1", message_id="message-1"),
+        string_value=None,
+        mapping_value=raw_mapping,
+        list_value=raw_list,
+    )
+
+    assert result.success is True
+    lifecycle_arguments = observed[0]["tool"]["input"]
+    assert lifecycle_arguments["string_value"] is None
+    assert lifecycle_arguments["mapping_value"] is raw_mapping
+    assert lifecycle_arguments["list_value"] is raw_list
+    assert handler_kwargs["stringValue"] == "None"
+    assert json.loads(handler_kwargs["mappingValue"]) == raw_mapping
+    assert json.loads(handler_kwargs["listValue"]) == raw_list
 
 
 @pytest.mark.asyncio

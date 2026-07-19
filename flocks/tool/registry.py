@@ -449,6 +449,8 @@ class Tool:
     async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
         """Execute the tool with given parameters and context"""
         try:
+            raw_kwargs = dict(kwargs)
+
             # Log tool execution start
             log.info("tool.execute.start", {
                 "tool": self.info.name,
@@ -544,7 +546,7 @@ class Tool:
                     "operation": "tool.execute",
                     "tool": {
                         "name": self.info.name,
-                        "input": coerced_kwargs,
+                        "input": raw_kwargs,
                     },
                     "session_id": ctx.session_id,
                     "message_id": ctx.message_id,
