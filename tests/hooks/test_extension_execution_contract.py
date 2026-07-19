@@ -342,6 +342,78 @@ async def test_tool_lifecycle_preserves_original_arguments_before_remapping_and_
 
 
 @pytest.mark.asyncio
+async def test_tool_lifecycle_forwards_context_extra_as_opaque_carrier() -> None:
+    observed: list[dict] = []
+
+    class LifecycleRecorder(HookBase):
+        async def action_before(self, ctx):
+            observed.append(dict(ctx.input))
+
+    async def handler(_ctx: ToolContext, value: str) -> ToolResult:
+        return ToolResult(success=True, output=value)
+
+    HookPipeline.register("lifecycle-recorder", LifecycleRecorder())
+    tool = Tool(
+        info=ToolInfo(
+            name="context-extra-carrier",
+            description="Forward neutral tool context extra",
+            category=ToolCategory.CUSTOM,
+            parameters=[ToolParameter(name="value", type=ParameterType.STRING)],
+        ),
+        handler=handler,
+    )
+    context_extra = {
+        "subject": {"subject_id": "principal-1", "subject_type": "human"},
+        "parent_ceiling": {"tools": ["read"]},
+        "opaque": {"value": object()},
+    }
+
+    result = await tool.execute(
+        ToolContext("session-1", "message-1", extra=context_extra), value="ok"
+    )
+
+    assert result.success is True
+    assert observed[0]["tool_context_extra"] == context_extra
+    assert observed[0]["tool_context_extra"] is not context_extra
+    assert observed[0]["tool_context_extra"]["opaque"] is context_extra["opaque"]
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_is_unchanged_without_hooks() -> None:
+    observed: list[str] = []
+
+    async def handler(_ctx: ToolContext, value: str) -> ToolResult:
+        observed.append(value)
+        return ToolResult(success=True, output=value)
+
+    tool = Tool(
+        info=ToolInfo(
+            name="context-extra-no-hook",
+            description="Neutral tool execution without hooks",
+            category=ToolCategory.CUSTOM,
+            parameters=[ToolParameter(name="value", type=ParameterType.STRING)],
+        ),
+        handler=handler,
+    )
+
+    result = await tool.execute(
+        ToolContext("session-1", "message-1", extra={"opaque": "value"}),
+        value="ok",
+    )
+
+    assert result.model_dump() == {
+        "success": True,
+        "output": "ok",
+        "error": None,
+        "metadata": {},
+        "title": None,
+        "truncated": False,
+        "attachments": None,
+    }
+    assert observed == ["ok"]
+
+
+@pytest.mark.asyncio
 async def test_http_and_channel_ingress_emit_before_and_after() -> None:
     observed: list[tuple[str, dict]] = []
 

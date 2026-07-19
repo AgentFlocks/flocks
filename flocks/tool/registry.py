@@ -551,6 +551,10 @@ class Tool:
                     "session_id": ctx.session_id,
                     "message_id": ctx.message_id,
                     "agent": ctx.agent,
+                    # Opaque carrier for optional extensions.  Flocks does
+                    # not parse, normalize, authorize, or otherwise assign
+                    # policy meaning to this caller-provided context.
+                    "tool_context_extra": dict(ctx.extra),
                 },
                 lambda: self.handler(ctx, **coerced_kwargs),
             )
