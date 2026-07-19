@@ -336,6 +336,77 @@ async def test_scoped_critical_entrypoint_failure_stops_tool_registry_effect(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("load_mode", ["scoped", "all"])
+async def test_entrypoint_metadata_scan_failure_stops_tool_registry_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    load_mode: str,
+) -> None:
+    """An unreadable entrypoint index cannot leave lifecycle effects open."""
+
+    def _scan_error():
+        raise RuntimeError("entrypoint metadata unavailable")
+
+    monkeypatch.setattr(
+        "flocks.plugin.loader.importlib.metadata.entry_points",
+        _scan_error,
+    )
+    monkeypatch.setattr(
+        PluginLoader,
+        "_extension_points",
+        {
+            "TOOLS": ExtensionPoint(
+                attr_name="TOOLS",
+                subdir="tools",
+                consumer=lambda _items, _source: None,
+            )
+        },
+    )
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
+
+    if load_mode == "scoped":
+        PluginLoader.load_extension(
+            "TOOLS",
+            project_dir=tmp_path,
+            load_entry_points=True,
+        )
+    else:
+        result = PluginLoader.load_all(project_dir=tmp_path)
+        assert result.has_critical_entrypoint_failure is True
+
+    executed = False
+
+    async def handler(_ctx: ToolContext, value: str) -> ToolResult:
+        nonlocal executed
+        executed = True
+        return ToolResult(success=True, output=value)
+
+    tool = Tool(
+        info=ToolInfo(
+            name=f"entrypoint-metadata-scan-{load_mode}",
+            description="must not execute after entrypoint metadata scan failure",
+            category=ToolCategory.CUSTOM,
+            parameters=[ToolParameter(name="value", type=ParameterType.STRING, required=True)],
+        ),
+        handler=handler,
+    )
+    monkeypatch.setattr(ToolRegistry, "_initialized", True)
+    monkeypatch.setattr(ToolRegistry, "_tools", {tool.info.name: tool})
+    monkeypatch.setattr(ToolRegistry, "_failure_state", {})
+
+    execution = await ToolRegistry.execute(
+        tool.info.name,
+        ToolContext(session_id="session-1", message_id="message-1"),
+        value="must not execute",
+    )
+
+    assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
+    assert execution.success is False
+    assert execution.error == "critical plugin entrypoint failure"
+    assert executed is False
+
+
+@pytest.mark.asyncio
 async def test_main_server_critical_loader_result_stops_channel_without_a_hook(
     monkeypatch,
 ) -> None:

@@ -468,7 +468,12 @@ class PluginLoader:
         try:
             entry_points = importlib.metadata.entry_points()
         except Exception as e:
-            log.debug("plugin.entrypoints.scan_failed", {"error": str(e)})
+            # A failed global scan leaves the loader unable to determine
+            # whether a declared-critical entrypoint is present.  Preserve a
+            # generic critical marker so hosts fail closed rather than serving
+            # after an indeterminate plugin discovery pass.
+            result.critical_entrypoint_failures.append("entrypoint_metadata_scan")
+            log.error("plugin.entrypoints.scan_failed", {"error": str(e)})
             return result
 
         for group, declared_critical in (
