@@ -40,11 +40,7 @@ def _prepare_isolated_runtime(tmp_path: Path) -> tuple[Path, Path, dict[str, str
     install_root = tmp_path / "install"
     install_root.mkdir()
     (install_root / "pyproject.toml").write_text(
-        "[project]\n"
-        'name = "handoff-process-test"\n'
-        'version = "0.0.0"\n'
-        'requires-python = ">=3.12"\n'
-        "dependencies = []\n",
+        '[project]\nname = "handoff-process-test"\nversion = "0.0.0"\nrequires-python = ">=3.12"\ndependencies = []\n',
         encoding="utf-8",
     )
     runtime_python = install_root / ".venv" / "bin" / "python"
@@ -189,13 +185,14 @@ def test_v2026_7_15_real_handoff_command_restarts_with_current_code(
     marker = tmp_path / "v2026.7.15-restarted"
     backup_path = tmp_path / "backup.tar.gz"
     backup_path.write_text("backup", encoding="utf-8")
+    public_port = _free_port()
     parent = _parent_process()
     command = _base_handoff_command(
         parent_pid=parent.pid,
         install_root=install_root,
         uv_path=fake_uv,
-        backend_port=_free_port(),
-        frontend_port=_free_port(),
+        backend_port=public_port,
+        frontend_port=public_port,
         current_version="2026.7.15",
     )
     command.extend(

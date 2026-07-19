@@ -234,9 +234,9 @@ def _build_captured_start_argv(args: argparse.Namespace) -> list[str]:
         "flocks.cli.main",
         "start",
         "--host",
-        config.backend_host,
+        config.frontend_host,
         "--port",
-        str(config.backend_port),
+        str(config.frontend_port),
     ]
     if config.no_browser:
         argv.append("--no-browser")
@@ -473,6 +473,19 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         if not supervisor_stopped:
             _record_handoff_log("legacy_handover_stop_timeout")
+            _cleanup_dir(args.cleanup_dir)
+            return 1
+    elif args.pro_wheel_path or args.pro_bundle_manifest_path:
+        supervisor_stopped = _stop_supervisor_before_restart(
+            backend_port=args.backend_port,
+            service_ports=(args.frontend_port,),
+        )
+        if not supervisor_stopped:
+            _record_handoff_log("pro_handover_stop_timeout")
+            _cleanup_dir(args.cleanup_dir)
+            return 1
+        if not _ensure_backend_port_free(args.backend_port):
+            _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
             _cleanup_dir(args.cleanup_dir)
             return 1
     elif not _ensure_backend_port_free(args.backend_port):

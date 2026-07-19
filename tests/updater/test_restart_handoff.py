@@ -10,7 +10,12 @@ import pytest
 from flocks.cli import service_manager
 from flocks.cli.service_config import service_config_payload
 from flocks.updater import restart_handoff
-from tests.helpers.service_supervisor import make_short_runtime_root, start_supervisor, stop_supervisor, wait_for_supervisor
+from tests.helpers.service_supervisor import (
+    make_short_runtime_root,
+    start_supervisor,
+    stop_supervisor,
+    wait_for_supervisor,
+)
 
 
 def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
@@ -94,7 +99,7 @@ def _simple_upgrade_handoff_args(tmp_path: Path) -> list[str]:
 def _v2026_7_1_handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
     """Build the handoff protocol emitted by the v2026.7.1 updater."""
     args = _handoff_args(tmp_path, restart_argv)
-    args[args.index("--install-root"):args.index("--install-root")] = [
+    args[args.index("--install-root") : args.index("--install-root")] = [
         "--backend-pid-file",
         str(tmp_path / "backend.pid"),
     ]
@@ -109,6 +114,7 @@ def _v2026_7_1_handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str
 def _v2026_7_15_handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
     """Build the handoff protocol emitted by the v2026.7.15 updater."""
     args = _handoff_args(tmp_path, restart_argv)
+    args[args.index("--backend-port") + 1] = "5173"
     separator_index = args.index("--")
     args[separator_index:separator_index] = [
         "--backup-path",
@@ -126,7 +132,7 @@ def test_current_version_upgrade_handoff_stops_replaces_installs_and_restarts(
     cleanup_dir = tmp_path / "cleanup"
     cleanup_dir.mkdir()
     args = _simple_upgrade_handoff_args(tmp_path)
-    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+    args[args.index("--") : args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
     monkeypatch.setattr(
@@ -211,6 +217,52 @@ def test_upgrade_start_argv_uses_captured_host_port_without_control_api(host: st
     ]
 
 
+@pytest.mark.parametrize(
+    ("public_host", "public_port"),
+    [
+        ("0.0.0.0", 5173),
+        ("10.20.30.40", 9527),
+        ("::", 6173),
+        ("2001:db8::20", 7173),
+    ],
+)
+def test_upgrade_start_argv_preserves_distinct_legacy_public_endpoint(
+    public_host: str,
+    public_port: int,
+) -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=8000,
+        frontend_host=public_host,
+        frontend_port=public_port,
+        legacy_backend_host="127.0.0.1",
+        legacy_backend_port=8000,
+        no_browser=True,
+        skip_frontend_build=True,
+    )
+    args = SimpleNamespace(
+        restart_argv=["/install/.venv/bin/python"],
+        service_config_json=json.dumps(service_config_payload(config)),
+    )
+
+    assert restart_handoff._build_captured_start_argv(args) == [
+        "/install/.venv/bin/python",
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--host",
+        public_host,
+        "--port",
+        str(public_port),
+        "--no-browser",
+        "--skip-webui-build",
+        "--server-host",
+        "127.0.0.1",
+        "--server-port",
+        "8000",
+    ]
+
+
 def test_upgrade_wait_ports_exclude_legacy_cleanup_port(tmp_path: Path) -> None:
     args = restart_handoff._parse_args(_simple_upgrade_handoff_args(tmp_path))
 
@@ -228,7 +280,7 @@ def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollba
     backup_path = tmp_path / "backup.tar.gz"
     backup_path.write_text("backup", encoding="utf-8")
     args = _simple_upgrade_handoff_args(tmp_path)
-    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+    args[args.index("--") : args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
 
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
@@ -266,7 +318,7 @@ def test_upgrade_start_failure_records_process_output_and_keeps_temp(
     backup_path = tmp_path / "backup.tar.gz"
     backup_path.write_text("backup", encoding="utf-8")
     args = _simple_upgrade_handoff_args(tmp_path)
-    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+    args[args.index("--") : args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
 
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
@@ -337,8 +389,9 @@ def test_run_waits_for_parent_and_backend_port_before_spawning(
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
-        or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, close_fds=False: (
+            events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}") or SimpleNamespace(pid=4321)
+        ),
     )
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
     monkeypatch.setattr(
@@ -385,8 +438,9 @@ def test_run_keeps_current_start_restart_argv(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
-        or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, close_fds=False: (
+            events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}") or SimpleNamespace(pid=4321)
+        ),
     )
 
     code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
@@ -399,7 +453,7 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
     events: list[str] = []
     restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
     args = _handoff_args(tmp_path, restart_argv)
-    args[args.index("--install-root"):args.index("--install-root")] = [
+    args[args.index("--install-root") : args.index("--install-root")] = [
         "--backend-pid-file",
         str(tmp_path / "backend.pid"),
     ]
@@ -412,8 +466,9 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
-        or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, close_fds=False: (
+            events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}") or SimpleNamespace(pid=4321)
+        ),
     )
 
     code = restart_handoff.run(args)
@@ -424,8 +479,34 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
 
 def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
-    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start", "--no-browser"]
+    restart_argv = [
+        "python.exe",
+        "-m",
+        "flocks.cli.main",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+    ]
+    expected_restart_argv = [
+        "python.exe",
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5173",
+        "--server-host",
+        "127.0.0.1",
+        "--server-port",
+        "8000",
+    ]
     args = _v2026_7_1_handoff_args(tmp_path, restart_argv)
+    args[args.index("--frontend-host") + 1] = "0.0.0.0"
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
     monkeypatch.setattr(
@@ -451,8 +532,9 @@ def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
-        or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, close_fds=False: (
+            events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}") or SimpleNamespace(pid=4321)
+        ),
     )
 
     assert restart_handoff.run(args) == 0
@@ -461,7 +543,7 @@ def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path
         "free-port:8000",
         "install",
         "stop-supervisor",
-        f"spawn:{restart_argv}:{tmp_path}:True",
+        f"spawn:{expected_restart_argv}:{tmp_path}:True",
     ]
 
 
@@ -470,8 +552,25 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start", "--no-browser"]
+    restart_argv = [
+        "python.exe",
+        "-m",
+        "flocks.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5173",
+        "--server-host",
+        "127.0.0.1",
+        "--server-port",
+        "8000",
+    ]
     args = _v2026_7_15_handoff_args(tmp_path, restart_argv)
+    args[args.index("--backend-host") + 1] = "0.0.0.0"
+    args[args.index("--frontend-host") + 1] = "0.0.0.0"
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
     monkeypatch.setattr(
@@ -497,14 +596,15 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
-        or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, close_fds=False: (
+            events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}") or SimpleNamespace(pid=4321)
+        ),
     )
 
     assert restart_handoff.run(args) == 0
     assert events == [
         "wait-parent:1234",
-        "stop-supervisor:{'backend_port': 8000, 'service_ports': (5173,)}",
+        "stop-supervisor:{'backend_port': 5173, 'service_ports': (5173,)}",
         "install",
         f"spawn:{restart_argv}:{tmp_path}:True",
     ]
@@ -537,8 +637,9 @@ def test_restart_only_waits_for_port_after_parent_exit(
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}")
-        or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, close_fds=False: (
+            events.append(f"spawn:{list(argv)}:{cwd}:{close_fds}") or SimpleNamespace(pid=4321)
+        ),
     )
 
     code = restart_handoff.run(_handoff_args(tmp_path, restart_argv))
@@ -568,6 +669,7 @@ def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
     monkeypatch.setattr(
@@ -587,6 +689,61 @@ def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
     assert any(event.startswith("spawn:") for event in events)
 
 
+def test_pro_bundle_handoff_stops_supervisor_before_port_check_and_install(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
+    pro_wheel = tmp_path / "flockspro.whl"
+    manifest = tmp_path / "manifest.json"
+    args = _handoff_args(tmp_path, restart_argv)
+    separator_index = args.index("--")
+    args[separator_index:separator_index] = [
+        "--pro-wheel-path",
+        str(pro_wheel),
+        "--pro-bundle-manifest-path",
+        str(manifest),
+    ]
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda **kwargs: events.append(f"stop-supervisor:{kwargs}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_ensure_backend_port_free",
+        lambda backend_port: events.append(f"free-port:{backend_port}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_run_upgrade_tasks",
+        lambda _args: events.append("install") or None,
+    )
+    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda _argv, **_kwargs: events.append("spawn") or SimpleNamespace(pid=4321),
+    )
+
+    assert restart_handoff.run(args) == 0
+    assert events == [
+        "wait-parent:1234",
+        "stop-supervisor:{'backend_port': 8000, 'service_ports': (5173,)}",
+        "free-port:8000",
+        "install",
+        "spawn",
+    ]
+
+
 def test_run_does_not_spawn_when_parent_exit_times_out(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
 
@@ -602,7 +759,10 @@ def test_run_does_not_spawn_when_parent_exit_times_out(monkeypatch, tmp_path: Pa
     code = restart_handoff.run(_handoff_args(tmp_path, ["python.exe", "-m", "flocks.cli.main", "start"]))
 
     assert code == 1
-    assert events == ["log:started parent_pid=1234 backend=127.0.0.1:8000 frontend=127.0.0.1:5173", "log:parent_exit_timeout parent_pid=1234"]
+    assert events == [
+        "log:started parent_pid=1234 backend=127.0.0.1:8000 frontend=127.0.0.1:5173",
+        "log:parent_exit_timeout parent_pid=1234",
+    ]
 
 
 def test_run_does_not_spawn_when_upgrade_tasks_fail(monkeypatch, tmp_path: Path) -> None:
