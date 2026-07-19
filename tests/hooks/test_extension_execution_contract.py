@@ -19,7 +19,7 @@ from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.identity import get_current_subject
 from flocks.ingest.kafka.manager import KafkaManager
 from flocks.ingest.syslog.manager import SyslogManager
-from flocks.plugin import PluginLoader
+from flocks.plugin import ExtensionPoint, PluginLoader
 from flocks.server import auth
 import flocks.server.app as server_app_module
 from flocks.server.app import auth_guard_middleware
@@ -34,6 +34,7 @@ from flocks.tool.registry import (
     ToolInfo,
     ToolParameter,
     ToolResult,
+    ToolRegistry,
 )
 from flocks.workflow import service_runtime
 from flocks.workflow.triggers.models import TriggerDefinition
@@ -255,6 +256,83 @@ async def test_channel_dispatcher_does_not_effect_after_critical_plugin_failure(
         await dispatcher.dispatch(message)
 
     dispatcher._dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scoped_critical_entrypoint_failure_stops_tool_registry_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A critical entrypoint found by scoped loading blocks a real tool call."""
+
+    class _CriticalEntryPoint:
+        name = "scoped-critical-plugin"
+
+        @staticmethod
+        def load():
+            raise ImportError("critical plugin dependency unavailable")
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group: str):
+            if group == "flocks.plugins.critical":
+                return [_CriticalEntryPoint()]
+            assert group == "flocks.plugins"
+            return []
+
+    monkeypatch.setattr(
+        "flocks.plugin.loader.importlib.metadata.entry_points",
+        lambda: _EntryPoints(),
+    )
+    monkeypatch.setattr(
+        PluginLoader,
+        "_extension_points",
+        {
+            "TOOLS": ExtensionPoint(
+                attr_name="TOOLS",
+                subdir="tools",
+                consumer=lambda _items, _source: None,
+            )
+        },
+    )
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
+
+    PluginLoader.load_extension(
+        "TOOLS",
+        project_dir=tmp_path,
+        load_entry_points=True,
+    )
+
+    executed = False
+
+    async def handler(_ctx: ToolContext, value: str) -> ToolResult:
+        nonlocal executed
+        executed = True
+        return ToolResult(success=True, output=value)
+
+    tool = Tool(
+        info=ToolInfo(
+            name="scoped-critical-entrypoint-tool",
+            description="must not execute after scoped critical plugin failure",
+            category=ToolCategory.CUSTOM,
+            parameters=[ToolParameter(name="value", type=ParameterType.STRING, required=True)],
+        ),
+        handler=handler,
+    )
+    monkeypatch.setattr(ToolRegistry, "_initialized", True)
+    monkeypatch.setattr(ToolRegistry, "_tools", {tool.info.name: tool})
+    monkeypatch.setattr(ToolRegistry, "_failure_state", {})
+
+    result = await ToolRegistry.execute(
+        tool.info.name,
+        ToolContext(session_id="session-1", message_id="message-1"),
+        value="must not execute",
+    )
+
+    assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
+    assert result.success is False
+    assert result.error == "critical plugin entrypoint failure"
+    assert executed is False
 
 
 @pytest.mark.asyncio

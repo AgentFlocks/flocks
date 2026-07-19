@@ -314,7 +314,10 @@ class PluginLoader:
             log_scope="load_extension",
         )
         if load_entry_points:
-            cls._load_entry_points()
+            result = cls._load_entry_points()
+            cls._runtime_critical_entrypoint_failure = (
+                result.has_critical_entrypoint_failure
+            )
 
     @classmethod
     def load_for_extension(
