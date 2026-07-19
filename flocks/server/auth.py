@@ -240,10 +240,11 @@ def _auth_ingress_payload(request: HTTPConnection) -> dict:
     return {
         "operation": "auth.request",
         "transport": "http",
+        "request": request,
         "method": getattr(request, "method", None),
         "path": request.url.path,
         "client": getattr(getattr(request, "client", None), "host", None),
-        "headers": dict(request.headers),
+        "headers": request.headers,
     }
 
 

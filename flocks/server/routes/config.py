@@ -35,12 +35,6 @@ from flocks.provider.provider import Provider
 from flocks.utils.log import Log
 
 
-def _raw_config_endpoint_value(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", exclude_none=True)
-    return value
-
-
 def _config_operation_payload(endpoint, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
     try:
         arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
@@ -48,11 +42,7 @@ def _config_operation_payload(endpoint, args: tuple[Any, ...], kwargs: Dict[str,
         arguments = dict(kwargs)
     return {
         "operation": f"config.{endpoint.__name__}",
-        "arguments": {
-            name: _raw_config_endpoint_value(value)
-            for name, value in arguments.items()
-            if name != "request"
-        },
+        "arguments": dict(arguments),
     }
 
 

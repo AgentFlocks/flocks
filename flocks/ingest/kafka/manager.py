@@ -766,8 +766,8 @@ class KafkaManager:
                 {
                     "operation": "workflow.trigger.kafka",
                     "workflow_id": workflow_id,
-                    "trigger": trigger.model_dump(mode="json"),
-                    "event": event.model_dump(mode="json"),
+                    "trigger": trigger,
+                    "event": event,
                 },
                 lambda: self._dispatcher.dispatch(
                     trigger=trigger,

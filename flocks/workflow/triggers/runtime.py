@@ -217,7 +217,7 @@ class TriggerRuntime:
             {
                 "operation": "workflow.trigger.execute",
                 "workflow_id": workflow_id,
-                "trigger": trigger.model_dump(mode="json"),
+                "trigger": trigger,
                 "inputs": mapped_inputs,
             },
             lambda: self._execute_workflow_effect(
