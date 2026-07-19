@@ -16,8 +16,10 @@ Flocks TUI expects Config format:
 }
 """
 
+import inspect
 import re
 import xml.etree.ElementTree as ET
+from functools import wraps
 from pathlib import Path
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
@@ -28,10 +30,64 @@ from defusedxml.common import DefusedXmlException
 
 from flocks.config.config import Config, GlobalConfig, ConfigInfo as ConfigInfoModel, UIConfig
 from flocks.config.config_writer import ConfigWriter
+from flocks.hooks.execution import execute_with_hooks
 from flocks.provider.provider import Provider
 from flocks.utils.log import Log
 
-router = APIRouter()
+
+def _raw_config_endpoint_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    return value
+
+
+def _config_operation_payload(endpoint, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
+    except TypeError:
+        arguments = dict(kwargs)
+    return {
+        "operation": f"config.{endpoint.__name__}",
+        "arguments": {
+            name: _raw_config_endpoint_value(value)
+            for name, value in arguments.items()
+            if name != "request"
+        },
+    }
+
+
+def _wrap_config_operation(endpoint):
+    @wraps(endpoint)
+    async def _wrapped(*args, **kwargs):
+        return await execute_with_hooks(
+            _config_operation_payload(endpoint, args, kwargs),
+            lambda: endpoint(*args, **kwargs),
+        )
+
+    return _wrapped
+
+
+class _ConfigLifecycleRouter(APIRouter):
+    """Attach the generic action lifecycle to configuration mutations."""
+
+    def api_route(self, path: str, *args, **kwargs):
+        methods = kwargs.get("methods") or []
+        method_set = {str(method).upper() for method in methods}
+        base_decorator = super().api_route(path, *args, **kwargs)
+
+        def _decorate(endpoint):
+            wrapped = (
+                _wrap_config_operation(endpoint)
+                if method_set & {"POST", "PUT", "PATCH", "DELETE"}
+                else endpoint
+            )
+            base_decorator(wrapped)
+            return wrapped
+
+        return _decorate
+
+
+router = _ConfigLifecycleRouter()
 log = Log.create(service="routes.config")
 
 
@@ -557,19 +613,19 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         # Extract channel sensitive fields into .secret.json before persisting
         if "channels" in config_data and isinstance(config_data.get("channels"), dict):
             from flocks.security.channel_secrets import extract_channel_secrets
+
             config_data = {**config_data, "channels": extract_channel_secrets(config_data["channels"])}
 
         # Parse and validate configuration
         config = ConfigInfoModel.model_validate(config_data)
-        
+
         # Update project config
         await Config.update(config)
-        
+
         # Clear cache to reload
         Config.clear_cache()
-        
+
         log.info("config.updated")
-        
         return await get_config()
     except Exception as e:
         log.error("config.update.error", {"error": str(e)})

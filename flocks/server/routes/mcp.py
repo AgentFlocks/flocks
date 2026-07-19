@@ -8,6 +8,8 @@ MCP state is instance-scoped for project isolation.
 """
 
 import asyncio
+import inspect
+from functools import wraps
 from typing import Dict, Optional, List, Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -41,9 +43,59 @@ from flocks.mcp.utils import (
 )
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.hooks.execution import execute_with_hooks
 from flocks.utils.log import Log
 
-router = APIRouter()
+
+def _raw_endpoint_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    return value
+
+
+def _mcp_operation_payload(endpoint, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
+    except TypeError:
+        arguments = dict(kwargs)
+    return {
+        "operation": f"mcp.{endpoint.__name__}",
+        "arguments": {
+            name: _raw_endpoint_value(value)
+            for name, value in arguments.items()
+            if name != "request"
+        },
+    }
+
+
+def _wrap_mcp_operation(endpoint):
+    @wraps(endpoint)
+    async def _wrapped(*args, **kwargs):
+        return await execute_with_hooks(
+            _mcp_operation_payload(endpoint, args, kwargs),
+            lambda: endpoint(*args, **kwargs),
+        )
+
+    return _wrapped
+
+
+class _McpLifecycleRouter(APIRouter):
+    """Attach the generic action lifecycle to MCP mutations."""
+
+    def api_route(self, path: str, *args, **kwargs):
+        methods = kwargs.get("methods") or []
+        method_set = {str(method).upper() for method in methods}
+        base_decorator = super().api_route(path, *args, **kwargs)
+
+        def _decorate(endpoint):
+            wrapped = _wrap_mcp_operation(endpoint) if method_set & {"POST", "PUT", "PATCH", "DELETE"} else endpoint
+            base_decorator(wrapped)
+            return wrapped
+
+        return _decorate
+
+
+router = _McpLifecycleRouter()
 log = Log.create(service="routes.mcp")
 
 

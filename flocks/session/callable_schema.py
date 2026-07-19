@@ -15,6 +15,7 @@ from flocks.session.callable_state import (
     get_session_callable_tools,
     initialize_session_callable_tools,
 )
+from flocks.hooks.pipeline import HookPipeline
 from flocks.tool.registry import ToolRegistry
 
 
@@ -90,6 +91,29 @@ async def list_session_callable_tool_infos(
 
     effective_callable_names = set(callable_tool_names) | always_load_names
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
+
+    projection_ctx = await HookPipeline.run_capability_filter({
+        "session_id": session_id,
+        "step": step,
+        "candidates": [
+            {
+                "name": tool_info.name,
+                "description": tool_info.description,
+                "category": getattr(tool_info.category, "value", tool_info.category),
+                "source": tool_info.source,
+            }
+            for tool_info in tool_infos
+        ],
+    })
+    replacement = projection_ctx.output.get("candidates")
+    if isinstance(replacement, list):
+        candidate_by_name = {tool_info.name: tool_info for tool_info in tool_infos}
+        replacement_names = [
+            item.get("name")
+            for item in replacement
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+        tool_infos = [candidate_by_name[name] for name in replacement_names if name in candidate_by_name]
 
     metadata = {
         "enabledToolCount": enabled_count,

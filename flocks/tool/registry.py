@@ -536,8 +536,22 @@ class Tool:
 
             coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
 
-            # Execute handler
-            result = await self.handler(ctx, **coerced_kwargs)
+            # Execute the operation through the generic extension lifecycle.
+            from flocks.hooks.execution import execute_with_hooks
+
+            result = await execute_with_hooks(
+                {
+                    "operation": "tool.execute",
+                    "tool": {
+                        "name": self.info.name,
+                        "input": coerced_kwargs,
+                    },
+                    "session_id": ctx.session_id,
+                    "message_id": ctx.message_id,
+                    "agent": ctx.agent,
+                },
+                lambda: self.handler(ctx, **coerced_kwargs),
+            )
 
             # Auto-truncate output unless the tool already handled it
             if result.success and not result.truncated:

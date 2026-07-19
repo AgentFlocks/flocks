@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Any, Dict, List
 
+from flocks.hooks.execution import execute_with_hooks
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
@@ -601,10 +602,18 @@ class SyslogManager:
             return exec_data
 
         try:
-            await self._dispatcher.dispatch(
-                trigger=trigger,
-                event=event,
-                executor=_executor,
+            await execute_with_hooks(
+                {
+                    "operation": "workflow.trigger.syslog",
+                    "workflow_id": workflow_id,
+                    "trigger": trigger.model_dump(mode="json"),
+                    "event": event.model_dump(mode="json"),
+                },
+                lambda: self._dispatcher.dispatch(
+                    trigger=trigger,
+                    event=event,
+                    executor=_executor,
+                ),
             )
         except TriggerDispatchError as exc:
             log.warning(

@@ -31,6 +31,13 @@ class HookStage:
     LLM_AFTER = "llm.call.after"
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
+    INGRESS_BEFORE = "ingress.before"
+    INGRESS_AFTER = "ingress.after"
+    ACTION_BEFORE = "action.before"
+    ACTION_AFTER = "action.after"
+    CAPABILITY_FILTER = "capability.filter"
+    SESSION_CHILD_BEFORE = "session.child.before"
+    SESSION_CHILD_AFTER = "session.child.after"
     EVENT = "event"
     CHANNEL_INBOUND = "channel.inbound"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
@@ -43,6 +50,13 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.LLM_AFTER: 5.0,
     HookStage.TOOL_BEFORE: 5.0,
     HookStage.TOOL_AFTER: 5.0,
+    HookStage.INGRESS_BEFORE: 5.0,
+    HookStage.INGRESS_AFTER: 5.0,
+    HookStage.ACTION_BEFORE: 5.0,
+    HookStage.ACTION_AFTER: 5.0,
+    HookStage.CAPABILITY_FILTER: 5.0,
+    HookStage.SESSION_CHILD_BEFORE: 5.0,
+    HookStage.SESSION_CHILD_AFTER: 5.0,
     HookStage.CHANNEL_INBOUND: 5.0,
     HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
@@ -71,6 +85,27 @@ class HookBase:
         return None
 
     async def tool_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def ingress_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def ingress_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def action_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def action_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def capability_filter(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def session_child_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def session_child_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def event(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -258,6 +293,62 @@ class HookPipeline:
         return await cls._run_stage(HookStage.TOOL_AFTER, input_data, output_data)
 
     @classmethod
+    async def run_ingress_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.INGRESS_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_ingress_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.INGRESS_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_action_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.ACTION_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_action_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.ACTION_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_capability_filter(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.CAPABILITY_FILTER, input_data, output_data)
+
+    @classmethod
+    async def run_session_child_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SESSION_CHILD_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_session_child_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SESSION_CHILD_AFTER, input_data, output_data)
+
+    @classmethod
     async def run_event(
         cls,
         input_data: Dict[str, Any],
@@ -407,7 +498,9 @@ class HookPipeline:
     async def _invoke_handler(handler: Callable[[HookContext], Awaitable[None]], ctx: HookContext) -> None:
         result = handler(ctx)
         if inspect.isawaitable(result):
-            await result
+            result = await result
+        if isinstance(result, dict):
+            ctx.output.update(result)
 
     @staticmethod
     def _resolve_handler(hook: HookBase, stage: str) -> Optional[Callable[[HookContext], Awaitable[None]]]:
@@ -421,6 +514,20 @@ class HookPipeline:
             return getattr(hook, "tool_before", None)
         if stage == HookStage.TOOL_AFTER:
             return getattr(hook, "tool_after", None)
+        if stage == HookStage.INGRESS_BEFORE:
+            return getattr(hook, "ingress_before", None)
+        if stage == HookStage.INGRESS_AFTER:
+            return getattr(hook, "ingress_after", None)
+        if stage == HookStage.ACTION_BEFORE:
+            return getattr(hook, "action_before", None)
+        if stage == HookStage.ACTION_AFTER:
+            return getattr(hook, "action_after", None)
+        if stage == HookStage.CAPABILITY_FILTER:
+            return getattr(hook, "capability_filter", None)
+        if stage == HookStage.SESSION_CHILD_BEFORE:
+            return getattr(hook, "session_child_before", None)
+        if stage == HookStage.SESSION_CHILD_AFTER:
+            return getattr(hook, "session_child_after", None)
         if stage == HookStage.EVENT:
             return getattr(hook, "event", None)
         if stage == HookStage.CHANNEL_INBOUND:

@@ -236,7 +236,31 @@ def _build_api_token_user() -> AuthUser:
     )
 
 
+def _auth_ingress_payload(request: HTTPConnection) -> dict:
+    return {
+        "operation": "auth.request",
+        "transport": "http",
+        "method": getattr(request, "method", None),
+        "path": request.url.path,
+        "client": getattr(getattr(request, "client", None), "host", None),
+        "headers": dict(request.headers),
+    }
+
+
 async def apply_auth_for_request(request: HTTPConnection):
+    """Resolve auth within the generic HTTP ingress lifecycle."""
+    from flocks.hooks.execution import execute_with_hooks
+    from flocks.hooks.pipeline import HookPipeline
+
+    return await execute_with_hooks(
+        _auth_ingress_payload(request),
+        lambda: _apply_auth_for_request(request),
+        before=HookPipeline.run_ingress_before,
+        after=HookPipeline.run_ingress_after,
+    )
+
+
+async def _apply_auth_for_request(request: HTTPConnection):
     """
     Resolve user from cookie and bind context var.
     Returns (response_if_blocked, token, user).

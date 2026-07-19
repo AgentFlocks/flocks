@@ -26,6 +26,8 @@ from flocks.session.session_loop import SessionLoop
 from flocks.agent.registry import is_delegatable
 from flocks.skill.skill import Skill
 from flocks.config.config import Config
+from flocks.hooks.execution import execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 
@@ -488,13 +490,23 @@ async def delegate_task_tool(
         description=description,
     )
     ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
-    result = await SessionLoop.run(
-        created.id,
-        provider_id=(category_model or {}).get("providerID"),
-        model_id=(category_model or {}).get("modelID"),
-        callbacks=forwarder.build_callbacks(
-            event_publish_callback=ctx.event_publish_callback,
+    child_payload = {
+        "operation": "session.child.run",
+        "parent_session_id": parent_session.id,
+        "child_session_id": created.id,
+    }
+    result = await execute_with_hooks(
+        child_payload,
+        lambda: SessionLoop.run(
+            created.id,
+            provider_id=(category_model or {}).get("providerID"),
+            model_id=(category_model or {}).get("modelID"),
+            callbacks=forwarder.build_callbacks(
+                event_publish_callback=ctx.event_publish_callback,
+            ),
         ),
+        before=HookPipeline.run_session_child_before,
+        after=HookPipeline.run_session_child_after,
     )
     tool_result = await format_sync_subagent_result(
         description=description,

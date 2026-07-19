@@ -15,6 +15,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from flocks.hooks.execution import execute_with_hooks
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
@@ -106,18 +107,29 @@ def create_service_app(
             )
 
         try:
-            tool_context = await build_workflow_tool_context(
-                workflow_id=app.state.workflow_id,
-                action_name="invoke",
-            )
-            result: RunWorkflowResult = await asyncio.to_thread(
-                run_workflow,
-                workflow=app.state.workflow_json,
-                inputs=req.inputs,
-                timeout_s=req.timeout_s,
-                trace=req.trace,
-                ensure_requirements=req.ensure_requirements,
-                tool_context=tool_context,
+            async def _effect() -> RunWorkflowResult:
+                tool_context = await build_workflow_tool_context(
+                    workflow_id=app.state.workflow_id,
+                    action_name="invoke",
+                )
+                return await asyncio.to_thread(
+                    run_workflow,
+                    workflow=app.state.workflow_json,
+                    inputs=req.inputs,
+                    timeout_s=req.timeout_s,
+                    trace=req.trace,
+                    ensure_requirements=req.ensure_requirements,
+                    tool_context=tool_context,
+                )
+
+            result = await execute_with_hooks(
+                {
+                    "operation": "workflow.service.invoke",
+                    "workflow_id": app.state.workflow_id,
+                    "release_id": app.state.release_id,
+                    "inputs": req.inputs,
+                },
+                _effect,
             )
             return {
                 "request_id": req.request_id,

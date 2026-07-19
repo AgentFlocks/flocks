@@ -272,6 +272,28 @@ class InboundDispatcher:
         self._group_context: OrderedDict[str, deque[_GroupContextEntry]] = OrderedDict()
 
     async def dispatch(self, msg: InboundMessage) -> None:
+        from flocks.hooks.execution import execute_with_hooks
+        from flocks.hooks.pipeline import HookPipeline
+
+        return await execute_with_hooks(
+            {
+                "operation": "channel.dispatch",
+                "transport": "channel",
+                "channel_id": msg.channel_id,
+                "account_id": msg.account_id,
+                "message_id": msg.message_id,
+                "sender_id": msg.sender_id,
+                "chat_id": msg.chat_id,
+                "chat_type": msg.chat_type.value,
+                "text": msg.mention_text or msg.text,
+            },
+            lambda: self._dispatch(msg),
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+
         # 1. dedup
         if self.dedup.is_duplicate(msg.message_id):
             log.debug("dispatcher.dedup", {"message_id": msg.message_id})
