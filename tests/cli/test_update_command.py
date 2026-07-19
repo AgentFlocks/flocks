@@ -234,7 +234,8 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         "wait_for_handoff": True,
     }
     assert "强制重新安装 v2026.4.2" in output.getvalue()
-    assert "[4/4] 重启服务...  ✓" in output.getvalue()
+    assert "[3/3] 应用新版本...  ✓" in output.getvalue()
+    assert "重启服务" not in output.getvalue()
     assert "升级完成" in output.getvalue()
 
 

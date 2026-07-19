@@ -105,7 +105,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         "restarting":  "重启服务",
         "done":        "完成",
     }
-    total_steps = 4
+    total_steps = 3
     seen_stages: set[str] = set()
     step = 0
     active_stage: str | None = None
@@ -137,6 +137,9 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
         if progress.stage == "done":
             _finish_active(success=True)
+            continue
+
+        if progress.stage == "restarting":
             continue
 
         if progress.stage not in seen_stages:
