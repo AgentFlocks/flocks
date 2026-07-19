@@ -59,11 +59,18 @@ async def test_action_stage_is_empty_without_registered_hooks() -> None:
 @pytest.mark.asyncio
 async def test_execution_stop_is_interpreted_only_by_calling_adapter() -> None:
     observed: list[tuple[str, dict]] = []
+    opaque_context = {"opaque_binding": object()}
 
     class Stopper(HookBase):
         async def ingress_before(self, ctx):
             observed.append((ctx.stage, dict(ctx.input)))
-            return {"execution": {"stop": True, "detail": "extension stopped operation"}}
+            return {
+                "execution": {
+                    "stop": True,
+                    "detail": "extension stopped operation",
+                },
+                "context": opaque_context,
+            }
 
         async def ingress_after(self, ctx):
             observed.append((ctx.stage, dict(ctx.input)))
@@ -74,6 +81,7 @@ async def test_execution_stop_is_interpreted_only_by_calling_adapter() -> None:
     stage_context = await HookPipeline.run_ingress_before(payload)
     assert stage_context.output == {
         "execution": {"stop": True, "detail": "extension stopped operation"},
+        "context": opaque_context,
     }
     assert stage_context.input == payload
     observed.clear()
@@ -92,6 +100,7 @@ async def test_execution_stop_is_interpreted_only_by_calling_adapter() -> None:
     after_payload = observed[-1][1]
     assert after_payload["outcome"] == "stopped"
     assert isinstance(after_payload["error"], ExecutionStopped)
+    assert after_payload["context"] is opaque_context
 
 
 @pytest.mark.asyncio
@@ -135,6 +144,109 @@ async def test_execute_with_hooks_binds_and_resets_valid_neutral_subject() -> No
     ) == "ok"
     assert observed[0].subject_id == "principal_42"
     assert get_current_subject() is None
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_merges_before_context_mapping_into_after() -> None:
+    """Lifecycle adapters preserve arbitrary hook context without interpreting it."""
+
+    opaque_before_value = object()
+    opaque_payload_value = object()
+    opaque_context = {
+        "opaque_binding": opaque_before_value,
+        "subject": {"subject_id": "p-1"},
+        "shared": "before",
+    }
+    observed_after_payloads: list[dict] = []
+
+    class ContextLifecycle(HookBase):
+        async def ingress_before(self, _ctx):
+            return {"context": opaque_context}
+
+        async def ingress_after(self, ctx):
+            observed_after_payloads.append(dict(ctx.input))
+
+    HookPipeline.register("context-lifecycle", ContextLifecycle())
+
+    assert await execute_with_hooks(
+        {
+            "operation": "channel.dispatch",
+            "context": {
+                "opaque_payload": opaque_payload_value,
+                "shared": "payload",
+            },
+        },
+        AsyncMock(return_value="ok"),
+        before=HookPipeline.run_ingress_before,
+        after=HookPipeline.run_ingress_after,
+    ) == "ok"
+
+    after_context = observed_after_payloads[0]["context"]
+    assert after_context["opaque_binding"] is opaque_before_value
+    assert after_context["opaque_payload"] is opaque_payload_value
+    assert after_context["shared"] == "before"
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_forwards_before_context_to_after_on_cancellation() -> None:
+    """Cancellation still runs the paired generic after lifecycle stage."""
+
+    opaque_context = {"opaque_binding": object()}
+    observed_after_payloads: list[dict] = []
+
+    class ContextLifecycle(HookBase):
+        async def ingress_before(self, _ctx):
+            return {"context": opaque_context}
+
+        async def ingress_after(self, ctx):
+            observed_after_payloads.append(dict(ctx.input))
+
+    async def cancelled_effect() -> None:
+        raise asyncio.CancelledError()
+
+    HookPipeline.register("cancelled-context-lifecycle", ContextLifecycle())
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_with_hooks(
+            {"operation": "channel.dispatch"},
+            cancelled_effect,
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    assert observed_after_payloads[0]["context"] is opaque_context
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_runs_after_when_before_hook_raises() -> None:
+    """A critical before-hook failure still reaches generic lifecycle cleanup."""
+
+    observed_after_payloads: list[dict] = []
+
+    class Recorder(HookBase):
+        async def ingress_before(self, _ctx):
+            return {"context": {"opaque_binding": object()}}
+
+        async def ingress_after(self, ctx):
+            observed_after_payloads.append(dict(ctx.input))
+
+    class CriticalFailure(HookBase):
+        async def ingress_before(self, _ctx):
+            raise RuntimeError("critical before hook failed")
+
+    HookPipeline.register("before-failure-recorder", Recorder())
+    HookPipeline.register("before-failure", CriticalFailure(), critical=True)
+
+    with pytest.raises(RuntimeError, match="critical before hook failed"):
+        await execute_with_hooks(
+            {"operation": "channel.dispatch"},
+            AsyncMock(),
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    assert observed_after_payloads[0]["outcome"] == "error"
+    assert isinstance(observed_after_payloads[0]["error"], RuntimeError)
 
 
 @pytest.mark.asyncio

@@ -73,10 +73,31 @@ async def execute_with_hooks(
         raise_if_execution_stopped(after_ctx)
         raise stopped
 
-    before_ctx = await before(payload)
+    try:
+        before_ctx = await before(payload)
+    except BaseException as exc:
+        after_ctx = await after({**payload, "outcome": "error", "error": exc})
+        raise_if_execution_stopped(after_ctx)
+        raise
     stopped = execution_stop_error(before_ctx)
+    before_context = before_ctx.output.get("context")
+
+    def _after_payload(data: dict[str, Any]) -> dict[str, Any]:
+        """Carry opaque hook context to the paired after lifecycle stage."""
+        if not isinstance(before_context, Mapping):
+            return data
+        existing_context = data.get("context")
+        if isinstance(existing_context, Mapping):
+            return {
+                **data,
+                "context": {**existing_context, **before_context},
+            }
+        return {**data, "context": before_context}
+
     if stopped is not None:
-        after_ctx = await after({**payload, "outcome": "stopped", "error": stopped})
+        after_ctx = await after(
+            _after_payload({**payload, "outcome": "stopped", "error": stopped})
+        )
         raise_if_execution_stopped(after_ctx)
         raise stopped
 
@@ -89,16 +110,24 @@ async def execute_with_hooks(
     except Exception as exc:
         if subject_token is not None:
             reset_current_subject(subject_token)
-        after_ctx = await after({**payload, "outcome": "error", "error": exc})
+        after_ctx = await after(
+            _after_payload({**payload, "outcome": "error", "error": exc})
+        )
         raise_if_execution_stopped(after_ctx)
         raise
-    except BaseException:
+    except BaseException as exc:
         if subject_token is not None:
             reset_current_subject(subject_token)
+        after_ctx = await after(
+            _after_payload({**payload, "outcome": "error", "error": exc})
+        )
+        raise_if_execution_stopped(after_ctx)
         raise
 
     if subject_token is not None:
         reset_current_subject(subject_token)
-    after_ctx = await after({**payload, "outcome": "success", "result": result})
+    after_ctx = await after(
+        _after_payload({**payload, "outcome": "success", "result": result})
+    )
     raise_if_execution_stopped(after_ctx)
     return result
