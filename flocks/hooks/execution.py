@@ -28,6 +28,7 @@ class ExecutionLifecycleScope:
 
     parent: ExecutionLifecycleScope | None
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
+    closed: bool = False
 
 
 _current_execution_lifecycle_scope: ContextVar[ExecutionLifecycleScope | None] = (
@@ -45,11 +46,14 @@ def is_execution_lifecycle_scope_active(scope: object) -> bool:
     if not isinstance(scope, ExecutionLifecycleScope):
         return False
     current = current_execution_lifecycle_scope()
+    matched = False
     while current is not None:
+        if current.closed:
+            return False
         if current is scope:
-            return True
+            matched = True
         current = current.parent
-    return False
+    return matched
 
 
 def register_execution_lifecycle_cleanup(callback: Callable[[], None]) -> bool:
@@ -74,6 +78,10 @@ def execution_lifecycle_scope(*, reuse_current: bool = False):
     try:
         yield scope
     finally:
+        # Tasks spawned inside this scope inherit its ContextVar value.  The
+        # shared closed flag makes an inherited scope inert once its owner has
+        # exited, even though that child task holds an older Context snapshot.
+        scope.closed = True
         for callback in reversed(scope.cleanup_callbacks):
             try:
                 callback()
