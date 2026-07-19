@@ -25,7 +25,7 @@ from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
 from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
-from flocks.hooks.execution import ExecutionStopped
+from flocks.hooks.execution import ExecutionStopped, execution_lifecycle_scope
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
 from flocks.server.static_webui import maybe_serve_static_webui
 
@@ -925,40 +925,49 @@ async def auth_guard_middleware(request: Request, call_next):
                 "message": "critical plugin entrypoint failure",
             },
         )
-    try:
-        await _run_http_middleware_hooks(request, {"stage": "before_auth"})
-        _blocked, token, _user = await apply_auth_for_request(request)
-    except ExecutionStopped:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={
-                "error": "ServiceUnavailable",
-                "message": "critical plugin entrypoint failure",
-            },
-        )
-    except StarletteHTTPException as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": "AuthError", "message": exc.detail},
-        )
-    except Exception as exc:
-        log.error("auth.middleware.unexpected", {
-            "path": request.url.path,
-            "error": repr(exc),
-        })
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
-        )
+    with execution_lifecycle_scope():
+        try:
+            await _run_http_middleware_hooks(request, {"stage": "before_auth"})
+            _blocked, token, _user = await apply_auth_for_request(request)
+        except ExecutionStopped as exc:
+            if str(exc) == "critical plugin entrypoint failure":
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={
+                        "error": "ServiceUnavailable",
+                        "message": "critical plugin entrypoint failure",
+                    },
+                )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "error": "Forbidden",
+                    "message": "request stopped by extension",
+                },
+            )
+        except StarletteHTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": "AuthError", "message": exc.detail},
+            )
+        except Exception as exc:
+            log.error("auth.middleware.unexpected", {
+                "path": request.url.path,
+                "error": repr(exc),
+            })
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+            )
 
-    from flocks.identity import reset_current_subject, set_current_subject
+        from flocks.identity import reset_current_subject, set_current_subject
 
-    subject_token = set_current_subject(getattr(request.state, "subject", None))
-    try:
-        return await call_next(request)
-    finally:
-        reset_current_subject(subject_token)
-        clear_auth_context(token)
+        subject_token = set_current_subject(getattr(request.state, "subject", None))
+        try:
+            return await call_next(request)
+        finally:
+            reset_current_subject(subject_token)
+            clear_auth_context(token)
 
 
 @app.middleware("http")

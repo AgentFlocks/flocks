@@ -413,6 +413,7 @@ class HookPipeline:
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
         handler_count = 0
+        deferred_critical_error: Exception | None = None
         for entry in cls._hooks:
             handler = cls._resolve_handler(entry.hook, stage)
             if not handler:
@@ -430,7 +431,7 @@ class HookPipeline:
                     )
                 else:
                     await cls._invoke_handler(handler, ctx)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 duration_ms = int((time.perf_counter() - handler_started_at) * 1000)
                 log.warning("hook.timeout", {
                     "stage": stage,
@@ -441,6 +442,9 @@ class HookPipeline:
                     "fail_policy": entry.fail_policy.value,
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
+                    if stage == HookStage.INGRESS_AFTER:
+                        deferred_critical_error = deferred_critical_error or exc
+                        continue
                     raise
             except Exception as exc:
                 log.error("hook.error", {
@@ -451,12 +455,17 @@ class HookPipeline:
                     "fail_policy": entry.fail_policy.value,
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
+                    if stage == HookStage.INGRESS_AFTER:
+                        deferred_critical_error = deferred_critical_error or exc
+                        continue
                     raise
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,
             "duration_ms": int((time.perf_counter() - stage_started_at) * 1000),
         })
+        if deferred_critical_error is not None:
+            raise deferred_critical_error
         return ctx
 
     @classmethod

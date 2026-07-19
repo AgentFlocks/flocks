@@ -12,6 +12,7 @@ from fastapi import HTTPException, UploadFile
 from starlette.requests import Request
 from starlette.responses import Response
 
+from flocks.auth.context import AuthUser, get_current_auth_user, set_current_auth_user
 from flocks.channel.base import InboundMessage
 from flocks.channel.inbound.dispatcher import InboundDispatcher
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
@@ -144,6 +145,66 @@ async def test_execute_with_hooks_binds_and_resets_valid_neutral_subject() -> No
     ) == "ok"
     assert observed[0].subject_id == "principal_42"
     assert get_current_subject() is None
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_forwards_successful_after_subject_to_sink() -> None:
+    """An after-stage hook can provide neutral request context after auth."""
+
+    class AfterSubject(HookBase):
+        async def ingress_after(self, _ctx):
+            return {
+                "context": {
+                    "subject": {
+                        "subject_id": "authenticated-local-user",
+                        "subject_type": "human",
+                    }
+                }
+            }
+
+    HookPipeline.register("after-subject", AfterSubject())
+    sunk_subjects = []
+    auth_result = (None, object(), object())
+
+    assert await execute_with_hooks(
+        {"operation": "auth.request", "transport": "http"},
+        AsyncMock(return_value=auth_result),
+        before=HookPipeline.run_ingress_before,
+        after=HookPipeline.run_ingress_after,
+        subject_sink=sunk_subjects.append,
+    ) is auth_result
+
+    assert len(sunk_subjects) == 1
+    assert sunk_subjects[0].subject_id == "authenticated-local-user"
+
+
+@pytest.mark.asyncio
+async def test_ingress_after_runs_cleanup_after_earlier_critical_failure() -> None:
+    """Ingress cleanup cannot be skipped by an earlier critical after hook."""
+
+    cleanup_called = False
+
+    class CriticalFailure(HookBase):
+        async def ingress_after(self, _ctx):
+            raise RuntimeError("critical ingress after failure")
+
+    class Cleanup(HookBase):
+        async def ingress_after(self, _ctx):
+            nonlocal cleanup_called
+            cleanup_called = True
+
+    HookPipeline.register("critical-after", CriticalFailure(), critical=True)
+    HookPipeline.register("cleanup-after", Cleanup(), order=1)
+
+    with pytest.raises(RuntimeError, match="critical ingress after failure"):
+        await execute_with_hooks(
+            {"operation": "channel.dispatch", "transport": "channel"},
+            AsyncMock(return_value="ok"),
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    assert cleanup_called is True
 
 
 @pytest.mark.asyncio
@@ -285,6 +346,45 @@ async def test_untrusted_subject_context_never_bypasses_http_authentication() ->
 
 
 @pytest.mark.asyncio
+async def test_auth_adapter_clears_auth_context_when_after_hook_stops(monkeypatch) -> None:
+    """An ingress-after denial must not strand an authenticated OSS user."""
+
+    class StopAfterAuthentication(HookBase):
+        async def ingress_after(self, _ctx):
+            return {"execution": {"stop": True, "detail": "policy_denied"}}
+
+    authenticated = AuthUser(
+        id="local_42",
+        username="alice",
+        role="member",
+        status="active",
+    )
+
+    async def authenticated_effect(_request):
+        token = set_current_auth_user(authenticated)
+        return None, token, authenticated
+
+    HookPipeline.register("stop-after-authentication", StopAfterAuthentication())
+    monkeypatch.setattr(auth, "_apply_auth_for_request", authenticated_effect)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/config",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        }
+    )
+
+    with pytest.raises(ExecutionStopped, match="policy_denied"):
+        await auth.apply_auth_for_request(request)
+
+    assert get_current_auth_user() is None
+
+
+@pytest.mark.asyncio
 async def test_execute_with_hooks_resets_neutral_subject_on_cancellation() -> None:
     class SubjectLifecycle(HookBase):
         async def ingress_before(self, _ctx):
@@ -347,6 +447,50 @@ async def test_main_server_critical_plugin_state_returns_503_before_auth(monkeyp
     call_next.assert_not_awaited()
     server_app_module.app.state.critical_plugin_entrypoint_failure = False
     server_app_module.app.state.critical_plugin_entrypoint_failures = ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detail", "expected_status", "expected_error"),
+    [
+        ("policy_denied", 403, "Forbidden"),
+        (
+            "critical plugin entrypoint failure",
+            503,
+            "ServiceUnavailable",
+        ),
+    ],
+)
+async def test_auth_middleware_distinguishes_extension_denial_from_critical_outage(
+    monkeypatch,
+    detail: str,
+    expected_status: int,
+    expected_error: str,
+) -> None:
+    """Only the declared startup-critical condition is an availability outage."""
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/config",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "app": server_app_module.app,
+        }
+    )
+    monkeypatch.setattr(server_app_module.app.state, "critical_plugin_entrypoint_failure", False)
+
+    async def stop_authentication(_request):
+        raise ExecutionStopped(detail)
+
+    monkeypatch.setattr(server_app_module, "apply_auth_for_request", stop_authentication)
+    response = await auth_guard_middleware(request, AsyncMock(return_value=Response()))
+
+    assert response.status_code == expected_status
+    assert expected_error.encode() in response.body
 
 
 @pytest.mark.asyncio

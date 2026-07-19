@@ -253,13 +253,27 @@ async def apply_auth_for_request(request: HTTPConnection):
     from flocks.hooks.execution import execute_with_hooks
     from flocks.hooks.pipeline import HookPipeline
 
-    return await execute_with_hooks(
-        _auth_ingress_payload(request),
-        lambda: _apply_auth_for_request(request),
-        before=HookPipeline.run_ingress_before,
-        after=HookPipeline.run_ingress_after,
-        subject_sink=lambda subject: setattr(request.state, "subject", subject),
-    )
+    auth_token = None
+
+    async def _authenticated_effect():
+        nonlocal auth_token
+        result = await _apply_auth_for_request(request)
+        auth_token = result[1]
+        return result
+
+    try:
+        return await execute_with_hooks(
+            _auth_ingress_payload(request),
+            _authenticated_effect,
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+            subject_sink=lambda subject: setattr(request.state, "subject", subject),
+            reuse_execution_scope=True,
+        )
+    except BaseException:
+        if auth_token is not None:
+            clear_auth_context(auth_token)
+        raise
 
 
 async def _apply_auth_for_request(request: HTTPConnection):
@@ -291,13 +305,13 @@ async def _apply_auth_for_request(request: HTTPConnection):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
 
         auth_user = user.to_auth_user()
-        request.state.auth_user = auth_user
-        token = set_current_auth_user(auth_user)
         if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="当前账号必须先修改密码后才能继续使用",
             )
+        request.state.auth_user = auth_user
+        token = set_current_auth_user(auth_user)
         return None, token, auth_user
 
     # Non-browser clients must authenticate with an API token because
@@ -342,13 +356,13 @@ async def _apply_auth_for_request(request: HTTPConnection):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
 
     auth_user = user.to_auth_user()
-    request.state.auth_user = auth_user
-    token = set_current_auth_user(auth_user)
     if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="当前账号必须先修改密码后才能继续使用",
         )
+    request.state.auth_user = auth_user
+    token = set_current_auth_user(auth_user)
     return None, token, auth_user
 
 

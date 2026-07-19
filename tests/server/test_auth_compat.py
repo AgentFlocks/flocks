@@ -2,7 +2,7 @@ from starlette.requests import Request
 from fastapi import HTTPException
 import pytest
 
-from flocks.auth.context import AuthUser
+from flocks.auth.context import AuthUser, get_current_auth_user
 from flocks.server import auth as auth_module
 
 
@@ -162,6 +162,7 @@ async def test_apply_auth_for_request_requires_password_reset_before_access(monk
 
     assert exc_info.value.status_code == 403
     assert "必须先修改密码" in str(exc_info.value.detail)
+    assert get_current_auth_user() is None
 
 
 @pytest.mark.asyncio
