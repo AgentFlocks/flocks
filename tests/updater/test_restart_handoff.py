@@ -42,6 +42,8 @@ def _handoff_args(tmp_path: Path, restart_argv: list[str]) -> list[str]:
 def _simple_upgrade_handoff_args(tmp_path: Path) -> list[str]:
     content_root = tmp_path / "staged"
     content_root.mkdir()
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
     config = service_manager.ServiceConfig(
         backend_host="10.0.0.8",
         backend_port=5273,
@@ -69,8 +71,8 @@ def _simple_upgrade_handoff_args(tmp_path: Path) -> list[str]:
         str(tmp_path / "install"),
         "--content-root",
         str(content_root),
-        "--backup-retain-count",
-        "3",
+        "--backup-path",
+        str(backup_path),
         "--was-running",
         "--daemon-pid",
         "2468",
@@ -89,7 +91,7 @@ def _simple_upgrade_handoff_args(tmp_path: Path) -> list[str]:
     ]
 
 
-def test_upgrade_handoff_owns_stop_backup_replace_install_and_restart_order(
+def test_upgrade_handoff_owns_stop_replace_install_and_restart_order(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -112,11 +114,6 @@ def test_upgrade_handoff_owns_stop_backup_replace_install_and_restart_order(
     )
     monkeypatch.setattr(
         restart_handoff,
-        "_backup_current_source",
-        lambda args: events.append("backup") or tmp_path / "backup.tar.gz",
-    )
-    monkeypatch.setattr(
-        restart_handoff,
         "_apply_new_source",
         lambda args: events.append("replace"),
     )
@@ -136,7 +133,6 @@ def test_upgrade_handoff_owns_stop_backup_replace_install_and_restart_order(
     assert events == [
         "wait-parent:1234",
         "stop:2468",
-        "backup",
         "replace",
         "install",
         "start",
@@ -188,44 +184,10 @@ def test_upgrade_start_argv_uses_captured_host_port_without_control_api(host: st
     ]
 
 
-def test_upgrade_backup_failure_restarts_old_source_without_replacing(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    events: list[str] = []
-    cleanup_dir = tmp_path / "cleanup"
-    cleanup_dir.mkdir()
-    args = _simple_upgrade_handoff_args(tmp_path)
-    args[args.index("--"):args.index("--")] = ["--cleanup-dir", str(cleanup_dir)]
+def test_upgrade_wait_ports_exclude_legacy_cleanup_port(tmp_path: Path) -> None:
+    args = restart_handoff._parse_args(_simple_upgrade_handoff_args(tmp_path))
 
-    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
-    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
-    monkeypatch.setattr(
-        restart_handoff,
-        "_backup_current_source",
-        lambda _args: events.append("backup") or None,
-    )
-    monkeypatch.setattr(
-        restart_handoff,
-        "_apply_new_source",
-        lambda _args: events.append("replace"),
-    )
-    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: events.append("install"))
-    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
-    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        restart_handoff.subprocess,
-        "run",
-        lambda argv, **_kwargs: events.append(f"start:{argv}")
-        or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
-    )
-
-    assert restart_handoff.run(args) == 1
-    assert events[0] == "backup"
-    assert events[1].startswith("start:")
-    assert "replace" not in events
-    assert "install" not in events
-    assert not cleanup_dir.exists()
+    assert restart_handoff._service_ports(args) == (5273,)
 
 
 def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollback(
@@ -243,7 +205,6 @@ def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollba
 
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
-    monkeypatch.setattr(restart_handoff, "_backup_current_source", lambda _args: backup_path)
     monkeypatch.setattr(
         restart_handoff,
         "_apply_new_source",
@@ -282,7 +243,6 @@ def test_upgrade_start_failure_records_process_output_and_keeps_temp(
 
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
-    monkeypatch.setattr(restart_handoff, "_backup_current_source", lambda _args: backup_path)
     monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)

@@ -1382,7 +1382,7 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
         async for _step in updater.perform_update("2026.4.1"):
             pass
 
-    assert events == ["sleep"]
+    assert events == ["backup", "sleep"]
     assert len(popen_calls) == 1
     handoff_argv = popen_calls[0]
     assert handoff_argv[:3] == ["/usr/bin/python3", "-m", "flocks.updater.restart_handoff"]
@@ -1391,10 +1391,67 @@ async def test_perform_update_only_stages_source_and_schedules_upgrade_handoff(
     assert "--mode" in handoff_argv
     assert handoff_argv[handoff_argv.index("--mode") + 1] == "upgrade"
     assert handoff_argv[handoff_argv.index("--content-root") + 1] == str(staged_root)
+    assert handoff_argv[handoff_argv.index("--backup-path") + 1] == str(tmp_path / "backup.tar.gz")
     assert handoff_argv[handoff_argv.index("--daemon-pid") + 1] == "2468"
     assert "--was-running" in handoff_argv
     assert "--prepare-handover" not in handoff_argv
     assert handoff_argv[handoff_argv.index("--") + 1 :] == ["/usr/bin/python3"]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_aborts_before_handoff_when_backup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    update_dir = tmp_path / "update"
+    update_dir.mkdir()
+    staged_root = update_dir / "staged"
+    staged_root.mkdir()
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    handoff_spawned = False
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    def fail_backup(*_args, **_kwargs):
+        raise OSError("backup directory is read-only")
+
+    def record_handoff(*_args, **_kwargs):
+        nonlocal handoff_spawned
+        handoff_spawned = True
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater.tempfile, "mkdtemp", lambda **_kwargs: str(update_dir))
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(updater, "_backup_current_version", fail_backup)
+    monkeypatch.setattr(updater, "_spawn_restart_handoff", record_handoff)
+    monkeypatch.setattr(updater, "_record_update_journal", lambda _message: None)
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert progresses[-1].message == "Failed to back up the current source; the update was not applied."
+    assert handoff_spawned is False
+    assert not update_dir.exists()
 
 
 @pytest.mark.asyncio

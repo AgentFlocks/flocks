@@ -119,7 +119,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend-pid-file")
     parser.add_argument("--install-root", required=True)
     parser.add_argument("--content-root")
-    parser.add_argument("--backup-retain-count", type=int, default=1)
+    parser.add_argument("--backup-path")
     parser.add_argument("--was-running", action="store_true")
     parser.add_argument("--daemon-pid", type=int)
     parser.add_argument("--service-config-json")
@@ -182,6 +182,11 @@ def _validate_simple_upgrade_args(args: argparse.Namespace) -> None:
     content_root = Path(args.content_root)
     if not content_root.is_dir():
         raise ValueError(f"upgrade content root does not exist: {content_root}")
+    if not args.backup_path:
+        raise ValueError("upgrade backup path is missing")
+    backup_path = Path(args.backup_path)
+    if not backup_path.is_file():
+        raise ValueError(f"upgrade backup does not exist: {backup_path}")
     if args.was_running and not args.restart_argv:
         raise ValueError("running service requires a restart runtime")
     _service_config_from_args(args)
@@ -190,10 +195,7 @@ def _validate_simple_upgrade_args(args: argparse.Namespace) -> None:
 def _service_ports(args: argparse.Namespace) -> tuple[int, ...]:
     """Return every port that must be released before source replacement."""
     config = _service_config_from_args(args)
-    ports = {config.backend_port, config.frontend_port}
-    if config.legacy_backend_port is not None:
-        ports.add(config.legacy_backend_port)
-    return tuple(sorted(ports))
+    return tuple(sorted({config.backend_port, config.frontend_port}))
 
 
 def _stop_services_before_upgrade(args: argparse.Namespace) -> bool:
@@ -207,15 +209,6 @@ def _stop_services_before_upgrade(args: argparse.Namespace) -> bool:
         daemon_pid=args.daemon_pid,
         backend_port=args.backend_port,
         service_ports=_service_ports(args),
-    )
-
-
-def _backup_current_source(args: argparse.Namespace) -> Path | None:
-    """Create the mandatory source-only backup after services have stopped."""
-    return updater_module._backup_current_version(
-        Path(args.install_root),
-        args.current_version,
-        retain_count=args.backup_retain_count,
     )
 
 
@@ -331,7 +324,7 @@ def _report_pending_pro_bundle_install_receipt(args: argparse.Namespace) -> None
 
 
 def _run_simple_upgrade(args: argparse.Namespace) -> int:
-    """Run stop, backup, source replacement, installation, and restart in order."""
+    """Run stop, source replacement, installation, and restart in order."""
     try:
         _validate_simple_upgrade_args(args)
     except ValueError as exc:
@@ -360,26 +353,7 @@ def _run_simple_upgrade(args: argparse.Namespace) -> int:
         _write_upgrade_result(args=args, phase="failed", failed_stage="stop", error=error)
         return 1
 
-    backup_path = _backup_current_source(args)
-    if backup_path is None:
-        error = "source backup failed"
-        _record_handoff_log(error)
-        stdout = ""
-        stderr = ""
-        if args.was_running:
-            restarted, stdout, stderr = _start_service_after_upgrade(args)
-            if not restarted:
-                error = f"{error}; old service restart failed"
-        _write_upgrade_result(
-            args=args,
-            phase="failed",
-            failed_stage="backup",
-            error=error,
-            stdout=stdout,
-            stderr=stderr,
-        )
-        _cleanup_dir(args.cleanup_dir)
-        return 1
+    backup_path = Path(args.backup_path)
 
     try:
         _apply_new_source(args)

@@ -2706,7 +2706,7 @@ async def perform_update(
         effective_update_version = latest_tag
 
     # ------------------------------------------------------------------ #
-    # Step 3 – leave all source mutation to the detached handoff
+    # Step 3 – stage the validated source for the detached handoff
     # ------------------------------------------------------------------ #
     yield UpdateProgress(
         stage="applying",
@@ -2746,8 +2746,8 @@ async def perform_update(
         )
 
     # ------------------------------------------------------------------ #
-    # Step 5 – pure Pro installs may stay in process; source changes always use
-    # the detached handoff regardless of the legacy ``restart`` flag.
+    # Step 5 – pure Pro installs may stay in process; source changes are backed
+    # up here and then always use the detached handoff.
     # ------------------------------------------------------------------ #
     if skip_core_replace and not restart:
         try:
@@ -2783,6 +2783,24 @@ async def perform_update(
         _record_update_journal(f"ERROR {message}")
         yield UpdateProgress(stage="error", message=message, success=False)
         return
+
+    backup_path: Path | None = None
+    if not skip_core_replace:
+        try:
+            backup_path = await asyncio.to_thread(
+                _backup_current_version,
+                install_root,
+                current_version,
+                ucfg.backup_retain_count,
+            )
+        except Exception as exc:
+            log.error("updater.backup.failed", {"error": str(exc)})
+        if backup_path is None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            message = "Failed to back up the current source; the update was not applied."
+            _record_update_journal(f"ERROR {message}")
+            yield UpdateProgress(stage="error", message=message, success=False)
+            return
 
     yield UpdateProgress(stage="restarting", message="Restarting service...")
 
@@ -2825,7 +2843,7 @@ async def perform_update(
             current_version=current_version,
             content_root=content_root if not skip_core_replace else None,
             service_snapshot=service_snapshot,
-            backup_retain_count=ucfg.backup_retain_count,
+            backup_path=backup_path,
             uv_default_index=profile.uv_default_index,
             npm_registry=profile.npm_registry,
             pro_wheel_path=pro_wheel_path,
@@ -2960,7 +2978,7 @@ def _build_restart_handoff_argv(
     current_version: str,
     content_root: Path | None = None,
     service_snapshot: ServiceSnapshot | None = None,
-    backup_retain_count: int = 1,
+    backup_path: Path | None = None,
     uv_default_index: str | None = None,
     npm_registry: str | None = None,
     pro_wheel_path: Path | None = None,
@@ -2976,6 +2994,8 @@ def _build_restart_handoff_argv(
     if source_upgrade:
         if service_snapshot is None:
             raise ValueError("source upgrade requires a captured service snapshot")
+        if backup_path is None:
+            raise ValueError("source upgrade requires a backup path")
         config = service_snapshot.config
     else:
         config = _handoff_service_config()
@@ -3035,8 +3055,8 @@ def _build_restart_handoff_argv(
                 "upgrade",
                 "--content-root",
                 str(content_root),
-                "--backup-retain-count",
-                str(backup_retain_count),
+                "--backup-path",
+                str(backup_path),
                 "--service-config-json",
                 json.dumps(service_config_payload(config), ensure_ascii=True, sort_keys=True),
             ]
