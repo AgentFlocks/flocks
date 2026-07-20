@@ -544,6 +544,7 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: None)
+    monkeypatch.setattr(restart_handoff, "_cleanup_legacy_upgrade_handover", lambda args: True)
     monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda: True)
     monkeypatch.setattr(
         restart_handoff.subprocess,
@@ -608,6 +609,11 @@ def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path
     )
     monkeypatch.setattr(
         restart_handoff,
+        "_cleanup_legacy_upgrade_handover",
+        lambda _args: events.append("cleanup-handover") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
         "_stop_supervisor_before_restart",
         lambda: events.append("stop-supervisor") or True,
     )
@@ -624,6 +630,7 @@ def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path
         "wait-parent:1234",
         "free-port:8000",
         "install",
+        "cleanup-handover",
         "stop-supervisor",
         f"spawn:{expected_restart_argv}:{tmp_path}:True",
     ]
@@ -670,10 +677,16 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
         "_stop_supervisor_before_restart",
         lambda **kwargs: events.append(f"stop-supervisor:{kwargs}") or True,
     )
+    monkeypatch.setattr(restart_handoff, "_legacy_supervisor_pid", lambda _args: 2468)
     monkeypatch.setattr(
         restart_handoff,
         "_run_upgrade_tasks",
         lambda _args: events.append("install") or None,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_cleanup_legacy_upgrade_handover",
+        lambda _args: events.append("cleanup-handover") or True,
     )
     monkeypatch.setattr(
         restart_handoff.subprocess,
@@ -686,10 +699,47 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
     assert restart_handoff.run(args) == 0
     assert events == [
         "wait-parent:1234",
-        "stop-supervisor:{'backend_port': 5173, 'service_ports': (5173,)}",
+        (
+            "stop-supervisor:{'daemon_pid': 2468, 'backend_port': 5173, "
+            "'service_ports': (5173,), 'force_daemon_stop': True}"
+        ),
         "install",
+        "cleanup-handover",
         f"spawn:{restart_argv}:{tmp_path}:True",
     ]
+
+
+def test_cleanup_legacy_upgrade_handover_stops_trusted_page(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    page_dir = run_dir / "upgrade-page"
+    page_dir.mkdir(parents=True)
+    state_path = run_dir / "upgrade-state.json"
+    state_path.write_text("{}", encoding="utf-8")
+    pid_path = run_dir / "upgrade_server.pid"
+    pid_path.write_text("2468", encoding="utf-8")
+    alive = {2468}
+
+    monkeypatch.setattr(restart_handoff.updater_module, "_flocks_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "port_owner_pids",
+        lambda _port: sorted(alive),
+    )
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "_process_command_line",
+        lambda pid: f"python -m http.server --directory {page_dir}" if pid in alive else "",
+    )
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "_terminate_orphan_pid",
+        lambda pid, _label, _console: alive.discard(pid),
+    )
+
+    assert restart_handoff._cleanup_legacy_upgrade_handover(SimpleNamespace(frontend_port=5173))
+    assert not state_path.exists()
+    assert not pid_path.exists()
+    assert not page_dir.exists()
 
 
 def test_restart_only_waits_for_port_after_parent_exit(
@@ -963,6 +1013,36 @@ def test_restart_only_does_not_rollback_when_restart_spawn_fails(monkeypatch, tm
     assert code == 1
     assert "log:restart_spawn_failed error=spawn failed" in events
     assert not any("rollback" in event for event in events)
+
+
+def test_stop_supervisor_requests_stop_when_health_probe_is_temporarily_unavailable(monkeypatch) -> None:
+    from flocks.cli import service_control
+
+    events: list[str] = []
+    daemon_running = True
+
+    monkeypatch.setattr(service_control, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "pid_is_running",
+        lambda _pid: daemon_running,
+    )
+    monkeypatch.setattr(restart_handoff, "_backend_port_in_use", lambda _port: False)
+
+    def request_stop(*, paths, timeout):
+        del paths, timeout
+        nonlocal daemon_running
+        events.append("request-stop")
+        daemon_running = False
+
+    monkeypatch.setattr(service_control, "request_stop", request_stop)
+
+    assert restart_handoff._stop_supervisor_before_restart(
+        daemon_pid=2468,
+        timeout_seconds=0.01,
+        poll_interval_seconds=0.001,
+    )
+    assert events == ["request-stop"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")

@@ -79,6 +79,7 @@ def _stop_supervisor_before_restart(
     daemon_pid: int | None = None,
     backend_port: int | None = None,
     service_ports: Sequence[int] = (),
+    force_daemon_stop: bool = False,
     timeout_seconds: float = SUPERVISOR_STOP_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
 ) -> bool:
@@ -86,12 +87,20 @@ def _stop_supervisor_before_restart(
 
     paths = service_manager.runtime_paths()
     ports = {port for port in (backend_port, *service_ports) if port is not None}
-    if service_control.supervisor_is_running(paths):
+    control_running = service_control.supervisor_is_running(paths)
+    daemon_running = service_manager.pid_is_running(daemon_pid)
+    if control_running or daemon_running:
         try:
             service_control.request_stop(paths=paths, timeout=timeout_seconds)
         except Exception as exc:
             _record_handoff_log(f"supervisor_stop_request_failed error={exc}")
-            return False
+            if not force_daemon_stop or daemon_pid is None:
+                return False
+            try:
+                service_manager._terminate_orphan_pid(daemon_pid, "daemon", _NullConsole())
+            except Exception as terminate_exc:
+                _record_handoff_log(f"supervisor_force_stop_failed error={terminate_exc}")
+                return False
 
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -418,6 +427,86 @@ def _cleanup_dir(path_value: str | None) -> None:
     shutil.rmtree(Path(path_value), ignore_errors=True)
 
 
+def _legacy_upgrade_page_pids(args: argparse.Namespace, page_dir: Path, pid_path: Path) -> list[int]:
+    """Find trusted temporary upgrade-page processes from older handoffs."""
+    candidates: set[int] = set()
+    try:
+        candidates.update(service_manager.port_owner_pids(args.frontend_port))
+    except Exception:
+        pass
+    try:
+        candidates.add(int(pid_path.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        pass
+
+    page_dir_text = str(page_dir).lower()
+    matches: list[int] = []
+    for pid in sorted(candidates):
+        try:
+            command_line = service_manager._process_command_line(pid).lower()
+        except Exception:
+            continue
+        if "http.server" in command_line and "upgrade-page" in command_line and page_dir_text in command_line:
+            matches.append(pid)
+    return matches
+
+
+def _cleanup_legacy_upgrade_handover(args: argparse.Namespace) -> bool:
+    """Stop and remove upgrade-page artifacts left by old handoff protocols."""
+    run_dir = updater_module._flocks_root() / "run"
+    state_path = run_dir / "upgrade-state.json"
+    pid_path = run_dir / "upgrade_server.pid"
+    page_dir = run_dir / "upgrade-page"
+    if not state_path.exists() and not pid_path.exists() and not page_dir.exists():
+        return True
+    page_pids = _legacy_upgrade_page_pids(args, page_dir, pid_path)
+
+    try:
+        for pid in page_pids:
+            service_manager._terminate_orphan_pid(pid, "升级临时页", _NullConsole())
+    except Exception as exc:
+        _record_handoff_log(f"legacy_handover_stop_failed error={exc}")
+        return False
+
+    remaining = _legacy_upgrade_page_pids(args, page_dir, pid_path)
+    if remaining:
+        _record_handoff_log(f"legacy_handover_still_running pids={remaining}")
+        return False
+
+    state_path.unlink(missing_ok=True)
+    pid_path.unlink(missing_ok=True)
+    shutil.rmtree(page_dir, ignore_errors=True)
+    if page_pids:
+        _record_handoff_log(f"legacy_handover_cleaned pids={page_pids}")
+    return True
+
+
+def _legacy_supervisor_pid(args: argparse.Namespace) -> int | None:
+    """Capture the daemon PID associated with an older handoff request."""
+    try:
+        candidates = service_manager.trusted_daemon_process_pids(root=Path(args.install_root))
+    except Exception as exc:
+        _record_handoff_log(f"legacy_daemon_scan_failed error={exc}")
+        return None
+
+    port_tokens = (f"--server-port {args.backend_port}", f"--server-port={args.backend_port}")
+    matches: list[int] = []
+    for pid in candidates:
+        try:
+            command_line = service_manager._process_command_line(pid).lower()
+        except Exception:
+            continue
+        if any(token in command_line for token in port_tokens):
+            matches.append(pid)
+    if len(matches) == 1:
+        return matches[0]
+    if not matches and len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        _record_handoff_log(f"legacy_daemon_scan_ambiguous pids={candidates}")
+    return None
+
+
 def _cli_subcommand(argv: Sequence[str]) -> str | None:
     """Return the flocks.cli.main subcommand embedded in a Python argv."""
     for index, value in enumerate(argv[:-2]):
@@ -465,6 +554,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         f"parent_pid={args.parent_pid} backend={args.backend_host}:{args.backend_port} "
         f"frontend={args.frontend_host}:{args.frontend_port}"
     )
+    legacy_daemon_pid = _legacy_supervisor_pid(args) if args.prepare_handover else None
 
     if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
         _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
@@ -474,8 +564,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     supervisor_stopped = False
     if args.prepare_handover:
         supervisor_stopped = _stop_supervisor_before_restart(
+            daemon_pid=legacy_daemon_pid,
             backend_port=args.backend_port,
             service_ports=(args.frontend_port,),
+            force_daemon_stop=True,
         )
         if not supervisor_stopped:
             _record_handoff_log("legacy_handover_stop_timeout")
@@ -508,6 +600,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
     _report_pending_pro_bundle_install_receipt(args)
+
+    uses_legacy_protocol = bool(args.backup_path or args.prepare_handover or args.backend_pid_file)
+    if uses_legacy_protocol and not _cleanup_legacy_upgrade_handover(args):
+        _record_handoff_log("legacy_handover_cleanup_failed")
+        _cleanup_dir(args.cleanup_dir)
+        return 1
 
     if not supervisor_stopped and not _stop_supervisor_before_restart():
         _record_handoff_log("supervisor_stop_timeout")
