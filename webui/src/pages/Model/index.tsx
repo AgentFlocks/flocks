@@ -2190,7 +2190,11 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
 
 function allowsBuiltInVisionToggle(modelId: string): boolean {
   const lowered = modelId.toLowerCase();
-  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+  return (
+    lowered.includes('qwen3.6-plus')
+    || lowered.includes('kimi-k2.6')
+    || lowered.includes('kimi-k2.7-code')
+  );
 }
 
 // ==================== Configure Dialog ====================

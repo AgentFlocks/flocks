@@ -277,7 +277,7 @@ class TestOnboardingApplyRoutes:
             return True
 
         async def fake_set_default_model(model_type, body):
-            calls.append(("default_model", body.provider_id))
+            calls.append(("default_model", body.provider_id, body.model_id))
             return {"provider_id": body.provider_id, "model_id": body.model_id}
 
         monkeypatch.setattr(onboarding_routes, "_validate_onboarding_request", fake_validate)
@@ -302,13 +302,14 @@ class TestOnboardingApplyRoutes:
         data = resp.json()
         assert data["success"] is True
         assert data["default_model"]["provider_id"] == "threatbook-cn-llm"
+        assert data["default_model"]["model_id"] == "kimi-k2.7-code"
         assert ("provider", "threatbook-cn-llm") in calls
         assert ("service", "threatbook-cn") in calls
         assert ("service_enabled", "threatbook-cn") in calls
         assert ("ensure_mcp", "cn") in calls
         assert ("mcp_credentials", "threatbook_mcp") in calls
         assert ("mcp_connect", "threatbook_mcp") in calls
-        assert ("default_model", "threatbook-cn-llm") in calls
+        assert ("default_model", "threatbook-cn-llm", "kimi-k2.7-code") in calls
 
     @pytest.mark.asyncio
     async def test_apply_returns_400_when_validation_fails(

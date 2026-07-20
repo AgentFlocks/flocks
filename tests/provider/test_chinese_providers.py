@@ -253,6 +253,7 @@ class TestCuratedCatalogModels:
         assert get_provider_default_url("threatbook-cn-llm") == "https://llm.threatbook.cn/v1"
         models = get_provider_model_definitions("threatbook-cn-llm")
         assert {m.id for m in models} == {
+            "kimi-k2.7-code",
             "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
@@ -262,6 +263,19 @@ class TestCuratedCatalogModels:
             "kimi-k2.6",
             "deepseek-v4-flash",
         }
+
+        kimi_code = next(m for m in models if m.id == "kimi-k2.7-code")
+        assert models[0].id == "kimi-k2.7-code"
+        assert kimi_code.capabilities.supports_vision is True
+        assert kimi_code.capabilities.supports_reasoning is True
+        assert kimi_code.capabilities.interleaved["field"] == "reasoning_content"
+        assert kimi_code.pricing.currency == "CNY"
+        assert kimi_code.pricing.cache_read == 1.3
+        assert kimi_code.pricing.input == 6.5
+        assert kimi_code.pricing.output == 27.0
+        assert kimi_code.limits.context_window == 256000
+        assert kimi_code.limits.max_input_tokens == 224000
+        assert kimi_code.limits.max_output_tokens == 16000
 
         qwen = next(m for m in models if m.id == "qwen3.6-plus")
         assert qwen.capabilities.supports_vision is True
