@@ -46,15 +46,73 @@ function isSystemStats(value: any): value is SystemStats {
   );
 }
 
+type StatsEndpointFailure = {
+  endpoint: string;
+  error: unknown;
+};
+
+function getErrorStatus(error: unknown): number | undefined {
+  return (error as { response?: { status?: number } } | undefined)?.response?.status;
+}
+
+function getErrorDetail(error: unknown): string | undefined {
+  const responseData = (error as { response?: { data?: unknown } } | undefined)?.response?.data;
+  if (responseData && typeof responseData === 'object') {
+    const data = responseData as {
+      message?: unknown;
+      detail?: unknown;
+      error?: unknown;
+    };
+    for (const value of [data.message, data.detail, data.error]) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+  }
+
+  const message = (error as { message?: unknown } | undefined)?.message;
+  return typeof message === 'string' && message.trim() ? message.trim() : undefined;
+}
+
+function describeStatsFailure(failures: StatsEndpointFailure[]): string {
+  if (failures.some((failure) => getErrorStatus(failure.error) === 401)) {
+    return '登录状态已失效或 API Token 缺失，无法加载首页统计数据';
+  }
+
+  if (failures.some((failure) => getErrorStatus(failure.error) === 403)) {
+    return '当前账号无权加载首页统计数据';
+  }
+
+  if (failures.some((failure) => getErrorStatus(failure.error) === 404)) {
+    return '统计接口不可用，已尝试兼容旧版接口但仍未成功';
+  }
+
+  const firstDetail = failures.map((failure) => getErrorDetail(failure.error)).find(Boolean);
+  if (firstDetail) {
+    return `首页统计数据加载失败：${firstDetail}`;
+  }
+
+  return '首页统计数据加载失败，请检查登录状态、API 路由或 Host/代理配置';
+}
+
 async function getSystemStatsLegacy(): Promise<SystemStats> {
+  const resourceFailures: StatsEndpointFailure[] = [];
+  const healthFailures: StatsEndpointFailure[] = [];
+  const getWithFallback = async (endpoint: string, fallbackData: unknown, failures: StatsEndpointFailure[] = resourceFailures) => {
+    try {
+      return await apiClient.get(endpoint);
+    } catch (error) {
+      failures.push({ endpoint, error });
+      return { data: fallbackData };
+    }
+  };
+
   const [taskDash, agents, workflows, skills, tools, providers, health] = await Promise.all([
-    apiClient.get('/api/task-system/dashboard').catch(() => ({ data: {} })),
-    apiClient.get('/api/agent').catch(() => ({ data: [] })),
-    apiClient.get('/api/workflow').catch(() => ({ data: [] })),
-    apiClient.get('/api/skills').catch(() => ({ data: [] })),
-    apiClient.get('/api/tools').catch(() => ({ data: [] })),
-    apiClient.get('/api/provider').catch(() => ({ data: { all: [] } })),
-    apiClient.get('/api/health').catch(() => ({ data: { status: 'error' } })),
+    getWithFallback('/api/task-system/dashboard', {}),
+    getWithFallback('/api/agent', []),
+    getWithFallback('/api/workflow', []),
+    getWithFallback('/api/skills', []),
+    getWithFallback('/api/tools', []),
+    getWithFallback('/api/provider', { all: [] }),
+    getWithFallback('/api/health', { status: 'error' }, healthFailures),
   ]);
 
   const dash = taskDash.data || {};
@@ -72,6 +130,12 @@ async function getSystemStatsLegacy(): Promise<SystemStats> {
   const totalModels = providerAll
     .filter((p: any) => connectedSet.has(p.id))
     .reduce((sum: number, p: any) => sum + Object.keys(p.models ?? {}).length, 0);
+  const allResourceEndpointsFailed = resourceFailures.length === 6;
+  const healthIsHealthy = health.data.status === 'healthy';
+  const healthMessage = typeof health.data.message === 'string' && health.data.message.trim()
+    ? health.data.message.trim()
+    : undefined;
+  const systemIsHealthy = healthIsHealthy && !allResourceEndpointsFailed;
 
   return {
     tasks: {
@@ -84,8 +148,12 @@ async function getSystemStatsLegacy(): Promise<SystemStats> {
     tools: { total: toolList.length },
     models: { total: totalModels },
     system: {
-      status: health.data.status === 'healthy' ? 'healthy' : 'error',
-      message: health.data.status === 'healthy' ? '所有服务运行正常' : '部分服务异常',
+      status: systemIsHealthy ? 'healthy' : 'error',
+      message: systemIsHealthy
+        ? '所有服务运行正常'
+        : allResourceEndpointsFailed
+          ? describeStatsFailure(resourceFailures)
+          : healthMessage ?? describeStatsFailure(healthFailures),
     },
   };
 }
@@ -110,7 +178,10 @@ export const statsApi = {
           skills: { total: 0 },
           tools: { total: 0 },
           models: { total: 0 },
-          system: { status: 'error', message: '无法连接到后端服务' },
+          system: {
+            status: 'error',
+            message: describeStatsFailure([{ endpoint: '/api/stats/summary', error: fallbackError || error }]),
+          },
         };
       }
     }

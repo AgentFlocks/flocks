@@ -98,4 +98,20 @@ describe('statsApi.getSystemStats', () => {
     const result = await statsApi.getSystemStats();
     expect(result.skills.total).toBe(0);
   });
+
+  it('reports an authentication-specific error when all stats resources fail with 401', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/api/stats/summary') return Promise.reject(new Error('legacy backend'));
+      if (url === '/api/health') return Promise.resolve({ data: { status: 'healthy' } });
+      return Promise.reject({
+        response: { status: 401, data: { message: 'unauthorized' } },
+      });
+    });
+
+    const { statsApi } = await import('./stats');
+    const result = await statsApi.getSystemStats();
+
+    expect(result.system.status).toBe('error');
+    expect(result.system.message).toContain('登录状态已失效');
+  });
 });

@@ -20,6 +20,7 @@
     "workflows": "工作流",
     "normal": "正常",
     "abnormal": "异常",
+    "loadErrorHint": "首页统计数据加载失败：{{message}}",
     "checking": "检测中...",
     "activeScheduled": "启动计划任务",
     "agentCount": "Agent 数量",
