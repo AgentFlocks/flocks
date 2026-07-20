@@ -293,6 +293,46 @@ async def test_call_llm_blocks_provider_when_llm_before_hook_fails(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_call_llm_blocks_provider_when_hook_stage_probe_fails(monkeypatch: pytest.MonkeyPatch):
+    runner = _make_runner("ses_runner_hook_probe_fail_closed")
+    assistant_msg = SimpleNamespace(id="msg_assistant_probe_fail")
+    agent = SimpleNamespace(name="rex")
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(side_effect=RuntimeError("hook registry unavailable")),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "langfuse_is_active",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
+        _FakeToolAccumulator,
+    )
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            raise AssertionError("provider must not be called when hook probe fails")
+
+    with pytest.raises(RuntimeError, match="stage probe failed"):
+        await runner._call_llm(
+            provider=_Provider(),
+            messages=[ChatMessage(role="user", content="email alice@example.com")],
+            tools=[],
+            agent=agent,
+            assistant_msg=assistant_msg,
+        )
+
+
+@pytest.mark.asyncio
 async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_langfuse_redacted")
     assistant_msg = SimpleNamespace(id="msg_assistant_langfuse_redacted")

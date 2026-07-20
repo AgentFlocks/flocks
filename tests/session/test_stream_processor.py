@@ -497,6 +497,37 @@ class TestToolCallExecution:
         assert running_inputs == [{"ip": "10.1.2.3"}]
 
     @pytest.mark.asyncio
+    async def test_tool_before_failure_blocks_tool_execution(self):
+        proc = _make_processor()
+        execute_mock = AsyncMock(return_value=ToolResult(success=True, output="should not run", title="ip query"))
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=execute_mock,
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(side_effect=RuntimeError("redaction restore failed")),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_hook_fail", tool_name="ip_query"))
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc_hook_fail",
+                    tool_name="ip_query",
+                    input={"ip": "[[V_IP_ADDRESS_1]]"},
+                )
+            )
+
+        execute_mock.assert_not_awaited()
+        state = proc.tool_calls["tc_hook_fail"]
+        assert state.status == "error"
+        assert state.error == "Tool execution blocked because tool-before hook failed"
+
+    @pytest.mark.asyncio
     async def test_cancelled_tool_blocks_late_running_metadata_updates(self):
         event_callback = AsyncMock()
         proc = _make_processor(event_callback=event_callback)

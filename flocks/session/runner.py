@@ -2619,7 +2619,8 @@ class SessionRunner:
                 llm_hook_metadata,
             )
         except Exception as exc:
-            log.debug("runner.hook.stage_probe.error", {"error": str(exc)})
+            log.error("runner.hook.stage_probe.error", {"error": str(exc)})
+            raise RuntimeError("LLM hook stage probe failed; request was not sent") from exc
 
         if llm_before_enabled:
             llm_before_hook_input = {
