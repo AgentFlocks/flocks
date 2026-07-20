@@ -5,6 +5,27 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Message } from '@/types';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function sessionListItem(id: string, projectID: string, updated = 1) {
+  return {
+    id,
+    projectID,
+    effectiveProjectID: projectID,
+    title: id,
+    time: { created: updated, updated },
+    category: 'user',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mocks — keep API calls from running in unit tests
 // ---------------------------------------------------------------------------
@@ -1183,5 +1204,80 @@ describe('useSessions list loading', () => {
       'prj_labs-1',
       'prj_labs-2',
     ]);
+  });
+
+  it('loads more sessions for different projects concurrently', async () => {
+    const defaultPage = deferred<any[]>();
+    const labsPage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+      }
+      return params.projectID === 'default' ? defaultPage.promise : labsPage.promise;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadDefault!: Promise<void>;
+    let loadLabs!: Promise<void>;
+    act(() => {
+      loadDefault = result.current.loadMore('default');
+      loadLabs = result.current.loadMore('prj_labs');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default', 'prj_labs']));
+
+    await act(async () => {
+      defaultPage.resolve([sessionListItem('default-2', 'default', 2)] as any);
+      await loadDefault;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['prj_labs']));
+
+    await act(async () => {
+      labsPage.resolve([sessionListItem('prj_labs-2', 'prj_labs', 2)] as any);
+      await loadLabs;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'default-2',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('clears project pagination state when a background refresh supersedes it', async () => {
+    const stalePage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset > 0) return stalePage.promise;
+      return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadMore!: Promise<void>;
+    act(() => {
+      loadMore = result.current.loadMore('default');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default']));
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+
+    await act(async () => {
+      stalePage.resolve([sessionListItem('default-stale', 'default', 2)] as any);
+      await loadMore;
+    });
+    expect(result.current.sessions.map((item) => item.id)).not.toContain('default-stale');
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
   });
 });

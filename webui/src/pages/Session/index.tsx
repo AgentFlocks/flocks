@@ -374,6 +374,7 @@ export default function SessionPage() {
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
 
   const sessionProjectIds = useMemo(
@@ -649,16 +650,19 @@ export default function SessionPage() {
   }, [toast, t]);
 
   const fetchProjects = useCallback(async (ensureProject?: ProjectSummary, query = '') => {
+    const requestSeq = ++projectListRequestSeqRef.current;
     const listResult = await client.get('/api/project', {
       params: { search: query.trim() || undefined },
     });
-    let nextProjects = Array.isArray(listResult.data) ? listResult.data : [];
-    if (ensureProject?.id) {
-      nextProjects = nextProjects.some((project) => project.id === ensureProject.id)
-        ? nextProjects.map((project) => (project.id === ensureProject.id ? ensureProject : project))
-        : [ensureProject, ...nextProjects];
-    }
-    setProjects(nextProjects);
+    if (requestSeq !== projectListRequestSeqRef.current) return;
+    const nextProjects = Array.isArray(listResult.data) ? listResult.data : [];
+    setProjects((currentProjects) => {
+      if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
+        return nextProjects;
+      }
+      const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
+      return [{ ...currentProject, ...ensureProject }, ...nextProjects];
+    });
   }, []);
 
   const scheduleSessionListRefetch = useCallback(() => {

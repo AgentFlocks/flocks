@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
@@ -672,9 +672,20 @@ describe('SessionPage session actions menu', () => {
   it('renames a project from the sidebar', async () => {
     const user = userEvent.setup();
     const defaultProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    client.get.mockResolvedValue({
-      data: [defaultProject, { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' }],
-    });
+    const projectList = [defaultProject, {
+      id: 'prj_project2',
+      worktree: '/tmp/labs',
+      name: 'Labs',
+      sessionCount: 8,
+      lastActivityAt: 10_000,
+    }];
+    client.get
+      .mockResolvedValueOnce({ data: projectList })
+      .mockResolvedValue({
+        data: projectList.map((project) => (
+          project.id === 'prj_project2' ? { ...project, name: 'Renamed Project' } : project
+        )),
+      });
     client.patch.mockResolvedValue({
       data: { id: 'prj_project2', worktree: '/tmp/labs', name: 'Renamed Project' },
     });
@@ -694,6 +705,55 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(client.patch).toHaveBeenCalledWith('/api/project/prj_project2', { name: 'Renamed Project' });
     });
+    const renamedProject = await screen.findByText('Renamed Project');
+    expect(renamedProject.closest('[class*="group/project"]')).toHaveTextContent('8');
+  });
+
+  it('ignores stale project results after the search changes', async () => {
+    const initialProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
+    const olderSearch = deferred<{ data: Array<Record<string, unknown>> }>();
+    const latestSearch = deferred<{ data: Array<Record<string, unknown>> }>();
+    client.get.mockImplementation((_url: string, config?: { params?: { search?: string } }) => {
+      const query = config?.params?.search;
+      if (query === 'a') return olderSearch.promise;
+      if (query === 'ab') return latestSearch.promise;
+      return Promise.resolve({ data: [initialProject] });
+    });
+
+    renderSessionPage();
+    await screen.findByText('tasksSection');
+    const searchInput = screen.getByPlaceholderText('filterConversations');
+    fireEvent.change(searchInput, { target: { value: 'a' } });
+    fireEvent.change(searchInput, { target: { value: 'ab' } });
+
+    await act(async () => {
+      latestSearch.resolve({
+        data: [initialProject, {
+          id: 'prj_latest',
+          worktree: '/tmp/latest',
+          name: 'Latest result',
+          isDefault: false,
+          matchedSessionCount: 1,
+        }],
+      });
+      await latestSearch.promise;
+    });
+    expect(await screen.findByText('Latest result')).toBeInTheDocument();
+
+    await act(async () => {
+      olderSearch.resolve({
+        data: [initialProject, {
+          id: 'prj_stale',
+          worktree: '/tmp/stale',
+          name: 'Stale result',
+          isDefault: false,
+          matchedSessionCount: 1,
+        }],
+      });
+      await olderSearch.promise;
+    });
+    expect(screen.getByText('Latest result')).toBeInTheDocument();
+    expect(screen.queryByText('Stale result')).not.toBeInTheDocument();
   });
 
   it('does not render project actions for the default task group', async () => {

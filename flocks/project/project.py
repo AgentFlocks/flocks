@@ -181,6 +181,34 @@ class Project:
         return os.path.normcase(str(Path(worktree).expanduser().resolve(strict=True)))
 
     @staticmethod
+    def _directory_context(directory: str) -> Tuple[Path, Path, Optional[str]]:
+        path = Path(directory).expanduser().resolve()
+        worktree = path
+        vcs: Optional[str] = None
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                worktree = Path(result.stdout.strip()).resolve()
+                vcs = "git"
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return path, worktree, vcs
+
+    @classmethod
+    def worktree_for_directory(cls, directory: str) -> str:
+        """Return a stable runtime scope for CLI sessions in a directory."""
+
+        _, worktree, _ = cls._directory_context(directory)
+        return os.path.normcase(str(worktree))
+
+    @staticmethod
     def _path_status(worktree: str) -> Literal["available", "missing", "unreadable"]:
         path = Path(worktree)
         if not path.is_dir():
@@ -568,23 +596,7 @@ class Project:
     async def from_directory(cls, directory: str) -> Dict[str, Any]:
         """Build an ephemeral runtime context without persisting a project."""
 
-        path = Path(directory).expanduser().resolve()
-        worktree = path
-        vcs: Optional[str] = None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=path,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                worktree = Path(result.stdout.strip()).resolve()
-                vcs = "git"
-        except (OSError, subprocess.SubprocessError):
-            pass
+        path, worktree, vcs = cls._directory_context(directory)
 
         now = cls._now_ms()
         project = ProjectInfo(

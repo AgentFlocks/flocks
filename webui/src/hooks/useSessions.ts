@@ -238,7 +238,9 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   const initializedRef = useRef(false);
   const sessionsRef = useRef<Session[]>([]);
   const hasLoadedOnceRef = useRef(false);
-  const requestSeqRef = useRef(0);
+  const replaceRequestSeqRef = useRef(0);
+  const appendRequestSeqByProjectRef = useRef<Map<string, number>>(new Map());
+  const activeAppendProjectsRef = useRef<Set<string>>(new Set());
   const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
   const loadedQueryKeyRef = useRef<string | null>(null);
   const projectIdsKey = options?.projectIds === undefined
@@ -252,6 +254,22 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
 
   const fetchSessions = useCallback(async (fetchOptions?: { append?: boolean; projectId?: string }) => {
     const append = Boolean(fetchOptions?.append);
+    const appendProjectKey = fetchOptions?.projectId ?? '*';
+    const replaceRequestSeq = append
+      ? replaceRequestSeqRef.current
+      : ++replaceRequestSeqRef.current;
+    const appendRequestSeq = append
+      ? (appendRequestSeqByProjectRef.current.get(appendProjectKey) ?? 0) + 1
+      : 0;
+    if (append) {
+      appendRequestSeqByProjectRef.current.set(appendProjectKey, appendRequestSeq);
+    }
+    const isCurrentRequest = () => (
+      append
+        ? replaceRequestSeqRef.current === replaceRequestSeq
+          && appendRequestSeqByProjectRef.current.get(appendProjectKey) === appendRequestSeq
+        : replaceRequestSeqRef.current === replaceRequestSeq
+    );
     const requestedProjectIds = projectIdsKey === null
       ? null
       : projectIdsKey.split('\u0000').filter(Boolean);
@@ -260,18 +278,23 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       : fetchOptions?.projectId
         ? [fetchOptions.projectId]
         : requestedProjectIds;
-    const requestSeq = ++requestSeqRef.current;
     try {
       // Only show the full-page loading state on the very first fetch.
       // Subsequent refetches (triggered by SSE events) update data silently
       // to avoid unmounting SessionChat and disrupting the active conversation.
       if (append) {
+        activeAppendProjectsRef.current.add(appendProjectKey);
         setLoadingMore(true);
         if (fetchOptions?.projectId) {
           setLoadingMoreProjectIds((current) => new Set(current).add(fetchOptions.projectId as string));
         }
       } else if (!initializedRef.current) {
         setLoading(true);
+      }
+      if (!append) {
+        activeAppendProjectsRef.current.clear();
+        setLoadingMore(false);
+        setLoadingMoreProjectIds(new Set());
       }
       setError(null);
       if (targetProjectIds?.length === 0) {
@@ -310,7 +333,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         });
         return { projectId, requestLimit, response };
       }));
-      if (requestSeq !== requestSeqRef.current) return;
+      if (!isCurrentRequest()) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
       const nextSessions = responses.flatMap(({ response }) => (
         Array.isArray(response) ? response.filter(
@@ -349,20 +372,24 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       hasLoadedOnceRef.current = true;
       loadedQueryKeyRef.current = queryKey;
     } catch (err: any) {
-      if (requestSeq !== requestSeqRef.current) return;
+      if (!isCurrentRequest()) return;
       setError(err.message || 'Failed to fetch sessions');
       if (!append && !hasLoadedOnceRef.current) setSessions([]);
     } finally {
-      if (requestSeq === requestSeqRef.current) {
-        setLoading(false);
-        setLoadingMore(false);
-        if (fetchOptions?.projectId) {
-          setLoadingMoreProjectIds((current) => {
-            const next = new Set(current);
-            next.delete(fetchOptions.projectId as string);
-            return next;
-          });
+      if (append) {
+        if (appendRequestSeqByProjectRef.current.get(appendProjectKey) === appendRequestSeq) {
+          activeAppendProjectsRef.current.delete(appendProjectKey);
+          setLoadingMore(activeAppendProjectsRef.current.size > 0);
+          if (fetchOptions?.projectId) {
+            setLoadingMoreProjectIds((current) => {
+              const next = new Set(current);
+              next.delete(fetchOptions.projectId as string);
+              return next;
+            });
+          }
         }
+      } else if (isCurrentRequest()) {
+        setLoading(false);
         initializedRef.current = true;
       }
     }
