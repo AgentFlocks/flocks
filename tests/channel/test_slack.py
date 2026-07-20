@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from flocks.channel.base import ChatType, OutboundContext
+from flocks.channel.base import ChatType, NonRetryableChannelError, OutboundContext
 import flocks.channel.builtin.slack.channel as slack_mod
 from flocks.channel.builtin.slack.channel import SlackChannel
 from flocks.channel.builtin.slack.format import markdown_to_slack_mrkdwn
@@ -19,6 +19,9 @@ def test_plugin_exports_slack_channel():
     assert plugin.meta().id == "slack"
     assert plugin.meta().label == "Slack"
     assert "sl" in plugin.meta().aliases
+    assert plugin.capabilities().media is False
+    assert plugin.capabilities().rich_text is True
+    assert plugin.capabilities().self_managed_connection is True
 
 
 def test_slack_manifest_matches_socket_mode_setup_needs():
@@ -57,6 +60,21 @@ def test_validate_config_requires_tokens(monkeypatch):
     assert "botToken" in (plugin.validate_config({}) or "")
     assert "appToken" in (plugin.validate_config({"botToken": "xoxb-1"}) or "")
     assert plugin.validate_config({"botToken": "xoxb-1", "appToken": "xapp-1"}) is None
+
+
+def test_validate_config_rejects_non_slack_token_prefixes(monkeypatch):
+    monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+    plugin = SlackChannel()
+
+    assert "xoxb-" in (
+        plugin.validate_config({"botToken": "xoxp-user", "appToken": "xapp-1"}) or ""
+    )
+    assert "xapp-" in (
+        plugin.validate_config({"botToken": "xoxb-1", "appToken": "xoxb-wrong"}) or ""
+    )
+    assert plugin.validate_config(
+        {"botToken": "{secret:slack_bot}", "appToken": "{secret:slack_app}"}
+    ) is None
 
 
 def test_validate_config_reports_missing_dependency(monkeypatch):
@@ -121,6 +139,117 @@ def test_build_inbound_group_mention_strips_bot_mention():
     assert msg.chat_type == ChatType.CHANNEL
     assert msg.mentioned is True
     assert msg.mention_text == "summarize this"
+
+
+def test_build_inbound_extracts_rich_text_blocks():
+    msg = build_inbound_message(
+        {
+            "channel": "C123",
+            "channel_type": "channel",
+            "user": "U123",
+            "ts": "171.22",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "user", "user_id": "UBOT"},
+                                {"type": "text", "text": " summarize "},
+                                {"type": "link", "text": "this", "url": "https://example.com"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert msg is not None
+    assert "<@UBOT> summarize this (https://example.com)" in msg.text
+    assert msg.mentioned is True
+    assert "summarize this" in msg.mention_text
+
+
+def test_build_inbound_merges_blocks_when_plain_text_exists():
+    msg = build_inbound_message(
+        {
+            "channel": "C123",
+            "channel_type": "channel",
+            "user": "U123",
+            "ts": "171.24",
+            "text": "<@UBOT> please inspect",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "user", "user_id": "UBOT"},
+                                {"type": "text", "text": " please inspect"},
+                            ],
+                        },
+                        {
+                            "type": "rich_text_quote",
+                            "elements": [
+                                {
+                                    "type": "rich_text_section",
+                                    "elements": [
+                                        {"type": "text", "text": "quoted outage context"},
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert msg is not None
+    assert "please inspect" in msg.text
+    assert "quoted outage context" in msg.text
+    assert "quoted outage context" in msg.mention_text
+
+
+def test_build_inbound_appends_attachments_and_file_names():
+    msg = build_inbound_message(
+        {
+            "channel": "C123",
+            "channel_type": "channel",
+            "user": "U123",
+            "ts": "171.23",
+            "text": "<@UBOT> review alert",
+            "attachments": [
+                {
+                    "title": "Alert context",
+                    "fields": [
+                        {"title": "Severity", "value": "high"},
+                    ],
+                }
+            ],
+            "files": [
+                {"name": "screenshot.png"},
+            ],
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert msg is not None
+    assert "review alert" in msg.text
+    assert "Alert context" in msg.text
+    assert "Severity: high" in msg.text
+    assert "[Slack files: screenshot.png]" in msg.text
 
 
 def test_build_inbound_group_dm_uses_group_chat_type():
@@ -329,11 +458,38 @@ async def test_connect_socket_mode_failure_marks_disconnected(monkeypatch):
 
     monkeypatch.setattr(slack_mod, "AsyncSocketModeHandler", FakeHandler)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(NonRetryableChannelError):
         await plugin._connect_socket_mode("xapp-bad")
 
     assert plugin.status.connected is False
-    assert plugin.status.last_error == "invalid app token"
+    assert "Slack App Token" in (plugin.status.last_error or "")
+    assert "xapp-" in (plugin.status.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_connect_socket_mode_slack_response_error_is_actionable(monkeypatch):
+    plugin = SlackChannel()
+    plugin._config = {"socketConnectTimeoutSeconds": 1}
+    plugin._app = SimpleNamespace()
+
+    class FakeSlackError(Exception):
+        def __init__(self):
+            super().__init__("Slack API error")
+            self.response = SimpleNamespace(data={"error": "missing_scope"})
+
+    class FakeHandler:
+        def __init__(self, app, token):
+            pass
+
+        async def connect_async(self):
+            raise FakeSlackError()
+
+    monkeypatch.setattr(slack_mod, "AsyncSocketModeHandler", FakeHandler)
+
+    with pytest.raises(NonRetryableChannelError):
+        await plugin._connect_socket_mode("xapp-missing-scope")
+
+    assert "connections:write" in (plugin.status.last_error or "")
 
 
 @pytest.mark.asyncio
@@ -356,6 +512,45 @@ async def test_connect_socket_mode_timeout_marks_disconnected(monkeypatch):
 
     assert plugin.status.connected is False
     assert "timed out" in (plugin.status.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_start_invalid_config_raises_non_retryable(monkeypatch):
+    monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+    plugin = SlackChannel()
+
+    with pytest.raises(NonRetryableChannelError):
+        await plugin.start({}, AsyncMock())
+
+    assert plugin.status.connected is False
+    assert "botToken" in (plugin.status.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_user_token_auth_identity(monkeypatch):
+    monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+
+    class FakeClient:
+        async def auth_test(self):
+            return {
+                "user_id": "U_HUMAN",
+                "team_id": "T1",
+            }
+
+    class FakeApp:
+        def __init__(self, token):
+            self.token = token
+            self.client = FakeClient()
+
+    monkeypatch.setattr(slack_mod, "AsyncApp", FakeApp)
+    plugin = SlackChannel()
+
+    with pytest.raises(NonRetryableChannelError):
+        await plugin.start({"botToken": "xoxb-looks-valid", "appToken": "xapp-1"}, AsyncMock())
+
+    assert plugin.status.connected is False
+    assert "Bot User OAuth Token" in (plugin.status.last_error or "")
+    assert "xoxp-" in (plugin.status.last_error or "")
 
 
 @pytest.mark.asyncio

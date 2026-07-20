@@ -32,6 +32,7 @@ from flocks.channel.base import (
     ChatType,
     DeliveryResult,
     InboundMessage,
+    NonRetryableChannelError,
     OutboundContext,
 )
 from flocks.config.config import ChannelAccountConfig, ChannelConfig, ConfigInfo
@@ -1405,6 +1406,70 @@ class TestGatewayManagerHelpers:
         GatewayManager._record_error(plugin, "test", RuntimeError("fail"))
         assert plugin.status.connected is False
         assert plugin.status.last_error == "fail"
+        assert plugin.status.error_count == 1
+
+    async def test_run_with_reconnect_stops_on_non_retryable_error(self):
+        from flocks.channel.gateway.manager import GatewayManager
+
+        manager = GatewayManager()
+        plugin = _StubChannel()
+        attempts = 0
+        abort_event = asyncio.Event()
+
+        async def _fail_start(config, on_message, abort_event=None):
+            nonlocal attempts
+            attempts += 1
+            raise NonRetryableChannelError("bad credentials")
+
+        plugin.start = _fail_start  # type: ignore[method-assign]
+
+        await manager._run_with_reconnect(
+            channel_id="stub",
+            plugin=plugin,
+            config={},
+            on_message=AsyncMock(),
+            abort_event=abort_event,
+        )
+
+        assert attempts == 1
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "bad credentials"
+        assert plugin.status.error_count == 1
+
+    async def test_run_with_reconnect_does_not_pre_mark_self_managed_connection(self):
+        from flocks.channel.gateway.manager import GatewayManager
+
+        class _SelfManagedChannel(_StubChannel):
+            def capabilities(self) -> ChannelCapabilities:
+                return ChannelCapabilities(
+                    chat_types=[ChatType.DIRECT],
+                    self_managed_connection=True,
+                )
+
+        manager = GatewayManager()
+        plugin = _SelfManagedChannel()
+        started = asyncio.Event()
+        abort_event = asyncio.Event()
+
+        async def _start(config, on_message, abort_event=None):
+            started.set()
+            await asyncio.sleep(0.75)
+            abort_event.set()
+            raise RuntimeError("handshake failed")
+
+        plugin.start = _start  # type: ignore[method-assign]
+
+        await manager._run_with_reconnect(
+            channel_id="stub",
+            plugin=plugin,
+            config={},
+            on_message=AsyncMock(),
+            abort_event=abort_event,
+        )
+
+        assert started.is_set()
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "handshake failed"
         assert plugin.status.error_count == 1
 
     async def test_stop_all_drains_cancelled_tasks(self, monkeypatch):

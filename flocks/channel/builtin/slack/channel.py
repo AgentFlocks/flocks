@@ -13,6 +13,7 @@ from flocks.channel.base import (
     ChatType,
     DeliveryResult,
     InboundMessage,
+    NonRetryableChannelError,
     OutboundContext,
 )
 from flocks.utils.log import Log
@@ -42,6 +43,83 @@ except ImportError:  # pragma: no cover - exercised by validate_config tests
 log = Log.create(service="channel.slack")
 
 
+_PERMANENT_SLACK_ERROR_CODES = {
+    "invalid_auth",
+    "not_authed",
+    "no_auth",
+    "token_revoked",
+    "account_inactive",
+    "not_allowed_token_type",
+    "missing_scope",
+}
+
+
+def _is_token_reference(value: str) -> bool:
+    return value.startswith("{secret:") or value.startswith("{env:")
+
+
+def _slack_response_get(response: Any, key: str, default: str = "") -> str:
+    getter = getattr(response, "get", None)
+    if callable(getter):
+        return str(getter(key, default) or default)
+    data = getattr(response, "data", None)
+    if isinstance(data, dict):
+        return str(data.get(key) or default)
+    return default
+
+
+def _slack_error_code(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    data = getattr(response, "data", None)
+    if isinstance(data, dict):
+        return str(data.get("error") or "").strip()
+    if isinstance(response, dict):
+        return str(response.get("error") or "").strip()
+
+    message = str(exc).lower().replace("-", "_")
+    for code in _PERMANENT_SLACK_ERROR_CODES:
+        if code in message:
+            return code
+    if "invalid app token" in message:
+        return "invalid_auth"
+    return ""
+
+
+def _is_permanent_slack_error(exc: Exception) -> bool:
+    return _slack_error_code(exc) in _PERMANENT_SLACK_ERROR_CODES
+
+
+def _format_slack_start_error(exc: Exception, *, phase: str) -> str:
+    code = _slack_error_code(exc)
+    detail = f"Slack error={code}" if code else str(exc)
+
+    if phase == "bot_auth":
+        if code == "missing_scope":
+            return (
+                "Slack Bot Token 权限不足：请在 Slack 开发者管理后台的 OAuth & Permissions "
+                "确认 Bot Token 具备 Manifest 中的 bot scopes，重新安装 App 后复制 "
+                "Bot User OAuth Token（xoxb- 开头）。"
+            )
+        return (
+            "Slack Bot Token 验证失败：请在 Slack 开发者管理后台的 OAuth & Permissions "
+            "复制 Bot User OAuth Token（xoxb- 开头），确认 App 已安装到 workspace 后重新保存。"
+            f" 原始错误：{detail}"
+        )
+
+    if code == "missing_scope":
+        return (
+            "Slack App Token 权限不足：请在 Basic Information > App-Level Tokens "
+            "创建或更新具备 connections:write scope 的 App-Level Token（xapp- 开头）。"
+        )
+    if code in {"invalid_auth", "not_authed", "no_auth", "token_revoked", "account_inactive", "not_allowed_token_type"}:
+        return (
+            "Slack App Token 验证失败：请在 Basic Information > App-Level Tokens "
+            "复制 App-Level Token（xapp- 开头），并确认它包含 connections:write scope。"
+            f" 原始错误：{detail}"
+        )
+    return f"Slack Socket Mode 连接失败：{detail}"
+
+
 class SlackChannel(ChannelPlugin):
     """Slack bot channel — Socket Mode inbound and Web API outbound."""
 
@@ -62,20 +140,30 @@ class SlackChannel(ChannelPlugin):
     def capabilities(self) -> ChannelCapabilities:
         return ChannelCapabilities(
             chat_types=[ChatType.DIRECT, ChatType.GROUP, ChatType.CHANNEL],
-            media=True,
+            media=False,
             threads=True,
             reactions=False,
             edit=False,
             rich_text=True,
+            self_managed_connection=True,
         )
 
     def validate_config(self, config: dict) -> Optional[str]:
         if not SLACK_AVAILABLE:
             return "Missing Python dependency: slack-bolt"
-        if not resolve_bot_token(config):
+        bot_token = resolve_bot_token(config)
+        app_token = resolve_app_token(config)
+        if not bot_token:
             return "Missing required config: botToken"
-        if not resolve_app_token(config):
+        if not app_token:
             return "Missing required config: appToken"
+        if not _is_token_reference(bot_token) and not bot_token.startswith("xoxb-"):
+            return (
+                "Slack Bot Token 必须是 Bot User OAuth Token（xoxb- 开头），"
+                "不能使用 User Token（xoxp-）或其他 token。"
+            )
+        if not _is_token_reference(app_token) and not app_token.startswith("xapp-"):
+            return "Slack App Token 必须是 App-Level Token（xapp- 开头）。"
         return None
 
     @property
@@ -111,7 +199,7 @@ class SlackChannel(ChannelPlugin):
         if error:
             self.mark_disconnected(error)
             log.error("slack.start.invalid_config", {"error": error})
-            return
+            raise NonRetryableChannelError(error)
 
         bot_token = resolve_bot_token(config)
         app_token = resolve_app_token(config)
@@ -121,9 +209,25 @@ class SlackChannel(ChannelPlugin):
         self._app = AsyncApp(token=bot_token)
         abort = abort_event or asyncio.Event()
         try:
-            auth = await self._app.client.auth_test()
-            self._bot_user_id = str(auth.get("user_id") or "")
-            team_id = str(auth.get("team_id") or "default")
+            try:
+                auth = await self._app.client.auth_test()
+            except Exception as exc:
+                message = _format_slack_start_error(exc, phase="bot_auth")
+                self.mark_disconnected(message)
+                if _is_permanent_slack_error(exc):
+                    raise NonRetryableChannelError(message) from exc
+                raise RuntimeError(message) from exc
+
+            self._bot_user_id = _slack_response_get(auth, "user_id")
+            if not _slack_response_get(auth, "bot_id"):
+                message = (
+                    "Slack Bot Token 验证失败：当前 token 认证为用户而不是 Bot。"
+                    "请在 Slack 开发者管理后台 OAuth & Permissions 中复制 "
+                    "Bot User OAuth Token（xoxb- 开头），不要使用 xoxp- User Token。"
+                )
+                self.mark_disconnected(message)
+                raise NonRetryableChannelError(message)
+            team_id = _slack_response_get(auth, "team_id", "default")
 
             self._register_handlers()
             await self._connect_socket_mode(app_token)
@@ -131,9 +235,14 @@ class SlackChannel(ChannelPlugin):
             await abort.wait()
         except asyncio.CancelledError:
             raise
+        except NonRetryableChannelError:
+            raise
         except Exception as exc:
-            self.mark_disconnected(str(exc))
-            log.warning("slack.socket.stopped", {"error": str(exc)})
+            message = str(exc)
+            if self.status.connected or self.status.last_error != message:
+                self.mark_disconnected(message)
+            log.warning("slack.socket.stopped", {"error": message})
+            raise
         finally:
             await self.stop()
 
@@ -152,8 +261,11 @@ class SlackChannel(ChannelPlugin):
             self.mark_disconnected(message)
             raise TimeoutError(message) from exc
         except Exception as exc:
-            self.mark_disconnected(str(exc))
-            raise
+            message = _format_slack_start_error(exc, phase="socket_mode")
+            self.mark_disconnected(message)
+            if _is_permanent_slack_error(exc):
+                raise NonRetryableChannelError(message) from exc
+            raise RuntimeError(message) from exc
         self.mark_connected()
 
     async def stop(self) -> None:

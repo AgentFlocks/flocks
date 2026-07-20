@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage
@@ -10,20 +11,189 @@ from .config import allow_bot_messages
 from .format import strip_bot_mention
 
 
+def _join_parts(parts: list[str]) -> str:
+    return "\n\n".join(part for part in (p.strip() for p in parts) if part)
+
+
+def _dedupe_part(part: str, existing_text: str) -> str:
+    candidate = part.strip()
+    existing = existing_text.strip()
+    if not candidate:
+        return ""
+    if not existing:
+        return candidate
+    if candidate == existing or candidate in existing:
+        return ""
+    if candidate.startswith(existing):
+        return candidate[len(existing):].strip()
+    return candidate
+
+
+def _slack_text_object(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        text = value.get("text")
+        if isinstance(text, str):
+            return text.strip()
+    return ""
+
+
+def _rich_text_element_text(element: Any) -> str:
+    if not isinstance(element, dict):
+        return ""
+
+    element_type = str(element.get("type") or "")
+    if element_type == "text":
+        return str(element.get("text") or "")
+    if element_type == "user":
+        return f"<@{element.get('user_id')}>"
+    if element_type == "channel":
+        return f"<#{element.get('channel_id')}>"
+    if element_type == "usergroup":
+        return f"<!subteam^{element.get('usergroup_id')}>"
+    if element_type == "broadcast":
+        return f"<!{element.get('range')}>"
+    if element_type == "emoji":
+        return f":{element.get('name')}:"
+    if element_type == "link":
+        text = str(element.get("text") or "").strip()
+        url = str(element.get("url") or "").strip()
+        return f"{text} ({url})" if text and url else text or url
+    if element_type == "date":
+        return str(element.get("fallback") or element.get("timestamp") or "")
+
+    children = element.get("elements")
+    if isinstance(children, list):
+        child_text = "".join(_rich_text_element_text(child) for child in children).strip()
+        if element_type == "rich_text_preformatted" and child_text:
+            return f"```\n{child_text}\n```"
+        if element_type == "rich_text_quote" and child_text:
+            return "\n".join(f"> {line}" for line in child_text.splitlines())
+        return child_text
+    return ""
+
+
+def _extract_blocks_text(blocks: Any) -> str:
+    if not isinstance(blocks, list):
+        return ""
+
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+
+        block_type = str(block.get("type") or "")
+        if block_type == "rich_text":
+            elements = block.get("elements")
+            if isinstance(elements, list):
+                parts.append(_join_parts([
+                    _rich_text_element_text(element)
+                    for element in elements
+                ]))
+            continue
+
+        for key in ("text", "title"):
+            value = _slack_text_object(block.get(key))
+            if value:
+                parts.append(value)
+
+        fields = block.get("fields")
+        if isinstance(fields, list):
+            parts.extend(_slack_text_object(field) for field in fields)
+
+        elements = block.get("elements")
+        if isinstance(elements, list):
+            parts.extend(_slack_text_object(element) for element in elements)
+
+    return _join_parts(parts)
+
+
+def _extract_attachments_text(attachments: Any) -> str:
+    if not isinstance(attachments, list):
+        return ""
+
+    parts: list[str] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+
+        for key in ("pretext", "title", "text", "fallback"):
+            value = _slack_text_object(attachment.get(key))
+            if value:
+                parts.append(value)
+
+        fields = attachment.get("fields")
+        if isinstance(fields, list):
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                title = _slack_text_object(field.get("title"))
+                value = _slack_text_object(field.get("value"))
+                if title and value:
+                    parts.append(f"{title}: {value}")
+                elif value:
+                    parts.append(value)
+
+        blocks = _extract_blocks_text(attachment.get("blocks"))
+        if blocks:
+            parts.append(blocks)
+
+    return _join_parts(parts)
+
+
+def _extract_files_text(files: Any) -> str:
+    if not isinstance(files, list) or not files:
+        return ""
+
+    names = [
+        str(item.get("name") or item.get("title") or item.get("id") or "file")
+        for item in files
+        if isinstance(item, dict)
+    ]
+    if names:
+        return "[Slack files: " + ", ".join(names) + "]"
+    return ""
+
+
 def extract_text(event: dict[str, Any]) -> str:
+    parts: list[str] = []
+    combined = ""
     text = event.get("text")
     if isinstance(text, str) and text.strip():
-        return text
+        combined = text.strip()
+        parts.append(combined)
 
-    files = event.get("files")
-    if isinstance(files, list) and files:
-        names = [
-            str(item.get("name") or item.get("title") or item.get("id") or "file")
-            for item in files
-            if isinstance(item, dict)
-        ]
-        if names:
-            return "[Slack files: " + ", ".join(names) + "]"
+    blocks = _dedupe_part(_extract_blocks_text(event.get("blocks")), combined)
+    if blocks:
+        parts.append(blocks)
+        combined = _join_parts(parts)
+
+    attachments = _dedupe_part(_extract_attachments_text(event.get("attachments")), combined)
+    if attachments:
+        parts.append(attachments)
+        combined = _join_parts(parts)
+
+    files = _dedupe_part(_extract_files_text(event.get("files")), combined)
+    if files:
+        parts.append(files)
+
+    rendered = _join_parts(parts)
+    if rendered:
+        return rendered
+
+    if event.get("blocks") or event.get("attachments"):
+        try:
+            return "[Slack structured message]\n" + json.dumps(
+                {
+                    "blocks": event.get("blocks"),
+                    "attachments": event.get("attachments"),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            return "[Slack structured message]"
 
     return ""
 
