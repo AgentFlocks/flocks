@@ -347,36 +347,73 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
-  it('groups sidebar sessions under their project', async () => {
+  it('shows default sessions under tasks without a default project row', async () => {
     const user = userEvent.setup();
-
     renderSessionPage();
 
-    const projectLabel = await screen.findByText('defaultProjectName');
+    await screen.findByText('tasksSection');
     expect(useSessions).toHaveBeenLastCalledWith('', {
       projectIds: ['default'],
       pageSize: 20,
     });
+    expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
     expect(screen.getByText('Original Session')).toBeInTheDocument();
-    expect(screen.getByText('1')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'toggleProject' }));
-
+    await user.click(screen.getByRole('button', { name: 'toggleTasks' }));
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'selectTasks' }));
+    expect(screen.getByText('Original Session')).toBeInTheDocument();
+  });
+
+  it('creates a new session from the tasks row', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await screen.findByText('tasksSection');
+    await user.click(screen.getByRole('button', { name: 'createTaskSession' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+        projectID: 'default',
+      });
+    });
   });
 
   it('restores collapsed projects after the session page remounts', async () => {
     const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        directory: '/tmp/labs',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
     const firstRender = renderSessionPage();
 
-    await screen.findByText('defaultProjectName');
+    await screen.findByText('Labs');
     await user.click(screen.getByRole('button', { name: 'toggleProject' }));
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
 
     firstRender.unmount();
     renderSessionPage();
 
-    await screen.findByText('defaultProjectName');
+    await screen.findByText('Labs');
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
   });
 
@@ -413,10 +450,31 @@ describe('SessionPage session actions menu', () => {
 
   it('toggles project sessions when clicking the selected project row', async () => {
     const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        directory: '/tmp/labs',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
 
     renderSessionPage();
 
-    await screen.findByText('defaultProjectName');
+    await screen.findByText('Labs');
     const toggle = screen.getByRole('button', { name: 'toggleProject' });
     const projectRow = screen.getByRole('button', { name: 'selectProject' });
 
@@ -463,10 +521,10 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
-    await screen.findByText('defaultProjectName');
+    await screen.findByText('tasksSection');
+    expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
     expect(screen.getByText('Original Session')).toBeInTheDocument();
     expect(screen.getByText('Legacy Session')).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument();
   });
 
   it('creates a user-managed project from the sidebar', async () => {
@@ -610,19 +668,12 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('does not expose rename or delete actions for the default project', async () => {
-    const user = userEvent.setup();
-
+  it('does not render project actions for the default task group', async () => {
     renderSessionPage();
 
-    const projectLabel = await screen.findByText('defaultProjectName');
-    const projectRow = projectLabel.closest('[class*="group/project"]');
-    expect(projectRow).not.toBeNull();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
-
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.newSessionAction' })).not.toBeInTheDocument();
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.renameAction' })).not.toBeInTheDocument();
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.deleteAction' })).not.toBeInTheDocument();
+    await screen.findByText('tasksSection');
+    expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'projectActions' })).not.toBeInTheDocument();
     expect(client.patch).not.toHaveBeenCalled();
   });
 

@@ -558,6 +558,7 @@ export default function SessionPage() {
     })
       .filter((group) => {
         if (!searchQuery.trim()) return true;
+        if (group.isDefault) return true;
         const project = projects.find((item) => item.id === group.id);
         return (project?.matchedSessionCount ?? group.sessions.length) > 0 || group.id === selectedProjectId;
       })
@@ -569,6 +570,24 @@ export default function SessionPage() {
         return a.label.localeCompare(b.label);
       });
   }, [defaultProjectId, projects, searchQuery, selectedProjectId, sessions, t]);
+
+  const managedProjectSessionGroups = useMemo(
+    () => projectSessionGroups.filter((group) => !group.isDefault),
+    [projectSessionGroups],
+  );
+  const taskSessionGroup = useMemo(
+    () => projectSessionGroups.find((group) => group.isDefault) ?? null,
+    [projectSessionGroups],
+  );
+  const taskGroupCollapsed = taskSessionGroup
+    ? collapsedProjectIds.has(taskSessionGroup.id)
+    : false;
+  const taskGroupSelected = taskSessionGroup?.id === selectedProjectId;
+  const hasMoreTaskSessions = taskSessionGroup
+    ? projects.length >= 2
+      ? taskSessionGroup.sessions.length < taskSessionGroup.sessionCount
+      : hasMoreByProject[taskSessionGroup.id]
+    : false;
 
   const selectedProjectIDForCreate = selectedProjectId ?? defaultProjectId ?? projectSessionGroups[0]?.id ?? null;
 
@@ -1480,7 +1499,7 @@ export default function SessionPage() {
                 </button>
               </div>
               <div className="space-y-1">
-                {projectSessionGroups.map((group) => {
+                {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
                   const isDefaultProject = group.isDefault;
                   const isSelectedProject = selectedProjectId === group.id;
@@ -1651,6 +1670,101 @@ export default function SessionPage() {
                   );
                 })}
               </div>
+              {taskSessionGroup && (
+                <div className="group/task relative mt-3">
+                  <div
+                    className={`mx-2 flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm transition-colors ${
+                      taskGroupSelected
+                        ? 'bg-gray-100 text-gray-900 dark:bg-zinc-900 dark:text-zinc-100'
+                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleProjectCollapsed(taskSessionGroup.id);
+                      }}
+                      className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                      aria-label={t('toggleTasks')}
+                    >
+                      {taskGroupCollapsed
+                        ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                        : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedProjectId(taskSessionGroup.id);
+                        toggleProjectCollapsed(taskSessionGroup.id);
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
+                      aria-label={t('selectTasks')}
+                    >
+                      <MessageSquare className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
+                      <span className="min-w-0 flex-1 truncate font-medium">{t('tasksSection')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleCreateSessionInProject(taskSessionGroup.id);
+                      }}
+                      disabled={creating || taskSessionGroup.pathStatus !== 'available'}
+                      className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                      title={t('createTaskSession')}
+                      aria-label={t('createTaskSession')}
+                    >
+                      {creating && taskGroupSelected
+                        ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : <Plus className="h-3 w-3" />}
+                    </button>
+                    <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
+                      {taskSessionGroup.sessionCount}
+                    </span>
+                  </div>
+                  {!taskGroupCollapsed && (
+                    <div className="mt-1 space-y-1">
+                      {taskSessionGroup.sessions.map((session) => (
+                        <SessionSidebarItem
+                          key={session.id}
+                          session={session}
+                          selected={selectedSessionId === session.id}
+                          selectMode={selectMode}
+                          checked={checkedIds.has(session.id)}
+                          menuOpen={openMenuSessionId === session.id}
+                          renaming={renamingSessionId === session.id}
+                          renameValue={renameValue}
+                          renameSubmitting={renameSubmitting}
+                          t={t}
+                          renameInputRef={renameInputRef}
+                          onSelect={handleSelectSessionRow}
+                          onToggleCheck={handleToggleCheck}
+                          onRenameValueChange={setRenameValue}
+                          onSubmitRename={handleSubmitRename}
+                          onCancelRename={handleCancelRename}
+                          onToggleMenu={handleToggleSessionMenu}
+                        />
+                      ))}
+                      {hasMoreTaskSessions && (
+                        <div className="mx-4 py-1">
+                          <button
+                            type="button"
+                            onClick={() => void loadMoreSessions(taskSessionGroup.id)}
+                            disabled={loadingMoreProjectIds.has(taskSessionGroup.id)}
+                            className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                          >
+                            {loadingMoreProjectIds.has(taskSessionGroup.id)
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <ChevronDown className="h-3 w-3" />}
+                            {t('loadMore', 'Load more')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
