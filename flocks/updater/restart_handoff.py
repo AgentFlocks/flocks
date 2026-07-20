@@ -516,6 +516,40 @@ def _cli_subcommand(argv: Sequence[str]) -> str | None:
     return None
 
 
+def _restore_legacy_handoff_endpoints(args: argparse.Namespace) -> None:
+    """Restore endpoints lost by pre-v2026.7.8 split-service handoffs."""
+    if not args.backend_pid_file or _cli_subcommand(args.restart_argv) != "serve":
+        return
+
+    state_path = updater_module._flocks_root() / "run" / "upgrade-state.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as exc:
+        _record_handoff_log(f"legacy_service_config_invalid error={exc}")
+        return
+
+    if not isinstance(payload, dict):
+        _record_handoff_log("legacy_service_config_invalid error=state is not an object")
+        return
+
+    hosts = (payload.get("backend_host"), payload.get("frontend_host"))
+    ports = (payload.get("backend_port"), payload.get("frontend_port"))
+    if not all(isinstance(host, str) and host.strip() for host in hosts) or not all(
+        isinstance(port, int) and not isinstance(port, bool) and 0 < port <= 65535 for port in ports
+    ):
+        _record_handoff_log("legacy_service_config_invalid error=invalid host or port")
+        return
+
+    args.backend_host, args.frontend_host = hosts
+    args.backend_port, args.frontend_port = ports
+    _record_handoff_log(
+        "legacy_service_config_restored "
+        f"backend={args.backend_host}:{args.backend_port} frontend={args.frontend_host}:{args.frontend_port}"
+    )
+
+
 def _restart_argv_for_current_runtime(args: argparse.Namespace, restart_argv: Sequence[str]) -> list[str]:
     if _cli_subcommand(restart_argv) != "serve":
         return list(restart_argv)
@@ -545,6 +579,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.mode == "upgrade":
         return _run_simple_upgrade(args)
 
+    _restore_legacy_handoff_endpoints(args)
     restart_argv = _restart_argv_for_current_runtime(args, args.restart_argv)
     if not restart_argv:
         _record_handoff_log("missing_restart_argv")

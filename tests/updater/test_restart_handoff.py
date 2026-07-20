@@ -586,6 +586,20 @@ def test_run_accepts_legacy_backend_pid_file_argument(monkeypatch, tmp_path: Pat
 
 def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path: Path) -> None:
     events: list[str] = []
+    flocks_root = tmp_path / "flocks-root"
+    upgrade_state = flocks_root / "run" / "upgrade-state.json"
+    upgrade_state.parent.mkdir(parents=True)
+    upgrade_state.write_text(
+        json.dumps(
+            {
+                "backend_host": "127.0.0.1",
+                "backend_port": 8000,
+                "frontend_host": "0.0.0.0",
+                "frontend_port": 8888,
+            }
+        ),
+        encoding="utf-8",
+    )
     restart_argv = [
         "python.exe",
         "-m",
@@ -606,15 +620,15 @@ def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path
         "--host",
         "0.0.0.0",
         "--port",
-        "5173",
+        "8888",
         "--server-host",
         "127.0.0.1",
         "--server-port",
         "8000",
     ]
     args = _v2026_7_1_handoff_args(tmp_path, restart_argv)
-    args[args.index("--frontend-host") + 1] = "0.0.0.0"
 
+    monkeypatch.setattr(restart_handoff.updater_module, "_flocks_root", lambda: flocks_root)
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
     monkeypatch.setattr(
         restart_handoff,
