@@ -9,8 +9,8 @@ ARG VITE_APP_VERSION=docker
 
 ENV DEBIAN_FRONTEND=noninteractive \
     FLOCKS_DEPLOY_MODE=docker \
-    FLOCKS_HOST=0.0.0.0 \
-    FLOCKS_PORT=5173 \
+    FLOCKS_BACKEND_HOST=0.0.0.0 \
+    FLOCKS_BACKEND_PORT=5173 \
     FLOCKS_FRONTEND_DIST_DIR=/opt/flocks/webui/dist \
     FLOCKS_ROOT=/home/flocks/.flocks \
     FLOCKS_CONFIG_DIR=/home/flocks/.flocks/config \
