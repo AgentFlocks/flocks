@@ -311,6 +311,15 @@ describe('useStreamingContent', () => {
 });
 
 describe('StreamingMarkdown', () => {
+  it('constrains rendered Markdown to its message container', () => {
+    const { container } = render(
+      <StreamingMarkdown content={`\`\`\`text\n${'long-command'.repeat(100)}\n\`\`\``} isStreaming={false} />,
+    );
+
+    expect(container.firstElementChild).toHaveClass('w-full', 'min-w-0', 'max-w-full');
+    expect(container.querySelector('pre')).not.toBeNull();
+  });
+
   it('preserves single newlines as visible line breaks', () => {
     const { container } = render(
       <StreamingMarkdown content={'first line\nsecond line\nthird line'} isStreaming={false} />,
