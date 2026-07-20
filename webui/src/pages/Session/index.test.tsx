@@ -365,6 +365,21 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
   });
 
+  it('restores collapsed projects after the session page remounts', async () => {
+    const user = userEvent.setup();
+    const firstRender = renderSessionPage();
+
+    await screen.findByText('defaultProjectName');
+    await user.click(screen.getByRole('button', { name: 'toggleProject' }));
+    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+
+    firstRender.unmount();
+    renderSessionPage();
+
+    await screen.findByText('defaultProjectName');
+    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+  });
+
   it('uses six sessions per page when multiple projects exist', async () => {
     client.get.mockResolvedValue({
       data: [

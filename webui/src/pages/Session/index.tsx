@@ -311,6 +311,7 @@ export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const { user } = useAuth();
   const activeProjectStorageKey = `flocks:sessions:active-project:${user?.id ?? 'anonymous'}`;
+  const collapsedProjectsStorageKey = `flocks:sessions:collapsed-projects:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -330,7 +331,14 @@ export default function SessionPage() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(new Set());
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(collapsedProjectsStorageKey) ?? '[]');
+      return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  });
   const [projectDialogMode, setProjectDialogMode] = useState<ProjectDialogMode | null>(null);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<ProjectSessionGroup | null>(null);
@@ -502,6 +510,17 @@ export default function SessionPage() {
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        collapsedProjectsStorageKey,
+        JSON.stringify(Array.from(collapsedProjectIds)),
+      );
+    } catch {
+      // Project collapse persistence must never block the session manager.
+    }
+  }, [collapsedProjectIds, collapsedProjectsStorageKey]);
 
   const defaultProjectId = useMemo(
     () => projects.find((project) => project.isDefault)?.id ?? projects[0]?.id ?? null,
