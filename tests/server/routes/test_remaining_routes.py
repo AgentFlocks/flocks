@@ -5,6 +5,7 @@ Remaining route tests: Workflow, Provider, Task, Config, Permission
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -507,6 +508,38 @@ class TestConfigRoutes:
         assert len(present) > 0, (
             f"No expected keys found. Got: {list(data.keys())}"
         )
+
+    def test_null_allow_from_deletes_existing_channel_field(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """channels.<id>.allowFrom=null removes the persisted allowlist."""
+        from flocks.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "flocks.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "channels": {
+                        "slack": {
+                            "enabled": False,
+                            "allowFrom": ["U123"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        config_routes._apply_channel_allow_from_deletions(
+            {"channels": {"slack": {"enabled": False, "allowFrom": None}}}
+        )
+
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "allowFrom" not in saved["channels"]["slack"]
 
     @pytest.mark.asyncio
     async def test_ui_display_defaults_and_updates(

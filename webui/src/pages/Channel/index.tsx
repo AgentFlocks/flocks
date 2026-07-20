@@ -3078,7 +3078,7 @@ export default function ChannelPage() {
       const updatedChannels = {
         ...(fullConfig.channels ?? {}),
         ...Object.fromEntries(
-          Object.entries(channelConfigs).map(([id, cfg]) => [id, stripEmpty(cfg)])
+          Object.entries(channelConfigs).map(([id, cfg]) => [id, stripChannelConfigForSave(id, cfg)])
         ),
       };
 
@@ -3439,5 +3439,15 @@ function stripEmpty(obj: Record<string, any>): Record<string, any> {
     // (distinct from absent key which means "open access").
     result[k] = v;
   }
+  return result;
+}
+
+function stripChannelConfigForSave(channelId: string, cfg: Record<string, any>): Record<string, any> {
+  const result = stripEmpty(cfg);
+
+  if (channelId === 'slack' && cfg.allowFrom === undefined) {
+    result.allowFrom = null;
+  }
+
   return result;
 }
