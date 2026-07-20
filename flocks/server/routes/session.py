@@ -427,6 +427,23 @@ async def _resolve_session_working_directory(session: SessionModel) -> str:
             "fallback_directory": default_project.worktree,
         },
     )
+    try:
+        from flocks.server.routes.event import publish_event
+
+        await publish_event(
+            "session.notice",
+            {
+                "sessionID": session.id,
+                "kind": "directory-fallback",
+                "storedDirectory": session.directory,
+                "fallbackDirectory": default_project.worktree,
+            },
+        )
+    except Exception as exc:
+        log.debug(
+            "session.directory.fallback_notice_failed",
+            {"sessionID": session.id, "error": str(exc)},
+        )
     return default_project.worktree
 
 
@@ -1321,11 +1338,13 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
         if msg.role == MessageRole.USER:
             current_agent = msg.agent or DEFAULT_AGENT
             break
+
+    working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
         try:
             await Instance.provide(
-                directory=session.directory,
+                directory=working_directory,
                 init=instance_bootstrap,
                 fn=lambda: _run_session_compaction(
                     sessionID,
@@ -1334,6 +1353,7 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
                     explicit_model_id=request.modelID,
                     auto=request.auto,
                     event_publish_callback=publish_event,
+                    working_directory=working_directory,
                 ),
             )
         except Exception as e:
@@ -2106,6 +2126,7 @@ async def _run_existing_user_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     if result.action == "queued":
@@ -2579,6 +2600,7 @@ async def _run_session_compaction(
     auto: bool = False,
     event_publish_callback=None,
     focus_instruction: Optional[str] = None,
+    working_directory: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Execute session compaction directly without routing through the LLM loop.
 
@@ -2596,6 +2618,8 @@ async def _run_session_compaction(
     session = await Session.get_by_id(session_id)
     if not session:
         raise ValueError(f"Session {session_id} not found")
+    if working_directory:
+        session = session.model_copy(update={"directory": working_directory})
 
     await SessionRevert.cleanup(session)
     agent_name, provider_id, model_id = await _resolve_compaction_context(
@@ -3029,6 +3053,7 @@ async def _process_session_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     # ------------------------------------------------------------------
@@ -3723,6 +3748,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             auto=False,
             event_publish_callback=publish_event,
             focus_instruction=focus_instruction,
+            working_directory=working_directory,
         )
         return True
 

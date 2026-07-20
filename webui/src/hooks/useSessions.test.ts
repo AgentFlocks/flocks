@@ -1103,6 +1103,46 @@ describe('useSessions list loading', () => {
     }));
   });
 
+  it('preserves each project loaded depth during a background refetch', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+    expect(result.current.sessions).toHaveLength(18);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 12,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(18);
+  });
+
   it('uses the selected project offset when loading more sessions', async () => {
     vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
       if (params.offset === 0) {

@@ -182,24 +182,22 @@ async def test_concurrent_project_creates_keep_every_registry_entry(project_root
 
 
 @pytest.mark.asyncio
-async def test_registry_recovers_from_last_backup(project_root):
+async def test_registry_writes_do_not_create_backup(project_root):
     labs = project_root / "labs"
     labs.mkdir()
     created = await Project.create(owner_id="user-1", name="Labs", worktree=str(labs))
     await Project.update(created.id, owner_id="user-1", name="Renamed Labs")
 
-    Project.registry_path("user-1").write_text("{broken", encoding="utf-8")
-
-    projects = await Project.list(owner_id="user-1")
-    assert [project.name for project in projects[1:]] == ["Labs"]
+    registry_path = Project.registry_path("user-1")
+    assert registry_path.exists()
+    assert not registry_path.with_suffix(".json.bak").exists()
 
 
 @pytest.mark.asyncio
-async def test_corrupt_registry_without_backup_only_returns_default(project_root):
+async def test_corrupt_registry_only_returns_default(project_root):
     await Project.ensure_registry("user-1")
     registry_path = Project.registry_path("user-1")
     registry_path.write_text("{broken", encoding="utf-8")
-    registry_path.with_suffix(".json.bak").unlink(missing_ok=True)
 
     projects = await Project.list(owner_id="user-1")
 

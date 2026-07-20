@@ -240,10 +240,12 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   const hasLoadedOnceRef = useRef(false);
   const requestSeqRef = useRef(0);
   const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
+  const loadedQueryKeyRef = useRef<string | null>(null);
   const projectIdsKey = options?.projectIds === undefined
     ? null
     : [...options.projectIds].sort().join('\u0000');
   const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
+  const queryKey = `${projectIdsKey ?? '*'}\u0001${pageSize}\u0001${search.trim()}`;
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
@@ -277,6 +279,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         setHasMore(false);
         setHasMoreByProject({});
         hasLoadedOnceRef.current = true;
+        loadedQueryKeyRef.current = queryKey;
         return;
       }
       // Fetch only root sessions: child sessions are internal and never shown
@@ -284,23 +287,28 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       const startMark = append ? 'sessions:list:older-start' : 'sessions:list:first-start';
       if (typeof performance !== 'undefined') performance.mark(startMark);
       const projectTargets = targetProjectIds ?? [undefined];
+      const preserveLoadedDepth = !append && loadedQueryKeyRef.current === queryKey;
       const responses = await Promise.all(projectTargets.map(async (projectId) => {
-        const offset = append
-          ? sessionsRef.current.filter((session) => (
-            !optimisticSessionsRef.current.has(session.id)
-            && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
-          )).length
-          : 0;
+        const loadedCount = sessionsRef.current.filter((session) => (
+          !optimisticSessionsRef.current.has(session.id)
+          && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
+        )).length;
+        const requestLimit = append
+          ? pageSize
+          : preserveLoadedDepth
+            ? Math.max(pageSize, loadedCount)
+            : pageSize;
+        const offset = append ? loadedCount : 0;
         const response = await sessionApi.list({
           view: 'list',
           manager: true,
           roots: true,
-          limit: pageSize,
+          limit: requestLimit,
           offset,
           search: search.trim() || undefined,
           projectID: projectId,
         });
-        return { projectId, response };
+        return { projectId, requestLimit, response };
       }));
       if (requestSeq !== requestSeqRef.current) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
@@ -313,9 +321,9 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       const nextHasMoreByProject = Object.fromEntries(
         responses
           .filter(({ projectId }) => projectId !== undefined)
-          .map(({ projectId, response }) => [
+          .map(({ projectId, requestLimit, response }) => [
             projectId as string,
-            Array.isArray(response) && response.length >= pageSize,
+            Array.isArray(response) && response.length >= requestLimit,
           ]),
       );
       setHasMoreByProject((current) => append
@@ -334,9 +342,12 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         return mergeSessionListWithOptimistic(nextSessions, optimistic);
       });
       setHasMore(targetProjectIds === null
-        ? responses.some(({ response }) => Array.isArray(response) && response.length >= pageSize)
+        ? responses.some(({ requestLimit, response }) => (
+          Array.isArray(response) && response.length >= requestLimit
+        ))
         : Object.values(nextHasMoreByProject).some(Boolean));
       hasLoadedOnceRef.current = true;
+      loadedQueryKeyRef.current = queryKey;
     } catch (err: any) {
       if (requestSeq !== requestSeqRef.current) return;
       setError(err.message || 'Failed to fetch sessions');
@@ -355,7 +366,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         initializedRef.current = true;
       }
     }
-  }, [pageSize, projectIdsKey, search]);
+  }, [pageSize, projectIdsKey, queryKey, search]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
     const optimistic = optimisticSessionsRef.current.get(sessionId);

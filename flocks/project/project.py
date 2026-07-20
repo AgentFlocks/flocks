@@ -11,14 +11,15 @@ import asyncio
 import hashlib
 import json
 import os
-import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterator, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,6 +30,48 @@ log = Log.create(service="project")
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "默认"
 _RESERVED_PROJECT_NAMES = {"default", DEFAULT_PROJECT_NAME.casefold()}
+
+
+def _platform_file_lock(fd: int) -> None:
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _platform_file_unlock(fd: int) -> None:
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _registry_cross_process_lock(registry_path: Path) -> Iterator[None]:
+    """Serialize registry read-modify-write operations across processes."""
+
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = registry_path.with_suffix(".json.lock")
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        _platform_file_lock(fd)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked:
+                _platform_file_unlock(fd)
+        finally:
+            os.close(fd)
 
 
 class ProjectNameConflictError(ValueError):
@@ -256,8 +299,6 @@ class Project:
     ) -> ProjectRegistry:
         path = cls.registry_path(owner_id)
         registry = cls._read_registry_file(path)
-        if registry is None:
-            registry = cls._read_registry_file(path.with_suffix(".json.bak"))
         if registry is not None:
             return registry
 
@@ -272,10 +313,6 @@ class Project:
     def _write_registry(cls, owner_id: str, registry: ProjectRegistry) -> None:
         path = cls.registry_path(owner_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        backup_path = path.with_suffix(".json.bak")
-
-        if path.exists():
-            shutil.copy2(path, backup_path)
 
         fd, temporary_path = tempfile.mkstemp(
             dir=str(path.parent),
@@ -344,10 +381,11 @@ class Project:
 
         async with cls._lock:
             path = cls.registry_path(owner_id)
-            registry = cls._read_registry(owner_id, default_worktree=default_worktree)
-            if not path.exists():
-                cls._write_registry(owner_id, registry)
-            return registry
+            with _registry_cross_process_lock(path):
+                registry = cls._read_registry(owner_id, default_worktree=default_worktree)
+                if not path.exists():
+                    cls._write_registry(owner_id, registry)
+                return registry
 
     @classmethod
     async def create(
@@ -360,39 +398,40 @@ class Project:
         """Register an existing directory for a user."""
 
         async with cls._lock:
-            registry = cls._read_registry(owner_id)
-            normalized_worktree = cls.validate_worktree(
-                worktree,
-                default_worktree=registry.default_worktree,
-                create_if_missing=True,
-            )
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                normalized_worktree = cls.validate_worktree(
+                    worktree,
+                    default_worktree=registry.default_worktree,
+                    create_if_missing=True,
+                )
 
-            if normalized_worktree == cls._normalized_worktree(registry.default_worktree):
-                raise ProjectPathConflictError(cls._default_to_info(registry))
+                if normalized_worktree == cls._normalized_worktree(registry.default_worktree):
+                    raise ProjectPathConflictError(cls._default_to_info(registry))
 
-            for entry in registry.projects:
-                if cls._normalized_worktree(entry.worktree) == normalized_worktree:
-                    raise ProjectPathConflictError(cls._entry_to_info(entry))
+                for entry in registry.projects:
+                    if cls._normalized_worktree(entry.worktree) == normalized_worktree:
+                        raise ProjectPathConflictError(cls._entry_to_info(entry))
 
-            normalized_name = (name or Path(normalized_worktree).name).strip()
-            if not normalized_name:
-                raise ValueError("Project name cannot be empty")
-            if normalized_name.casefold() in _RESERVED_PROJECT_NAMES:
-                raise ProjectNameConflictError("Project name is reserved")
-            if any(entry.name.strip().casefold() == normalized_name.casefold() for entry in registry.projects):
-                raise ProjectNameConflictError(f"Project name '{normalized_name}' already exists")
+                normalized_name = (name or Path(normalized_worktree).name).strip()
+                if not normalized_name:
+                    raise ValueError("Project name cannot be empty")
+                if normalized_name.casefold() in _RESERVED_PROJECT_NAMES:
+                    raise ProjectNameConflictError("Project name is reserved")
+                if any(entry.name.strip().casefold() == normalized_name.casefold() for entry in registry.projects):
+                    raise ProjectNameConflictError(f"Project name '{normalized_name}' already exists")
 
-            now = cls._now_ms()
-            project_id = f"prj_{uuid.uuid4()}"
-            entry = ProjectRegistryEntry(
-                id=project_id,
-                name=normalized_name,
-                worktree=normalized_worktree,
-                createdAt=now,
-                updatedAt=now,
-            )
-            registry.projects.append(entry)
-            cls._write_registry(owner_id, registry)
+                now = cls._now_ms()
+                project_id = f"prj_{uuid.uuid4()}"
+                entry = ProjectRegistryEntry(
+                    id=project_id,
+                    name=normalized_name,
+                    worktree=normalized_worktree,
+                    createdAt=now,
+                    updatedAt=now,
+                )
+                registry.projects.append(entry)
+                cls._write_registry(owner_id, registry)
             cls.invalidate_session_stats(owner_id)
             log.info("project.created", {"id": project_id, "owner": cls._owner_hash(owner_id)})
             return cls._entry_to_info(entry)
@@ -436,19 +475,20 @@ class Project:
             raise ProjectNameConflictError("Project name is reserved")
 
         async with cls._lock:
-            registry = cls._read_registry(owner_id)
-            entry = next((item for item in registry.projects if item.id == project_id), None)
-            if entry is None:
-                raise ValueError(f"Project {project_id} not found")
-            if any(
-                item.id != project_id and item.name.strip().casefold() == normalized_name.casefold()
-                for item in registry.projects
-            ):
-                raise ProjectNameConflictError(f"Project name '{normalized_name}' already exists")
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                entry = next((item for item in registry.projects if item.id == project_id), None)
+                if entry is None:
+                    raise ValueError(f"Project {project_id} not found")
+                if any(
+                    item.id != project_id and item.name.strip().casefold() == normalized_name.casefold()
+                    for item in registry.projects
+                ):
+                    raise ProjectNameConflictError(f"Project name '{normalized_name}' already exists")
 
-            entry.name = normalized_name
-            entry.updated_at = cls._now_ms()
-            cls._write_registry(owner_id, registry)
+                entry.name = normalized_name
+                entry.updated_at = cls._now_ms()
+                cls._write_registry(owner_id, registry)
             cls.invalidate_session_stats(owner_id)
             log.info("project.updated", {"id": project_id})
             return cls._entry_to_info(entry)
@@ -460,12 +500,13 @@ class Project:
         if project_id == DEFAULT_PROJECT_ID:
             raise ProjectDeletionError("The default project cannot be deleted")
         async with cls._lock:
-            registry = cls._read_registry(owner_id)
-            remaining = [entry for entry in registry.projects if entry.id != project_id]
-            if len(remaining) == len(registry.projects):
-                raise ValueError(f"Project {project_id} not found")
-            registry.projects = remaining
-            cls._write_registry(owner_id, registry)
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                remaining = [entry for entry in registry.projects if entry.id != project_id]
+                if len(remaining) == len(registry.projects):
+                    raise ValueError(f"Project {project_id} not found")
+                registry.projects = remaining
+                cls._write_registry(owner_id, registry)
             cls.invalidate_session_stats(owner_id)
             log.info("project.deleted", {"id": project_id})
             return True

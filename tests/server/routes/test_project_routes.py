@@ -158,3 +158,28 @@ async def test_project_counts_and_session_lists_are_user_scoped(
         "Alice session",
         "Second Alice session",
     }
+
+
+@pytest.mark.asyncio
+async def test_session_title_update_invalidates_project_search_stats(
+    client: AsyncClient,
+):
+    created = await client.post(
+        "/api/session",
+        json={"title": "Initial title"},
+    )
+    assert created.status_code == status.HTTP_200_OK
+
+    initial = await client.get("/api/project", params={"search": "triage"})
+    assert initial.status_code == status.HTTP_200_OK
+    assert initial.json()[0]["matchedSessionCount"] == 0
+
+    updated = await client.patch(
+        f"/api/session/{created.json()['id']}",
+        json={"title": "Triage findings"},
+    )
+    assert updated.status_code == status.HTTP_200_OK
+
+    refreshed = await client.get("/api/project", params={"search": "triage"})
+    assert refreshed.status_code == status.HTTP_200_OK
+    assert refreshed.json()[0]["matchedSessionCount"] == 1

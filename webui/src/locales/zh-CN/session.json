@@ -269,6 +269,8 @@
   "projectActions": "项目操作",
   "defaultProject": "默认项目",
   "projectPathUnavailable": "项目目录不可用",
+  "projectDirectoryFallbackTitle": "项目文件夹不可用",
+  "projectDirectoryFallbackDescription": "原文件夹不可用，本次会话将改用 {{path}} 继续运行。",
   "defaultProjectName": "默认",
   "noProjectSessions": "暂无会话",
   "projectDialog": {

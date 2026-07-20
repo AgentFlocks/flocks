@@ -35,6 +35,42 @@ from flocks.session.session import Session
 # CRUD
 # ===========================================================================
 
+
+@pytest.mark.asyncio
+async def test_missing_session_directory_uses_default_and_publishes_notice(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.project.project import Project
+    from flocks.server.routes import event as event_routes
+    from flocks.server.routes import session as session_routes
+
+    default_project = SimpleNamespace(
+        worktree=str(tmp_path),
+        path_status="available",
+    )
+    monkeypatch.setattr(Project, "get", AsyncMock(return_value=default_project))
+    publish_event = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish_event)
+
+    working_directory = await session_routes._resolve_session_working_directory(
+        SimpleNamespace(
+            id="ses_missing_directory",
+            directory=str(tmp_path / "missing"),
+        ),
+    )
+
+    assert working_directory == str(tmp_path)
+    publish_event.assert_awaited_once_with(
+        "session.notice",
+        {
+            "sessionID": "ses_missing_directory",
+            "kind": "directory-fallback",
+            "storedDirectory": str(tmp_path / "missing"),
+            "fallbackDirectory": str(tmp_path),
+        },
+    )
+
 class TestSessionCRUD:
     """Basic create / read / update / delete for sessions."""
 

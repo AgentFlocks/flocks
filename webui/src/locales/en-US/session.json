@@ -269,6 +269,8 @@
   "projectActions": "Project actions",
   "defaultProject": "Default project",
   "projectPathUnavailable": "Project directory unavailable",
+  "projectDirectoryFallbackTitle": "Project folder unavailable",
+  "projectDirectoryFallbackDescription": "The original folder is unavailable. This session will continue in {{path}}.",
   "defaultProjectName": "Default",
   "noProjectSessions": "No conversations",
   "projectDialog": {

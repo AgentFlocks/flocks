@@ -164,6 +164,9 @@ class Session:
     @classmethod
     def _sync_list_cache(cls, session: SessionInfo) -> None:
         """Keep the in-memory list cache aligned with session mutations."""
+        from flocks.project.project import Project
+
+        Project.invalidate_session_stats()
         if cls._all_sessions_cache is None:
             return
 

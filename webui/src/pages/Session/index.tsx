@@ -591,34 +591,6 @@ export default function SessionPage() {
     toast.error(t('chat.error', 'Error'), msg);
   }, [toast, t]);
 
-  const scheduleSessionListRefetch = useCallback(() => {
-    if (sessionUpdateRefetchTimerRef.current !== null) return;
-    sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
-      sessionUpdateRefetchTimerRef.current = null;
-      void refetchSessions();
-    }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
-  }, [refetchSessions]);
-
-  useEffect(() => () => {
-    if (sessionUpdateRefetchTimerRef.current !== null) {
-      window.clearTimeout(sessionUpdateRefetchTimerRef.current);
-      sessionUpdateRefetchTimerRef.current = null;
-    }
-  }, []);
-
-  const handleSSEEvent = useCallback((event: SSEChatEvent) => {
-    if (event.type === 'session.updated' && event.properties?.id) {
-      if (event.properties?.title) {
-        // Instant local title update so the sidebar reflects the change immediately.
-        updateSessionTitle(event.properties.id, event.properties.title);
-      }
-      // Session/title updates can arrive in bursts when several sessions or
-      // background tasks finish together. Coalesce the full sidebar refresh so
-      // those bursts don't turn into a request/re-render storm.
-      scheduleSessionListRefetch();
-    }
-  }, [scheduleSessionListRefetch, updateSessionTitle]);
-
   const fetchProjects = useCallback(async (ensureProject?: ProjectSummary, query = '') => {
     const listResult = await client.get('/api/project', {
       params: { search: query.trim() || undefined },
@@ -631,6 +603,46 @@ export default function SessionPage() {
     }
     setProjects(nextProjects);
   }, []);
+
+  const scheduleSessionListRefetch = useCallback(() => {
+    if (sessionUpdateRefetchTimerRef.current !== null) return;
+    sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
+      sessionUpdateRefetchTimerRef.current = null;
+      void Promise.all([
+        refetchSessions(),
+        fetchProjects(undefined, searchQuery),
+      ]);
+    }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
+  }, [fetchProjects, refetchSessions, searchQuery]);
+
+  useEffect(() => () => {
+    if (sessionUpdateRefetchTimerRef.current !== null) {
+      window.clearTimeout(sessionUpdateRefetchTimerRef.current);
+      sessionUpdateRefetchTimerRef.current = null;
+    }
+  }, []);
+
+  const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    if (event.type === 'session.notice' && event.properties?.kind === 'directory-fallback') {
+      toast.warning(
+        t('projectDirectoryFallbackTitle'),
+        t('projectDirectoryFallbackDescription', {
+          path: event.properties.fallbackDirectory,
+        }),
+      );
+      return;
+    }
+    if (event.type === 'session.updated' && event.properties?.id) {
+      if (event.properties?.title) {
+        // Instant local title update so the sidebar reflects the change immediately.
+        updateSessionTitle(event.properties.id, event.properties.title);
+      }
+      // Session/title updates can arrive in bursts when several sessions or
+      // background tasks finish together. Coalesce the full sidebar refresh so
+      // those bursts don't turn into a request/re-render storm.
+      scheduleSessionListRefetch();
+    }
+  }, [scheduleSessionListRefetch, t, toast, updateSessionTitle]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
