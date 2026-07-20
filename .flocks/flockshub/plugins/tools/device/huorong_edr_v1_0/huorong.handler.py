@@ -156,10 +156,10 @@ async def _post(
             if resp.status >= 400:
                 return ToolResult(
                     success=False,
-                    data=resp_json,
+                    output=resp_json,
                     error=f"HTTP {resp.status}: {resp_text[:200]}",
                 )
-            return ToolResult(success=True, data=resp_json)
+            return ToolResult(success=True, output=resp_json)
 
 
 def _pick(params: dict[str, Any], *keys: str) -> dict[str, Any]:
@@ -171,9 +171,8 @@ def _pick(params: dict[str, Any], *keys: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def group(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def group(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     base_url, timeout, secret_id, secret_key, verify_ssl = _resolve_runtime_config()
-    action = params.get("action", "")
 
     if action == "group_list":
         return await _post(base_url, "/api/group/_list", {}, secret_id, secret_key, timeout, verify_ssl)
@@ -194,9 +193,8 @@ async def group(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
-async def clnts(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def clnts(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     base_url, timeout, secret_id, secret_key, verify_ssl = _resolve_runtime_config()
-    action = params.get("action", "")
 
     if action == "clnts_online":
         body = _pick(params, "offset")
@@ -231,9 +229,8 @@ async def clnts(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
-async def task(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def task(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     base_url, timeout, secret_id, secret_key, verify_ssl = _resolve_runtime_config()
-    action = params.get("action", "")
 
     if action == "task_create":
         body = _pick(params, "offset")
