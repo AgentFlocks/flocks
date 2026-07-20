@@ -141,18 +141,9 @@ class TestCuratedCatalogModels:
 
         models = get_provider_model_definitions("deepseek")
         assert {m.id for m in models} == {
-            "deepseek-chat",
-            "deepseek-reasoner",
             "deepseek-v4-flash",
             "deepseek-v4-pro",
         }
-
-        r1 = next(m for m in models if m.id == "deepseek-reasoner")
-        assert r1.capabilities.supports_reasoning is True
-        assert r1.capabilities.interleaved["field"] == "reasoning_content"
-        assert r1.capabilities.interleaved["placeholder"] == " "
-        assert r1.pricing.currency == "CNY"
-        assert r1.pricing.output == 16.0
 
         v4_flash = next(m for m in models if m.id == "deepseek-v4-flash")
         assert v4_flash.capabilities.supports_reasoning is True

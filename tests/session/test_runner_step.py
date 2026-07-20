@@ -2148,7 +2148,7 @@ async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypat
 def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
     runner = _make_runner("ses_runner_interleaved_capability_key")
     runner.provider_id = "deepseek"
-    runner.model_id = "deepseek-reasoner"
+    runner.model_id = "deepseek-v4-pro"
 
     monkeypatch.setattr(SessionRunner, "_model_supports_vision", lambda self: False)
     monkeypatch.setattr(

@@ -1016,47 +1016,6 @@
       "DEEPSEEK_API_KEY"
     ],
     "models": {
-      "deepseek-chat": {
-        "name": "DeepSeek Chat",
-        "family": "deepseek-v3",
-        "capabilities": {
-          "supports_tools": true,
-          "supports_streaming": true
-        },
-        "limits": {
-          "context_window": 128000,
-          "max_output_tokens": 128000
-        },
-        "pricing": {
-          "input": 2.0,
-          "output": 3.0,
-          "currency": "CNY"
-        }
-      },
-      "deepseek-reasoner": {
-        "name": "DeepSeek Reasoner",
-        "family": "deepseek-r1",
-        "capabilities": {
-          "supports_tools": true,
-          "supports_reasoning": true,
-          "interleaved": {
-            "field": "reasoning_content",
-            "echo": "tool_calls",
-            "placeholder": " ",
-            "cross_provider_policy": "placeholder"
-          },
-          "supports_streaming": true
-        },
-        "limits": {
-          "context_window": 128000,
-          "max_output_tokens": 128000
-        },
-        "pricing": {
-          "input": 4.0,
-          "output": 16.0,
-          "currency": "CNY"
-        }
-      },
       "deepseek-v4-flash": {
         "name": "DeepSeek V4 Flash",
         "family": "deepseek-v4",

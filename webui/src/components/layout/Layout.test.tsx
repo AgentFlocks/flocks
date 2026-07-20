@@ -306,7 +306,7 @@ describe('Layout onboarding entry', () => {
             { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('openai-compatible', 'OpenAI Compatible', []),
-          makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-chat', name: 'DeepSeek V3.2' }]),
+          makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }]),
         ],
       },
     });
