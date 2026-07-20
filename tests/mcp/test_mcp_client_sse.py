@@ -5,9 +5,12 @@ from contextlib import asynccontextmanager
 from types import MethodType, SimpleNamespace
 
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData, METHOD_NOT_FOUND
 
 import flocks.mcp.client as mcp_client_module
 from flocks.mcp.client import McpClient, _extract_root_cause
+from flocks.mcp.errors import is_method_not_found_error
 
 
 def _make_session_class(
@@ -374,3 +377,21 @@ class TestExtractRootCause:
         result = _extract_root_cause(exc)
         assert "401" in result
         assert "secret" not in result
+
+    def test_method_not_found_detection_uses_structured_error_code(self):
+        exc = McpError(ErrorData(code=METHOD_NOT_FOUND, message="Unsupported operation"))
+        assert is_method_not_found_error(exc) is True
+
+    def test_method_not_found_detection_checks_every_exception_group_child(self):
+        method_error = McpError(
+            ErrorData(code=METHOD_NOT_FOUND, message="Unsupported operation")
+        )
+        exc = ExceptionGroup(
+            "request failed",
+            [RuntimeError("transport closed"), method_error],
+        )
+        assert is_method_not_found_error(exc) is True
+
+    def test_method_not_found_detection_does_not_match_unrelated_phrase(self):
+        exc = RuntimeError("cache method not found during local lookup")
+        assert is_method_not_found_error(exc) is False

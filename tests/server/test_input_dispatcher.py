@@ -357,13 +357,13 @@ class TestPromptQueueRoutes:
         from flocks.server.routes import session as session_routes
         from flocks.session.utils.file_extractor import read_file_part_bytes
 
-        class FakeWorkspace:
-            def resolve_workspace_path(self, rel_path: str):
-                return tmp_path / rel_path
-
         monkeypatch.setattr(
             "flocks.workspace.manager.WorkspaceManager.get_instance",
-            lambda: FakeWorkspace(),
+            lambda: (_ for _ in ()).throw(PermissionError("workspace access denied")),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get_data_path",
+            staticmethod(lambda: tmp_path),
         )
         data_url = "data:image/png;base64," + base64.b64encode(b"png-bytes").decode()
 
@@ -376,6 +376,17 @@ class TestPromptQueueRoutes:
 
         assert url.startswith("file://")
         assert read_file_part_bytes(url) == b"png-bytes"
+
+    def test_session_upload_path_rejects_traversal(self, monkeypatch, tmp_path):
+        from flocks.server.routes import session as session_routes
+
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get_data_path",
+            staticmethod(lambda: tmp_path),
+        )
+
+        with pytest.raises(ValueError, match="Invalid session ID"):
+            session_routes._session_uploads_dir("../outside")
 
     @pytest.mark.asyncio
     async def test_prompt_async_queues_when_session_running_without_creating_message(self, monkeypatch):

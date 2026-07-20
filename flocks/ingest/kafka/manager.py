@@ -297,7 +297,14 @@ class KafkaManager:
             if not workflow_id:
                 continue
             if isinstance(data, dict) and data.get("enabled"):
-                await self.restart_workflow(workflow_id)
+                try:
+                    await self.restart_workflow(workflow_id, startup=True)
+                except Exception as exc:
+                    self._status[workflow_id] = {"state": "failed", "error": str(exc)}
+                    log.warning(
+                        "kafka.start_failed",
+                        {"workflow_id": workflow_id, "error": str(exc)},
+                    )
 
     async def stop_all(self) -> None:
         for workflow_id in list(self._tasks.keys()):
@@ -360,7 +367,12 @@ class KafkaManager:
         if workflow_id in self._status:
             self._status[workflow_id] = {"state": "stopped", "error": None}
 
-    async def restart_workflow(self, workflow_id: str) -> Dict[str, Any]:
+    async def restart_workflow(
+        self,
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> Dict[str, Any]:
         """Restart the consumer and return its post-connect runtime status.
 
         Blocks until the consumer connects, the connection fails, or
@@ -377,6 +389,21 @@ class KafkaManager:
             self._status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
 
+        # Load and cache the workflow JSON once; avoids a disk read per message.
+        wf_data = read_workflow_from_fs(workflow_id)
+        if not wf_data:
+            err = "workflow_not_found"
+            if startup:
+                self._status[workflow_id] = {"state": "stopped", "error": err}
+                log.info("kafka.workflow_not_found_on_start", {
+                    "workflow_id": workflow_id,
+                    "action": "stale_config_skipped",
+                })
+                return {"state": "stopped", "error": err}
+            self._status[workflow_id] = {"state": "failed", "error": err}
+            log.warning("kafka.workflow_not_found", {"workflow_id": workflow_id})
+            return {"state": "failed", "error": err}
+
         input_broker = str(data.get("inputBroker") or "").strip()
         input_topic = str(data.get("inputTopic") or "").strip()
         if not input_broker or not input_topic:
@@ -385,13 +412,6 @@ class KafkaManager:
             log.warning("kafka.config_incomplete", {"workflow_id": workflow_id})
             return {"state": "failed", "error": err}
 
-        # Load and cache the workflow JSON once; avoids a disk read per message.
-        wf_data = read_workflow_from_fs(workflow_id)
-        if not wf_data:
-            err = "workflow_not_found"
-            self._status[workflow_id] = {"state": "failed", "error": err}
-            log.warning("kafka.workflow_not_found_on_start", {"workflow_id": workflow_id})
-            return {"state": "failed", "error": err}
         workflow_json = wf_data.get("workflowJson")
         if not workflow_json:
             err = "workflow_json_missing"

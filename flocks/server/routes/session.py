@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
@@ -48,6 +49,62 @@ _context_usage_cache_lock = asyncio.Lock()
 # extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
+_UPLOAD_EXT_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+}
+
+
+def _session_uploads_dir(session_id: str) -> Path:
+    """Return the application-owned upload directory for one session."""
+    from flocks.config.config import Config
+
+    uploads_root = (Config.get_data_path() / "uploads").resolve()
+    target = (uploads_root / session_id).resolve()
+    if target == uploads_root or not target.is_relative_to(uploads_root):
+        raise ValueError(f"Invalid session ID for upload path: {session_id}")
+    return target
+
+
+def _materialize_data_url_part(
+    session_id: str,
+    data_url: str,
+    mime_hint: str,
+    filename_hint: Optional[str],
+    *,
+    failure_event: str = "session.prompt_queue.materialize_failed",
+) -> str:
+    """Persist a data URL under the application data directory."""
+    try:
+        import base64
+        from flocks.utils.id import Identifier
+
+        _header, _sep, encoded = data_url.partition(",")
+        if not encoded:
+            return data_url
+        raw_bytes = base64.b64decode(encoded)
+        uploads_root = _session_uploads_dir(session_id)
+        uploads_root.mkdir(parents=True, exist_ok=True)
+
+        ext = _UPLOAD_EXT_BY_MIME.get(mime_hint, "")
+        if not ext and filename_hint:
+            _, _, tail = filename_hint.rpartition(".")
+            if tail.lower() in _UPLOAD_SAFE_EXTS:
+                ext = "." + tail.lower()
+        target = uploads_root / f"{Identifier.create('part')}{ext}"
+        target.write_bytes(raw_bytes)
+        return target.resolve().as_uri()
+    except Exception as exc:
+        log.warn(failure_event, {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
+        return data_url
 
 
 def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[str, int]:
@@ -782,17 +839,14 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     await Session.delete(session.project_id, sessionID)
 
     # Best-effort cleanup of any image/file uploads materialised for this
-    # session via ``_materialize_data_url_to_disk`` (see prompt_async).
+    # session via ``_materialize_data_url_part`` (see prompt_async).
     # The session DB row is gone, so the on-disk bytes are now orphaned —
-    # remove them to keep the workspace tidy. We deliberately swallow any
+    # remove them to keep application data tidy. We deliberately swallow any
     # filesystem errors: deletion of the session record is the contract,
     # the upload cleanup is incidental.
     try:
         import shutil
-        from flocks.workspace.manager import WorkspaceManager
-
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
+        uploads_root = _session_uploads_dir(sessionID)
         if uploads_root.exists() and uploads_root.is_dir():
             shutil.rmtree(uploads_root, ignore_errors=True)
             log.info("session.uploads.cleaned", {
@@ -2764,51 +2818,6 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     from flocks.session.message import FilePart
 
-    def _materialize_data_url_to_disk(
-        data_url: str, mime_hint: str, filename_hint: Optional[str]
-    ) -> str:
-        """Decode a ``data:`` URL to ``~/.flocks/workspace/uploads/<session>/...``.
-
-        Returns a ``file://`` URL pointing at the persisted file. On failure
-        the original ``data:`` URL is returned unchanged (older code paths
-        still cope with that, just with the now-known token-cost penalty).
-        """
-        try:
-            import base64
-            from flocks.workspace.manager import WorkspaceManager
-
-            header, _, encoded = data_url.partition(",")
-            if not encoded:
-                return data_url
-            raw_bytes = base64.b64decode(encoded)
-
-            ws = WorkspaceManager.get_instance()
-            # Use resolve_workspace_path to guard against path traversal if
-            # sessionID were ever user-controlled (e.g. ../../../tmp/x).
-            uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
-            uploads_root.mkdir(parents=True, exist_ok=True)
-
-            ext_map = {
-                "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
-                "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
-                "application/pdf": ".pdf",
-            }
-            ext = ext_map.get(mime_hint, "")
-            if not ext and filename_hint:
-                _, _, tail = filename_hint.rpartition(".")
-                if tail.lower() in _UPLOAD_SAFE_EXTS:
-                    ext = "." + tail.lower()
-            unique_name = f"{Identifier.create('part')}{ext}"
-            target = uploads_root / unique_name
-            target.write_bytes(raw_bytes)
-            return target.resolve().as_uri()
-        except Exception as exc:
-            log.warn("session.message.file_part.materialize_failed", {
-                "sessionID": sessionID,
-                "error": str(exc),
-            })
-            return data_url
-
     for raw_part in request.parts or []:
         part_type = raw_part.get("type")
         if part_type == "text":
@@ -2824,7 +2833,13 @@ async def _process_session_message(
                 continue
             # Materialize ``data:`` URLs to disk before persisting the part.
             if url.startswith("data:"):
-                url = _materialize_data_url_to_disk(url, mime, raw_part.get("filename"))
+                url = _materialize_data_url_part(
+                    sessionID,
+                    url,
+                    mime,
+                    raw_part.get("filename"),
+                    failure_event="session.message.file_part.materialize_failed",
+                )
             file_part_id = raw_part.get("id") or Identifier.create("part")
             file_part = FilePart(
                 id=file_part_id,
@@ -3275,50 +3290,6 @@ def _materialize_queued_parts(session_id: str, parts: List[Dict[str, Any]]) -> L
             next_part["url"] = _materialize_data_url_part(session_id, url, mime, filename)
         prepared.append(next_part)
     return prepared
-
-
-def _materialize_data_url_part(
-    session_id: str,
-    data_url: str,
-    mime_hint: str,
-    filename_hint: Optional[str],
-) -> str:
-    try:
-        import base64
-        from flocks.workspace.manager import WorkspaceManager
-        from flocks.utils.id import Identifier
-
-        _header, _sep, encoded = data_url.partition(",")
-        if not encoded:
-            return data_url
-        raw_bytes = base64.b64decode(encoded)
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{session_id}")
-        uploads_root.mkdir(parents=True, exist_ok=True)
-
-        ext_map = {
-            "image/png": ".png",
-            "image/jpeg": ".jpg",
-            "image/jpg": ".jpg",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-            "image/bmp": ".bmp",
-            "application/pdf": ".pdf",
-        }
-        ext = ext_map.get(mime_hint, "")
-        if not ext and filename_hint:
-            _, _, tail = filename_hint.rpartition(".")
-            if tail.lower() in _UPLOAD_SAFE_EXTS:
-                ext = "." + tail.lower()
-        target = uploads_root / f"{Identifier.create('part')}{ext}"
-        target.write_bytes(raw_bytes)
-        return target.resolve().as_uri()
-    except Exception as exc:
-        log.warn("session.prompt_queue.materialize_failed", {
-            "sessionID": session_id,
-            "error": str(exc),
-        })
-        return data_url
 
 
 def _event_from_queued_prompt(item, working_directory: str):

@@ -191,7 +191,18 @@ class WorkflowPollerManager:
             if not workflow_id:
                 continue
             if isinstance(data, dict) and data.get("enabled"):
-                await self.restart_workflow(workflow_id)
+                try:
+                    await self.restart_workflow(workflow_id, startup=True)
+                except Exception as exc:
+                    self._status[workflow_id] = {
+                        **self._base_status(workflow_id),
+                        "state": "failed",
+                        "error": str(exc),
+                    }
+                    log.warning(
+                        "poller.start_failed",
+                        {"workflow_id": workflow_id, "error": str(exc)},
+                    )
 
     async def stop_all(self) -> None:
         for workflow_id in list(self._tasks.keys()):
@@ -229,7 +240,12 @@ class WorkflowPollerManager:
             self._run_cancel_events.pop(workflow_id, None)
         self._status[workflow_id] = current
 
-    async def restart_workflow(self, workflow_id: str) -> Dict[str, Any]:
+    async def restart_workflow(
+        self,
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> Dict[str, Any]:
         await self.stop_workflow(workflow_id)
         try:
             stored = await WorkflowStore.get_config(workflow_id, kind="workflow_poller_config")
@@ -237,8 +253,7 @@ class WorkflowPollerManager:
             log.warning("poller.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"workflowId": workflow_id, "state": "failed", "error": str(exc)}
 
-        config = self._normalize_config(workflow_id, stored)
-        if not config.get("enabled"):
+        if not isinstance(stored, dict) or not stored.get("enabled"):
             self._status[workflow_id] = {
                 **self._base_status(workflow_id),
                 "workflowId": workflow_id,
@@ -253,11 +268,20 @@ class WorkflowPollerManager:
             self._status[workflow_id] = {
                 **self.get_status(workflow_id),
                 "workflowId": workflow_id,
-                "state": "failed",
+                "state": "stopped" if startup else "failed",
                 "error": err,
             }
+            poller_log = log.info if startup else log.warning
+            poller_log(
+                "poller.workflow_not_found_on_start" if startup else "poller.workflow_not_found",
+                {
+                    "workflow_id": workflow_id,
+                    **({"action": "stale_config_skipped"} if startup else {}),
+                },
+            )
             return self.get_status(workflow_id)
 
+        config = self._normalize_config(workflow_id, stored)
         workflow_json = wf_data.get("workflowJson")
         if not workflow_json:
             err = "workflow_json_missing"

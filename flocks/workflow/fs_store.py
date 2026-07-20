@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from flocks.utils.log import Log
 
-from .center import resolve_global_workflow_roots, resolve_project_workflow_roots
+from .center import resolve_workflow_scan_roots
 
 log = Log.create(service="workflow.fs-store")
 
@@ -104,12 +104,7 @@ def find_workspace_root() -> Path:
 
 def workflow_scan_dirs() -> list[tuple[Path, str]]:
     """Return all workflow roots ordered from lowest to highest priority."""
-    workspace = find_workspace_root()
-    return [
-        (root, "global") for root in resolve_global_workflow_roots()
-    ] + [
-        (root, "project") for root in resolve_project_workflow_roots(workspace)
-    ]
+    return resolve_workflow_scan_roots(find_workspace_root())
 
 
 def read_workflow_dir(

@@ -198,10 +198,9 @@ class Skill:
     Skill discovery and management.
 
     Discovers SKILL.md files from (lowest → highest priority):
-    - .flocks dirs   (global + project-level)
-    - .claude dirs     (global ~/.claude + project-level)
-    - ~/.flocks        (global user-level)
-    - <project>/.flocks (project-level, wins on collision)
+    - .claude dirs
+    - global built-in and project-bundled .flocks dirs
+    - ~/.flocks/plugins (user-level customizations, wins on collision)
     """
 
     _cache: Optional[Dict[str, SkillInfo]] = None
@@ -392,11 +391,21 @@ class Skill:
                 skill_info = cls._parse_skill_md(match, source=source)
                 if skill_info:
                     if skill_info.name in skills:
-                        log.warn("skill.duplicate", {
-                            "name": skill_info.name,
-                            "existing": skills[skill_info.name].location,
-                            "duplicate": match,
-                        })
+                        existing = skills[skill_info.name]
+                        if existing.source != skill_info.source:
+                            log.info("skill.override", {
+                                "name": skill_info.name,
+                                "selected": match,
+                                "selected_source": skill_info.source,
+                                "replaced": existing.location,
+                                "replaced_source": existing.source,
+                            })
+                        else:
+                            log.warn("skill.duplicate", {
+                                "name": skill_info.name,
+                                "existing": existing.location,
+                                "duplicate": match,
+                            })
 
                     skills[skill_info.name] = skill_info
                     log.debug("skill.found", {
@@ -416,9 +425,10 @@ class Skill:
         Discover all skills. Last wins on name collision.
 
         Scan order (lowest → highest priority):
-          1. .claude dirs       (global ~/.claude + project-level)
-          2. ~/.flocks          (global user-level, overrides .claude)
-          3. <project>/.flocks  (project-level, highest priority)
+          1. .claude dirs
+          2. ~/.flocks/skill[s] built-ins
+          3. <project>/.flocks project-bundled skills
+          4. ~/.flocks/plugins user customizations
 
         Source labels:
           "flocks"   — built-in skills inside .flocks/skills/ directories
@@ -450,16 +460,12 @@ class Skill:
         for claude_dir in cls._find_dirs_up(".claude", current_dir, worktree):
             cls._scan_directory(claude_dir, "skills/**/SKILL.md", skills, source="claude")
 
-        # 2) Global ~/.flocks — overrides .claude
-        #    Built-in skills: source="flocks"; user-installed plugins: source="user"
+        # 2) Global built-in skills — overrides .claude
         if os.path.isdir(global_flocks):
             for pattern in builtin_patterns:
                 cls._scan_directory(global_flocks, pattern, skills, source="flocks")
-            for pattern in plugin_patterns:
-                cls._scan_directory(global_flocks, pattern, skills, source="user")
 
-        # 3) Project-level .flocks — highest priority
-        #    Built-in skills: source="flocks"; project-installed plugins: source="project"
+        # 3) Project-bundled .flocks skills — built-in baseline for this project
         for flocks_dir in cls._find_dirs_up(".flocks", current_dir, worktree):
             if os.path.normpath(flocks_dir) == os.path.normpath(global_flocks):
                 continue
@@ -467,6 +473,11 @@ class Skill:
                 cls._scan_directory(flocks_dir, pattern, skills, source="flocks")
             for pattern in plugin_patterns:
                 cls._scan_directory(flocks_dir, pattern, skills, source="project")
+
+        # 4) User-installed plugins — explicit customizations win over project bundles
+        if os.path.isdir(global_flocks):
+            for pattern in plugin_patterns:
+                cls._scan_directory(global_flocks, pattern, skills, source="user")
 
         log.info("skill.discovery.complete", {"count": len(skills), "names": list(skills.keys())})
         return skills

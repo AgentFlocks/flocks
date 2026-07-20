@@ -1341,18 +1341,15 @@ class SessionRunner:
                 
             except Exception as e:
                 error_attempt += 1
-                log.error("runner.step.error", {
-                    "error": str(e),
-                    "attempt": error_attempt,
-                })
-                
+
                 # Convert exception to error dict for retry check
                 error_dict = self._exception_to_error_dict(e)
-                
+
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
+                will_retry = retry_message is not None and error_attempt <= MAX_ERROR_RETRIES
 
-                if retry_message is not None and error_attempt <= MAX_ERROR_RETRIES:
+                if will_retry:
                     # Error is retryable and we have budget left
                     delay_ms = SessionRetry.delay(error_attempt, error_dict)
                     # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
@@ -1361,8 +1358,9 @@ class SessionRunner:
                     from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
                     delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
                     next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
-                    
-                    log.info("runner.step.retry", {
+
+                    log.warn("runner.step.retry", {
+                        "error": str(e),
                         "attempt": error_attempt,
                         "delay_ms": delay_ms,
                         "reason": retry_message,
@@ -1393,7 +1391,10 @@ class SessionRunner:
                             "max_retries": MAX_ERROR_RETRIES,
                         })
                     else:
-                        log.error("runner.step.not_retryable", {"error": str(e)})
+                        log.error("runner.step.not_retryable", {
+                            "error": str(e),
+                            "attempt": error_attempt,
+                        })
 
                     final_error_message = str(e)
                     if SessionRetry.is_connection_error(error_dict):
