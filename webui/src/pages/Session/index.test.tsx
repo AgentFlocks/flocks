@@ -351,7 +351,14 @@ describe('SessionPage session actions menu', () => {
     const user = userEvent.setup();
     renderSessionPage();
 
-    await screen.findByText('tasksSection');
+    const tasksHeading = await screen.findByText('tasksSection');
+    const projectsHeading = screen.getByText('projectsSection');
+    const tasksSection = tasksHeading.closest('section');
+    const projectsSection = projectsHeading.closest('section');
+    expect(tasksSection).not.toBeNull();
+    expect(projectsSection).not.toBeNull();
+    expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
+    expect(projectsSection).not.toContainElement(tasksHeading);
     expect(useSessions).toHaveBeenLastCalledWith('', {
       projectIds: ['default'],
       pageSize: 20,
@@ -379,6 +386,27 @@ describe('SessionPage session actions menu', () => {
         projectID: 'default',
       });
     });
+  });
+
+  it('collapses the projects section and restores it after remounting', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
+      ],
+    });
+    const firstRender = renderSessionPage();
+
+    await screen.findByText('Labs');
+    await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
+    expect(screen.queryByText('Labs')).not.toBeInTheDocument();
+
+    firstRender.unmount();
+    renderSessionPage();
+
+    await screen.findByText('projectsSection');
+    expect(screen.queryByText('Labs')).not.toBeInTheDocument();
   });
 
   it('restores collapsed projects after the session page remounts', async () => {

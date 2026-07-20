@@ -263,6 +263,7 @@
   "groupLastWeek": "Last Week",
   "groupEarlier": "Earlier",
   "projectsSection": "Projects",
+  "toggleProjects": "Expand or collapse projects",
   "tasksSection": "Tasks",
   "toggleTasks": "Expand or collapse tasks",
   "selectTasks": "Select tasks",

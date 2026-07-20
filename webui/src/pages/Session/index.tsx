@@ -312,6 +312,7 @@ export default function SessionPage() {
   const { user } = useAuth();
   const activeProjectStorageKey = `flocks:sessions:active-project:${user?.id ?? 'anonymous'}`;
   const collapsedProjectsStorageKey = `flocks:sessions:collapsed-projects:${user?.id ?? 'anonymous'}`;
+  const projectsSectionCollapsedStorageKey = `flocks:sessions:projects-section-collapsed:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -337,6 +338,13 @@ export default function SessionPage() {
       return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
     } catch {
       return new Set();
+    }
+  });
+  const [projectsSectionCollapsed, setProjectsSectionCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(projectsSectionCollapsedStorageKey) === 'true';
+    } catch {
+      return false;
     }
   });
   const [projectDialogMode, setProjectDialogMode] = useState<ProjectDialogMode | null>(null);
@@ -521,6 +529,17 @@ export default function SessionPage() {
       // Project collapse persistence must never block the session manager.
     }
   }, [collapsedProjectIds, collapsedProjectsStorageKey]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        projectsSectionCollapsedStorageKey,
+        String(projectsSectionCollapsed),
+      );
+    } catch {
+      // Section collapse persistence must never block the session manager.
+    }
+  }, [projectsSectionCollapsed, projectsSectionCollapsedStorageKey]);
 
   const defaultProjectId = useMemo(
     () => projects.find((project) => project.isDefault)?.id ?? projects[0]?.id ?? null,
@@ -1486,19 +1505,31 @@ export default function SessionPage() {
             </div>
           ) : (
             <div>
-              <div className="flex items-center justify-between px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
-                <span>{t('projectsSection')}</span>
-                <button
-                  type="button"
-                  onClick={handleOpenCreateProject}
-                  className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
-                  title={t('projectDialog.createTitle')}
-                  aria-label={t('projectDialog.createTitle')}
-                >
-                  <FolderPlus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="space-y-1">
+              <section className="group/projects-section">
+                <div className="flex items-center justify-between px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
+                  <button
+                    type="button"
+                    onClick={() => setProjectsSectionCollapsed((collapsed) => !collapsed)}
+                    className="flex items-center gap-1 rounded text-left transition-colors hover:text-gray-700 dark:hover:text-zinc-300"
+                    aria-label={t('toggleProjects')}
+                  >
+                    <span>{t('projectsSection')}</span>
+                    {projectsSectionCollapsed
+                      ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleOpenCreateProject}
+                    className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                    title={t('projectDialog.createTitle')}
+                    aria-label={t('projectDialog.createTitle')}
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {!projectsSectionCollapsed && (
+                  <div className="space-y-1">
                 {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
                   const isDefaultProject = group.isDefault;
@@ -1669,23 +1700,30 @@ export default function SessionPage() {
                     </div>
                   );
                 })}
-              </div>
+                  </div>
+                )}
+              </section>
               {taskSessionGroup && (
-                <div className="group/task relative mt-3">
-                  <div
-                    className={`mx-2 flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm transition-colors ${
-                      taskGroupSelected
-                        ? 'bg-gray-100 text-gray-900 dark:bg-zinc-900 dark:text-zinc-100'
-                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
-                    }`}
-                  >
+                <section className="group/tasks-section mt-3">
+                  <div className="flex items-center gap-1 px-4 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-gray-400 select-none dark:text-zinc-600">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedProjectId(taskSessionGroup.id);
+                        toggleProjectCollapsed(taskSessionGroup.id);
+                      }}
+                      className="min-w-0 truncate rounded text-left transition-colors hover:text-gray-700 dark:hover:text-zinc-300"
+                      aria-label={t('selectTasks')}
+                    >
+                      {t('tasksSection')}
+                    </button>
                     <button
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
                         toggleProjectCollapsed(taskSessionGroup.id);
                       }}
-                      className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                      className="mr-auto rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
                       aria-label={t('toggleTasks')}
                     >
                       {taskGroupCollapsed
@@ -1694,24 +1732,12 @@ export default function SessionPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        setSelectedProjectId(taskSessionGroup.id);
-                        toggleProjectCollapsed(taskSessionGroup.id);
-                      }}
-                      className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
-                      aria-label={t('selectTasks')}
-                    >
-                      <MessageSquare className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
-                      <span className="min-w-0 flex-1 truncate font-medium">{t('tasksSection')}</span>
-                    </button>
-                    <button
-                      type="button"
                       onClick={(event) => {
                         event.stopPropagation();
                         handleCreateSessionInProject(taskSessionGroup.id);
                       }}
                       disabled={creating || taskSessionGroup.pathStatus !== 'available'}
-                      className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                      className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
                       title={t('createTaskSession')}
                       aria-label={t('createTaskSession')}
                     >
@@ -1719,7 +1745,7 @@ export default function SessionPage() {
                         ? <Loader2 className="h-3 w-3 animate-spin" />
                         : <Plus className="h-3 w-3" />}
                     </button>
-                    <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
+                    <span className="w-5 shrink-0 text-right tabular-nums">
                       {taskSessionGroup.sessionCount}
                     </span>
                   </div>
@@ -1763,7 +1789,7 @@ export default function SessionPage() {
                       )}
                     </div>
                   )}
-                </div>
+                </section>
               )}
             </div>
           )}
