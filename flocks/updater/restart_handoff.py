@@ -270,16 +270,17 @@ def _start_service_after_upgrade(args: argparse.Namespace) -> tuple[bool, str, s
         start_argv,
         cwd=Path(args.install_root),
         capture_output=True,
-        text=True,
+        text=False,
         check=False,
     )
+    stdout = updater_module._clean_process_output(completed.stdout)
+    stderr = updater_module._clean_process_output(completed.stderr)
     if completed.returncode == 0:
-        return True, completed.stdout, completed.stderr
+        return True, stdout, stderr
     _record_handoff_log(
-        "restart_failed "
-        f"returncode={completed.returncode} stdout={completed.stdout.strip()} stderr={completed.stderr.strip()}"
+        f"restart_failed returncode={completed.returncode} stdout={stdout} stderr={stderr}"
     )
-    return False, completed.stdout, completed.stderr
+    return False, stdout, stderr
 
 
 def _write_upgrade_result(

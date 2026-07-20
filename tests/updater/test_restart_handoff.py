@@ -434,6 +434,30 @@ def test_upgrade_that_was_stopped_does_not_start_service(monkeypatch, tmp_path: 
     assert restart_handoff._start_service_after_upgrade(parsed) == (True, "", "")
 
 
+def test_upgrade_start_decodes_invalid_windows_output_without_crashing(monkeypatch, tmp_path: Path) -> None:
+    parsed = restart_handoff._parse_args(_simple_upgrade_handoff_args(tmp_path))
+    logs: list[str] = []
+
+    def fake_run(command, **kwargs):
+        assert kwargs["text"] is False
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=b"start stdout \x80",
+            stderr=b"start stderr \x81",
+        )
+
+    monkeypatch.setattr(restart_handoff.subprocess, "run", fake_run)
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", logs.append)
+
+    assert restart_handoff._start_service_after_upgrade(parsed) == (
+        False,
+        "start stdout �",
+        "start stderr �",
+    )
+    assert logs == ["restart_failed returncode=1 stdout=start stdout � stderr=start stderr �"]
+
+
 def test_run_waits_for_parent_and_backend_port_before_spawning(
     monkeypatch,
     tmp_path: Path,
