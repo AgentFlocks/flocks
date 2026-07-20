@@ -218,7 +218,7 @@ alert_records
 | `input_paths` | 无 | 显式路径列表，优先级最高 |
 | `input_path` | 无 | 单个显式路径 |
 | `input_date` | 今天 | 自动发现该日所有上游 `dedup_result_*.jsonl` |
-| `concurrency` | `1` | `workflow.md` 和 metadata 推荐 1；`concurrent_triage` 会限制到 1 到 5 |
+| `concurrency` | `1` | 控制外层 work unit 和运行级 LLM 并发预算；`concurrent_triage` 会限制到 1 到 5 |
 | `max_triage_cache_size` | `100000` | 小于 1 时回退 100000 |
 | `triage_output_mode` | `soc_db` | 输出模式：`soc_db` / `jsonl` / `both` / `none` |
 | `soc_db_path` | `~/.flocks/data/soc.db` | 默认 SOC DB 写入位置 |
@@ -228,10 +228,10 @@ alert_records
 并发注意：
 
 - 外层 `ThreadPoolExecutor(max_workers=concurrency)` 处理 unique work units。
-- 内层每个 leader 会用 4 路并行 LLM 分支：`survey`、`cve_related`、`cve_info`、`payload_analysis`。
-- 稳态 LLM 峰值约为 `concurrency * 4`。
-- 配置引导应默认显式给出 `concurrency=1`。如果用户要提高到 2 到 5，先说明 LLM 并发和上游工具压力，再确认。
-- 当前 `load_dedup_file` 节点在完全不传 `concurrency` 时会输出 5；因此引导和样例中应显式传 `concurrency=1`，避免与文档推荐值不一致。
+- 每个 leader 仍会执行 `survey`、`cve_related`、`cve_info`、`payload_analysis` 4 个 LLM 分支。
+- 所有 `llm.ask()` 共享运行级信号量，稳态 LLM 峰值不超过 `concurrency`，不会再与 4 个分支相乘。
+- 配置引导应默认显式给出 `concurrency=1`。如果用户要提高到 2 到 5，先说明 LLM 和上游工具压力，再确认。
+- `load_dedup_file` 在完全不传 `concurrency` 时同样输出 1，与文档和样例保持一致。
 
 leader/follower 规则：
 
@@ -298,7 +298,7 @@ leader/follower 规则：
 3. 后续每行是否能按 JSON 对象解析。
 4. 是否至少有 `dedup_key`、`sip`、`dip`、`req_http_url`、`threat_name` 中的关键字段。
 5. 按 `dedup_key` 估算 unique work units 和 follower 数。
-6. 预估 `concurrency * 4` 的 LLM 峰值。
+6. 确认运行级 LLM 峰值不超过 `concurrency`。
 
 真实执行验证注意：
 
