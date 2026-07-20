@@ -258,6 +258,16 @@ class SystemPrompt:
     ) -> List[str]:
         """Build stable workspace metadata that should stay cache-friendly."""
         working_dir = directory or os.getcwd()
+        source_code_dir = str(
+            Path(
+                os.getenv(
+                    "FLOCKS_REPO_ROOT",
+                    str(Path(__file__).resolve().parents[2]),
+                )
+            )
+            .expanduser()
+            .resolve()
+        )
         is_git = vcs == "git"
 
         from flocks.workspace.manager import WorkspaceManager
@@ -267,7 +277,8 @@ class SystemPrompt:
         env_info = [
             "Here is some useful information about the environment you are running in:",
             "<env>",
-            f"  Source code directory: {working_dir}",
+            f"  flocks source code directory: {source_code_dir}",
+            f"  current working directory: {working_dir}",
             f"  Workspace outputs directory: {outputs_dir}",
             f"  Is directory a git repo: {'yes' if is_git else 'no'}",
             f"  Platform: {platform.system().lower()}",
