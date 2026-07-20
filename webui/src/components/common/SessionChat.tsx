@@ -821,7 +821,7 @@ export function getMessageBubbleClassName({
       ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
       : 'w-full max-w-full';
 
-    return `${widthClass} px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
         ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
         : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
@@ -832,7 +832,7 @@ export function getMessageBubbleClassName({
     ? (isEditing ? 'w-full' : 'w-auto')
     : 'w-full';
 
-  return `${widthClass} px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
+  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
     isUser
       ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
       : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'

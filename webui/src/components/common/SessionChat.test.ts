@@ -435,6 +435,16 @@ describe('getMessageBubbleClassName', () => {
   // The message column owns the available width, so the inner bubble only
   // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
   // assert width semantics, not legacy max-width literals.
+  it('allows every bubble variant to shrink within the message column', () => {
+    for (const compact of [false, true]) {
+      for (const isUser of [false, true]) {
+        const className = getMessageBubbleClassName({ compact, isUser, isEditing: false });
+        expect(className).toContain('min-w-0');
+        expect(className).toContain('max-w-full');
+      }
+    }
+  });
+
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -443,7 +453,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-auto');
-    expect(className).not.toContain('w-full');
+    expect(className.split(' ')).not.toContain('w-full');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
