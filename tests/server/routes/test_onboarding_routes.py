@@ -198,6 +198,14 @@ class TestOnboardingValidateRoutes:
 
 
 class TestOnboardingApplyRoutes:
+    def test_threatbook_region_presets_use_kimi_k27_code(self):
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["cn"]["threatbook_default_model_id"] == (
+            "kimi-k2.7-code"
+        )
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["threatbook_default_model_id"] == (
+            "kimi-k2.7-code"
+        )
+
     def test_ensure_threatbook_mcp_config_uses_explicit_secret_reference(
         self, monkeypatch: pytest.MonkeyPatch
     ):
