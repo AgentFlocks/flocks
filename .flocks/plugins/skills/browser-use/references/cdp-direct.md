@@ -350,11 +350,11 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 
 1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和浏览器状态；不要只看退出码，优先读 `next action`，再看 `browser running`、`daemon alive`、`active browser connections`。
 2. `next action` 为 `attach`，或 `daemon alive` ok 但 `active browser connections` 为 0 时，不要先反复 `--setup`。先用一次实际命令触发连接/观察：`flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'`。
-3. 如果上一步失败或仍无连接，再执行 `flocks browser --reload` 清旧 daemon，然后执行 `flocks browser --setup`；setup 可能需要多次，因为用户可能需要完成浏览器 inspect/Allow 授权，或浏览器需要时间写入 remote debugging 状态。
+3. 如果上一步失败或仍无连接，再执行 `flocks browser --reload` 清旧 daemon，然后执行 `flocks browser --setup`。若 setup 输出本地 remote debugging 不可达，按 `references/cdp-setup.md` 的固定端口流程处理。
 4. 首次安装、冷启动、daemon 不存在/不通，且浏览器已经运行或配置了 `BU_CDP_URL` / `BU_CDP_WS` 时，优先运行 `flocks browser --setup`。
-5. Chrome / Chromium / Edge 未运行且没有显式 CDP endpoint 时，只提示用户启动浏览器或提供 endpoint；不要直接让用户改设置。
-6. 只有在明确提示 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake、remote-debugging page 或 not live yet 时，才让用户打开对应浏览器的 inspect 页面（例如 `chrome://inspect/#remote-debugging` 或 `edge://inspect/#remote-debugging`）并勾选 Allow remote debugging。
-7. 用户刚开启 remote debugging 时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
+5. Chrome / Chromium / Edge / Brave 未运行且没有显式 CDP endpoint 时，按 `references/cdp-setup.md` 提供对应平台的 remote-debugging 启动命令。
+6. 只有在明确提示 remote debugging 不可达、`DevToolsActivePort` 缺失、403 handshake、remote-debugging page 或 not live yet 时，才让用户使用非默认 `--user-data-dir` 和 `--remote-debugging-port=9222` 启动 Chromium 系浏览器，并访问 `http://127.0.0.1:9222/json/version` 验证。
+7. 用户刚按固定端口流程启动浏览器时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
 8. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是浏览器正在启动，轮询等待，不要重启。
 9. stale websocket / stale socket 时执行一次：
 

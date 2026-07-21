@@ -61,8 +61,8 @@ inputSchema:
           是否任务型: 否
         - cc_rule_create
           用途: 创建 CC 防护规则
-          必填: `policy_id`、`url`、`limit_num`、`limit_period`、`lock_time`、`tag_type`、`action`
-          常用: `policy_id`、`url`、`limit_num`、`limit_period`、`lock_time`、`tag_type`、`action`
+          必填: `policy_id`、`url`、`limit_num`、`limit_period`、`lock_time`、`tag_type`、`rule_action`
+          常用: `policy_id`、`url`、`limit_num`、`limit_period`、`lock_time`、`tag_type`、`rule_action`
           风险提示: 写操作；会新增 CC 规则
           是否任务型: 否
         - cc_rule_delete
@@ -79,8 +79,8 @@ inputSchema:
           是否任务型: 否
         - custom_rule_create
           用途: 创建精准防护规则
-          必填: `policy_id`、`name`、`conditions`、`action`
-          常用: `policy_id`、`name`、`conditions`、`action`、`priority`
+          必填: `policy_id`、`name`、`conditions`、`rule_action`
+          常用: `policy_id`、`name`、`conditions`、`rule_action`、`priority`
           风险提示: 写操作；会新增精准防护规则
           是否任务型: 否
         - custom_rule_delete
@@ -168,7 +168,7 @@ inputSchema:
     tag_type:
       type: string
       description: CC 规则标签类型，如 `ip`、`cookie`、`header` 等
-    action:
+    rule_action:
       type: object
       description: 规则匹配后的动作，含 `category`（`block`/`pass`/`log`）等字段
     conditions:

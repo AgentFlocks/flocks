@@ -20,7 +20,7 @@ inputSchema:
         - event_list
           用途: 查询攻击事件列表（分页）
           必填: 无
-          常用: `from`、`to`、`hosts`、`attacks`、`action`、`page`、`pagesize`
+          常用: `from`、`to`、`hosts`、`attacks`、`event_action`、`page`、`pagesize`
           风险提示: 只读查询接口；建议传 from/to 缩小范围
           是否任务型: 否
         - event_show
@@ -38,7 +38,7 @@ inputSchema:
         - event_export_job
           用途: 下发自定义导出攻击事件的异步任务
           必填: `from`、`to`
-          常用: `from`、`to`、`hosts`、`attacks`、`action`
+          常用: `from`、`to`、`hosts`、`attacks`、`event_action`
           风险提示: 写操作（下发异步任务）；任务完成后可通过 `event_log_download` 获取结果
           是否任务型: 是
         - threat_distribution
@@ -89,9 +89,12 @@ inputSchema:
       items:
         type: string
       description: 攻击类型列表（如 `sqli`、`xss`、`cmdi`、`cc` 等）
-    action:
+    event_action:
       type: string
       description: 防护动作筛选，`block`（拦截）或 `log`（仅记录）
+      enum:
+        - block
+        - log
     top:
       type: integer
       description: 返回 Top N 条数，默认 5
