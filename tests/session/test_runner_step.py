@@ -2486,6 +2486,167 @@ async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monk
 
 
 @pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_provider_missing(monkeypatch):
+    runner = _make_runner("ses_runner_missing_provider_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "missing-provider", "modelID": "missing-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None)
+    events = []
+    callback_errors = []
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    async def on_error(error):
+        callback_errors.append(error)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: None))
+
+    runner.provider_id = "missing-provider"
+    runner.model_id = "missing-model"
+    runner.callbacks = RunnerCallbacks(
+        on_error=on_error,
+        event_publish_callback=publish_event,
+    )
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text_parts = [
+        part for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    ]
+
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "ProviderUnavailableError"
+    assert visible_text_parts
+    assert visible_text_parts[0].text == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert any(event_name == "message.part.updated" for event_name, _payload in events)
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_provider_not_configured(monkeypatch):
+    runner = _make_runner("ses_runner_unconfigured_provider_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "unconfigured-provider", "modelID": "unconfigured-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None)
+    events = []
+    callback_errors = []
+
+    class UnconfiguredProvider:
+        def is_configured(self):
+            return False
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    async def on_error(error):
+        callback_errors.append(error)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: UnconfiguredProvider()))
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+
+    runner.provider_id = "unconfigured-provider"
+    runner.model_id = "unconfigured-model"
+    runner.callbacks = RunnerCallbacks(
+        on_error=on_error,
+        event_publish_callback=publish_event,
+    )
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text_parts = [
+        part for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    ]
+
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "ProviderConfigurationError"
+    assert visible_text_parts
+    assert visible_text_parts[0].text == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert any(event_name == "message.part.updated" for event_name, _payload in events)
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_model_returns_empty_stream(monkeypatch):
+    runner = _make_runner("ses_runner_empty_stream_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "empty-provider", "modelID": "empty-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None, model=None)
+    events = []
+
+    class EmptyProvider:
+        def is_configured(self):
+            return True
+
+        async def chat_stream(self, **kwargs):
+            del kwargs
+            if False:
+                yield None
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: EmptyProvider()))
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    runner.provider_id = "empty-provider"
+    runner.model_id = "empty-model"
+    runner.callbacks = RunnerCallbacks(event_publish_callback=publish_event)
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text = "\n".join(
+        getattr(part, "text", "")
+        for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    )
+
+    assert result.action == "stop"
+    assert "returned an empty response" in result.error
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "EmptyResponseError"
+    assert "returned an empty response" in visible_text
+    assert any(
+        event_name == "message.part.updated"
+        and "returned an empty response" in _payload["part"]["text"]
+        for event_name, _payload in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(monkeypatch):
     runner = _make_runner("ses_runner_prompt_guidance_tool_names")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())

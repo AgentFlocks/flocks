@@ -3884,6 +3884,12 @@ function ChatMessageBubbleInner({
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    part.type === 'text' && !String(part.text || '').trim()
+  );
+  const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
+    parts.length === 0 || hasOnlyBlankTextParts
+  );
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
@@ -3901,7 +3907,7 @@ function ChatMessageBubbleInner({
     <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
 
       {/* Empty / loading state */}
-      {parts.length === 0 && (
+      {(parts.length === 0 || shouldRenderAssistantErrorState) && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
