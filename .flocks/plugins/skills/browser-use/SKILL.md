@@ -61,9 +61,9 @@ flocks browser --doctor
 | 结果 | 触发条件 | 一线修复 | 仍失败兜底 |
 |---|---|---|---|
 | **A** | `next action` 以 `ready` 开头 | 立即确定 `CDP 直连`,阅读 `references/cdp-direct.md`,之后不再切到 `agent-browser` | — |
-| **B** | `next action` 以 `attach` 开头 | 不要先反复 `--setup`；按输出执行 `flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'` 触发一次实际连接/观察 | 如果 `-c` 失败或仍无连接，执行 `flocks browser --reload` 清理旧 daemon，再执行 `flocks browser --setup`；setup 可能需要多次，直到用户完成浏览器 Allow/inspect 授权或错误信息稳定 |
-| **C** | `next action` 以 `setup` 开头 | 先执行 `flocks browser --setup`（不包短超时），再运行 `--doctor` 确认 | 如提示 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake 或 not live yet，再提示用户打开对应 inspect 页面并 Allow；用户确认后可多次 `--setup` |
-| **D** | `next action` 提示启动浏览器或提供 endpoint | 明确告知需要先启动 Chrome/Chromium/Edge 或提供 CDP endpoint | **不**擅自降级到 curl/webfetch；坚持告知 skill 边界 |
+| **B** | `next action` 以 `attach` 开头 | 不要先反复 `--setup`；按输出执行 `flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'` 触发一次实际连接/观察 | 如果 `-c` 失败或仍无连接，执行 `flocks browser --reload` 清理旧 daemon，再执行 `flocks browser --setup`；若 setup 输出本地 remote debugging 不可达，按 `references/cdp-setup.md` 的固定端口流程处理 |
+| **C** | `next action` 以 `setup` 开头 | 先执行 `flocks browser --setup`（不包短超时），再运行 `--doctor` 确认 | 如提示 remote debugging 不可达、`DevToolsActivePort` 缺失、403 handshake 或 not live yet，按 `references/cdp-setup.md` 指引使用非默认 `--user-data-dir` 启动 Chromium 系浏览器，再访问 `/json/version` 验证 |
+| **D** | `next action` 提示启动浏览器或提供 endpoint | 明确告知需要先用 remote-debugging 参数启动 Chrome/Chromium/Edge/Brave，或提供 CDP endpoint | **不**擅自降级到 curl/webfetch；坚持告知 skill 边界 |
 
 ### Step 4: 跨模式通用失败
 
