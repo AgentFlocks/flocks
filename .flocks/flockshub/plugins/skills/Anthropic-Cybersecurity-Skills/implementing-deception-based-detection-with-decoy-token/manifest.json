@@ -1,17 +1,18 @@
 {
   "schemaVersion": "hub.plugin.v1",
-  "id": "deploying-ransomware-canary-files",
+  "id": "implementing-deception-based-detection-with-decoy-token",
   "type": "skill",
-  "name": "deploying-ransomware-canary-files",
-  "description": "Deploys and monitors ransomware canary files across critical directories using Python's watchdog library for real-time filesystem event detection. Places strategically named decoy files that mimic high-value targets (financial records, credentials, database exports) in locations ransomware typically enumerates first. Monitors for any read, modify, rename, or delete operations on canary files and triggers immediate alerts via email, Slack webhook, or syslog when interaction is detected, providing early warning before full encryption begins.",
-  "version": "1.0.0",
+  "name": "implementing-deception-based-detection-with-decoy-token",
+  "description": "Deploy and monitor Decoy Tokens via the Thinkst Decoy API for deception-based breach detection using web bug tokens, DNS tokens, document tokens, and AWS key tokens.",
+  "version": "1.0",
   "author": "mahipal",
   "license": "Apache-2.0",
   "homepage": "https://github.com/mukul975/Anthropic-Cybersecurity-Skills",
   "category": "detection",
   "tags": [
-    "email-security",
-    "iam"
+    "cloud",
+    "api-security",
+    "web-security"
   ],
   "useCases": [
     "incident-response"
@@ -26,7 +27,7 @@
   "trust": "community",
   "source": {
     "kind": "bundled",
-    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/deploying-ransomware-canary-files"
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/implementing-deception-based-detection-with-decoy-token"
   },
   "compatibility": {
     "flocks": ">=0.8.0",
@@ -49,10 +50,8 @@
     "filesystem": "read"
   },
   "risk": {
-    "level": "medium",
-    "reasons": [
-      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
-    ]
+    "level": "low",
+    "reasons": []
   },
   "entrypoints": [
     "SKILL.md"

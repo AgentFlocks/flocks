@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Deception Technology Deployment Agent
-Deploys and manages honeypots, honeytokens, and canary files to detect
+Deploys and manages honeypots, honeytokens, and decoy files to detect
 lateral movement and credential abuse with near-zero false positive alerts.
 """
 
@@ -43,9 +43,9 @@ def generate_honeytoken_credentials(count: int = 5) -> list[dict]:
     return honeytokens
 
 
-def generate_canary_files(output_dir: str, count: int = 5) -> list[dict]:
-    """Generate canary files that trigger alerts when accessed."""
-    canary_templates = [
+def generate_decoy_files(output_dir: str, count: int = 5) -> list[dict]:
+    """Generate decoy files that trigger alerts when accessed."""
+    decoy_templates = [
         ("passwords.xlsx", "Fake password spreadsheet"),
         ("salary_data_2024.csv", "Fake salary data"),
         ("aws_credentials.txt", "Fake AWS access keys"),
@@ -53,22 +53,22 @@ def generate_canary_files(output_dir: str, count: int = 5) -> list[dict]:
         ("database_backup_prod.sql", "Fake database backup"),
     ]
 
-    canary_files = []
+    decoy_files = []
     os.makedirs(output_dir, exist_ok=True)
 
-    for i in range(min(count, len(canary_templates))):
-        filename, description = canary_templates[i]
+    for i in range(min(count, len(decoy_templates))):
+        filename, description = decoy_templates[i]
         filepath = os.path.join(output_dir, filename)
         token_id = secrets.token_hex(4)
 
-        content = f"# CANARY FILE - Token: {token_id}\n"
+        content = f"# DECOY FILE - Token: {token_id}\n"
         content += f"# This file is a decoy. Any access triggers a security alert.\n"
         content += f"# Description: {description}\n"
         content += f"# Generated: {datetime.now(timezone.utc).isoformat()}\n\n"
 
         if "credentials" in filename or "password" in filename:
-            content += "admin:P@ssw0rd_fake_canary_2024\n"
-            content += "root:SuperSecret_fake_canary!\n"
+            content += "admin:P@ssw0rd_fake_decoy_2024\n"
+            content += "root:SuperSecret_fake_decoy!\n"
         elif "aws" in filename:
             content += f"[default]\naws_access_key_id = AKIA{secrets.token_hex(8).upper()}\n"
             content += f"aws_secret_access_key = {secrets.token_hex(20)}\n"
@@ -76,9 +76,9 @@ def generate_canary_files(output_dir: str, count: int = 5) -> list[dict]:
         with open(filepath, "w") as f:
             f.write(content)
 
-        canary_files.append({
+        decoy_files.append({
             "token_id": f"CF-{token_id}",
-            "type": "canary_file",
+            "type": "decoy_file",
             "filename": filename,
             "filepath": filepath,
             "description": description,
@@ -87,18 +87,18 @@ def generate_canary_files(output_dir: str, count: int = 5) -> list[dict]:
             "created": datetime.now(timezone.utc).isoformat(),
         })
 
-    return canary_files
+    return decoy_files
 
 
-def generate_dns_canary_tokens(domain: str, count: int = 3) -> list[dict]:
-    """Generate DNS canary tokens that alert on resolution."""
+def generate_dns_decoy_tokens(domain: str, count: int = 3) -> list[dict]:
+    """Generate DNS decoy tokens that alert on resolution."""
     tokens = []
     for i in range(count):
         token_id = secrets.token_hex(8)
         hostname = f"{token_id}.{domain}"
         tokens.append({
             "token_id": f"DNS-{token_id[:8]}",
-            "type": "dns_canary",
+            "type": "dns_decoy",
             "hostname": hostname,
             "usage": f"Embed in config files, documents, or network shares",
             "alert_on": "DNS resolution of hostname",
@@ -162,10 +162,10 @@ def start_http_honeypot(host: str = "0.0.0.0", port: int = 8888) -> HTTPServer:
 
 
 def generate_deployment_report(
-    credentials: list, canary_files: list, dns_tokens: list
+    credentials: list, decoy_files: list, dns_tokens: list
 ) -> str:
     """Generate deception technology deployment report."""
-    total = len(credentials) + len(canary_files) + len(dns_tokens)
+    total = len(credentials) + len(decoy_files) + len(dns_tokens)
     lines = [
         "DECEPTION TECHNOLOGY DEPLOYMENT REPORT",
         "=" * 50,
@@ -177,11 +177,11 @@ def generate_deployment_report(
     for cred in credentials:
         lines.append(f"  [{cred['token_id']}] {cred['username']} - {cred['description']}")
 
-    lines.append(f"\nCANARY FILES ({len(canary_files)}):")
-    for cf in canary_files:
+    lines.append(f"\nDECOY FILES ({len(decoy_files)}):")
+    for cf in decoy_files:
         lines.append(f"  [{cf['token_id']}] {cf['filename']} - {cf['description']}")
 
-    lines.append(f"\nDNS CANARY TOKENS ({len(dns_tokens)}):")
+    lines.append(f"\nDNS DECOY TOKENS ({len(dns_tokens)}):")
     for dns in dns_tokens:
         lines.append(f"  [{dns['token_id']}] {dns['hostname']}")
 
@@ -189,21 +189,21 @@ def generate_deployment_report(
 
 
 if __name__ == "__main__":
-    output_dir = sys.argv[1] if len(sys.argv) > 1 else "canary_files"
-    dns_domain = sys.argv[2] if len(sys.argv) > 2 else "canary.example.com"
+    output_dir = sys.argv[1] if len(sys.argv) > 1 else "decoy_files"
+    dns_domain = sys.argv[2] if len(sys.argv) > 2 else "decoy.example.com"
 
     print("[*] Deploying deception technology...")
 
     credentials = generate_honeytoken_credentials(5)
-    canary_files = generate_canary_files(output_dir, 5)
-    dns_tokens = generate_dns_canary_tokens(dns_domain, 3)
+    decoy_files = generate_decoy_files(output_dir, 5)
+    dns_tokens = generate_dns_decoy_tokens(dns_domain, 3)
 
-    report = generate_deployment_report(credentials, canary_files, dns_tokens)
+    report = generate_deployment_report(credentials, decoy_files, dns_tokens)
     print(report)
 
     inventory = {
         "credentials": credentials,
-        "canary_files": canary_files,
+        "decoy_files": decoy_files,
         "dns_tokens": dns_tokens,
     }
     output = f"deception_inventory_{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"

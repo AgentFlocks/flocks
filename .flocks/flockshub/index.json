@@ -3738,7 +3738,7 @@
       "id": "deploying-decoy-files-for-ransomware-detection",
       "type": "skill",
       "name": "deploying-decoy-files-for-ransomware-detection",
-      "description": "Deploys canary files (honeytokens) across file systems to detect ransomware encryption activity in real time. Uses strategically placed decoy documents monitored via file integrity monitoring or OS-level watchdogs to trigger alerts when ransomware modifies or encrypts them. Activates for requests involving ransomware canary deployment, honeyfile setup, deception-based ransomware detection, or file integrity monitoring for encryption.",
+      "description": "Deploys decoy files (honeytokens) across file systems to detect ransomware encryption activity in real time. Uses strategically placed decoy documents monitored via file integrity monitoring or OS-level watchdogs to trigger alerts when ransomware modifies or encrypts them. Activates for requests involving ransomware decoy deployment, honeyfile setup, deception-based ransomware detection, or file integrity monitoring for encryption.",
       "version": "1.0.0",
       "category": "detection",
       "tags": [
@@ -3809,10 +3809,10 @@
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/deploying-palo-alto-prisma-access-zero-trust/manifest.json"
     },
     {
-      "id": "deploying-ransomware-canary-files",
+      "id": "deploying-ransomware-decoy-files",
       "type": "skill",
-      "name": "deploying-ransomware-canary-files",
-      "description": "Deploys and monitors ransomware canary files across critical directories using Python's watchdog library for real-time filesystem event detection. Places strategically named decoy files that mimic high-value targets (financial records, credentials, database exports) in locations ransomware typically enumerates first. Monitors for any read, modify, rename, or delete operations on canary files and triggers immediate alerts via email, Slack webhook, or syslog when interaction is detected, providing early warning before full encryption begins.",
+      "name": "deploying-ransomware-decoy-files",
+      "description": "Deploys and monitors ransomware decoy files across critical directories using Python's watchdog library for real-time filesystem event detection. Places strategically named decoy files that mimic high-value targets (financial records, credentials, database exports) in locations ransomware typically enumerates first. Monitors for any read, modify, rename, or delete operations on decoy files and triggers immediate alerts via email, Slack webhook, or syslog when interaction is detected, providing early warning before full encryption begins.",
       "version": "1.0.0",
       "category": "detection",
       "tags": [
@@ -3824,7 +3824,7 @@
       ],
       "trust": "community",
       "riskLevel": "medium",
-      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/deploying-ransomware-canary-files/manifest.json"
+      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/deploying-ransomware-decoy-files/manifest.json"
     },
     {
       "id": "deploying-software-defined-perimeter",
@@ -7489,10 +7489,10 @@
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/implementing-browser-isolation-for-zero-trust/manifest.json"
     },
     {
-      "id": "implementing-canary-tokens-for-network-intrusion",
+      "id": "implementing-decoy-tokens-for-network-intrusion",
       "type": "skill",
-      "name": "implementing-canary-tokens-for-network-intrusion",
-      "description": "Deploys DNS, HTTP, and AWS API key canary tokens across network infrastructure to detect unauthorized access and lateral movement. Integrates with webhook alerting (Slack, Teams, email, generic HTTP) for real-time intrusion notifications. Provides automated token generation, placement strategies, and monitoring for enterprise network environments. Use when building deception-based network intrusion detection with Canarytokens.org and Thinkst Canary platforms.",
+      "name": "implementing-decoy-tokens-for-network-intrusion",
+      "description": "Deploys DNS, HTTP, and AWS API key decoy tokens across network infrastructure to detect unauthorized access and lateral movement. Integrates with webhook alerting (Slack, Teams, email, generic HTTP) for real-time intrusion notifications. Provides automated token generation, placement strategies, and monitoring for enterprise network environments. Use when building deception-based network intrusion detection with Decoytokens.org and Thinkst Decoy platforms.",
       "version": "1.0",
       "category": "threat-intel",
       "tags": [
@@ -7506,7 +7506,7 @@
       ],
       "trust": "community",
       "riskLevel": "low",
-      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/implementing-canary-tokens-for-network-intrusion/manifest.json"
+      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/implementing-decoy-tokens-for-network-intrusion/manifest.json"
     },
     {
       "id": "implementing-cisa-zero-trust-maturity-model",
@@ -7795,10 +7795,10 @@
       "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/implementing-ddos-mitigation-with-cloudflare/manifest.json"
     },
     {
-      "id": "implementing-deception-based-detection-with-canarytoken",
+      "id": "implementing-deception-based-detection-with-decoy-token",
       "type": "skill",
-      "name": "implementing-deception-based-detection-with-canarytoken",
-      "description": "Deploy and monitor Canary Tokens via the Thinkst Canary API for deception-based breach detection using web bug tokens, DNS tokens, document tokens, and AWS key tokens.",
+      "name": "implementing-deception-based-detection-with-decoy-token",
+      "description": "Deploy and monitor Decoy Tokens via the Thinkst Decoy API for deception-based breach detection using web bug tokens, DNS tokens, document tokens, and AWS key tokens.",
       "version": "1.0",
       "category": "detection",
       "tags": [
@@ -7811,7 +7811,7 @@
       ],
       "trust": "community",
       "riskLevel": "low",
-      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/implementing-deception-based-detection-with-canarytoken/manifest.json"
+      "manifestPath": "plugins/skills/Anthropic-Cybersecurity-Skills/implementing-deception-based-detection-with-decoy-token/manifest.json"
     },
     {
       "id": "implementing-delinea-secret-server-for-pam",
@@ -8332,7 +8332,7 @@
       "id": "implementing-honeypot-for-ransomware-detection",
       "type": "skill",
       "name": "implementing-honeypot-for-ransomware-detection",
-      "description": "Deploys canary files, honeypot shares, and decoy systems to detect ransomware activity at the earliest possible stage. Configures canary tokens embedded in strategic file locations that trigger alerts when ransomware attempts encryption, uses honeypot network shares that mimic high-value targets, and deploys Thinkst Canary appliances for comprehensive deception-based detection. Activates for requests involving ransomware honeypots, canary files, deception technology for ransomware, or early ransomware alerting.",
+      "description": "Deploys decoy files, honeypot shares, and decoy systems to detect ransomware activity at the earliest possible stage. Configures decoy tokens embedded in strategic file locations that trigger alerts when ransomware attempts encryption, uses honeypot network shares that mimic high-value targets, and deploys Thinkst Decoy appliances for comprehensive deception-based detection. Activates for requests involving ransomware honeypots, decoy files, deception technology for ransomware, or early ransomware alerting.",
       "version": "1.0.0",
       "category": "threat-intel",
       "tags": [
@@ -8349,7 +8349,7 @@
       "id": "implementing-honeytokens-for-breach-detection",
       "type": "skill",
       "name": "implementing-honeytokens-for-breach-detection",
-      "description": "Deploys canary tokens and honeytokens (fake AWS credentials, DNS canaries, document beacons, database records) that trigger alerts when accessed by attackers. Uses the Canarytokens API and custom webhook integrations for breach detection. Use when building deception-based early warning systems for intrusion detection.",
+      "description": "Deploys decoy tokens and honeytokens (fake AWS credentials, DNS canaries, document beacons, database records) that trigger alerts when accessed by attackers. Uses the Decoytokens API and custom webhook integrations for breach detection. Use when building deception-based early warning systems for intrusion detection.",
       "version": "1.0",
       "category": "threat-intel",
       "tags": [
@@ -8806,7 +8806,7 @@
       "id": "implementing-network-deception-with-honeypots",
       "type": "skill",
       "name": "implementing-network-deception-with-honeypots",
-      "description": "Deploy and manage network honeypots using OpenCanary, T-Pot, or Cowrie to detect unauthorized access, lateral movement, and attacker reconnaissance.",
+      "description": "Deploy and manage network honeypots using OpenDecoy, T-Pot, or Cowrie to detect unauthorized access, lateral movement, and attacker reconnaissance.",
       "version": "1.0",
       "category": "detection",
       "tags": [

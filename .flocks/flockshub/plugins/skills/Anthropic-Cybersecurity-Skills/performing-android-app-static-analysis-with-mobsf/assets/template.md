@@ -90,7 +90,7 @@
 | Emulator Detection | [Present/Absent] | [DETAILS] |
 | Native Libraries (NX) | [Enabled/Disabled] | [DETAILS] |
 | Native Libraries (PIE) | [Enabled/Disabled] | [DETAILS] |
-| Native Libraries (Stack Canary) | [Present/Absent] | [DETAILS] |
+| Native Libraries (Stack Decoy) | [Present/Absent] | [DETAILS] |
 
 ## Recommendations
 

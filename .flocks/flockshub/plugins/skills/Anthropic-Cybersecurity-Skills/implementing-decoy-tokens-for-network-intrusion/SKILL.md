@@ -1,15 +1,15 @@
 ---
-name: implementing-canary-tokens-for-network-intrusion
-description: 'Deploys DNS, HTTP, and AWS API key canary tokens across network infrastructure to detect unauthorized access
+name: implementing-decoy-tokens-for-network-intrusion
+description: 'Deploys DNS, HTTP, and AWS API key decoy tokens across network infrastructure to detect unauthorized access
   and lateral movement. Integrates with webhook alerting (Slack, Teams, email, generic HTTP) for real-time intrusion notifications.
   Provides automated token generation, placement strategies, and monitoring for enterprise network environments. Use when
-  building deception-based network intrusion detection with Canarytokens.org and Thinkst Canary platforms.
+  building deception-based network intrusion detection with Decoytokens.org and Thinkst Decoy platforms.
 
   '
 domain: cybersecurity
 subdomain: security-operations
 tags:
-- canary-tokens
+- decoy-tokens
 - intrusion-detection
 - deception
 - network-security
@@ -25,32 +25,32 @@ nist_csf:
 - DE.AE-02
 ---
 
-# Implementing Canary Tokens for Network Intrusion Detection
+# Implementing Decoy Tokens for Network Intrusion Detection
 
 ## When to Use
 
 - When deploying deception-based tripwires across network infrastructure to detect intrusions
 - When building early warning systems that alert on unauthorized access to sensitive resources
 - When planting fake AWS credentials, DNS beacons, or HTTP tokens to catch attackers during lateral movement
-- When integrating canary token alerts with SOC workflows via Slack, Microsoft Teams, or SIEM webhooks
+- When integrating decoy token alerts with SOC workflows via Slack, Microsoft Teams, or SIEM webhooks
 - When complementing traditional IDS/IPS with zero-false-positive deception technology
 
 ## Prerequisites
 
 - Python 3.8+ with `requests` library installed
-- Network access to canarytokens.org API (or self-hosted Canarytokens instance)
+- Network access to decoytokens.org API (or self-hosted Decoytokens instance)
 - Webhook endpoint for alert delivery (Slack, Teams, email, or generic HTTP)
-- For Thinkst Canary enterprise: valid console domain and API auth token
+- For Thinkst Decoy enterprise: valid console domain and API auth token
 - Administrative access to target systems where tokens will be planted
 - Appropriate authorization for all deployment activities
 
 ## Core Concepts
 
-### What Are Canary Tokens?
+### What Are Decoy Tokens?
 
-Canary tokens are digital tripwires -- resources that should never be accessed during normal
-operations. When an attacker interacts with a canary token, it immediately triggers an alert
-with near-zero false positives. Unlike signature-based detection, canary tokens detect
+Decoy tokens are digital tripwires -- resources that should never be accessed during normal
+operations. When an attacker interacts with a decoy token, it immediately triggers an alert
+with near-zero false positives. Unlike signature-based detection, decoy tokens detect
 attackers by their behavior (accessing bait resources) rather than matching known patterns.
 
 ### Token Types for Network Intrusion Detection
@@ -67,7 +67,7 @@ attackers by their behavior (accessing bait resources) rather than matching know
 ### Alert Flow Architecture
 
 ```
-[Attacker Action] --> [Token Triggered] --> [Canarytokens Server]
+[Attacker Action] --> [Token Triggered] --> [Decoytokens Server]
                                                     |
                                             [Webhook POST]
                                                     |
@@ -80,7 +80,7 @@ attackers by their behavior (accessing bait resources) rather than matching know
 
 ## Instructions
 
-### Step 1: Generate DNS Canary Tokens
+### Step 1: Generate DNS Decoy Tokens
 
 DNS tokens are the most versatile -- they trigger on any DNS resolution, even from
 air-gapped networks with only DNS egress. The token is an FQDN that, when resolved,
@@ -89,8 +89,8 @@ alerts the token owner.
 ```python
 import requests
 
-# Create DNS canary token via Canarytokens.org
-response = requests.post("https://canarytokens.org/generate", data={
+# Create DNS decoy token via Decoytokens.org
+response = requests.post("https://decoytokens.org/generate", data={
     "type": "dns",
     "email": "soc@company.com",
     "memo": "Production database server - /etc/app/db.conf",
@@ -99,24 +99,24 @@ response = requests.post("https://canarytokens.org/generate", data={
 
 token_data = response.json()
 dns_hostname = token_data["hostname"]
-# Example: abc123def456.canarytokens.com
+# Example: abc123def456.decoytokens.com
 ```
 
 Plant DNS tokens in locations attackers commonly inspect:
-- `/etc/hosts` entries pointing to the canary FQDN
+- `/etc/hosts` entries pointing to the decoy FQDN
 - Application configuration files (`database_host`, `backup_server`)
-- SSH config files (`~/.ssh/config`) with canary hostnames
+- SSH config files (`~/.ssh/config`) with decoy hostnames
 - Internal DNS zone files as decoy A records
 - CI/CD pipeline environment variables
 
-### Step 2: Deploy HTTP Canary Tokens
+### Step 2: Deploy HTTP Decoy Tokens
 
 HTTP tokens generate a unique URL that triggers on any HTTP request. They reveal the
 source IP, User-Agent, and other HTTP headers of the requester.
 
 ```python
 # Create HTTP token
-response = requests.post("https://canarytokens.org/generate", data={
+response = requests.post("https://decoytokens.org/generate", data={
     "type": "http",
     "email": "soc@company.com",
     "memo": "Internal wiki - IT admin passwords page",
@@ -136,13 +136,13 @@ Placement strategies for HTTP tokens:
 
 ### Step 3: Create AWS API Key Tokens
 
-AWS key tokens are among the highest-fidelity canary tokens. They generate real-looking
+AWS key tokens are among the highest-fidelity decoy tokens. They generate real-looking
 AWS access keys that trigger an alert whenever anyone attempts to use them against any
 AWS API endpoint.
 
 ```python
-# Create AWS API key canary token
-response = requests.post("https://canarytokens.org/generate", data={
+# Create AWS API key decoy token
+response = requests.post("https://decoytokens.org/generate", data={
     "type": "aws_keys",
     "email": "soc@company.com",
     "memo": "DevOps jump box - /home/deploy/.aws/credentials",
@@ -176,9 +176,9 @@ Set up real-time alerting to your SOC through multiple channels:
 ```python
 # Slack webhook integration
 def send_slack_alert(webhook_url, alert_data):
-    """Forward canary token alert to Slack channel."""
+    """Forward decoy token alert to Slack channel."""
     payload = {
-        "text": f":rotating_light: *Canary Token Triggered*",
+        "text": f":rotating_light: *Decoy Token Triggered*",
         "attachments": [{
             "color": "#FF0000",
             "fields": [
@@ -187,7 +187,7 @@ def send_slack_alert(webhook_url, alert_data):
                 {"title": "Token Type", "value": alert_data.get("channel", "Unknown"), "short": True},
                 {"title": "Triggered At", "value": alert_data.get("time", "Unknown"), "short": True},
             ],
-            "footer": "Canarytokens Alert System",
+            "footer": "Decoytokens Alert System",
         }]
     }
     requests.post(webhook_url, json=payload, timeout=10)
@@ -199,13 +199,13 @@ from flask import Flask, request, jsonify
 import json, logging
 
 app = Flask(__name__)
-logging.basicConfig(filename="/var/log/canary_alerts.json", level=logging.INFO)
+logging.basicConfig(filename="/var/log/decoy_alerts.json", level=logging.INFO)
 
-@app.route("/canary-webhook", methods=["POST"])
+@app.route("/decoy-webhook", methods=["POST"])
 def receive_alert():
     alert = request.json or request.form.to_dict()
     logging.info(json.dumps({
-        "event_type": "canarytoken_triggered",
+        "event_type": "decoytoken_triggered",
         "memo": alert.get("memo"),
         "src_ip": alert.get("src_ip"),
         "token_type": alert.get("channel"),
@@ -216,16 +216,16 @@ def receive_alert():
     return jsonify({"status": "received"}), 200
 ```
 
-### Step 5: Enterprise Deployment with Thinkst Canary API
+### Step 5: Enterprise Deployment with Thinkst Decoy API
 
-For organizations using Thinkst Canary, leverage the API for mass deployment and
+For organizations using Thinkst Decoy, leverage the API for mass deployment and
 centralized management:
 
 ```python
-import canarytools
+import decoytools
 
-# Connect to Thinkst Canary console
-console = canarytools.Console(
+# Connect to Thinkst Decoy console
+console = decoytools.Console(
     domain="yourcompany",
     api_key="your_api_auth_token"
 )
@@ -279,7 +279,7 @@ for alert in alerts:
 ### Full Deployment Script
 
 ```python
-# Deploy a comprehensive canary token network
+# Deploy a comprehensive decoy token network
 python scripts/agent.py --action full_deploy \
     --email soc@company.com \
     --webhook https://hooks.slack.com/services/T.../B.../xxx \
@@ -313,15 +313,15 @@ python scripts/agent.py --action inventory \
 - [ ] Deployment locations are documented in token inventory
 - [ ] Alert escalation procedures are defined and tested
 - [ ] Tokens do not interfere with legitimate operations
-- [ ] Self-hosted Canarytokens instance (if used) is hardened and monitored
+- [ ] Self-hosted Decoytokens instance (if used) is hardened and monitored
 - [ ] Token rotation schedule is established (quarterly recommended)
 
 ## References
 
-- Canarytokens Documentation: https://docs.canarytokens.org/guide/
-- Thinkst Canary Platform: https://canary.tools/
-- Thinkst Canary API: https://docs.canary.tools/canarytokens/actions.html
-- Canarytokens Open Source: https://github.com/thinkst/canarytokens
-- Zeltser Honeytoken Setup Guide: https://zeltser.com/honeytokens-canarytokens-setup/
-- Grafana Canary Token Case Study: https://grafana.com/blog/2025/08/25/canary-tokens-learn-all-about-the-unsung-heroes-of-security-at-grafana-labs/
-- AWS Infrastructure Canarytoken: https://blog.thinkst.com/2025/09/introducing-the-aws-infrastructure-canarytoken.html
+- Decoytokens Documentation: https://docs.decoytokens.org/guide/
+- Thinkst Decoy Platform: https://decoy.tools/
+- Thinkst Decoy API: https://docs.decoy.tools/decoytokens/actions.html
+- Decoytokens Open Source: https://github.com/thinkst/decoytokens
+- Zeltser Honeytoken Setup Guide: https://zeltser.com/honeytokens-decoytokens-setup/
+- Grafana Decoy Token Case Study: https://grafana.com/blog/2025/08/25/decoy-tokens-learn-all-about-the-unsung-heroes-of-security-at-grafana-labs/
+- AWS Infrastructure Decoytoken: https://blog.thinkst.com/2025/09/introducing-the-aws-infrastructure-decoytoken.html

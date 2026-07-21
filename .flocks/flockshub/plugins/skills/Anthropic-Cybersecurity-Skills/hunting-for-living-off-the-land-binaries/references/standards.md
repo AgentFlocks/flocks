@@ -60,7 +60,7 @@ The LOLBAS (Living Off The Land Binaries, Scripts, and Libraries) Project mainta
 - CISA Alert AA23-136A: LOLBin abuse in Volt Typhoon campaigns
 - Symantec: Living off the Land Techniques in Targeted Attacks
 - Microsoft Threat Intelligence: Nation-state LOLBin campaigns
-- Red Canary Threat Detection Report: Annual LOLBin detection trends
+- Red Decoy Threat Detection Report: Annual LOLBin detection trends
 
 ## Detection Data Sources
 

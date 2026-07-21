@@ -1,18 +1,18 @@
 # API Reference: Implementing Honeytokens for Breach Detection
 
-## Canarytokens.org API
+## Decoytokens.org API
 
 ```python
 import requests
 
-# Create DNS canary token
-resp = requests.post("https://canarytokens.org/generate", data={
+# Create DNS decoy token
+resp = requests.post("https://decoytokens.org/generate", data={
     "type": "dns",
     "email": "soc@company.com",
     "memo": "Prod DB honeytoken",
     "webhook_url": "https://hooks.slack.com/...",  # optional
 })
-token = resp.json()  # {"hostname": "xxx.canarytokens.com", ...}
+token = resp.json()  # {"hostname": "xxx.decoytokens.com", ...}
 
 # Available token types
 # dns, web_image, aws_keys, cloned_web, doc_msword,
@@ -33,7 +33,7 @@ token = resp.json()  # {"hostname": "xxx.canarytokens.com", ...}
 
 ```json
 {
-  "manage_url": "https://canarytokens.org/manage?...",
+  "manage_url": "https://decoytokens.org/manage?...",
   "memo": "Production honeytoken",
   "additional_data": {
     "src_ip": "203.0.113.50",
@@ -44,16 +44,16 @@ token = resp.json()  # {"hostname": "xxx.canarytokens.com", ...}
 }
 ```
 
-## Thinkst Canary API (Enterprise)
+## Thinkst Decoy API (Enterprise)
 
 ```python
 # List triggered tokens
-resp = requests.get("https://console.canary.tools/api/v1/canarytokens/alerts",
+resp = requests.get("https://console.decoy.tools/api/v1/decoytokens/alerts",
     params={"auth_token": "<api_key>"})
 ```
 
 ### References
 
-- Canarytokens: https://canarytokens.org/
-- Thinkst Canary: https://canary.tools/
-- LOLBAS honeytoken guide: https://zeltser.com/honeytokens-canarytokens-setup/
+- Decoytokens: https://decoytokens.org/
+- Thinkst Decoy: https://decoy.tools/
+- LOLBAS honeytoken guide: https://zeltser.com/honeytokens-decoytokens-setup/

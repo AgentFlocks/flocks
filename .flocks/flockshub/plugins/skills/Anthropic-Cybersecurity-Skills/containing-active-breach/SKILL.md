@@ -104,7 +104,7 @@ Implement sustainable containment while the investigation continues:
 - Deploy temporary jump hosts for administrators to access contained systems for investigation
 - Implement enhanced monitoring (full packet capture) on network segments adjacent to compromised hosts
 - Enable advanced audit policies on all domain controllers (4768, 4769, 4771 for Kerberos attacks)
-- Deploy canary tokens and honeypot accounts to detect adversary attempts to expand from containment
+- Deploy decoy tokens and honeypot accounts to detect adversary attempts to expand from containment
 
 ### Step 4: Validate Containment Effectiveness
 

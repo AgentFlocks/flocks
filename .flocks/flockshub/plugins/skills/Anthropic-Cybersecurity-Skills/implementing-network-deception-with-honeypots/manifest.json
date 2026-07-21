@@ -3,7 +3,7 @@
   "id": "implementing-network-deception-with-honeypots",
   "type": "skill",
   "name": "implementing-network-deception-with-honeypots",
-  "description": "Deploy and manage network honeypots using OpenCanary, T-Pot, or Cowrie to detect unauthorized access, lateral movement, and attacker reconnaissance.",
+  "description": "Deploy and manage network honeypots using OpenDecoy, T-Pot, or Cowrie to detect unauthorized access, lateral movement, and attacker reconnaissance.",
   "version": "1.0",
   "author": "mahipal",
   "license": "Apache-2.0",

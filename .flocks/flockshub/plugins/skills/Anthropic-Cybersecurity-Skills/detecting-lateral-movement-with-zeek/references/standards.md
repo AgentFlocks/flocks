@@ -17,4 +17,4 @@
 
 ## Detection References
 - SANS: Detecting Lateral Movement with Zeek
-- Red Canary Threat Detection Report — Lateral Movement chapter
+- Red Decoy Threat Detection Report — Lateral Movement chapter

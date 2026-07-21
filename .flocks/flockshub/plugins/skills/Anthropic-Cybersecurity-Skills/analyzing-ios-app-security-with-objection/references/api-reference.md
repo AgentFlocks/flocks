@@ -90,7 +90,7 @@ ObjC.choose(ObjC.classes.ClassName, {
 | M4 | Insufficient Input/Output Validation | Hook input methods |
 | M5 | Insecure Communication | `ios sslpinning disable` |
 | M6 | Inadequate Privacy Controls | `ios nsuserdefaults get` |
-| M7 | Insufficient Binary Protections | Check PIE, ARC, stack canary |
+| M7 | Insufficient Binary Protections | Check PIE, ARC, stack decoy |
 | M8 | Security Misconfiguration | `ios plist cat Info.plist` |
 | M9 | Insecure Data Storage | Filesystem + keychain review |
 | M10 | Insufficient Cryptography | Hook crypto classes |

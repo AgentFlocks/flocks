@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Ransomware canary file deployment and monitoring agent.
+"""Ransomware decoy file deployment and monitoring agent.
 
 Deploys decoy files across critical directories and monitors them using
 watchdog for real-time filesystem event detection. Any interaction with
-canary files triggers alerts via email, Slack, and syslog.
+decoy files triggers alerts via email, Slack, and syslog.
 """
 
 import os
@@ -43,12 +43,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("canary_monitor.log"),
+        logging.FileHandler("decoy_monitor.log"),
     ],
 )
 logger = logging.getLogger(__name__)
 
-CANARY_FILE_TEMPLATES = {
+DECOY_FILE_TEMPLATES = {
     "Passwords.xlsx": b"PK\x03\x04" + b"\x00" * 26 + b"[Content_Types].xml" + os.urandom(512),
     "Financial_Report_2026.docx": b"PK\x03\x04" + b"\x00" * 26 + b"word/document.xml" + os.urandom(512),
     "backup_credentials.csv": (
@@ -118,7 +118,7 @@ def compute_entropy(filepath):
 
 
 def get_process_info():
-    """Get information about processes that may have accessed canary files."""
+    """Get information about processes that may have accessed decoy files."""
     if not HAS_PSUTIL:
         return {"error": "psutil not installed"}
     suspicious = []
@@ -138,9 +138,9 @@ def get_process_info():
     return suspicious[:10]
 
 
-def deploy_canary_files(target_dirs, custom_files=None):
-    """Deploy canary files to specified directories."""
-    templates = dict(CANARY_FILE_TEMPLATES)
+def deploy_decoy_files(target_dirs, custom_files=None):
+    """Deploy decoy files to specified directories."""
+    templates = dict(DECOY_FILE_TEMPLATES)
     if custom_files:
         templates.update(custom_files)
 
@@ -157,7 +157,7 @@ def deploy_canary_files(target_dirs, custom_files=None):
         for filename, content in templates.items():
             filepath = dir_path / filename
             if filepath.exists():
-                logger.info("Canary already exists: %s", filepath)
+                logger.info("Decoy already exists: %s", filepath)
                 deployed.append(str(filepath))
                 continue
             try:
@@ -167,27 +167,27 @@ def deploy_canary_files(target_dirs, custom_files=None):
                     os.chmod(filepath, 0o644)
                 sha256 = compute_sha256(str(filepath))
                 deployed.append(str(filepath))
-                logger.info("Deployed canary: %s (SHA-256: %s)", filepath, sha256[:16])
+                logger.info("Deployed decoy: %s (SHA-256: %s)", filepath, sha256[:16])
             except (PermissionError, OSError) as e:
                 logger.error("Failed to deploy %s: %s", filepath, e)
 
     manifest = {
         "deployed_at": datetime.now(timezone.utc).isoformat(),
-        "canary_count": len(deployed),
+        "decoy_count": len(deployed),
         "directories": target_dirs,
         "files": deployed,
         "hashes": {f: compute_sha256(f) for f in deployed},
     }
-    manifest_path = Path("canary_manifest.json")
+    manifest_path = Path("decoy_manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    logger.info("Deployed %d canary files, manifest saved to %s", len(deployed), manifest_path)
+    logger.info("Deployed %d decoy files, manifest saved to %s", len(deployed), manifest_path)
     return manifest
 
 
 def send_email_alert(alert_data, smtp_host, smtp_port, sender, recipients, password=None):
     """Send alert email via SMTP."""
-    subject = f"RANSOMWARE CANARY ALERT: {alert_data['event_type']} on {alert_data['canary_file']}"
+    subject = f"RANSOMWARE DECOY ALERT: {alert_data['event_type']} on {alert_data['decoy_file']}"
     body = json.dumps(alert_data, indent=2, default=str)
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -219,17 +219,17 @@ def send_slack_alert(alert_data, webhook_url):
         logger.error("requests library not installed, cannot send Slack alert")
         return False
     payload = {
-        "text": f":rotating_light: *RANSOMWARE CANARY ALERT*",
+        "text": f":rotating_light: *RANSOMWARE DECOY ALERT*",
         "blocks": [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": "Ransomware Canary File Triggered"}
+                "text": {"type": "plain_text", "text": "Ransomware Decoy File Triggered"}
             },
             {
                 "type": "section",
                 "fields": [
                     {"type": "mrkdwn", "text": f"*Event:*\n{alert_data['event_type']}"},
-                    {"type": "mrkdwn", "text": f"*File:*\n`{alert_data['canary_file']}`"},
+                    {"type": "mrkdwn", "text": f"*File:*\n`{alert_data['decoy_file']}`"},
                     {"type": "mrkdwn", "text": f"*Time:*\n{alert_data['timestamp']}"},
                     {"type": "mrkdwn", "text": f"*Host:*\n{alert_data.get('hostname', 'unknown')}"},
                 ]
@@ -261,8 +261,8 @@ def send_syslog_alert(alert_data, syslog_server="127.0.0.1", syslog_port=514):
     priority = 8 * 4 + 1  # facility=security, severity=alert
     message = (
         f"<{priority}>1 {alert_data['timestamp']} {alert_data.get('hostname', '-')} "
-        f"canary-monitor - - - RANSOMWARE_CANARY event={alert_data['event_type']} "
-        f"file={alert_data['canary_file']} "
+        f"decoy-monitor - - - RANSOMWARE_DECOY event={alert_data['event_type']} "
+        f"file={alert_data['decoy_file']} "
         f"hash_before={alert_data.get('hash_before', 'N/A')} "
         f"hash_after={alert_data.get('hash_after', 'N/A')}"
     )
@@ -278,19 +278,19 @@ def send_syslog_alert(alert_data, syslog_server="127.0.0.1", syslog_port=514):
         return False
 
 
-class CanaryFileHandler(FileSystemEventHandler):
-    """Watchdog event handler for canary file monitoring."""
+class DecoyFileHandler(FileSystemEventHandler):
+    """Watchdog event handler for decoy file monitoring."""
 
-    def __init__(self, canary_files, config):
+    def __init__(self, decoy_files, config):
         super().__init__()
-        self.canary_files = {str(Path(f).resolve()): compute_sha256(f) for f in canary_files}
+        self.decoy_files = {str(Path(f).resolve()): compute_sha256(f) for f in decoy_files}
         self.config = config
         self.alert_count = 0
         self.last_alert_time = {}
 
-    def _is_canary(self, path):
+    def _is_decoy(self, path):
         resolved = str(Path(path).resolve())
-        return resolved in self.canary_files
+        return resolved in self.decoy_files
 
     def _rate_limit_check(self, path, cooldown=10):
         now = time.time()
@@ -304,10 +304,10 @@ class CanaryFileHandler(FileSystemEventHandler):
         alert = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": event_type,
-            "canary_file": src_path,
+            "decoy_file": src_path,
             "hostname": platform.node(),
             "platform": platform.system(),
-            "hash_before": self.canary_files.get(str(Path(src_path).resolve()), "unknown"),
+            "hash_before": self.decoy_files.get(str(Path(src_path).resolve()), "unknown"),
             "hash_after": compute_sha256(src_path) if os.path.exists(src_path) else "file_deleted",
             "entropy_after": compute_entropy(src_path) if os.path.exists(src_path) else 0.0,
             "alert_number": self.alert_count + 1,
@@ -321,10 +321,10 @@ class CanaryFileHandler(FileSystemEventHandler):
     def _dispatch_alert(self, alert):
         self.alert_count += 1
         logger.critical(
-            "CANARY TRIGGERED: %s on %s (alert #%d)",
-            alert["event_type"], alert["canary_file"], self.alert_count
+            "DECOY TRIGGERED: %s on %s (alert #%d)",
+            alert["event_type"], alert["decoy_file"], self.alert_count
         )
-        with open("canary_alerts.jsonl", "a") as f:
+        with open("decoy_alerts.jsonl", "a") as f:
             f.write(json.dumps(alert, default=str) + "\n")
 
         if self.config.get("slack_webhook"):
@@ -334,7 +334,7 @@ class CanaryFileHandler(FileSystemEventHandler):
                 alert,
                 self.config["smtp_host"],
                 self.config.get("smtp_port", 587),
-                self.config.get("smtp_sender", "canary@localhost"),
+                self.config.get("smtp_sender", "decoy@localhost"),
                 self.config.get("smtp_recipients", []),
                 self.config.get("smtp_password"),
             )
@@ -348,7 +348,7 @@ class CanaryFileHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory:
             return
-        if self._is_canary(event.src_path) and self._rate_limit_check(event.src_path):
+        if self._is_decoy(event.src_path) and self._rate_limit_check(event.src_path):
             alert = self._build_alert("FILE_MODIFIED", event.src_path)
             high_entropy = alert.get("entropy_after", 0) > 7.5
             if high_entropy:
@@ -359,7 +359,7 @@ class CanaryFileHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         if event.is_directory:
             return
-        if self._is_canary(event.src_path) and self._rate_limit_check(event.src_path):
+        if self._is_decoy(event.src_path) and self._rate_limit_check(event.src_path):
             alert = self._build_alert("FILE_DELETED", event.src_path)
             alert["severity"] = "critical"
             self._dispatch_alert(alert)
@@ -367,7 +367,7 @@ class CanaryFileHandler(FileSystemEventHandler):
     def on_moved(self, event):
         if event.is_directory:
             return
-        if self._is_canary(event.src_path) and self._rate_limit_check(event.src_path):
+        if self._is_decoy(event.src_path) and self._rate_limit_check(event.src_path):
             alert = self._build_alert("FILE_RENAMED", event.src_path, event.dest_path)
             extension = Path(event.dest_path).suffix.lower()
             ransomware_extensions = {
@@ -390,8 +390,8 @@ class CanaryFileHandler(FileSystemEventHandler):
         ]
         basename = Path(event.src_path).stem.lower()
         if any(pattern in basename for pattern in ransom_note_patterns):
-            for canary_dir in set(str(Path(c).parent) for c in self.canary_files):
-                if parent == canary_dir:
+            for decoy_dir in set(str(Path(c).parent) for c in self.decoy_files):
+                if parent == decoy_dir:
                     alert = self._build_alert("RANSOM_NOTE_DETECTED", event.src_path)
                     alert["severity"] = "critical"
                     alert["indicator"] = "Ransom note dropped in monitored directory"
@@ -400,7 +400,7 @@ class CanaryFileHandler(FileSystemEventHandler):
 
 
 def start_monitoring(manifest_path, config):
-    """Start real-time canary file monitoring."""
+    """Start real-time decoy file monitoring."""
     if not HAS_WATCHDOG:
         logger.error("watchdog library required: pip install watchdog")
         sys.exit(1)
@@ -408,24 +408,24 @@ def start_monitoring(manifest_path, config):
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    canary_files = manifest["files"]
-    if not canary_files:
-        logger.error("No canary files found in manifest")
+    decoy_files = manifest["files"]
+    if not decoy_files:
+        logger.error("No decoy files found in manifest")
         sys.exit(1)
 
     watch_dirs = set()
-    for canary in canary_files:
-        parent = str(Path(canary).parent)
+    for decoy in decoy_files:
+        parent = str(Path(decoy).parent)
         if os.path.isdir(parent):
             watch_dirs.add(parent)
 
-    handler = CanaryFileHandler(canary_files, config)
+    handler = DecoyFileHandler(decoy_files, config)
     observer = Observer()
     for directory in watch_dirs:
         observer.schedule(handler, directory, recursive=False)
         logger.info("Watching directory: %s", directory)
 
-    logger.info("Monitoring %d canary files across %d directories", len(canary_files), len(watch_dirs))
+    logger.info("Monitoring %d decoy files across %d directories", len(decoy_files), len(watch_dirs))
     observer.start()
     try:
         while True:
@@ -436,8 +436,8 @@ def start_monitoring(manifest_path, config):
     observer.join()
 
 
-def verify_canary_integrity(manifest_path):
-    """Verify all canary files match their original hashes."""
+def verify_decoy_integrity(manifest_path):
+    """Verify all decoy files match their original hashes."""
     with open(manifest_path) as f:
         manifest = json.load(f)
     results = {"checked": 0, "intact": 0, "modified": 0, "missing": 0, "details": []}
@@ -464,14 +464,14 @@ def verify_canary_integrity(manifest_path):
 
 
 def simulate_ransomware_test(manifest_path):
-    """Simulate ransomware activity against canary files for testing."""
+    """Simulate ransomware activity against decoy files for testing."""
     with open(manifest_path) as f:
         manifest = json.load(f)
     test_results = []
     for filepath in manifest.get("files", [])[:2]:
         if not os.path.exists(filepath):
             continue
-        test_file = filepath + ".test_canary"
+        test_file = filepath + ".test_decoy"
         try:
             import shutil
             shutil.copy2(filepath, test_file)
@@ -490,11 +490,11 @@ def simulate_ransomware_test(manifest_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ransomware Canary File Deployment and Monitoring Agent")
+    parser = argparse.ArgumentParser(description="Ransomware Decoy File Deployment and Monitoring Agent")
     parser.add_argument("--action", choices=["deploy", "monitor", "verify", "test"],
                         default="deploy", help="Action to perform")
-    parser.add_argument("--dirs", nargs="+", help="Directories to deploy canary files")
-    parser.add_argument("--manifest", default="canary_manifest.json", help="Canary manifest file path")
+    parser.add_argument("--dirs", nargs="+", help="Directories to deploy decoy files")
+    parser.add_argument("--manifest", default="decoy_manifest.json", help="Decoy manifest file path")
     parser.add_argument("--config", help="JSON config file for alert settings")
     parser.add_argument("--slack-webhook", help="Slack incoming webhook URL")
     parser.add_argument("--smtp-host", help="SMTP server hostname")
@@ -524,13 +524,13 @@ def main():
             print("\nExample:")
             print("  python agent.py --action deploy --dirs /srv/shares/finance /home/admin/Documents")
             return
-        manifest = deploy_canary_files(args.dirs)
+        manifest = deploy_decoy_files(args.dirs)
         print(json.dumps(manifest, indent=2))
 
     elif args.action == "monitor":
         if not os.path.exists(args.manifest):
             print(f"Manifest not found: {args.manifest}")
-            print("Run --action deploy first to create canary files")
+            print("Run --action deploy first to create decoy files")
             return
         start_monitoring(args.manifest, config)
 
@@ -538,10 +538,10 @@ def main():
         if not os.path.exists(args.manifest):
             print(f"Manifest not found: {args.manifest}")
             return
-        results = verify_canary_integrity(args.manifest)
+        results = verify_decoy_integrity(args.manifest)
         print(json.dumps(results, indent=2))
         if results["modified"] > 0 or results["missing"] > 0:
-            print(f"\n[ALERT] {results['modified']} modified, {results['missing']} missing canary files!")
+            print(f"\n[ALERT] {results['modified']} modified, {results['missing']} missing decoy files!")
 
     elif args.action == "test":
         if not os.path.exists(args.manifest):

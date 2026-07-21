@@ -103,7 +103,7 @@ For each phase, document applicable defensive courses of action (COAs):
 - **Deny COA**: What control would prevent the adversary from completing this phase?
 - **Disrupt COA**: What control would interrupt the adversary mid-phase?
 - **Degrade COA**: What control would reduce the adversary's effectiveness in this phase?
-- **Deceive COA**: What deception (honeypots, canary tokens) would expose activity in this phase?
+- **Deceive COA**: What deception (honeypots, decoy tokens) would expose activity in this phase?
 - **Destroy COA**: What active defense capability would neutralize adversary infrastructure?
 
 ### Step 5: Produce Kill Chain Analysis Report

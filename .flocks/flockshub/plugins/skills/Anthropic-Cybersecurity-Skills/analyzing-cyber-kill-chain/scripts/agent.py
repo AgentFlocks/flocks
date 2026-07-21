@@ -58,7 +58,7 @@ KILL_CHAIN_PHASES = {
             "deny": "Block malicious attachments, URL filtering, USB device control",
             "disrupt": "Quarantine suspicious emails before delivery",
             "degrade": "Sandbox detonation of attachments delays delivery",
-            "deceive": "Canary documents in email attachments",
+            "deceive": "Decoy documents in email attachments",
         },
     },
     4: {
@@ -95,7 +95,7 @@ KILL_CHAIN_PHASES = {
             "deny": "Application whitelisting, UAC enforcement",
             "disrupt": "Real-time file integrity monitoring alerts",
             "degrade": "Restrict write access to system directories",
-            "deceive": "Canary registry keys and file system canaries",
+            "deceive": "Decoy registry keys and file system canaries",
         },
     },
     6: {
@@ -132,7 +132,7 @@ KILL_CHAIN_PHASES = {
             "deny": "Network segmentation, data classification controls",
             "disrupt": "Isolate compromised systems, kill C2 connections",
             "degrade": "Encrypt sensitive data at rest (attacker gets ciphertext)",
-            "deceive": "Canary files and honeytoken credentials",
+            "deceive": "Decoy files and honeytoken credentials",
         },
     },
 }

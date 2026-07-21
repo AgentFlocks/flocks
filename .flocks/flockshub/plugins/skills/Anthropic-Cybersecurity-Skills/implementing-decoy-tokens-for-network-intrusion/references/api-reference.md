@@ -1,11 +1,11 @@
-# API Reference: Canary Tokens for Network Intrusion Detection
+# API Reference: Decoy Tokens for Network Intrusion Detection
 
-## Canarytokens.org Public API
+## Decoytokens.org Public API
 
 ### Create Token
 
 ```
-POST https://canarytokens.org/generate
+POST https://decoytokens.org/generate
 Content-Type: application/x-www-form-urlencoded
 ```
 
@@ -22,19 +22,19 @@ Content-Type: application/x-www-form-urlencoded
 ```python
 import requests
 
-resp = requests.post("https://canarytokens.org/generate", data={
+resp = requests.post("https://decoytokens.org/generate", data={
     "type": "dns",
     "email": "soc@company.com",
     "memo": "Production DB server /etc/app/db.conf",
     "webhook_url": "https://hooks.slack.com/services/T.../B.../xxx",
 })
 token = resp.json()
-# {"hostname": "abc123.canarytokens.com", "url": "https://canarytokens.org/manage?..."}
+# {"hostname": "abc123.decoytokens.com", "url": "https://decoytokens.org/manage?..."}
 ```
 
 **Example - AWS Key Token:**
 ```python
-resp = requests.post("https://canarytokens.org/generate", data={
+resp = requests.post("https://decoytokens.org/generate", data={
     "type": "aws_keys",
     "email": "soc@company.com",
     "memo": "DevOps jump box /home/deploy/.aws/credentials",
@@ -45,29 +45,29 @@ token = resp.json()
 
 **Example - HTTP Token:**
 ```python
-resp = requests.post("https://canarytokens.org/generate", data={
+resp = requests.post("https://decoytokens.org/generate", data={
     "type": "http",
     "email": "soc@company.com",
     "memo": "Internal wiki emergency passwords page",
 })
 token = resp.json()
-# {"url": "http://canarytokens.com/..."}
+# {"url": "http://decoytokens.com/..."}
 ```
 
-## Thinkst Canary Enterprise API
+## Thinkst Decoy Enterprise API
 
 ### Authentication
 
 All enterprise API calls require `auth_token` parameter.
 
 ```
-Base URL: https://{console_domain}.canary.tools/api/v1/
+Base URL: https://{console_domain}.decoy.tools/api/v1/
 ```
 
 ### Create Token
 
 ```
-POST /api/v1/canarytoken/create
+POST /api/v1/decoytoken/create
 ```
 
 **Parameters:**
@@ -84,7 +84,7 @@ POST /api/v1/canarytoken/create
 ```python
 import requests
 
-url = "https://yourcompany.canary.tools/api/v1/canarytoken/create"
+url = "https://yourcompany.decoy.tools/api/v1/decoytoken/create"
 resp = requests.post(url, data={
     "auth_token": "YOUR_AUTH_TOKEN",
     "memo": "Production honeytoken",
@@ -95,25 +95,25 @@ resp = requests.post(url, data={
 ### List Tokens
 
 ```
-GET /api/v1/canarytokens/fetch?auth_token=YOUR_AUTH_TOKEN
+GET /api/v1/decoytokens/fetch?auth_token=YOUR_AUTH_TOKEN
 ```
 
 ### Get Triggered Alerts
 
 ```
-GET /api/v1/canarytokens/alerts?auth_token=YOUR_AUTH_TOKEN
+GET /api/v1/decoytokens/alerts?auth_token=YOUR_AUTH_TOKEN
 ```
 
 ### Using Python Client Library
 
 ```python
-import canarytools
+import decoytools
 
-console = canarytools.Console(domain="yourcompany", api_key="YOUR_API_KEY")
+console = decoytools.Console(domain="yourcompany", api_key="YOUR_API_KEY")
 
 # Create tokens
-dns_token = console.tokens.create(memo="DNS beacon", kind=canarytools.CanaryTokenKinds.DNS)
-aws_token = console.tokens.create(memo="AWS keys", kind=canarytools.CanaryTokenKinds.AWS_ID)
+dns_token = console.tokens.create(memo="DNS beacon", kind=decoytools.DecoyTokenKinds.DNS)
+aws_token = console.tokens.create(memo="AWS keys", kind=decoytools.DecoyTokenKinds.AWS_ID)
 
 # List all tokens
 tokens = console.tokens.all()
@@ -124,11 +124,11 @@ alerts = console.tokens.alerts()
 
 ## Webhook Alert Payload Format
 
-When a canary token is triggered, the webhook receives a POST with this payload:
+When a decoy token is triggered, the webhook receives a POST with this payload:
 
 ```json
 {
-    "manage_url": "https://canarytokens.org/manage?token=abc123&auth=xyz",
+    "manage_url": "https://decoytokens.org/manage?token=abc123&auth=xyz",
     "memo": "Production DB server /etc/app/db.conf",
     "additional_data": {
         "src_ip": "203.0.113.50",
@@ -169,7 +169,7 @@ When a canary token is triggered, the webhook receives a POST with this payload:
 
 ## MITRE ATT&CK Mapping
 
-| Technique | ID | Canary Token Detection |
+| Technique | ID | Decoy Token Detection |
 |-----------|----|----------------------|
 | Account Discovery | T1087 | AWS key tokens detect credential testing |
 | File and Directory Discovery | T1083 | Document/config tokens detect file access |
@@ -180,11 +180,11 @@ When a canary token is triggered, the webhook receives a POST with this payload:
 
 ## References
 
-- Canarytokens Documentation: https://docs.canarytokens.org/guide/
-- Canarytokens DNS Tokens: https://docs.canarytokens.org/guide/dns-token.html
-- Canarytokens HTTP Tokens: https://docs.canarytokens.org/guide/http-token.html
-- Canarytokens AWS Key Tokens: https://docs.canarytokens.org/guide/aws-keys-token.html
-- Thinkst Canary API Docs: https://docs.canary.tools/canarytokens/actions.html
-- Thinkst Python Client: https://github.com/thinkst/canarytools-python
-- Canarytokens Open Source: https://github.com/thinkst/canarytokens
-- Zeltser Honeytoken Guide: https://zeltser.com/honeytokens-canarytokens-setup/
+- Decoytokens Documentation: https://docs.decoytokens.org/guide/
+- Decoytokens DNS Tokens: https://docs.decoytokens.org/guide/dns-token.html
+- Decoytokens HTTP Tokens: https://docs.decoytokens.org/guide/http-token.html
+- Decoytokens AWS Key Tokens: https://docs.decoytokens.org/guide/aws-keys-token.html
+- Thinkst Decoy API Docs: https://docs.decoy.tools/decoytokens/actions.html
+- Thinkst Python Client: https://github.com/thinkst/decoytools-python
+- Decoytokens Open Source: https://github.com/thinkst/decoytokens
+- Zeltser Honeytoken Guide: https://zeltser.com/honeytokens-decoytokens-setup/

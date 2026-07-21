@@ -203,5 +203,5 @@ Automated Response Actions:
 - **Sysmon**: Windows system monitor providing detailed file system and process events for behavioral analysis
 - **watchdog (Python)**: Cross-platform file system monitoring library for real-time file change detection
 - **psutil (Python)**: Process and system monitoring library for tracking per-process I/O statistics
-- **Elastic Endpoint**: Commercial endpoint protection with built-in ransomware behavioral detection using canary files
+- **Elastic Endpoint**: Commercial endpoint protection with built-in ransomware behavioral detection using decoy files
 - **Wazuh**: Open-source security platform with file integrity monitoring and active response capabilities

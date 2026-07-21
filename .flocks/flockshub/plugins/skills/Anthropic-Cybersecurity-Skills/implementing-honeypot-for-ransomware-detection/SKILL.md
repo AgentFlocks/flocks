@@ -1,9 +1,9 @@
 ---
 name: implementing-honeypot-for-ransomware-detection
-description: 'Deploys canary files, honeypot shares, and decoy systems to detect ransomware activity at the earliest possible
-  stage. Configures canary tokens embedded in strategic file locations that trigger alerts when ransomware attempts encryption,
-  uses honeypot network shares that mimic high-value targets, and deploys Thinkst Canary appliances for comprehensive deception-based
-  detection. Activates for requests involving ransomware honeypots, canary files, deception technology for ransomware, or
+description: 'Deploys decoy files, honeypot shares, and decoy systems to detect ransomware activity at the earliest possible
+  stage. Configures decoy tokens embedded in strategic file locations that trigger alerts when ransomware attempts encryption,
+  uses honeypot network shares that mimic high-value targets, and deploys Thinkst Decoy appliances for comprehensive deception-based
+  detection. Activates for requests involving ransomware honeypots, decoy files, deception technology for ransomware, or
   early ransomware alerting.
 
   '
@@ -13,7 +13,7 @@ tags:
 - ransomware
 - detection
 - honeypot
-- canary
+- decoy
 - defense
 - deception
 version: 1.0.0
@@ -35,7 +35,7 @@ nist_csf:
 
 ## When to Use
 
-- Deploying early-warning detection for ransomware encryption attempts using canary files
+- Deploying early-warning detection for ransomware encryption attempts using decoy files
 - Creating honeypot file shares that detect lateral movement and data staging before encryption
 - Supplementing EDR and SIEM-based detection with deception-layer alerts that have near-zero false positives
 - Detecting ransomware variants that evade signature-based detection by triggering on file modification behavior
@@ -45,26 +45,26 @@ nist_csf:
 
 ## Prerequisites
 
-- File server or NAS infrastructure where canary files can be deployed
+- File server or NAS infrastructure where decoy files can be deployed
 - Windows File Server Resource Manager (FSRM) or equivalent file activity monitoring
-- Thinkst Canary or similar deception platform (optional, for advanced deployment)
+- Thinkst Decoy or similar deception platform (optional, for advanced deployment)
 - SIEM platform for centralizing honeypot alerts
-- Administrative access to deploy canary files across file shares
+- Administrative access to deploy decoy files across file shares
 - Network segment for honeypot systems (if deploying full honeypot servers)
 
 ## Workflow
 
-### Step 1: Deploy Canary Files on File Shares
+### Step 1: Deploy Decoy Files on File Shares
 
-Place canary files in strategic locations that ransomware will encounter during encryption:
+Place decoy files in strategic locations that ransomware will encounter during encryption:
 
 ```powershell
-# Deploy canary files across all file shares
+# Deploy decoy files across all file shares
 # Files are named to appear early in alphabetical and directory order
 # Ransomware typically encrypts alphabetically or by directory traversal
 
 $shares = @("\\fileserver01\finance", "\\fileserver01\hr", "\\fileserver01\engineering")
-$canaryNames = @(
+$decoyNames = @(
     "!_IMPORTANT_DO_NOT_DELETE.docx",
     "000_Budget_2026_FINAL.xlsx",
     "_Confidential_Employee_Records.pdf",
@@ -72,9 +72,9 @@ $canaryNames = @(
 )
 
 foreach ($share in $shares) {
-    foreach ($name in $canaryNames) {
+    foreach ($name in $decoyNames) {
         $targetPath = Join-Path $share $name
-        # Create a legitimate-looking file with canary content
+        # Create a legitimate-looking file with decoy content
         # The file contains a unique token that triggers on access
         $content = "This document contains confidential financial data.`n"
         $content += "Q4 2025 Revenue: $42.3M | Q1 2026 Forecast: $45.1M`n"
@@ -89,19 +89,19 @@ foreach ($share in $shares) {
 # Also deploy in subdirectories (ransomware traverses recursively)
 $subDirs = Get-ChildItem -Path "\\fileserver01\finance" -Directory -Recurse | Select-Object -First 20
 foreach ($dir in $subDirs) {
-    $canaryPath = Join-Path $dir.FullName "!_Budget_Summary.xlsx"
-    Set-Content -Path $canaryPath -Value "Canary file for ransomware detection"
-    (Get-Item $canaryPath).Attributes = [System.IO.FileAttributes]::Hidden
+    $decoyPath = Join-Path $dir.FullName "!_Budget_Summary.xlsx"
+    Set-Content -Path $decoyPath -Value "Decoy file for ransomware detection"
+    (Get-Item $decoyPath).Attributes = [System.IO.FileAttributes]::Hidden
 }
 ```
 
-### Step 2: Configure File Integrity Monitoring on Canary Files
+### Step 2: Configure File Integrity Monitoring on Decoy Files
 
 **Windows FSRM approach:**
 
 ```powershell
 # Configure FSRM to monitor for ransomware file extensions
-# and canary file modifications
+# and decoy file modifications
 
 Install-WindowsFeature -Name FS-Resource-Manager -IncludeManagementTools
 
@@ -129,11 +129,11 @@ foreach ($path in $monitoredPaths) {
 }
 ```
 
-**Canary file modification monitoring with PowerShell FileSystemWatcher:**
+**Decoy file modification monitoring with PowerShell FileSystemWatcher:**
 
 ```powershell
-# Real-time canary file monitoring service
-$canaryPaths = @(
+# Real-time decoy file monitoring service
+$decoyPaths = @(
     "D:\Shares\Finance\!_IMPORTANT_DO_NOT_DELETE.docx",
     "D:\Shares\HR\000_Budget_2026_FINAL.xlsx",
     "D:\Shares\Engineering\_Confidential_Employee_Records.pdf"
@@ -150,16 +150,16 @@ $action = {
     $changeType = $Event.SourceEventArgs.ChangeType
     $timestamp = $Event.TimeGenerated
 
-    # Check if modified file is a canary
-    $isCanary = $false
-    foreach ($canary in $canaryPaths) {
-        if ($path -eq $canary) { $isCanary = $true; break }
+    # Check if modified file is a decoy
+    $isDecoy = $false
+    foreach ($decoy in $decoyPaths) {
+        if ($path -eq $decoy) { $isDecoy = $true; break }
     }
 
-    if ($isCanary -or $changeType -eq "Renamed") {
-        $alertMsg = "RANSOMWARE ALERT: Canary file modified! Path: $path | Change: $changeType | Time: $timestamp"
+    if ($isDecoy -or $changeType -eq "Renamed") {
+        $alertMsg = "RANSOMWARE ALERT: Decoy file modified! Path: $path | Change: $changeType | Time: $timestamp"
         # Log to Windows Event Log
-        Write-EventLog -LogName Application -Source "RansomwareCanary" `
+        Write-EventLog -LogName Application -Source "RansomwareDecoy" `
             -EventID 9999 -EntryType Error -Message $alertMsg
         # Send SIEM alert via syslog
         # Trigger automated containment
@@ -213,35 +213,35 @@ Set-Acl "D:\HoneypotShares" $acl
 auditpol /set /subcategory:"File System" /success:enable /failure:enable
 ```
 
-### Step 4: Deploy Thinkst Canary Tokens
+### Step 4: Deploy Thinkst Decoy Tokens
 
-For organizations using Thinkst Canary or the free canarytokens.org service:
+For organizations using Thinkst Decoy or the free decoytokens.org service:
 
 ```bash
-# Generate canary tokens via API (Thinkst Canary)
+# Generate decoy tokens via API (Thinkst Decoy)
 # These trigger alerts when documents are opened or URLs are accessed
 
 # Word document token
-curl -X POST "https://CONSOLE.canary.tools/api/v1/canarytoken/create" \
+curl -X POST "https://CONSOLE.decoy.tools/api/v1/decoytoken/create" \
   -d "auth_token=YOUR_API_TOKEN" \
-  -d "memo=Finance_Share_Canary" \
+  -d "memo=Finance_Share_Decoy" \
   -d "kind=doc-msword" \
-  -o /tmp/canary_budget_report.docx
+  -o /tmp/decoy_budget_report.docx
 
 # PDF document token
-curl -X POST "https://CONSOLE.canary.tools/api/v1/canarytoken/create" \
+curl -X POST "https://CONSOLE.decoy.tools/api/v1/decoytoken/create" \
   -d "auth_token=YOUR_API_TOKEN" \
-  -d "memo=HR_Share_Canary" \
+  -d "memo=HR_Share_Decoy" \
   -d "kind=pdf-acrobat-reader" \
-  -o /tmp/canary_employee_handbook.pdf
+  -o /tmp/decoy_employee_handbook.pdf
 
 # Windows folder token (alerts when folder is browsed)
-curl -X POST "https://CONSOLE.canary.tools/api/v1/canarytoken/create" \
+curl -X POST "https://CONSOLE.decoy.tools/api/v1/decoytoken/create" \
   -d "auth_token=YOUR_API_TOKEN" \
   -d "memo=Executive_Folder_Browse" \
   -d "kind=windows-dir"
 
-# Deploy Canary appliance (emulates a file server)
+# Deploy Decoy appliance (emulates a file server)
 # Configure via web console to appear as:
 # - Windows file server with SMB shares
 # - Contains realistic-looking directories
@@ -262,14 +262,14 @@ SIEM_WEBHOOK = "https://siem.company.com/api/alerts"
 NAC_API = "https://nac.company.com/api/v1/quarantine"
 EDR_API = "https://edr.company.com/api/v1/isolate"
 
-def send_ransomware_alert(source_ip: str, canary_path: str, action: str):
+def send_ransomware_alert(source_ip: str, decoy_path: str, action: str):
     """Send high-priority alert to SIEM and trigger automated containment."""
     alert = {
         "timestamp": datetime.utcnow().isoformat(),
         "severity": "CRITICAL",
-        "category": "Ransomware - Canary File Triggered",
+        "category": "Ransomware - Decoy File Triggered",
         "source_ip": source_ip,
-        "canary_file": canary_path,
+        "decoy_file": decoy_path,
         "action_detected": action,
         "automated_response": "Host isolation initiated",
         "mitre_technique": "T1486 - Data Encrypted for Impact",
@@ -284,7 +284,7 @@ def send_ransomware_alert(source_ip: str, canary_path: str, action: str):
     # Automated containment - isolate host via NAC
     try:
         requests.post(f"{NAC_API}/{source_ip}",
-                      json={"action": "quarantine", "reason": "Ransomware canary triggered"},
+                      json={"action": "quarantine", "reason": "Ransomware decoy triggered"},
                       timeout=5)
     except requests.RequestException as e:
         logging.error(f"NAC quarantine failed: {e}")
@@ -297,47 +297,47 @@ def send_ransomware_alert(source_ip: str, canary_path: str, action: str):
     except requests.RequestException as e:
         logging.error(f"EDR isolation failed: {e}")
 
-    logging.critical(f"RANSOMWARE CANARY ALERT: {source_ip} modified {canary_path} ({action})")
+    logging.critical(f"RANSOMWARE DECOY ALERT: {source_ip} modified {decoy_path} ({action})")
 ```
 
 ## Key Concepts
 
 | Term | Definition |
 |------|------------|
-| **Canary File** | A decoy file placed in strategic locations that triggers an alert when modified, renamed, or deleted by ransomware |
+| **Decoy File** | A decoy file placed in strategic locations that triggers an alert when modified, renamed, or deleted by ransomware |
 | **Honeypot Share** | A decoy network share designed to attract attackers, where any access is suspicious and triggers alerts |
-| **Canary Token** | A trackable token embedded in a document or URL that reports back when accessed, revealing the accessor's IP and time |
+| **Decoy Token** | A trackable token embedded in a document or URL that reports back when accessed, revealing the accessor's IP and time |
 | **FSRM** | File Server Resource Manager - Windows Server role that monitors file operations and can screen for ransomware extensions |
 | **Deception Layer** | Security architecture layer using decoy assets to detect threats with near-zero false positive rates |
 | **File System Watcher** | System service that monitors real-time file system changes (creation, modification, deletion, rename) |
 
 ## Tools & Systems
 
-- **Thinkst Canary**: Commercial deception platform providing canary appliances (emulate servers) and canary tokens (trackable documents)
-- **Canarytokens.org**: Free service from Thinkst for generating basic canary tokens (Word docs, PDFs, URLs, DNS)
-- **OpenCanary**: Open-source honeypot daemon that emulates common services (SMB, RDP, SSH) and logs access attempts
+- **Thinkst Decoy**: Commercial deception platform providing decoy appliances (emulate servers) and decoy tokens (trackable documents)
+- **Decoytokens.org**: Free service from Thinkst for generating basic decoy tokens (Word docs, PDFs, URLs, DNS)
+- **OpenDecoy**: Open-source honeypot daemon that emulates common services (SMB, RDP, SSH) and logs access attempts
 - **FSRM (File Server Resource Manager)**: Windows Server built-in tool for file screening, quota management, and ransomware extension detection
-- **Elastic Endpoint**: Uses canary files internally for ransomware protection, triggering behavioral alerts on canary modification
+- **Elastic Endpoint**: Uses decoy files internally for ransomware protection, triggering behavioral alerts on decoy modification
 
 ## Common Scenarios
 
-### Scenario: Early Detection of BlackByte Ransomware via Canary Files
+### Scenario: Early Detection of BlackByte Ransomware via Decoy Files
 
-**Context**: A retail company deploys canary files across 200 file shares and 3 honeypot shares. At 3:00 AM on a Saturday, the canary monitoring system generates 47 alerts in rapid succession as canary files across 12 shares are modified within 90 seconds.
+**Context**: A retail company deploys decoy files across 200 file shares and 3 honeypot shares. At 3:00 AM on a Saturday, the decoy monitoring system generates 47 alerts in rapid succession as decoy files across 12 shares are modified within 90 seconds.
 
 **Approach**:
-1. Canary file alert triggers automated containment: source workstation (10.2.8.55) quarantined via NAC within 30 seconds
+1. Decoy file alert triggers automated containment: source workstation (10.2.8.55) quarantined via NAC within 30 seconds
 2. SIEM correlation shows the source workstation had EDR alerts for PsExec execution 2 hours earlier (missed by overnight SOC)
-3. Additional canary alerts from 3 other workstations indicate the ransomware is spreading via scheduled tasks
+3. Additional decoy alerts from 3 other workstations indicate the ransomware is spreading via scheduled tasks
 4. IR team isolates the affected VLAN, preventing encryption of the remaining 188 file shares
 5. The 12 affected shares are restored from immutable backups within 4 hours
 6. Estimated damage prevented: $2.3M in downtime and recovery costs based on the 95% of shares protected
 
 **Pitfalls**:
-- Placing canary files only in root directories where ransomware may skip them by targeting subdirectories first
-- Using obvious canary names that sophisticated ransomware may recognize and avoid
-- Not testing canary alerting end-to-end, discovering during an actual incident that alerts are not reaching the SOC
-- Generating excessive canary alerts during legitimate file migrations or antivirus scans, causing alert fatigue
+- Placing decoy files only in root directories where ransomware may skip them by targeting subdirectories first
+- Using obvious decoy names that sophisticated ransomware may recognize and avoid
+- Not testing decoy alerting end-to-end, discovering during an actual incident that alerts are not reaching the SOC
+- Generating excessive decoy alerts during legitimate file migrations or antivirus scans, causing alert fatigue
 
 ## Output Format
 
@@ -347,7 +347,7 @@ def send_ransomware_alert(source_ip: str, canary_path: str, action: str):
 **Organization**: [Name]
 **Deployment Date**: [Date]
 
-### Canary File Deployment
+### Decoy File Deployment
 | Share | Files Deployed | Naming Convention | Alert Method |
 |-------|---------------|-------------------|--------------|
 | [Share path] | [Count] | [Pattern] | [FSRM/Watcher/Token] |
@@ -355,7 +355,7 @@ def send_ransomware_alert(source_ip: str, canary_path: str, action: str):
 ### Honeypot Shares
 | Share Name | Location | Apparent Content | Monitoring |
 |-----------|----------|-----------------|------------|
-| [Name] | [Server] | [Description] | [Audit/Canary] |
+| [Name] | [Server] | [Description] | [Audit/Decoy] |
 
 ### Alert Integration
 - SIEM: [Connected/Not Connected]
@@ -363,6 +363,6 @@ def send_ransomware_alert(source_ip: str, canary_path: str, action: str):
 - Alert SLA: [Expected response time]
 
 ### Testing Results
-| Test Date | Test Type | Canary Triggered | Alert Received | Containment Executed | Time to Alert |
+| Test Date | Test Type | Decoy Triggered | Alert Received | Containment Executed | Time to Alert |
 |-----------|----------|-----------------|----------------|---------------------|---------------|
 ```

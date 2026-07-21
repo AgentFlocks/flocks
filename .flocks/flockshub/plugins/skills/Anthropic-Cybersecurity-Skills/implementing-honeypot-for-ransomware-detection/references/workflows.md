@@ -1,6 +1,6 @@
 # Workflows - Honeypot for Ransomware Detection
 
-## Workflow 1: Canary File Deployment
+## Workflow 1: Decoy File Deployment
 
 ```
 Start
@@ -9,13 +9,13 @@ Start
 [Inventory all file shares] --> Map share names, paths, user population
   |
   v
-[Select canary file placement strategy]
+[Select decoy file placement strategy]
   |-- Root of each share (first files encrypted)
   |-- Key subdirectories (finance, HR, executive)
   |-- Alphabetically early names (!_, 000_, AAA_)
   |
   v
-[Generate canary files with realistic content]
+[Generate decoy files with realistic content]
   |-- .docx, .xlsx, .pdf formats
   |-- Realistic filenames matching share context
   |-- Hidden attribute to prevent user interaction
@@ -23,8 +23,8 @@ Start
   v
 [Deploy monitoring]
   |-- FSRM file screens for ransomware extensions
-  |-- FileSystemWatcher for canary file changes
-  |-- Audit logging on canary files
+  |-- FileSystemWatcher for decoy file changes
+  |-- Audit logging on decoy files
   |
   v
 [Integrate with SIEM and automated containment]
@@ -39,7 +39,7 @@ End
 ## Workflow 2: Honeypot Alert Response
 
 ```
-Canary Alert Triggered
+Decoy Alert Triggered
   |
   v
 [Identify source IP and user from alert]
@@ -58,7 +58,7 @@ Canary Alert Triggered
   |
   v
 [IR team assesses scope]
-  |-- How many canary files triggered?
+  |-- How many decoy files triggered?
   |-- How many endpoints involved?
   |-- Is encryption spreading?
   |

@@ -2,9 +2,9 @@
 """
 Ransomware Honeypot Deployment and Monitoring Tool
 
-Deploys canary files across file shares and monitors for modifications
+Deploys decoy files across file shares and monitors for modifications
 that indicate ransomware activity. Supports:
-- Canary file generation with realistic content
+- Decoy file generation with realistic content
 - File system monitoring with immediate alerting
 - Integration with SIEM via syslog
 - Automated containment via API calls
@@ -26,7 +26,7 @@ logger = logging.getLogger("ransomware_honeypot")
 
 
 @dataclass
-class CanaryFile:
+class DecoyFile:
     path: str
     original_hash: str
     file_type: str
@@ -38,16 +38,16 @@ class CanaryFile:
 
 
 @dataclass
-class CanaryAlert:
+class DecoyAlert:
     timestamp: str
-    canary_path: str
+    decoy_path: str
     change_type: str  # modified, deleted, renamed, extension_changed
     source_info: str
     severity: str = "CRITICAL"
     automated_response: str = ""
 
 
-CANARY_TEMPLATES = {
+DECOY_TEMPLATES = {
     "finance": [
         ("!_Budget_FY2026_FINAL.xlsx", "FY2026 Budget Summary\nTotal Revenue: $142.3M\nTotal Expenses: $98.7M\nNet Income: $43.6M"),
         ("000_Quarterly_Earnings.docx", "Q4 2025 Earnings Report\nRevenue: $38.2M\nGross Margin: 67%\nEBITDA: $12.1M"),
@@ -71,19 +71,19 @@ CANARY_TEMPLATES = {
 }
 
 
-class CanaryDeployer:
-    """Deploys and manages canary files for ransomware detection."""
+class DecoyDeployer:
+    """Deploys and manages decoy files for ransomware detection."""
 
-    def __init__(self, state_file: str = "canary_state.json"):
+    def __init__(self, state_file: str = "decoy_state.json"):
         self.state_file = state_file
-        self.canaries: list[CanaryFile] = []
+        self.canaries: list[DecoyFile] = []
         self._load_state()
 
     def _load_state(self):
         if os.path.exists(self.state_file):
             with open(self.state_file, "r") as f:
                 data = json.load(f)
-                self.canaries = [CanaryFile(**c) for c in data.get("canaries", [])]
+                self.canaries = [DecoyFile(**c) for c in data.get("canaries", [])]
 
     def _save_state(self):
         with open(self.state_file, "w") as f:
@@ -100,8 +100,8 @@ class CanaryDeployer:
         return h.hexdigest()
 
     def deploy_canaries(self, base_path: str, share_type: str = "finance") -> list:
-        """Deploy canary files to a target directory."""
-        templates = CANARY_TEMPLATES.get(share_type, CANARY_TEMPLATES["finance"])
+        """Deploy decoy files to a target directory."""
+        templates = DECOY_TEMPLATES.get(share_type, DECOY_TEMPLATES["finance"])
         deployed = []
 
         base = Path(base_path)
@@ -115,18 +115,18 @@ class CanaryDeployer:
                 filepath.write_text(content, encoding="utf-8")
                 file_hash = self._compute_hash(str(filepath))
 
-                canary = CanaryFile(
+                decoy = DecoyFile(
                     path=str(filepath),
                     original_hash=file_hash,
                     file_type=filepath.suffix,
                     deploy_time=datetime.now().isoformat(),
                     share_name=share_type,
                 )
-                self.canaries.append(canary)
-                deployed.append(canary)
-                logger.info(f"Deployed canary: {filepath}")
+                self.canaries.append(decoy)
+                deployed.append(decoy)
+                logger.info(f"Deployed decoy: {filepath}")
             except OSError as e:
-                logger.error(f"Failed to deploy canary {filepath}: {e}")
+                logger.error(f"Failed to deploy decoy {filepath}: {e}")
 
         self._save_state()
         return deployed
@@ -135,58 +135,58 @@ class CanaryDeployer:
         """Check all deployed canaries for modifications."""
         alerts = []
 
-        for canary in self.canaries:
-            if canary.status != "active":
+        for decoy in self.canaries:
+            if decoy.status != "active":
                 continue
 
-            canary.last_check = datetime.now().isoformat()
+            decoy.last_check = datetime.now().isoformat()
 
-            if not os.path.exists(canary.path):
+            if not os.path.exists(decoy.path):
                 # File deleted - strong ransomware indicator
-                alert = CanaryAlert(
+                alert = DecoyAlert(
                     timestamp=datetime.now().isoformat(),
-                    canary_path=canary.path,
+                    decoy_path=decoy.path,
                     change_type="deleted",
                     source_info="File no longer exists",
                     severity="CRITICAL",
                 )
                 alerts.append(alert)
-                canary.alert_triggered = True
-                canary.status = "triggered"
-                logger.critical(f"CANARY DELETED: {canary.path}")
+                decoy.alert_triggered = True
+                decoy.status = "triggered"
+                logger.critical(f"DECOY DELETED: {decoy.path}")
                 continue
 
-            current_hash = self._compute_hash(canary.path)
-            if current_hash != canary.original_hash:
+            current_hash = self._compute_hash(decoy.path)
+            if current_hash != decoy.original_hash:
                 # File modified - likely encryption
-                alert = CanaryAlert(
+                alert = DecoyAlert(
                     timestamp=datetime.now().isoformat(),
-                    canary_path=canary.path,
+                    decoy_path=decoy.path,
                     change_type="modified",
-                    source_info=f"Hash changed: {canary.original_hash[:16]}... -> {current_hash[:16]}...",
+                    source_info=f"Hash changed: {decoy.original_hash[:16]}... -> {current_hash[:16]}...",
                     severity="CRITICAL",
                 )
                 alerts.append(alert)
-                canary.alert_triggered = True
-                canary.status = "triggered"
-                logger.critical(f"CANARY MODIFIED: {canary.path}")
+                decoy.alert_triggered = True
+                decoy.status = "triggered"
+                logger.critical(f"DECOY MODIFIED: {decoy.path}")
 
             # Check for ransomware extension appended
-            parent = Path(canary.path).parent
-            base_name = Path(canary.path).name
+            parent = Path(decoy.path).parent
+            base_name = Path(decoy.path).name
             for f in parent.iterdir():
                 if f.name.startswith(base_name) and f.name != base_name:
                     # Possible encrypted version (e.g., file.docx.lockbit)
-                    alert = CanaryAlert(
+                    alert = DecoyAlert(
                         timestamp=datetime.now().isoformat(),
-                        canary_path=canary.path,
+                        decoy_path=decoy.path,
                         change_type="extension_changed",
                         source_info=f"Possible encrypted copy: {f.name}",
                         severity="CRITICAL",
                     )
                     alerts.append(alert)
-                    canary.alert_triggered = True
-                    logger.critical(f"CANARY EXTENSION CHANGE: {f.name}")
+                    decoy.alert_triggered = True
+                    logger.critical(f"DECOY EXTENSION CHANGE: {f.name}")
 
         self._save_state()
         return alerts
@@ -195,7 +195,7 @@ class CanaryDeployer:
         """Generate deployment status report."""
         lines = []
         lines.append("=" * 60)
-        lines.append("RANSOMWARE CANARY DEPLOYMENT REPORT")
+        lines.append("RANSOMWARE DECOY DEPLOYMENT REPORT")
         lines.append("=" * 60)
         lines.append(f"Report Time: {datetime.now().isoformat()}")
         lines.append(f"Total Canaries: {len(self.canaries)}")
@@ -221,16 +221,16 @@ class CanaryDeployer:
 
     def continuous_monitor(self, interval_seconds: int = 10):
         """Run continuous monitoring loop."""
-        logger.info(f"Starting continuous canary monitoring (interval: {interval_seconds}s)")
-        logger.info(f"Monitoring {len(self.canaries)} canary files")
+        logger.info(f"Starting continuous decoy monitoring (interval: {interval_seconds}s)")
+        logger.info(f"Monitoring {len(self.canaries)} decoy files")
 
         try:
             while True:
                 alerts = self.check_canaries()
                 if alerts:
-                    logger.critical(f"!!! {len(alerts)} CANARY ALERTS DETECTED !!!")
+                    logger.critical(f"!!! {len(alerts)} DECOY ALERTS DETECTED !!!")
                     for alert in alerts:
-                        logger.critical(f"  {alert.change_type}: {alert.canary_path}")
+                        logger.critical(f"  {alert.change_type}: {alert.decoy_path}")
                         # In production: trigger SIEM alert, NAC quarantine, EDR isolation
                 time.sleep(interval_seconds)
         except KeyboardInterrupt:
@@ -238,8 +238,8 @@ class CanaryDeployer:
 
 
 def main():
-    deployer = CanaryDeployer(
-        state_file=str(Path(__file__).parent / "canary_state.json")
+    deployer = DecoyDeployer(
+        state_file=str(Path(__file__).parent / "decoy_state.json")
     )
 
     if len(sys.argv) > 1:
@@ -249,14 +249,14 @@ def main():
             target_path = sys.argv[2]
             share_type = sys.argv[3]
             deployed = deployer.deploy_canaries(target_path, share_type)
-            print(f"Deployed {len(deployed)} canary files to {target_path}")
+            print(f"Deployed {len(deployed)} decoy files to {target_path}")
 
         elif command == "check":
             alerts = deployer.check_canaries()
             if alerts:
                 print(f"\n!!! {len(alerts)} ALERTS !!!")
                 for alert in alerts:
-                    print(f"  [{alert.severity}] {alert.change_type}: {alert.canary_path}")
+                    print(f"  [{alert.severity}] {alert.change_type}: {alert.decoy_path}")
             else:
                 print("All canaries intact - no alerts")
 
@@ -281,7 +281,7 @@ def main():
         demo_dir.mkdir(exist_ok=True)
 
         deployed = deployer.deploy_canaries(str(demo_dir), "finance")
-        print(f"\nDeployed {len(deployed)} canary files")
+        print(f"\nDeployed {len(deployed)} decoy files")
 
         alerts = deployer.check_canaries()
         print(f"Initial check: {len(alerts)} alerts (expected: 0)")

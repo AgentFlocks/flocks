@@ -61,4 +61,4 @@ index=wineventlog EventCode=4698
 
 - [Sysmon Configuration Guide](https://github.com/SwiftOnSecurity/sysmon-config)
 - [Splunk Scheduled Task Detection](https://research.splunk.com/endpoint/7feb7972-7ac3-11eb-bac8-acde48001122/)
-- [Red Canary: Scheduled Task](https://redcanary.com/threat-detection-report/techniques/scheduled-task/)
+- [Red Decoy: Scheduled Task](https://reddecoy.com/threat-detection-report/techniques/scheduled-task/)

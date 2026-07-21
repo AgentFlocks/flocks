@@ -23,7 +23,7 @@ Get-ProcessMitigation -RegistryConfigFilePath export.xml
 | ASLR | Windows/Linux | Randomize memory layout |
 | CFG | Windows | Control Flow Guard |
 | SEHOP | Windows | SEH Overwrite Protection |
-| Stack Canary | Linux | Detect stack buffer overflow |
+| Stack Decoy | Linux | Detect stack buffer overflow |
 | PIE | Linux | Position-Independent Executable |
 | RELRO | Linux | Read-Only Relocations |
 | FORTIFY_SOURCE | Linux | Buffer overflow checks |
@@ -50,7 +50,7 @@ readelf -d binary | grep BIND_NOW
 
 | Flag | Protection |
 |------|-----------|
-| `-fstack-protector-strong` | Stack canary |
+| `-fstack-protector-strong` | Stack decoy |
 | `-D_FORTIFY_SOURCE=2` | Buffer overflow checks |
 | `-pie -fPIE` | Position-independent |
 | `-Wl,-z,relro,-z,now` | Full RELRO |

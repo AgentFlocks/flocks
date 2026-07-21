@@ -15,8 +15,8 @@ import requests
 _SAFE_TABLE_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 
 
-def create_dns_canarytoken(email, memo, webhook_url=None):
-    """Create a DNS canary token via Canarytokens.org API."""
+def create_dns_decoytoken(email, memo, webhook_url=None):
+    """Create a DNS decoy token via Decoytokens.org API."""
     data = {
         "type": "dns",
         "email": email,
@@ -24,13 +24,13 @@ def create_dns_canarytoken(email, memo, webhook_url=None):
     }
     if webhook_url:
         data["webhook_url"] = webhook_url
-    resp = requests.post("https://canarytokens.org/generate", data=data, timeout=15)
+    resp = requests.post("https://decoytokens.org/generate", data=data, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
 
 def create_web_bug_token(email, memo, webhook_url=None):
-    """Create a web bug (image beacon) canary token."""
+    """Create a web bug (image beacon) decoy token."""
     data = {
         "type": "web_image",
         "email": email,
@@ -38,13 +38,13 @@ def create_web_bug_token(email, memo, webhook_url=None):
     }
     if webhook_url:
         data["webhook_url"] = webhook_url
-    resp = requests.post("https://canarytokens.org/generate", data=data, timeout=15)
+    resp = requests.post("https://decoytokens.org/generate", data=data, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
 
 def create_aws_key_token(email, memo, webhook_url=None):
-    """Create an AWS credential canary token."""
+    """Create an AWS credential decoy token."""
     data = {
         "type": "aws_keys",
         "email": email,
@@ -52,7 +52,7 @@ def create_aws_key_token(email, memo, webhook_url=None):
     }
     if webhook_url:
         data["webhook_url"] = webhook_url
-    resp = requests.post("https://canarytokens.org/generate", data=data, timeout=15)
+    resp = requests.post("https://decoytokens.org/generate", data=data, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -62,12 +62,12 @@ def generate_honeytoken_id():
     return f"HT-{uuid.uuid4().hex[:12].upper()}"
 
 
-def deploy_aws_credential_token(target_path, canary_key_id, canary_secret):
+def deploy_aws_credential_token(target_path, decoy_key_id, decoy_secret):
     """Deploy fake AWS credentials file as a honeytoken."""
     content = (
         "[default]\n"
-        f"aws_access_key_id = {canary_key_id}\n"
-        f"aws_secret_access_key = {canary_secret}\n"
+        f"aws_access_key_id = {decoy_key_id}\n"
+        f"aws_secret_access_key = {decoy_secret}\n"
         "region = us-east-1\n"
     )
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -89,13 +89,13 @@ def deploy_database_honeytoken(db_connection_string, table_name="users"):
     fake_users = [
         {
             "username": "svc_backup_admin",
-            "email": f"{token_id}@canary.internal",
+            "email": f"{token_id}@decoy.internal",
             "role": "admin",
             "api_key": hashlib.sha256(token_id.encode()).hexdigest()[:40],
         },
         {
             "username": "emergency_break_glass",
-            "email": f"bg-{token_id}@canary.internal",
+            "email": f"bg-{token_id}@decoy.internal",
             "role": "superadmin",
             "api_key": hashlib.sha256(f"bg-{token_id}".encode()).hexdigest()[:40],
         },
@@ -114,7 +114,7 @@ def deploy_database_honeytoken(db_connection_string, table_name="users"):
 
 
 def deploy_dns_token_in_config(config_path, dns_hostname, key_name="backup_server"):
-    """Embed a DNS canary token in a configuration file."""
+    """Embed a DNS decoy token in a configuration file."""
     config_entry = f"{key_name} = {dns_hostname}\n"
     with open(config_path, "a") as f:
         f.write(f"\n# Backup configuration\n{config_entry}")
@@ -134,13 +134,13 @@ def create_deployment_plan(target_environment):
             {"type": "aws_credentials", "location": "/opt/backup/.aws/credentials",
              "description": "Fake AWS creds in backup directory"},
             {"type": "dns", "location": "/etc/app/config.yml",
-             "description": "DNS canary in app config"},
+             "description": "DNS decoy in app config"},
             {"type": "database", "location": "users table",
              "description": "Honeytoken admin accounts"},
             {"type": "web_bug", "location": "internal wiki",
              "description": "Image beacon in sensitive docs"},
             {"type": "dns", "location": "/root/.ssh/config",
-             "description": "DNS canary in SSH config"},
+             "description": "DNS decoy in SSH config"},
         ],
     }
     return plan
@@ -154,7 +154,7 @@ def check_token_alerts(webhook_log_path):
         logs = json.load(f)
     alerts = []
     for entry in logs:
-        if entry.get("type") == "canarytoken_triggered":
+        if entry.get("type") == "decoytoken_triggered":
             alerts.append({
                 "token_memo": entry.get("memo", ""),
                 "source_ip": entry.get("src_ip", ""),
@@ -166,8 +166,8 @@ def check_token_alerts(webhook_log_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Honeytoken Deployment Agent")
-    parser.add_argument("--email", default=os.getenv("CANARY_EMAIL", "soc@company.com"))
-    parser.add_argument("--webhook", default=os.getenv("CANARY_WEBHOOK"))
+    parser.add_argument("--email", default=os.getenv("DECOY_EMAIL", "soc@company.com"))
+    parser.add_argument("--webhook", default=os.getenv("DECOY_WEBHOOK"))
     parser.add_argument("--output", default="honeytoken_report.json")
     parser.add_argument("--action", choices=[
         "create_dns", "create_aws", "create_web", "plan", "full_deploy"
@@ -182,9 +182,9 @@ def main():
         print(f"[+] Deployment plan: {len(plan['tokens'])} tokens")
 
     if args.action in ("create_dns", "full_deploy"):
-        token = create_dns_canarytoken(args.email, "Production honeytoken", args.webhook)
+        token = create_dns_decoytoken(args.email, "Production honeytoken", args.webhook)
         report["tokens"]["dns"] = token
-        print(f"[+] DNS canary token created")
+        print(f"[+] DNS decoy token created")
 
     if args.action in ("create_aws", "full_deploy"):
         token = create_aws_key_token(args.email, "AWS credential honeytoken", args.webhook)

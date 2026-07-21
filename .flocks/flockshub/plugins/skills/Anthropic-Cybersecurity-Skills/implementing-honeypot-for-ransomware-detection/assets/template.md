@@ -2,11 +2,11 @@
 
 ## Deployment Plan
 
-| Share | Canary Count | File Types | Naming Convention | Monitoring Method |
+| Share | Decoy Count | File Types | Naming Convention | Monitoring Method |
 |-------|-------------|------------|-------------------|-------------------|
 | | | | | |
 
-## Canary File Inventory
+## Decoy File Inventory
 
 | File Path | Type | Hash (SHA-256) | Deploy Date | Status |
 |-----------|------|----------------|-------------|--------|
@@ -24,7 +24,7 @@
 - [ ] Automated NAC quarantine tested
 - [ ] EDR isolation API integrated
 - [ ] Email/SMS alerts configured for on-call
-- [ ] Canary alerts have CRITICAL priority in SIEM
+- [ ] Decoy alerts have CRITICAL priority in SIEM
 
 ## Validation Testing
 

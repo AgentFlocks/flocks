@@ -336,7 +336,7 @@ aws organizations create-policy \
 4. Create individual scoped policies for each function based on actual API usage
 5. Apply permission boundaries to cap maximum permissions
 6. Deploy scoped roles to staging and run integration tests
-7. Roll out to production with canary deployment and rollback plan
+7. Roll out to production with decoy deployment and rollback plan
 8. Validate with IAM Policy Simulator before removing the old broad role
 
 **Pitfalls**: Some Lambda functions may have infrequent code paths that only trigger monthly (batch jobs, error handlers). A 30-day observation window may miss rare API calls. Review the function code alongside CloudTrail data to identify all potential API calls. Use Access Analyzer's policy validation rather than relying solely on generated policies.

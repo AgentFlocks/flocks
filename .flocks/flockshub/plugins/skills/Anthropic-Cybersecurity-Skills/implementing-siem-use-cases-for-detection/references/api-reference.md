@@ -50,6 +50,6 @@
 ## External References
 - ATT&CK Techniques: https://attack.mitre.org/techniques/enterprise/
 - Sigma Rules: https://github.com/SigmaHQ/sigma
-- Atomic Red Team: https://github.com/redcanaryco/atomic-red-team
+- Atomic Red Team: https://github.com/reddecoyco/atomic-red-team
 - Splunk ES Detections: https://research.splunk.com/detections/
 - Elastic Detection Rules: https://github.com/elastic/detection-rules

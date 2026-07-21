@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Honeypot Deployment Agent - deploys OpenCanary honeypots and analyzes interaction logs."""
+"""Honeypot Deployment Agent - deploys OpenDecoy honeypots and analyzes interaction logs."""
 
 import json
 import argparse
@@ -12,8 +12,8 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-OPENCANARY_CONFIG_TEMPLATE = {
-    "device.node_id": "opencanary-001",
+OPENDECOY_CONFIG_TEMPLATE = {
+    "device.node_id": "opendecoy-001",
     "ip.ignorelist": [],
     "logtype.console.enabled": True,
     "logger": {
@@ -23,7 +23,7 @@ OPENCANARY_CONFIG_TEMPLATE = {
             "handlers": {
                 "file": {
                     "class": "logging.FileHandler",
-                    "filename": "/var/tmp/opencanary.log",
+                    "filename": "/var/tmp/opendecoy.log",
                 },
                 "console": {
                     "class": "logging.StreamHandler",
@@ -58,9 +58,9 @@ OPENCANARY_CONFIG_TEMPLATE = {
 }
 
 
-def generate_config(services, node_id="opencanary-001", log_path="/var/tmp/opencanary.log"):
-    """Generate OpenCanary configuration with specified services enabled."""
-    config = OPENCANARY_CONFIG_TEMPLATE.copy()
+def generate_config(services, node_id="opendecoy-001", log_path="/var/tmp/opendecoy.log"):
+    """Generate OpenDecoy configuration with specified services enabled."""
+    config = OPENDECOY_CONFIG_TEMPLATE.copy()
     config["device.node_id"] = node_id
     config["logger"]["kwargs"]["handlers"]["file"]["filename"] = log_path
     for service in services:
@@ -72,19 +72,19 @@ def generate_config(services, node_id="opencanary-001", log_path="/var/tmp/openc
     return config
 
 
-def deploy_opencanary(config, config_path="/etc/opencanaryd/opencanary.conf"):
-    """Deploy OpenCanary with generated configuration."""
+def deploy_opendecoy(config, config_path="/etc/opendecoyd/opendecoy.conf"):
+    """Deploy OpenDecoy with generated configuration."""
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
     logger.info("Configuration written to %s", config_path)
-    start_cmd = ["opencanaryd", "--start"]
+    start_cmd = ["opendecoyd", "--start"]
     result = subprocess.run(start_cmd, capture_output=True, text=True, timeout=120)
     return {"config_path": config_path, "started": result.returncode == 0, "output": result.stdout[:200]}
 
 
-def parse_opencanary_log(log_path="/var/tmp/opencanary.log"):
-    """Parse OpenCanary JSON log file for interaction events."""
+def parse_opendecoy_log(log_path="/var/tmp/opendecoy.log"):
+    """Parse OpenDecoy JSON log file for interaction events."""
     events = []
     try:
         with open(log_path) as f:
@@ -156,8 +156,8 @@ def analyze_interactions(events):
 
 
 def check_honeypot_status():
-    """Check if OpenCanary daemon is running."""
-    cmd = ["opencanaryd", "--status"]
+    """Check if OpenDecoy daemon is running."""
+    cmd = ["opendecoyd", "--status"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     is_running = "running" in result.stdout.lower() or result.returncode == 0
     return {"running": is_running, "status_output": result.stdout.strip()[:200]}
@@ -168,7 +168,7 @@ def generate_report(analysis, status, config):
     enabled_services = [k.replace(".enabled", "") for k, v in config.items() if k.endswith(".enabled") and v]
     report = {
         "timestamp": datetime.utcnow().isoformat(),
-        "honeypot_type": "OpenCanary",
+        "honeypot_type": "OpenDecoy",
         "node_id": config.get("device.node_id", ""),
         "enabled_services": enabled_services,
         "daemon_status": status,
@@ -182,20 +182,20 @@ def main():
     parser.add_argument("--action", choices=["deploy", "analyze", "status", "full"], default="analyze")
     parser.add_argument("--services", nargs="+", default=["ssh", "http", "smb", "ftp", "telnet"],
                         help="Services to enable (default: ssh http smb ftp telnet)")
-    parser.add_argument("--node-id", default="opencanary-001", help="Honeypot node identifier")
-    parser.add_argument("--log-path", default="/var/tmp/opencanary.log", help="OpenCanary log file path")
-    parser.add_argument("--config-path", default="/etc/opencanaryd/opencanary.conf")
+    parser.add_argument("--node-id", default="opendecoy-001", help="Honeypot node identifier")
+    parser.add_argument("--log-path", default="/var/tmp/opendecoy.log", help="OpenDecoy log file path")
+    parser.add_argument("--config-path", default="/etc/opendecoyd/opendecoy.conf")
     parser.add_argument("--output", default="honeypot_report.json")
     args = parser.parse_args()
 
     config = generate_config(args.services, args.node_id, args.log_path)
 
     if args.action in ("deploy", "full"):
-        deploy_result = deploy_opencanary(config, args.config_path)
+        deploy_result = deploy_opendecoy(config, args.config_path)
         logger.info("Deployment: %s", "success" if deploy_result["started"] else "failed")
 
     status = check_honeypot_status()
-    events = parse_opencanary_log(args.log_path)
+    events = parse_opendecoy_log(args.log_path)
     analysis = analyze_interactions(events)
     report = generate_report(analysis, status, config)
 

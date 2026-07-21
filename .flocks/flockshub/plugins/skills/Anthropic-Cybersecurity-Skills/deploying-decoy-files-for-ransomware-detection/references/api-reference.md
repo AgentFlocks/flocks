@@ -60,17 +60,17 @@ observer.join()
 | `IN_CREATE` | File was created |
 | `IN_ATTRIB` | Metadata changed |
 
-## Canarytokens (Thinkst)
+## Decoytokens (Thinkst)
 
 ### Generate Token
 ```
-URL: https://canarytokens.org/generate
+URL: https://decoytokens.org/generate
 Types: Word document, PDF, DNS, HTTP, AWS key, SQL, SVN
 ```
 
 ### Alert Webhook
 ```
-POST https://canarytokens.org/webhook
+POST https://decoytokens.org/webhook
 Payload: { "token": "...", "src_ip": "...", "time": "..." }
 ```
 

@@ -236,7 +236,7 @@ Phase 3: Reconnect remaining systems
 Throughout: SOC monitoring on high alert
   - EDR in aggressive blocking mode
   - All previous IOCs loaded in detection rules
-  - Canary files deployed on recovered systems
+  - Decoy files deployed on recovered systems
 ```
 
 ## Key Concepts
@@ -306,5 +306,5 @@ Throughout: SOC monitoring on high alert
 - [ ] Persistence mechanisms scanned
 - [ ] EDR deployed and active on recovered systems
 - [ ] IOCs loaded in detection rules
-- [ ] Canary files deployed
+- [ ] Decoy files deployed
 ```

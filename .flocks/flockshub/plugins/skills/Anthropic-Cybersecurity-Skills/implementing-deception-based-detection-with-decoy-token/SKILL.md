@@ -1,15 +1,15 @@
 ---
-name: implementing-deception-based-detection-with-canarytoken
-description: Deploy and monitor Canary Tokens via the Thinkst Canary API for deception-based breach detection using web bug
+name: implementing-deception-based-detection-with-decoy-token
+description: Deploy and monitor Decoy Tokens via the Thinkst Decoy API for deception-based breach detection using web bug
   tokens, DNS tokens, document tokens, and AWS key tokens.
 domain: cybersecurity
 subdomain: deception-technology
 tags:
-- canarytoken
+- decoytoken
 - deception
 - honeytokens
 - breach-detection
-- Thinkst-Canary
+- Thinkst-Decoy
 - tripwire
 - early-warning
 version: '1.0'
@@ -21,30 +21,30 @@ nist_csf:
 - PR.IR-01
 ---
 
-# Implementing Deception-Based Detection with Canarytoken
+# Implementing Deception-Based Detection with Decoytoken
 
 ## Overview
 
-Canary Tokens are lightweight tripwire mechanisms that alert when an attacker accesses a resource. This skill uses the Thinkst Canary REST API to programmatically create tokens (web bugs, DNS tokens, MS Word documents, AWS API keys), deploy them to strategic locations, monitor for triggered alerts, and generate deception coverage reports.
+Decoy Tokens are lightweight tripwire mechanisms that alert when an attacker accesses a resource. This skill uses the Thinkst Decoy REST API to programmatically create tokens (web bugs, DNS tokens, MS Word documents, AWS API keys), deploy them to strategic locations, monitor for triggered alerts, and generate deception coverage reports.
 
 
 ## When to Use
 
-- When deploying or configuring implementing deception based detection with canarytoken capabilities in your environment
+- When deploying or configuring implementing deception based detection with decoytoken capabilities in your environment
 - When establishing security controls aligned to compliance requirements
 - When building or improving security architecture for this domain
 - When conducting security assessments that require this implementation
 
 ## Prerequisites
 
-- Thinkst Canary Console or canarytokens.org account
-- API auth token from Canary Console
+- Thinkst Decoy Console or decoytokens.org account
+- API auth token from Decoy Console
 - Python 3.9+ with `requests`
 - File system access for deploying document and file tokens
 
 ## Steps
 
-1. Authenticate to the Canary Console API using auth_token
+1. Authenticate to the Decoy Console API using auth_token
 2. Create web bug (HTTP) tokens for embedding in documents and web pages
 3. Create DNS tokens for monitoring DNS resolution attempts
 4. Create MS Word document tokens for file share deployment
@@ -54,5 +54,5 @@ Canary Tokens are lightweight tripwire mechanisms that alert when an attacker ac
 
 ## Expected Output
 
-- JSON report listing all deployed Canary Tokens, trigger history, alert details, and coverage analysis
+- JSON report listing all deployed Decoy Tokens, trigger history, alert details, and coverage analysis
 - Deployment map showing token types across network segments

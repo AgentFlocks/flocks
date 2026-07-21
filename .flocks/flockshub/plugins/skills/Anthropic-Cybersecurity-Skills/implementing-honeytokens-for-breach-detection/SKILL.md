@@ -1,7 +1,7 @@
 ---
 name: implementing-honeytokens-for-breach-detection
-description: 'Deploys canary tokens and honeytokens (fake AWS credentials, DNS canaries, document beacons, database records)
-  that trigger alerts when accessed by attackers. Uses the Canarytokens API and custom webhook integrations for breach detection.
+description: 'Deploys decoy tokens and honeytokens (fake AWS credentials, DNS canaries, document beacons, database records)
+  that trigger alerts when accessed by attackers. Uses the Decoytokens API and custom webhook integrations for breach detection.
   Use when building deception-based early warning systems for intrusion detection.
 
   '
@@ -47,8 +47,8 @@ type alerts via webhook when triggered by an attacker.
 ```python
 import requests
 
-# Create a DNS canary token via Canarytokens
-resp = requests.post("https://canarytokens.org/generate", data={
+# Create a DNS decoy token via Decoytokens
+resp = requests.post("https://decoytokens.org/generate", data={
     "type": "dns",
     "email": "soc@company.com",
     "memo": "Production DB server honeytoken",
@@ -58,7 +58,7 @@ print(f"DNS token: {token['hostname']}")
 ```
 
 Token types to deploy:
-1. AWS credential files (~/.aws/credentials) with canary keys
+1. AWS credential files (~/.aws/credentials) with decoy keys
 2. DNS tokens embedded in configuration files
 3. Document beacons (Word/PDF) in sensitive file shares
 4. Database honeytoken records in user tables
@@ -67,8 +67,8 @@ Token types to deploy:
 ## Examples
 
 ```python
-# Generate a fake AWS credentials file with canary token
-aws_creds = f"[default]\naws_access_key_id = {canary_key_id}\naws_secret_access_key = {canary_secret}\n"
+# Generate a fake AWS credentials file with decoy token
+aws_creds = f"[default]\naws_access_key_id = {decoy_key_id}\naws_secret_access_key = {decoy_secret}\n"
 with open("/opt/backup/.aws/credentials", "w") as f:
     f.write(aws_creds)
 ```

@@ -1,38 +1,38 @@
 # Network Deception with Honeypots Reference
 
-## OpenCanary Installation
+## OpenDecoy Installation
 
 ```bash
 # Ubuntu/Debian
 sudo apt-get install python3-dev python3-pip python3-virtualenv libssl-dev libpcap-dev
-virtualenv canary-env && source canary-env/bin/activate
-pip install opencanary
+virtualenv decoy-env && source decoy-env/bin/activate
+pip install opendecoy
 
 # Docker
-docker pull thinkst/opencanary
-docker run -d --network host -v /path/to/config:/etc/opencanaryd thinkst/opencanary
+docker pull thinkst/opendecoy
+docker run -d --network host -v /path/to/config:/etc/opendecoyd thinkst/opendecoy
 ```
 
-## OpenCanary CLI
+## OpenDecoy CLI
 
 ```bash
 # Generate default config
-opencanaryd --copyconfig
+opendecoyd --copyconfig
 
 # Start daemon
-opencanaryd --start
+opendecoyd --start
 
 # Stop daemon
-opencanaryd --stop
+opendecoyd --stop
 
 # Check status
-opencanaryd --status
+opendecoyd --status
 
 # Run in foreground (debug)
-opencanaryd --dev
+opendecoyd --dev
 ```
 
-## Configuration File (`/etc/opencanaryd/opencanary.conf`)
+## Configuration File (`/etc/opendecoyd/opendecoy.conf`)
 
 ```json
 {

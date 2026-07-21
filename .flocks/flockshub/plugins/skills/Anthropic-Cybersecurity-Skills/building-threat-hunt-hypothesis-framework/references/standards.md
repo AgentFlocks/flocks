@@ -36,6 +36,6 @@
 - MITRE ATT&CK Framework: https://attack.mitre.org/
 - Sigma Detection Rules: https://github.com/SigmaHQ/sigma
 - LOLBAS Project: https://lolbas-project.github.io/
-- Atomic Red Team Tests: https://github.com/redcanaryco/atomic-red-team
-- Red Canary Threat Detection Report
+- Atomic Red Team Tests: https://github.com/reddecoyco/atomic-red-team
+- Red Decoy Threat Detection Report
 - SANS Threat Hunting Summit Resources

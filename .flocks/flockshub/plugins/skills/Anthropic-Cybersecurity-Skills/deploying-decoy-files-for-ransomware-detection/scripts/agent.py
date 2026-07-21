@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Decoy file (canary) deployment agent for ransomware detection.
+"""Decoy file (decoy) deployment agent for ransomware detection.
 
-Deploys canary files across file systems and monitors them for modifications
+Deploys decoy files across file systems and monitors them for modifications
 that indicate ransomware encryption activity. Provides real-time alerting
 when decoy files are modified, renamed, or deleted.
 """
@@ -18,16 +18,16 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-logger = logging.getLogger("canary_agent")
+logger = logging.getLogger("decoy_agent")
 
-CANARY_EXTENSIONS = [".docx", ".xlsx", ".pdf", ".csv", ".sql", ".txt", ".pptx"]
+DECOY_EXTENSIONS = [".docx", ".xlsx", ".pdf", ".csv", ".sql", ".txt", ".pptx"]
 
-CANARY_NAMES_FIRST = [
+DECOY_NAMES_FIRST = [
     "_AAAA_budget_2024", "_AAAA_financial_report", "_AAAA_payroll_data",
     "_AAA_employee_records", "_AAA_client_contracts",
 ]
 
-CANARY_NAMES_LAST = [
+DECOY_NAMES_LAST = [
     "~zzzz_annual_review", "~zzzz_backup_config", "~zzzz_tax_returns",
     "~zzz_insurance_claims", "~zzz_merger_docs",
 ]
@@ -55,10 +55,10 @@ def compute_file_hash(filepath):
     return sha256.hexdigest()
 
 
-def generate_canary_content(canary_type, name):
-    """Generate realistic content for canary files."""
+def generate_decoy_content(decoy_type, name):
+    """Generate realistic content for decoy files."""
     timestamp = datetime.now().isoformat()
-    content = f"CANARY_TOKEN:{name}\n"
+    content = f"DECOY_TOKEN:{name}\n"
     content += f"Generated: {timestamp}\n"
     content += f"Classification: CONFIDENTIAL\n\n"
 
@@ -83,9 +83,9 @@ def generate_canary_content(canary_type, name):
 
 
 def deploy_canaries(target_dirs, canaries_per_dir=4):
-    """Deploy canary files to target directories."""
+    """Deploy decoy files to target directories."""
     deployed = []
-    names = CANARY_NAMES_FIRST[:canaries_per_dir // 2] + CANARY_NAMES_LAST[:canaries_per_dir // 2]
+    names = DECOY_NAMES_FIRST[:canaries_per_dir // 2] + DECOY_NAMES_LAST[:canaries_per_dir // 2]
 
     for target_dir in target_dirs:
         if not os.path.isdir(target_dir):
@@ -93,11 +93,11 @@ def deploy_canaries(target_dirs, canaries_per_dir=4):
             continue
 
         for i, name in enumerate(names):
-            ext = CANARY_EXTENSIONS[i % len(CANARY_EXTENSIONS)]
+            ext = DECOY_EXTENSIONS[i % len(DECOY_EXTENSIONS)]
             filename = f"{name}{ext}"
             filepath = os.path.join(target_dir, filename)
 
-            content = generate_canary_content(ext, name)
+            content = generate_decoy_content(ext, name)
             with open(filepath, "w") as f:
                 f.write(content)
 
@@ -110,16 +110,16 @@ def deploy_canaries(target_dirs, canaries_per_dir=4):
                 "name": filename,
             }
             deployed.append(record)
-            logger.info("Deployed canary: %s (hash: %s)", filepath, file_hash[:16])
+            logger.info("Deployed decoy: %s (hash: %s)", filepath, file_hash[:16])
 
     return deployed
 
 
-def check_canary_integrity(canary_records):
-    """Check all canary files for modifications, deletions, or renames."""
+def check_decoy_integrity(decoy_records):
+    """Check all decoy files for modifications, deletions, or renames."""
     alerts = []
 
-    for record in canary_records:
+    for record in decoy_records:
         filepath = record["path"]
 
         if not os.path.exists(filepath):
@@ -142,7 +142,7 @@ def check_canary_integrity(canary_records):
 
             if not renamed:
                 alerts.append({
-                    "type": "CANARY_DELETED",
+                    "type": "DECOY_DELETED",
                     "severity": "HIGH",
                     "path": filepath,
                     "timestamp": datetime.now().isoformat(),
@@ -152,7 +152,7 @@ def check_canary_integrity(canary_records):
         current_hash = compute_file_hash(filepath)
         if current_hash != record["hash"]:
             alerts.append({
-                "type": "CANARY_MODIFIED",
+                "type": "DECOY_MODIFIED",
                 "severity": "CRITICAL",
                 "path": filepath,
                 "original_hash": record["hash"],
@@ -171,9 +171,9 @@ def check_canary_integrity(canary_records):
                 "timestamp": datetime.now().isoformat(),
             })
 
-    # Check for ransom notes in canary directories
+    # Check for ransom notes in decoy directories
     checked_dirs = set()
-    for record in canary_records:
+    for record in decoy_records:
         parent_dir = os.path.dirname(record["path"])
         if parent_dir in checked_dirs or not os.path.isdir(parent_dir):
             continue
@@ -190,13 +190,13 @@ def check_canary_integrity(canary_records):
     return alerts
 
 
-def monitor_loop(canary_records, interval=10):
-    """Continuously monitor canary files at specified interval."""
-    logger.info("Starting canary monitoring loop (interval: %ds)", interval)
-    logger.info("Monitoring %d canary files", len(canary_records))
+def monitor_loop(decoy_records, interval=10):
+    """Continuously monitor decoy files at specified interval."""
+    logger.info("Starting decoy monitoring loop (interval: %ds)", interval)
+    logger.info("Monitoring %d decoy files", len(decoy_records))
 
     while True:
-        alerts = check_canary_integrity(canary_records)
+        alerts = check_decoy_integrity(decoy_records)
         if alerts:
             for alert in alerts:
                 logger.critical(
@@ -211,14 +211,14 @@ def monitor_loop(canary_records, interval=10):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Ransomware Canary File Deployment Agent")
+    print("Ransomware Decoy File Deployment Agent")
     print("Deploy and monitor decoy files for encryption detection")
     print("=" * 60)
 
     if len(sys.argv) < 2:
         print("\nUsage:")
         print("  python agent.py deploy <dir1> [dir2] ...   Deploy canaries")
-        print("  python agent.py check <registry.json>      Check canary integrity")
+        print("  python agent.py check <registry.json>      Check decoy integrity")
         print("  python agent.py monitor <registry.json>     Continuous monitoring")
         sys.exit(0)
 
@@ -227,29 +227,29 @@ if __name__ == "__main__":
     if command == "deploy":
         dirs = sys.argv[2:] if len(sys.argv) > 2 else [os.getcwd()]
         records = deploy_canaries(dirs)
-        registry_file = "canary_registry.json"
+        registry_file = "decoy_registry.json"
         with open(registry_file, "w") as f:
             json.dump(records, f, indent=2)
-        print(f"\n[+] Deployed {len(records)} canary files across {len(dirs)} directories")
+        print(f"\n[+] Deployed {len(records)} decoy files across {len(dirs)} directories")
         print(f"[+] Registry saved to: {registry_file}")
 
     elif command == "check":
         if len(sys.argv) < 3:
-            print("[!] Provide canary registry JSON file")
+            print("[!] Provide decoy registry JSON file")
             sys.exit(1)
         with open(sys.argv[2]) as f:
             records = json.load(f)
-        alerts = check_canary_integrity(records)
+        alerts = check_decoy_integrity(records)
         if alerts:
             print(f"\n[!] {len(alerts)} ALERTS DETECTED:")
             for a in alerts:
                 print(f"  [{a['severity']}] {a['type']}: {a.get('path', a.get('original'))}")
         else:
-            print(f"\n[+] All {len(records)} canary files intact. No alerts.")
+            print(f"\n[+] All {len(records)} decoy files intact. No alerts.")
 
     elif command == "monitor":
         if len(sys.argv) < 3:
-            print("[!] Provide canary registry JSON file")
+            print("[!] Provide decoy registry JSON file")
             sys.exit(1)
         with open(sys.argv[2]) as f:
             records = json.load(f)

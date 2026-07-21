@@ -37,20 +37,20 @@ XSS_PAYLOADS = {
     ],
 }
 
-CANARY = "xsscanary7391"
+DECOY = "xssdecoy7391"
 
 
-def detect_reflection_context(response_text, canary):
+def detect_reflection_context(response_text, decoy):
     """Determine the rendering context of reflected input."""
     contexts = []
-    if f">{canary}<" in response_text or f">{canary} " in response_text:
+    if f">{decoy}<" in response_text or f">{decoy} " in response_text:
         contexts.append("html_body")
-    if f'="{canary}"' in response_text or f"='{canary}'" in response_text:
+    if f'="{decoy}"' in response_text or f"='{decoy}'" in response_text:
         contexts.append("html_attribute")
-    if f"'{canary}'" in response_text or f'"{canary}"' in response_text:
+    if f"'{decoy}'" in response_text or f'"{decoy}"' in response_text:
         if "<script>" in response_text.lower():
             contexts.append("javascript_context")
-    if f'href="{canary}' in response_text or f"href='{canary}" in response_text:
+    if f'href="{decoy}' in response_text or f"href='{decoy}" in response_text:
         contexts.append("url_context")
     return contexts if contexts else ["html_body"]
 
@@ -65,12 +65,12 @@ def test_reflected_xss(base_url, params, token=None):
 
     for param_url in params:
         url = urljoin(base_url, param_url)
-        canary_url = url.replace("FUZZ", CANARY)
+        decoy_url = url.replace("FUZZ", DECOY)
         try:
-            resp = requests.get(canary_url, headers=headers, timeout=10, verify=False)
-            if CANARY not in resp.text:
+            resp = requests.get(decoy_url, headers=headers, timeout=10, verify=False)
+            if DECOY not in resp.text:
                 continue
-            contexts = detect_reflection_context(resp.text, CANARY)
+            contexts = detect_reflection_context(resp.text, DECOY)
             print(f"  [+] Reflection found at {param_url} (contexts: {contexts})")
             char_test_url = url.replace("FUZZ", '<>"\'&/')
             char_resp = requests.get(char_test_url, headers=headers, timeout=10, verify=False)

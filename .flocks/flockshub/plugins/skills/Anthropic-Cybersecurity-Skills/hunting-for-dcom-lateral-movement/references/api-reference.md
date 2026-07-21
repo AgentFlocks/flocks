@@ -123,4 +123,4 @@ python3 dcomexec.py -object ShellWindows domain/user:password@target_ip "powersh
 - Cybereason DCOM Research: https://www.cybereason.com/blog/dcom-lateral-movement-techniques
 - MDSec DCOM Lateral Movement: https://www.mdsec.co.uk/2020/09/i-like-to-move-it-windows-lateral-movement-part-2-dcom/
 - Elastic Detection Rule: https://www.elastic.co/guide/en/security/8.19/incoming-dcom-lateral-movement-with-shellbrowserwindow-or-shellwindows.html
-- Atomic Red Team T1021.003: https://github.com/redcanaryco/atomic-red-team/blob/master/atomics/T1021.003/T1021.003.md
+- Atomic Red Team T1021.003: https://github.com/reddecoyco/atomic-red-team/blob/master/atomics/T1021.003/T1021.003.md

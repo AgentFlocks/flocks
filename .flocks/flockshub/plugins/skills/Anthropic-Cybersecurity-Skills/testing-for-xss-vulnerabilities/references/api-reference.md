@@ -5,9 +5,9 @@
 ### Reflection Testing
 ```python
 from urllib.parse import quote
-# Inject canary to find reflection points
-resp = requests.get(f"{url}?q={canary}")
-if canary in resp.text:
+# Inject decoy to find reflection points
+resp = requests.get(f"{url}?q={decoy}")
+if decoy in resp.text:
     # Input is reflected - test payloads
     resp = requests.get(f"{url}?q={quote(payload)}")
 ```

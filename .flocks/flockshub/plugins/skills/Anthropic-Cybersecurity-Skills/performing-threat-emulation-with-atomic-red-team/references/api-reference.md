@@ -42,7 +42,7 @@ atomic_tests:
 
 ```bash
 # Clone atomics
-git clone https://github.com/redcanaryco/atomic-red-team
+git clone https://github.com/reddecoyco/atomic-red-team
 
 # Install operator
 pip install atomic-operator
@@ -62,6 +62,6 @@ ls atomic-red-team/atomics/T1059.001/
 
 ### References
 
-- Atomic Red Team: https://github.com/redcanaryco/atomic-red-team
-- atomic-operator: https://github.com/redcanaryco/atomic-operator
+- Atomic Red Team: https://github.com/reddecoyco/atomic-red-team
+- atomic-operator: https://github.com/reddecoyco/atomic-operator
 - ATT&CK Navigator: https://mitre-attack.github.io/attack-navigator/
