@@ -699,6 +699,14 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
     await waitFor(() => expect(folderInput).toHaveValue('/home/test-user'));
 
+    await user.type(folderInput, '/');
+    await waitFor(() => {
+      expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
+        params: { path: '/home/test-user/' },
+      });
+    });
+    expect(folderInput).toHaveValue('/home/test-user/');
+
     await user.clear(folderInput);
     await user.type(folderInput, '/home/test-user/labs');
     await waitFor(() => {

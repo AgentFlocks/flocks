@@ -388,6 +388,7 @@ export default function SessionPage() {
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
   const folderBrowserRequestIdRef = useRef(0);
+  const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
@@ -1141,7 +1142,7 @@ export default function SessionPage() {
 
   const loadFolderBrowser = useCallback(async (
     path?: string,
-    options?: { silent?: boolean },
+    options?: { preserveInput?: boolean; silent?: boolean },
   ) => {
     const requestId = ++folderBrowserRequestIdRef.current;
     setFolderBrowserLoading(true);
@@ -1152,7 +1153,12 @@ export default function SessionPage() {
       if (requestId !== folderBrowserRequestIdRef.current) return;
       const browser = response.data as FolderBrowserResponse;
       setFolderBrowser(browser);
-      setProjectWorktreeValue(browser.path);
+      if (options?.preserveInput) {
+        folderBrowserInputPathRef.current = path?.trim() || browser.path;
+      } else {
+        folderBrowserInputPathRef.current = browser.path;
+        setProjectWorktreeValue(browser.path);
+      }
     } catch (err: any) {
       if (requestId === folderBrowserRequestIdRef.current && !options?.silent) {
         toast.error(t('projectDialog.folderBrowseFailed'), err.message);
@@ -1167,10 +1173,14 @@ export default function SessionPage() {
   useEffect(() => {
     if (!folderBrowser) return undefined;
     const path = projectWorktreeValue.trim();
-    if (!path || path === folderBrowser.path) return undefined;
+    if (
+      !path
+      || path === folderBrowser.path
+      || path === folderBrowserInputPathRef.current
+    ) return undefined;
 
     const timer = window.setTimeout(() => {
-      void loadFolderBrowser(path, { silent: true });
+      void loadFolderBrowser(path, { preserveInput: true, silent: true });
     }, 300);
     return () => window.clearTimeout(timer);
   }, [folderBrowser, loadFolderBrowser, projectWorktreeValue]);
@@ -2237,6 +2247,7 @@ export default function SessionPage() {
                       value={projectWorktreeValue}
                       onChange={(event) => {
                         folderBrowserRequestIdRef.current += 1;
+                        folderBrowserInputPathRef.current = null;
                         setFolderBrowserLoading(false);
                         setProjectWorktreeValue(event.target.value);
                         if (!projectNameManuallyEdited) {
