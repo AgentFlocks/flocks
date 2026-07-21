@@ -1,9 +1,8 @@
 """
-Shared SSH utilities for host security tools.
+Shared neutral SSH transport utilities.
 
-Provides common SSH connection logic, credential resolution,
-audit logging, and session-level connection pooling used by
-both ssh_host_cmd and ssh_run_script tools.
+Provides credential resolution, connection pooling, and command transport.
+Security policy and audit semantics are implemented by FlocksPro extensions.
 """
 
 import asyncio
@@ -11,8 +10,6 @@ import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import asyncssh
@@ -20,39 +17,6 @@ import asyncssh
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.ssh_utils")
-
-# ---------------------------------------------------------------------------
-# Audit logging
-# ---------------------------------------------------------------------------
-
-AUDIT_LOG_PATH = Path.home() / ".flocks" / "audit" / "ssh_commands.log"
-
-
-def audit_log(
-    session_id: str,
-    host: str,
-    username: str,
-    port: int,
-    command: str,
-    decision: str,
-    source: str,
-    exit_code: Optional[int] = None,
-    output_bytes: int = 0,
-    elapsed_ms: int = 0,
-) -> None:
-    """Append an audit record for an SSH command decision/execution."""
-    AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    line = (
-        f"[{ts}] session={session_id} host={host} user={username} port={port}\n"
-        f"  cmd: {command}\n"
-        f"  decision: {decision} | source: {source}\n"
-        f"  exit_code: {exit_code if exit_code is not None else '-'}"
-        f"  output_bytes: {output_bytes}  elapsed_ms: {elapsed_ms}\n\n"
-    )
-    with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(line)
-
 
 # ---------------------------------------------------------------------------
 # Session-level SSH connection pool

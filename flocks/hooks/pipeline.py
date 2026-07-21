@@ -69,6 +69,12 @@ class HookContext:
     stage: str
     input: Dict[str, Any]
     output: Dict[str, Any] = field(default_factory=dict)
+    # ``output`` is deliberately shared by every hook, so it remains suitable
+    # for cooperative metadata.  The generic execution stop, however, is a
+    # monotonic lifecycle control: once a hook has requested it, a later hook
+    # must not be able to resume the effect by replacing ``output.execution``.
+    execution_stop_requested: bool = False
+    execution_stop_detail: str | None = None
 
 
 class HookBase:
@@ -412,6 +418,7 @@ class HookPipeline:
         project_dir = await cls._resolve_project_dir(input_data)
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
+        cls._latch_execution_stop(ctx)
         handler_count = 0
         deferred_critical_error: Exception | None = None
         for entry in cls._hooks:
@@ -431,6 +438,7 @@ class HookPipeline:
                     )
                 else:
                     await cls._invoke_handler(handler, ctx)
+                cls._latch_execution_stop(ctx)
             except asyncio.TimeoutError as exc:
                 duration_ms = int((time.perf_counter() - handler_started_at) * 1000)
                 log.warning("hook.timeout", {
@@ -467,6 +475,27 @@ class HookPipeline:
         if deferred_critical_error is not None:
             raise deferred_critical_error
         return ctx
+
+    @staticmethod
+    def _latch_execution_stop(ctx: HookContext) -> None:
+        """Remember a generic stop request even if later hooks mutate output.
+
+        This is intentionally limited to the pre-existing generic
+        ``execution.stop`` contract.  Flocks assigns no policy meaning to the
+        request; extensions remain responsible for deciding whether to emit
+        it and for supplying an opaque detail string.
+        """
+        execution = ctx.output.get("execution")
+        if not isinstance(execution, dict) or execution.get("stop") is not True:
+            return
+        ctx.execution_stop_requested = True
+        if ctx.execution_stop_detail is None:
+            detail = execution.get("detail")
+            ctx.execution_stop_detail = (
+                str(detail)
+                if detail is not None
+                else "operation stopped by extension"
+            )
 
     @classmethod
     def _register_plugin_extension_point(cls) -> None:

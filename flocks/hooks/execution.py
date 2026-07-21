@@ -105,6 +105,10 @@ def raise_if_execution_stopped(ctx: HookContext) -> None:
 
 def execution_stop_error(ctx: HookContext) -> ExecutionStopped | None:
     """Return the generic stop error requested by a lifecycle hook, if any."""
+    if ctx.execution_stop_requested:
+        return ExecutionStopped(
+            ctx.execution_stop_detail or "operation stopped by extension"
+        )
     execution = ctx.output.get("execution")
     if not isinstance(execution, dict) or execution.get("stop") is not True:
         return None

@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from flocks.hooks.pipeline import HookBase, HookPipeline
+from flocks.hooks.pipeline import HookBase, HookContext, HookPipeline
 from flocks.tool.registry import (
     ParameterType,
     Tool,
@@ -113,3 +113,30 @@ async def test_command_family_behavior_is_unchanged_without_extensions(
     assert result.success is True
     assert result.output == "ok"
     assert calls == [arguments]
+
+
+@pytest.mark.asyncio
+async def test_execution_stop_cannot_be_cleared_by_a_later_hook() -> None:
+    """The generic stop control is monotonic across independently ordered hooks."""
+
+    class StopHook(HookBase):
+        async def action_before(self, ctx: HookContext) -> None:
+            ctx.output["execution"] = {"stop": True, "detail": "blocked"}
+
+    class ClearHook(HookBase):
+        async def action_before(self, ctx: HookContext) -> None:
+            ctx.output["execution"] = {"stop": False}
+
+    calls: list[dict[str, Any]] = []
+    arguments = {"command": "safe"}
+    HookPipeline.register("test.stop", StopHook(), order=10)
+    HookPipeline.register("test.clear", ClearHook(), order=20)
+
+    result = await _tool("bash", arguments, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        **arguments,
+    )
+
+    assert result.success is False
+    assert result.error == "blocked"
+    assert calls == []

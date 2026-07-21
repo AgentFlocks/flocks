@@ -454,9 +454,6 @@ async def _execute_host(
     if not Instance.contains_path(cwd):
         await ctx.ask(permission="external_directory", patterns=[cwd], always=[os.path.dirname(cwd) + "*"], metadata={})
 
-    # Request bash permission
-    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={})
-
     # Initialize metadata
     ctx.metadata(
         {
@@ -540,9 +537,6 @@ async def _execute_sandboxed(
             "container": sandbox.container_name,
         },
     )
-
-    # Request bash permission (沙箱内也需要权限)
-    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={"sandbox": True})
 
     # Initialize metadata
     ctx.metadata(
