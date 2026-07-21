@@ -5,14 +5,18 @@ import os
 import socket
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
+
+from websockets.sync.client import connect as websocket_connect
 
 from . import BROWSER_LABEL, PROJECT_ROOT, get_browser_version
 from . import _ipc as ipc
+from . import lifecycle
 from .utils import load_env_file
 
 
-NAME = os.environ.get("BU_NAME", "default")
 VERSION_CACHE = Path(tempfile.gettempdir()) / "flocks-browser-version-cache.json"
 VERSION_CACHE_TTL = 24 * 3600
 DOCTOR_TEXT_LIMIT = 140
@@ -31,12 +35,15 @@ def _load_env() -> None:
             continue
         load_env_file(path)
 
+
 _load_env()
+
+NAME = ipc.runtime_paths().name
 
 
 def _log_tail(name: str | None):
     try:
-        return ipc.log_path(name or NAME).read_text().strip().splitlines()[-1]
+        return ipc.log_path(name or NAME).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1]
     except (FileNotFoundError, IndexError):
         return None
 
@@ -63,46 +70,66 @@ def _configured_cdp_endpoint(env: dict | None = None) -> tuple[str | None, str |
     return None, None
 
 
+def _probe_cdp_websocket(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        return False, "invalid WebSocket URL"
+    try:
+        with websocket_connect(url, open_timeout=timeout, close_timeout=timeout) as websocket:
+            websocket.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+            response = json.loads(websocket.recv(timeout=timeout))
+        if not isinstance(response, dict) or response.get("id") != 1 or not isinstance(response.get("result"), dict):
+            return False, "Browser.getVersion returned an invalid response"
+    except Exception as error:
+        return False, f"connection failed ({type(error).__name__})"
+    return True, "CDP handshake succeeded"
+
+
+def _probe_cdp_endpoint(name: str, value: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Verify that an explicit CDP endpoint is reachable and speaks CDP."""
+    if name == "BU_CDP_WS":
+        return _probe_cdp_websocket(value, timeout)
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "invalid HTTP URL"
+    try:
+        with urllib.request.urlopen(f"{value.rstrip('/')}/json/version", timeout=timeout) as response:
+            payload = json.loads(response.read())
+        websocket_url = payload.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str):
+            return False, "/json/version did not return webSocketDebuggerUrl"
+    except Exception as error:
+        return False, f"connection failed ({type(error).__name__})"
+    return _probe_cdp_websocket(websocket_url, timeout)
+
+
 def _is_local_chrome_mode(env: dict | None = None) -> bool:
     return _configured_cdp_endpoint(env)[0] is None
 
 
 def daemon_alive(name: str | None = None) -> bool:
     try:
-        conn = ipc.connect(name or NAME, timeout=1.0)
-        conn.close()
+        ipc.identify(name or NAME, timeout=1.0)
         return True
-    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, socket.timeout, OSError):
+    except (
+        ipc.EndpointRecordError,
+        ipc.IPCProtocolError,
+        FileNotFoundError,
+        ConnectionRefusedError,
+        TimeoutError,
+        socket.timeout,
+        OSError,
+    ):
         return False
 
 
 def _daemon_endpoint_names() -> list[str]:
-    suffix = ".port" if ipc.IS_WINDOWS else ".sock"
-    if ipc.BU_TMP_DIR:
-        return [NAME] if (ipc._TMP / f"bu{suffix}").exists() else []
-    names: list[str] = []
-    for path in sorted(ipc._TMP.glob(f"bu-*{suffix}")):
-        raw = path.name[3 : -len(suffix)]
-        try:
-            ipc._check(raw)
-        except ValueError:
-            continue
-        names.append(raw)
-    return names
+    return ipc.discover_names()
 
 
 def _daemon_browser_connection(name: str):
-    conn = None
     try:
-        conn = ipc.connect(name, timeout=1.0)
-        conn.sendall(b'{"meta":"connection_status"}\n')
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = conn.recv(1 << 16)
-            if not chunk:
-                break
-            data += chunk
-        response = json.loads(data)
+        response = ipc.request(name, {"meta": "connection_status"}, timeout=1.0)
         if "error" in response:
             return None
         page = response.get("page")
@@ -110,6 +137,8 @@ def _daemon_browser_connection(name: str):
             page = {"title": page.get("title") or "(untitled)", "url": page.get("url") or ""}
         return {"name": name, "page": page}
     except (
+        ipc.EndpointRecordError,
+        ipc.IPCProtocolError,
         FileNotFoundError,
         ConnectionRefusedError,
         TimeoutError,
@@ -120,9 +149,12 @@ def _daemon_browser_connection(name: str):
         json.JSONDecodeError,
     ):
         return None
-    finally:
-        if conn:
-            conn.close()
+
+
+def daemon_browser_connected(name: str | None = None) -> bool:
+    """Return whether the selected daemon still has a live browser connection."""
+    effective_name = ipc.runtime_paths(name or NAME).name
+    return _daemon_browser_connection(effective_name) is not None
 
 
 def browser_connections() -> list[dict]:
@@ -140,18 +172,11 @@ def active_browser_connections() -> int:
 
 
 def _daemon_probe(name: str | None, req: dict) -> dict | None:
-    conn = None
     try:
-        conn = ipc.connect(name or NAME, timeout=3.0)
-        conn.sendall((json.dumps(req) + "\n").encode())
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = conn.recv(1 << 16)
-            if not chunk:
-                break
-            data += chunk
-        return json.loads(data)
+        return ipc.request(name or NAME, req, timeout=3.0)
     except (
+        ipc.EndpointRecordError,
+        ipc.IPCProtocolError,
         FileNotFoundError,
         ConnectionRefusedError,
         TimeoutError,
@@ -162,9 +187,6 @@ def _daemon_probe(name: str | None, req: dict) -> dict | None:
         json.JSONDecodeError,
     ):
         return None
-    finally:
-        if conn:
-            conn.close()
 
 
 def _daemon_has_current_protocol(name: str | None = None) -> bool:
@@ -178,9 +200,12 @@ def _daemon_has_current_protocol(name: str | None = None) -> bool:
 
 def stop_all_daemons() -> list[str]:
     """Stop all browser daemons visible from the current environment."""
-    names = _daemon_endpoint_names()
-    for name in names:
-        restart_daemon(name)
+    names, errors = lifecycle.stop_all_daemons()
+    if errors:
+        import sys
+
+        for name, error in errors.items():
+            print(f"{BROWSER_LABEL}: failed to stop browser session {name!r}: {error}", file=sys.stderr)
     return names
 
 
@@ -194,36 +219,60 @@ def ensure_daemon(
     wait: float = 60.0, name: str | None = None, env: dict | None = None, _open_inspect: bool = True
 ) -> None:
     """Ensure a healthy daemon is running, restarting stale sessions when needed."""
-    if daemon_alive(name):
-        if _daemon_has_current_protocol(name):
+    effective_name = ipc.runtime_paths(name or NAME).name
+    if ipc.endpoint_reachable(effective_name):
+        if daemon_alive(effective_name) and _daemon_has_current_protocol(effective_name):
             return
-        restart_daemon(name)
+        lifecycle.stop_daemon(effective_name)
 
     import subprocess
     import sys
 
     local = _is_local_chrome_mode(env)
     for attempt in (0, 1):
-        merged_env = {**os.environ, **({"BU_NAME": name} if name else {}), **(env or {})}
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "flocks.browser.daemon"],
-            env=merged_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **ipc.spawn_kwargs(),
-        )
+        merged_env = {
+            **os.environ,
+            **(env or {}),
+            "BU_NAME": effective_name,
+            "PYTHONIOENCODING": "utf-8:replace",
+        }
+        paths = ipc.runtime_paths(effective_name)
+        paths.ensure_root()
+
+        def spawn_daemon():
+            with paths.log.open("ab", buffering=0) as daemon_log:
+                return subprocess.Popen(
+                    [sys.executable, "-m", "flocks.browser.daemon"],
+                    env=merged_env,
+                    stdout=daemon_log,
+                    stderr=subprocess.STDOUT,
+                    **ipc.spawn_kwargs(),
+                )
+
+        proc = spawn_daemon()
         deadline = time.time() + wait
         while time.time() < deadline:
-            if daemon_alive(name):
+            if daemon_alive(effective_name):
                 return
-            if proc.poll() is not None:
+            return_code = proc.poll()
+            if return_code == ipc.LOCK_BUSY_EXIT_CODE:
+                retry_lock = ipc.DaemonLock(effective_name)
+                if retry_lock.acquire():
+                    retry_lock.release()
+                    proc = spawn_daemon()
+                else:
+                    time.sleep(0.2)
+                continue
+            if return_code is not None:
                 break
             time.sleep(0.2)
-        msg = _log_tail(name) or ""
+        msg = _log_tail(effective_name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
-            restart_daemon(name)
+            restart_daemon(effective_name)
             if not _open_inspect:
-                raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
+                raise RuntimeError(
+                    msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}"
+                )
             _open_browser_inspect()
             print(
                 f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
@@ -231,42 +280,12 @@ def ensure_daemon(
                 file=sys.stderr,
             )
             continue
-        raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
+        raise RuntimeError(msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}")
 
 
 def restart_daemon(name: str | None = None) -> None:
-    """Best-effort daemon shutdown and endpoint cleanup."""
-    import signal
-
-    pid_file = str(ipc.pid_path(name or NAME))
-    try:
-        conn = ipc.connect(name or NAME, timeout=5.0)
-        conn.sendall(b'{"meta":"shutdown"}\n')
-        conn.recv(1024)
-        conn.close()
-    except Exception:
-        pass
-    try:
-        pid = int(Path(pid_file).read_text())
-    except (FileNotFoundError, ValueError):
-        pid = None
-    if pid:
-        for _ in range(75):
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.2)
-            except (ProcessLookupError, OSError, SystemError):
-                break
-        else:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError, SystemError):
-                pass
-    ipc.cleanup_endpoint(name or NAME)
-    try:
-        os.unlink(pid_file)
-    except FileNotFoundError:
-        pass
+    """Safely stop a daemon and clean only artifacts protected by its lock."""
+    lifecycle.stop_daemon(name or NAME)
 
 
 def _version() -> str:
@@ -288,14 +307,14 @@ def _install_mode() -> str:
 
 def _cache_read() -> dict:
     try:
-        return json.loads(VERSION_CACHE.read_text())
+        return json.loads(VERSION_CACHE.read_text(encoding="utf-8-sig", errors="replace"))
     except (FileNotFoundError, ValueError):
         return {}
 
 
 def _cache_write(data: dict) -> None:
     try:
-        VERSION_CACHE.write_text(json.dumps(data))
+        ipc.atomic_write_text(VERSION_CACHE, json.dumps(data))
     except OSError:
         pass
 
@@ -460,7 +479,10 @@ def run_doctor() -> int:
     current = _version()
     mode = _install_mode()
     browser_running = _chrome_running()
-    endpoint_name, _endpoint_value = _configured_cdp_endpoint()
+    endpoint_name, endpoint_value = _configured_cdp_endpoint()
+    endpoint_ok, endpoint_detail = (True, "")
+    if endpoint_name and endpoint_value:
+        endpoint_ok, endpoint_detail = _probe_cdp_endpoint(endpoint_name, endpoint_value)
     daemon = daemon_alive()
     connections = browser_connections()
     latest = _latest_release_tag()
@@ -471,8 +493,10 @@ def run_doctor() -> int:
         mark = "ok  " if ok else "FAIL"
         print(f"  [{mark}] {label}{(' — ' + detail) if detail else ''}")
 
-    target_available = browser_running or bool(endpoint_name)
-    if connections:
+    target_available = endpoint_ok if endpoint_name else browser_running
+    if endpoint_name and not endpoint_ok:
+        next_action = f"fix {endpoint_name}, then run `flocks browser --setup`"
+    elif connections:
         next_action = "ready; use `flocks browser -c 'print(page_info())'`"
     elif target_available and daemon:
         next_action = "attach; run `flocks browser -c 'print(page_info())'` before setup"
@@ -490,7 +514,10 @@ def run_doctor() -> int:
     else:
         print("  latest release    (not configured)")
     if endpoint_name:
-        row("browser target", True, f"configured via {endpoint_name}")
+        detail = (
+            f"configured via {endpoint_name}" if endpoint_ok else f"{endpoint_name} is unreachable: {endpoint_detail}"
+        )
+        row("browser target", endpoint_ok, detail)
     else:
         row(
             "browser running",

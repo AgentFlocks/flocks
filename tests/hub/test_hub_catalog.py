@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from flocks.hub import local
 from flocks.hub.catalog import list_catalog, load_manifest, load_taxonomy
 from flocks.hub.files import file_tree, read_file_content
-from flocks.hub.installer import install_plugin, uninstall_plugin
+from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.plugin.loader import PluginLoader
 
 
@@ -75,6 +75,30 @@ def test_bundled_hub_catalog_loads():
     assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "device", "workflow", "webui", "component"}
 
 
+def test_hub_catalog_snapshot_reuses_manifest_parse_for_counts(monkeypatch: pytest.MonkeyPatch):
+    from flocks.hub import catalog as catalog_module
+
+    catalog_module.clear_catalog_caches()
+    original_read_yaml = catalog_module._read_yaml
+    calls = 0
+
+    def counted_read_yaml(path: Path):
+        nonlocal calls
+        calls += 1
+        return original_read_yaml(path)
+
+    monkeypatch.setattr(catalog_module, "_read_yaml", counted_read_yaml)
+
+    assert catalog_module.list_catalog()
+    initial_calls = calls
+    assert initial_calls > 0
+
+    catalog_module.category_counts()
+    catalog_module.list_catalog(plugin_type="device")
+
+    assert calls == initial_calls
+
+
 def test_workflow_catalog_exposes_chinese_names():
     entries = {entry.id: entry for entry in list_catalog(plugin_type="workflow")}
 
@@ -88,6 +112,162 @@ def test_soc_workspace_component_exposes_chinese_name():
     entries = {entry.id: entry for entry in list_catalog(plugin_type="component")}
 
     assert entries["soc-workspace"].nameCn == "SOC 工作区场景套件"
+
+
+async def test_chaitin_safeline_repair_release_replaces_broken_handler(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    plugin_id = "chaitin_safeline_waf_v1_0_0"
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "device"
+        / plugin_id
+    )
+    install_dir.mkdir(parents=True)
+    legacy_handler = install_dir / "chaitin_leichi_waf.handler.py"
+    legacy_handler.write_text("def broken(:\n", encoding="utf-8")
+
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="device")}
+    assert entries[plugin_id].state == "updateAvailable"
+    assert entries[plugin_id].version == "1.0.1"
+    assert entries[plugin_id].installedVersion is None
+
+    record = await update_plugin("device", plugin_id)
+
+    repaired_handler = install_dir / "chaitin_safeline_waf.handler.py"
+    assert record.version == "1.0.1"
+    assert local.get_record("device", plugin_id) == record
+    assert not legacy_handler.exists()
+    compile(repaired_handler.read_text(encoding="utf-8"), str(repaired_handler), "exec")
+
+
+async def test_hub_install_runtime_failure_rolls_back_new_plugin(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_refresh(_plugin_type, _changed_path=None):
+        raise RuntimeError("import failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_refresh)
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "python"
+        / "soc_workspace_query"
+    )
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        await install_plugin("tool", "soc_workspace_query")
+
+    assert not install_dir.exists()
+    assert local.get_record("tool", "soc_workspace_query") is None
+
+
+async def test_hub_update_runtime_failure_restores_previous_plugin(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "python"
+        / "soc_workspace_query"
+    )
+    install_dir.mkdir(parents=True)
+    old_handler = install_dir / "old_tool.py"
+    old_handler.write_text("OLD = True\n", encoding="utf-8")
+    previous_record = local.make_record(
+        plugin_type="tool",
+        plugin_id="soc_workspace_query",
+        version="0.9.0",
+        source="bundled:old",
+        install_path=install_dir,
+        scope="global",
+    )
+    local.save_installed_record(previous_record)
+    refresh_calls = 0
+
+    async def fail_then_recover(_plugin_type, _changed_path=None):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("import failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_then_recover)
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        await update_plugin("tool", "soc_workspace_query")
+
+    assert refresh_calls == 2
+    assert old_handler.read_text(encoding="utf-8") == "OLD = True\n"
+    assert not (install_dir / "soc_workspace_query.py").exists()
+    assert local.get_record("tool", "soc_workspace_query") == previous_record
+
+
+async def test_hub_webui_runtime_failure_rolls_back_package_and_access_contracts(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_refresh(_plugin_type, _changed_path=None):
+        raise RuntimeError("reconcile failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        await install_plugin("webui", "soc_ui")
+
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert local.get_record("webui", "soc_ui") is None
+
+
+def test_catalog_ignores_stale_record_when_legacy_install_is_inferred(
+    isolated_hub_env,
+):
+    plugin_id = "chaitin_safeline_waf_v1_0_0"
+    legacy_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "device"
+        / plugin_id
+    )
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy.yaml").write_text(
+        "name: legacy\nhandler:\n  type: http\n",
+        encoding="utf-8",
+    )
+    stale_record = local.make_record(
+        plugin_type="device",
+        plugin_id=plugin_id,
+        version="1.0.1",
+        source="bundled:stale",
+        install_path=isolated_hub_env["home"] / "missing",
+        scope="global",
+    )
+    local.save_installed_record(stale_record)
+
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="device")}
+
+    assert entries[plugin_id].state == "updateAvailable"
+    assert entries[plugin_id].installedVersion is None
+    assert entries[plugin_id].installPath == str(legacy_dir)
+    assert local.get_record("device", plugin_id) is None
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():
@@ -190,7 +370,7 @@ async def test_hub_installs_pentest_subagent(isolated_hub_env):
 
 
 async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -222,7 +402,7 @@ async def test_hub_webui_install_fails_when_bundle_build_fails(
     isolated_hub_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     def fail_build(_self, _page_id: str):
@@ -245,7 +425,7 @@ async def test_hub_installed_soc_webui_registers_alert_access_contract(
     isolated_hub_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -272,7 +452,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     isolated_hub_env,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -368,7 +548,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
 
 
 async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -397,7 +577,7 @@ async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, m
 
 
 async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -424,7 +604,7 @@ async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_
 
 
 async def test_hub_component_adopts_existing_soc_workspace_tool(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -449,7 +629,7 @@ async def test_hub_component_adopts_existing_soc_workspace_tool(isolated_hub_env
 
 
 async def test_hub_component_uninstall_cleans_adoptable_legacy_tool_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -472,7 +652,7 @@ async def test_hub_component_uninstall_cleans_adoptable_legacy_tool_record(isola
 
 
 async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -497,7 +677,7 @@ async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_h
 
 
 async def test_hub_component_install_failure_rolls_back_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def fail_tool_refresh(plugin_type):
+    async def fail_tool_refresh(plugin_type, _changed_path=None):
         if plugin_type == "tool":
             raise RuntimeError("tool refresh failed")
         return None
@@ -524,7 +704,7 @@ async def test_hub_component_install_failure_rolls_back_children(isolated_hub_en
 
 
 async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -558,7 +738,7 @@ async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, 
 
 
 async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
@@ -590,14 +770,35 @@ async def test_catalog_clears_stale_skill_record_after_external_delete(isolated_
 
 
 def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
+    from flocks.auth.context import AuthUser
+    from flocks.server.auth import require_admin
     from flocks.server.routes.hub import router
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="hub-test-admin",
+        username="hub-test-admin",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api")
     client = TestClient(app, raise_server_exceptions=True)
 
     catalog = client.get("/api/hub/catalog").json()
     assert any(item["id"] == "ndr-alert-analysis" for item in catalog)
+
+    catalog_page = client.get("/api/hub/catalog", params={"limit": 1, "offset": 0}).json()
+    assert isinstance(catalog_page, dict)
+    assert len(catalog_page["items"]) == 1
+    assert catalog_page["total"] == len(catalog)
+    assert catalog_page["limit"] == 1
+    assert catalog_page["facets"]["type"]
+    assert catalog_page["facets"]["state"]
+
+    taxonomy = client.get("/api/hub/categories", params={"include_counts": False}).json()
+    assert taxonomy["tags"]
+    assert "counts" not in taxonomy
 
     detail = client.get("/api/hub/plugins/skill/ndr-alert-analysis").json()
     assert detail["id"] == "ndr-alert-analysis"
@@ -631,6 +832,68 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
 
 
+def test_hub_paginated_facets_exclude_their_own_filter():
+    from flocks.hub.models import HubCatalogEntry
+    from flocks.server.routes import hub as hub_routes
+
+    entries = [
+        HubCatalogEntry(
+            id="skill-installed",
+            type="skill",
+            name="Installed skill",
+            category="security",
+            tags=["triage"],
+            useCases=["incident-response"],
+            trust="official",
+            riskLevel="low",
+            state="installed",
+            manifestPath="skills/installed.json",
+        ),
+        HubCatalogEntry(
+            id="agent-installed",
+            type="agent",
+            name="Installed agent",
+            category="security",
+            tags=["triage"],
+            useCases=["incident-response"],
+            trust="official",
+            riskLevel="low",
+            state="installed",
+            manifestPath="agents/installed.json",
+        ),
+        HubCatalogEntry(
+            id="skill-available",
+            type="skill",
+            name="Available skill",
+            category="productivity",
+            tags=["automation"],
+            useCases=["operations"],
+            trust="community",
+            riskLevel="medium",
+            state="available",
+            manifestPath="skills/available.json",
+        ),
+    ]
+
+    facets = hub_routes._build_hub_catalog_facets_for_filters(
+        entries,
+        {
+            "plugin_type": "skill",
+            "category": None,
+            "tags": None,
+            "use_cases": None,
+            "state": ["installed"],
+            "trust": None,
+            "risk": None,
+            "q": None,
+        },
+    )
+
+    assert facets.type == {"skill": 1, "agent": 1}
+    assert facets.state == {"installed": 1, "available": 1}
+    assert facets.category == {"security": 1}
+
+
 def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
     from flocks.server.routes import hub as hub_routes
 
@@ -647,15 +910,24 @@ def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
 
 
 def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    from flocks.auth.context import AuthUser
+    from flocks.server.auth import require_admin
     from flocks.server.routes.hub import router
 
-    async def noop_refresh(_plugin_type):
+    async def noop_refresh(_plugin_type, _changed_path=None):
         return None
 
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
     _patch_webui_bundle_build(monkeypatch)
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="hub-test-admin",
+        username="hub-test-admin",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api")
     client = TestClient(app, raise_server_exceptions=True)
 

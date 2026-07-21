@@ -1,13 +1,14 @@
 import React from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/types';
 
 import {
-  areChatMessagePartsRenderEqual,
+  areChatTimelineItemsRenderEqual,
   buildInstructionDisplayText,
+  buildChatTimelineItems,
   buildContextUsageBreakdown,
   buildTodoSummary,
   ChatMessageBubble,
@@ -29,9 +30,11 @@ import {
   isActiveSessionStatus,
   listUploadedDocumentPaths,
   shouldRenderMessage,
+  shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
@@ -163,9 +166,13 @@ vi.mock('@/hooks/useReasoningToggle', () => ({
   }),
 }));
 
-vi.mock('@/hooks/usePendingQuestions', () => ({
-  usePendingQuestions: () => pendingQuestionsHookMock,
-}));
+vi.mock('@/features/session-chat', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/session-chat')>();
+  return {
+    ...actual,
+    usePendingQuestions: () => pendingQuestionsHookMock,
+  };
+});
 
 vi.mock('./Toast', () => ({
   useToast: () => toastMock,
@@ -428,6 +435,16 @@ describe('getMessageBubbleClassName', () => {
   // The message column owns the available width, so the inner bubble only
   // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
   // assert width semantics, not legacy max-width literals.
+  it('allows every bubble variant to shrink within the message column', () => {
+    for (const compact of [false, true]) {
+      for (const isUser of [false, true]) {
+        const className = getMessageBubbleClassName({ compact, isUser, isEditing: false });
+        expect(className).toContain('min-w-0');
+        expect(className).toContain('max-w-full');
+      }
+    }
+  });
+
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -436,7 +453,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-auto');
-    expect(className).not.toContain('w-full');
+    expect(className.split(' ')).not.toContain('w-full');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
@@ -996,6 +1013,155 @@ describe('getRenderableThinkingText', () => {
   });
 });
 
+describe('ChatMessageBubble reasoning streaming', () => {
+  it.each(['reasoning', 'thinking'] as const)(
+    'paces an active %s part after a tool and flushes the completed text',
+    (partType) => {
+      type RafCallback = (time: number) => void;
+      const callbacks = new Map<number, RafCallback>();
+      let nextRafId = 0;
+      vi.stubGlobal('requestAnimationFrame', (callback: RafCallback) => {
+        const id = ++nextRafId;
+        callbacks.set(id, callback);
+        return id;
+      });
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+        callbacks.delete(id);
+      });
+
+      const makeReasoningMessage = (text: string, finish?: Message['finish']) => makeMessage({
+        id: 'assistant-reasoning-stream',
+        role: 'assistant',
+        finish,
+        parts: [
+          {
+            id: 'tool-before-reasoning',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: 'tool',
+            tool: 'read',
+            state: { status: 'completed', output: 'done' },
+          } as any,
+          {
+            id: 'reasoning-stream',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: partType,
+            text,
+          } as any,
+        ],
+      });
+
+      let unmount = () => {};
+      try {
+        const rendered = render(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思'),
+          isActive: true,
+        }));
+        unmount = rendered.unmount;
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程'),
+          isActive: true,
+        }));
+
+        expect(screen.getByText('思考中...')).toBeInTheDocument();
+        expect(screen.getByText('思')).toBeInTheDocument();
+        expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
+
+        act(() => {
+          const pending = [...callbacks.values()];
+          callbacks.clear();
+          pending.forEach(callback => callback(1000 / 60));
+        });
+        expect(screen.getByText('思考')).toBeInTheDocument();
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程', 'stop'),
+          isActive: false,
+        }));
+        expect(screen.getByText('思考过程')).toBeInTheDocument();
+      } finally {
+        unmount();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it('does not animate reasoning while its process group is closed', () => {
+    let nextRafId = 0;
+    const requestAnimationFrameSpy = vi.fn(() => ++nextRafId);
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrameSpy);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    const messageId = 'assistant-hidden-reasoning';
+    const processGroupKey = `${messageId}:process:0`;
+    const makeHiddenReasoningMessage = (text: string) => makeMessage({
+      id: messageId,
+      role: 'assistant',
+      parts: [
+        {
+          id: 'tool-before-hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'completed', output: 'done' },
+        } as any,
+        {
+          id: 'hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text,
+        } as any,
+      ],
+    });
+
+    let unmount = () => {};
+    try {
+      const rendered = render(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      unmount = rendered.unmount;
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新继续'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('getMessageErrorText', () => {
   it('prefers user-facing display messages over raw provider errors', () => {
     expect(getMessageErrorText(makeMessage({
@@ -1025,6 +1191,146 @@ describe('getMessageErrorText', () => {
       id: 'assistant-error',
       error: { code: 'SessionError' } as any,
     }))).toBe('SessionError');
+  });
+});
+
+describe('shouldForwardSSEEventToParent', () => {
+  it('forwards global workflow, task, and session update events', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'workflow.updated',
+      properties: { id: 'workflow-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'task.updated',
+      properties: { executionID: 'task-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'session.updated',
+      properties: { id: 'other-session' },
+    }, 'sess-1')).toBe(true);
+  });
+
+  it('forwards chat events only for the current session', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'sess-1' } },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'other-session' } },
+    }, 'sess-1')).toBe(false);
+    expect(shouldForwardSSEEventToParent({
+      type: 'context.usage.updated',
+      properties: { sessionID: 'other-session' },
+    }, 'sess-1')).toBe(false);
+  });
+
+  it('skips heartbeat-style events without payloads', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'server.heartbeat',
+    }, 'sess-1')).toBe(false);
+  });
+});
+
+describe('buildChatTimelineItems', () => {
+  it('filters skipped and non-renderable messages while marking the active assistant', () => {
+    const messages = [
+      makeMessage({
+        id: 'user-1',
+        role: 'user',
+        parts: [{ id: 'user-part', type: 'text', text: 'hello' }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'synthetic-1',
+        role: 'assistant',
+        parts: [{ id: 'synthetic-part', type: 'text', text: '', synthetic: true }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-active',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set([1]),
+      isStreaming: true,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['user-1', 'assistant-active']);
+    expect(items.map((item) => item.isActive)).toEqual([false, true]);
+  });
+
+  it('keeps the same visible set when not streaming', () => {
+    const messages = [
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-text',
+        role: 'assistant',
+        parts: [{ id: 'text-part', type: 'text', text: 'done' }] as Message['parts'],
+        finish: 'stop',
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set(),
+      isStreaming: false,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['assistant-text']);
+    expect(items[0].isActive).toBe(false);
+  });
+});
+
+describe('areChatTimelineItemsRenderEqual', () => {
+  it('treats cloned assistant messages with identical visible parts as equal', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      agent: 'rex',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+      finish: 'stop',
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(true);
+  });
+
+  it('detects visible text changes in otherwise stable timeline items', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello world' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(false);
   });
 });
 
@@ -1953,6 +2259,32 @@ describe('SessionChat agent mentions', () => {
         }),
       );
     });
+  });
+});
+
+describe('SessionChat slash command routing', () => {
+  it('sends absolute filesystem paths as normal prompts instead of slash commands', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    const text = '/tmp/stream_alert_denoise/rex_integration_guide.md\n\nuse this file';
+    const textarea = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: text } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: [{ type: 'text', text }],
+        }),
+      );
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/command',
+      expect.anything(),
+    );
   });
 });
 

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
@@ -28,7 +30,7 @@ from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.utils.monitor import get_monitor
-from flocks.server.auth import require_user
+from flocks.server.auth import API_TOKEN_SERVICE_USER_ID, require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
@@ -37,6 +39,10 @@ log = Log.create(service="session-routes")
 DEFAULT_AGENT = "rex"
 DEFAULT_MESSAGE_PAGE_LIMIT = 50
 _DESCENDANT_ABORT_SCAN_LIMIT = 3
+_CONTEXT_USAGE_CACHE_TTL_SECONDS = 5.0
+_context_usage_cache: Dict[Tuple[str, int], Tuple[float, ContextUsageSnapshot]] = {}
+_context_usage_inflight: Dict[Tuple[str, int], asyncio.Task[ContextUsageSnapshot]] = {}
+_context_usage_cache_lock = asyncio.Lock()
 
 # File extensions that are safe to persist when materialising data-URL uploads.
 # Intentionally narrow: any extension outside this set is rejected to prevent
@@ -44,6 +50,115 @@ _DESCENDANT_ABORT_SCAN_LIMIT = 3
 # extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
+_UPLOAD_EXT_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+}
+
+
+def _session_uploads_dir(session_id: str) -> Path:
+    """Return the application-owned upload directory for one session."""
+    from flocks.config.config import Config
+
+    uploads_root = (Config.get_data_path() / "uploads").resolve()
+    target = (uploads_root / session_id).resolve()
+    if target == uploads_root or not target.is_relative_to(uploads_root):
+        raise ValueError(f"Invalid session ID for upload path: {session_id}")
+    return target
+
+
+def _materialize_data_url_part(
+    session_id: str,
+    data_url: str,
+    mime_hint: str,
+    filename_hint: Optional[str],
+    *,
+    failure_event: str = "session.prompt_queue.materialize_failed",
+) -> str:
+    """Persist a data URL under the application data directory."""
+    try:
+        import base64
+        from flocks.utils.id import Identifier
+
+        _header, _sep, encoded = data_url.partition(",")
+        if not encoded:
+            return data_url
+        raw_bytes = base64.b64decode(encoded)
+        uploads_root = _session_uploads_dir(session_id)
+        uploads_root.mkdir(parents=True, exist_ok=True)
+
+        ext = _UPLOAD_EXT_BY_MIME.get(mime_hint, "")
+        if not ext and filename_hint:
+            _, _, tail = filename_hint.rpartition(".")
+            if tail.lower() in _UPLOAD_SAFE_EXTS:
+                ext = "." + tail.lower()
+        target = uploads_root / f"{Identifier.create('part')}{ext}"
+        target.write_bytes(raw_bytes)
+        return target.resolve().as_uri()
+    except Exception as exc:
+        log.warn(failure_event, {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
+        return data_url
+
+
+def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[str, int]:
+    return session_id, int(getattr(session.time, "updated", 0) or 0)
+
+
+async def _build_context_usage_for_cache(
+    key: Tuple[str, int],
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    current_task = asyncio.current_task()
+    try:
+        snapshot = await build_context_usage_snapshot(session_id, session=session)
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is not current_task:
+                return snapshot
+            for cache_key in [item for item in _context_usage_cache if item[0] == session_id and item[1] < key[1]]:
+                _context_usage_cache.pop(cache_key, None)
+            has_newer_cache = any(item[0] == session_id and item[1] > key[1] for item in _context_usage_cache)
+            if not has_newer_cache:
+                _context_usage_cache[key] = (
+                    time.monotonic() + _CONTEXT_USAGE_CACHE_TTL_SECONDS,
+                    snapshot.model_copy(deep=True),
+                )
+        return snapshot
+    finally:
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is current_task:
+                _context_usage_inflight.pop(key, None)
+
+
+async def _cached_context_usage_snapshot(
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    key = _context_usage_cache_key(session_id, session)
+    now = time.monotonic()
+
+    async with _context_usage_cache_lock:
+        cached = _context_usage_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
+        task = _context_usage_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(_build_context_usage_for_cache(key, session_id, session=session))
+            _context_usage_inflight[key] = task
+
+    snapshot = await asyncio.shield(task)
+    return snapshot.model_copy(deep=True)
 
 # =============================================================================
 # Request/Response Models - API Compatible (camelCase)
@@ -72,6 +187,7 @@ class SessionCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     
     parentID: Optional[str] = Field(None, alias="parent_id", description="Parent session ID")
+    projectID: Optional[str] = Field(None, alias="project_id", description="Project ID")
     title: Optional[str] = Field(None, description="Session title")
     permission: Optional[List[PermissionRule]] = Field(None, description="Permission rules")
     category: Optional[str] = Field(None, description="Session category (e.g. 'user', 'workflow')")
@@ -118,6 +234,7 @@ class SessionResponse(BaseModel):
     id: str = Field(..., description="Session ID")
     slug: str = Field("", description="Session slug")
     projectID: str = Field(..., description="Project ID")
+    effectiveProjectID: str = Field(..., description="Project used for session manager grouping")
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
@@ -143,6 +260,9 @@ class SessionListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
 
     id: str
+    projectID: str
+    effectiveProjectID: str
+    directory: str
     title: str
     time: SessionTime
     category: str = "user"
@@ -155,19 +275,31 @@ class SessionListItem(BaseModel):
     isShared: bool = False
 
 
-def _session_to_response(session: SessionModel) -> SessionResponse:
+def _session_to_response(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
     """
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_shared(session)
+    is_shared = SessionPolicy.is_shared(session, shared_project_ids)
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
 
     return SessionResponse(
         id=session.id,
         slug=session.slug,
         projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
         directory=session.directory,
         title=session.title,
         version=session.version,
@@ -193,11 +325,25 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     )
 
 
-def _session_to_list_item(session: SessionModel) -> SessionListItem:
+def _session_to_list_item(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
     return SessionListItem(
         id=session.id,
+        projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
+        directory=session.directory,
         title=session.title,
         time=SessionTime(
             created=session.time.created,
@@ -212,13 +358,17 @@ def _session_to_list_item(session: SessionModel) -> SessionListItem:
         model_pinned=session.model_pinned,
         canWrite=SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
-        isShared=SessionPolicy.is_shared(session),
+        isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
 
 
-async def _session_to_response_with_goal(session: SessionModel) -> SessionResponse:
+async def _session_to_response_with_goal(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """Convert SessionModel to SessionResponse and attach persisted goal state."""
-    response = _session_to_response(session)
+    response = _session_to_response(session, effective_project_id, shared_project_ids)
     try:
         from flocks.session.goal import GoalManager
 
@@ -306,6 +456,56 @@ async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionMode
         reset_current_auth_user(token)
 
 
+async def _resolve_session_working_directory(session: SessionModel) -> str:
+    """Keep a valid historical cwd, otherwise use the user's default project."""
+
+    if session.directory:
+        directory = Path(session.directory).expanduser()
+        if directory.is_dir() and os.access(directory, os.R_OK | os.X_OK):
+            return str(directory.resolve())
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+
+    current_user = get_current_auth_user()
+    owner_id = current_user.id if current_user else API_TOKEN_SERVICE_USER_ID
+    default_project = await Project.get(
+        DEFAULT_PROJECT_ID,
+        owner_id=owner_id,
+        default_worktree=Project.default_worktree_candidate(),
+    )
+    if default_project is None or default_project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The session directory and default project directory are unavailable",
+        )
+    log.warn(
+        "session.directory.fallback",
+        {
+            "sessionID": session.id,
+            "stored_directory": session.directory,
+            "fallback_directory": default_project.worktree,
+        },
+    )
+    try:
+        from flocks.server.routes.event import publish_event
+
+        await publish_event(
+            "session.notice",
+            {
+                "sessionID": session.id,
+                "kind": "directory-fallback",
+                "storedDirectory": session.directory,
+                "fallbackDirectory": default_project.worktree,
+            },
+        )
+    except Exception as exc:
+        log.debug(
+            "session.directory.fallback_notice_failed",
+            {"sessionID": session.id, "error": str(exc)},
+        )
+    return default_project.worktree
+
+
 async def _publish_context_usage_update(
     event_publish_callback,
     session_id: str,
@@ -383,6 +583,7 @@ async def list_sessions(
     view: Optional[Literal["list"]] = Query(None, description="Use lightweight list rows"),
     manager: Optional[bool] = Query(None, description="Apply session-manager visibility filters"),
     directory: Optional[str] = Query(None, description="Filter by project directory"),
+    projectID: Optional[str] = Query(None, description="Filter by effective project ID"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
     search: Optional[str] = Query(None, description="Filter by title (case-insensitive)"),
@@ -392,20 +593,37 @@ async def list_sessions(
 ) -> List[Union[SessionResponse, SessionListItem]]:
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
-    _current_user = require_user(request)
+    current_user = require_user(request)
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
     list_started_at = time.perf_counter()
-    all_sessions = await Session.list_all()
+    all_sessions = await Session.list_all_unfiltered()
     list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
     
     filtered = []
+    effective_project_ids: Dict[str, str] = {}
     term = search.lower() if search else None
     manager_categories = {"user", "workflow", "entity-config"}
     skip_remaining = offset or 0
     
     for session in all_sessions:
+        if not SessionPolicy.can_read(
+            session,
+            current_user,
+            shared_project_ids=shared_project_ids,
+        ):
+            continue
         if _is_hidden_from_session_manager(session):
             continue
         if directory is not None and session.directory != directory:
+            continue
+        effective_project_id = (
+            session.project_id
+            if session.project_id in visible_project_ids
+            else DEFAULT_PROJECT_ID
+        )
+        if projectID is not None and effective_project_id != projectID:
             continue
         if (roots or manager) and session.parent_id:
             continue
@@ -428,12 +646,16 @@ async def list_sessions(
             continue
         
         filtered.append(session)
+        effective_project_ids[session.id] = effective_project_id
         
         if limit is not None and len(filtered) >= limit:
             break
 
     if view == "list":
-        response = [_session_to_list_item(s) for s in filtered]
+        response = [
+            _session_to_list_item(s, effective_project_ids[s.id], shared_project_ids)
+            for s in filtered
+        ]
         log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
             "total": len(all_sessions),
             "count": len(response),
@@ -443,11 +665,19 @@ async def list_sessions(
             "offset": offset,
             "search": bool(search),
             "category": category,
+            "projectID": projectID,
             "list_ms": round(list_elapsed_ms, 2),
         })
         return response
 
-    response = [await _session_to_response_with_goal(s) for s in filtered]
+    response = [
+        await _session_to_response_with_goal(
+            s,
+            effective_project_ids[s.id],
+            shared_project_ids,
+        )
+        for s in filtered
+    ]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
@@ -456,6 +686,7 @@ async def list_sessions(
         "offset": offset,
         "search": bool(search),
         "category": category,
+        "projectID": projectID,
         "list_ms": round(list_elapsed_ms, 2),
     })
     return response
@@ -472,19 +703,28 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     """Create a new session"""
     current_user = require_user(http_request)
     await assert_license_active(feature="session_create")
-    import os
-    
     if request is None:
         request = SessionCreateRequest()
-    
-    # Use Instance context if available, otherwise use cwd
-    from flocks.project.instance import Instance
-    try:
-        directory = Instance.directory
-        project_id = Instance.project.id if hasattr(Instance, 'project') else "default"
-    except Exception:
-        directory = os.getcwd()
-        project_id = "default"
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+
+    project_id = request.projectID or DEFAULT_PROJECT_ID
+    project = await Project.get(
+        project_id,
+        owner_id=current_user.id,
+        default_worktree=Project.default_worktree_candidate(),
+    )
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {project_id} not found",
+        )
+    if project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project directory is {project.path_status}",
+        )
+    directory = project.worktree
     
     # Trigger command:new hook if creating from parent (like /new command)
     if request.parentID:
@@ -527,6 +767,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             )
             for p in request.permission
         ]
+
+    is_api_token_client = current_user.id == API_TOKEN_SERVICE_USER_ID
     
     session = await Session.create(
         project_id=project_id,
@@ -534,9 +776,11 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         title=request.title,
         parent_id=request.parentID,
         permission=permission,
-        owner_user_id=current_user.id,
+        owner_user_id=None if is_api_token_client else current_user.id,
+        owner_username=None if is_api_token_client else current_user.username,
         **({"category": request.category} if request.category else {}),
     )
+    Project.invalidate_session_stats()
 
     log.info("session.created", {"session_id": session.id})
     try:
@@ -549,7 +793,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 "user_name": current_user.username,
                 "username": current_user.username,
                 "session_id": session.id,
-                "owner_user_id": current_user.id,
+                "owner_user_id": session.owner_user_id,
                 "project_id": session.project_id,
             },
         )
@@ -597,7 +841,7 @@ async def get_session_context_usage(sessionID: str, request: Request) -> Context
             detail=f"Session {sessionID} not found",
         )
     _require_session_read_access(session, current_user)
-    snapshot = await build_context_usage_snapshot(sessionID, session=session)
+    snapshot = await _cached_context_usage_snapshot(sessionID, session=session)
     log_route_timing(log, "session.context_usage.complete", started_at=started_at, extra={
         "sessionID": sessionID,
         "source": snapshot.source,
@@ -720,19 +964,19 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     await _wait_for_sessions_idle([sessionID])
     await _abort_and_wait_descendant_sessions(session.project_id, sessionID)
     await Session.delete(session.project_id, sessionID)
+    from flocks.project.project import Project
+
+    Project.invalidate_session_stats()
 
     # Best-effort cleanup of any image/file uploads materialised for this
-    # session via ``_materialize_data_url_to_disk`` (see prompt_async).
+    # session via ``_materialize_data_url_part`` (see prompt_async).
     # The session DB row is gone, so the on-disk bytes are now orphaned —
-    # remove them to keep the workspace tidy. We deliberately swallow any
+    # remove them to keep application data tidy. We deliberately swallow any
     # filesystem errors: deletion of the session record is the contract,
     # the upload cleanup is incidental.
     try:
         import shutil
-        from flocks.workspace.manager import WorkspaceManager
-
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
+        uploads_root = _session_uploads_dir(sessionID)
         if uploads_root.exists() and uploads_root.is_dir():
             shutil.rmtree(uploads_root, ignore_errors=True)
             log.info("session.uploads.cleaned", {
@@ -884,11 +1128,7 @@ async def update_session(
 )
 async def share_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -896,11 +1136,15 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=True, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -917,11 +1161,7 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
 )
 async def unshare_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -929,11 +1169,15 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=False, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1159,11 +1403,13 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
         if msg.role == MessageRole.USER:
             current_agent = msg.agent or DEFAULT_AGENT
             break
+
+    working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
         try:
             await Instance.provide(
-                directory=session.directory,
+                directory=working_directory,
                 init=instance_bootstrap,
                 fn=lambda: _run_session_compaction(
                     sessionID,
@@ -1172,6 +1418,7 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
                     explicit_model_id=request.modelID,
                     auto=request.auto,
                     event_publish_callback=publish_event,
+                    working_directory=working_directory,
                 ),
             )
         except Exception as e:
@@ -1944,6 +2191,7 @@ async def _run_existing_user_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     if result.action == "queued":
@@ -2073,7 +2321,7 @@ async def resend_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
@@ -2168,7 +2416,7 @@ async def regenerate_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
@@ -2233,7 +2481,7 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
     current_user = require_user(http_request)
     _require_session_write_access(session, current_user)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     
     log.info("session.message.send.processing", {
         "sessionID": sessionID,
@@ -2417,6 +2665,7 @@ async def _run_session_compaction(
     auto: bool = False,
     event_publish_callback=None,
     focus_instruction: Optional[str] = None,
+    working_directory: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Execute session compaction directly without routing through the LLM loop.
 
@@ -2434,6 +2683,8 @@ async def _run_session_compaction(
     session = await Session.get_by_id(session_id)
     if not session:
         raise ValueError(f"Session {session_id} not found")
+    if working_directory:
+        session = session.model_copy(update={"directory": working_directory})
 
     await SessionRevert.cleanup(session)
     agent_name, provider_id, model_id = await _resolve_compaction_context(
@@ -2704,51 +2955,6 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     from flocks.session.message import FilePart
 
-    def _materialize_data_url_to_disk(
-        data_url: str, mime_hint: str, filename_hint: Optional[str]
-    ) -> str:
-        """Decode a ``data:`` URL to ``~/.flocks/workspace/uploads/<session>/...``.
-
-        Returns a ``file://`` URL pointing at the persisted file. On failure
-        the original ``data:`` URL is returned unchanged (older code paths
-        still cope with that, just with the now-known token-cost penalty).
-        """
-        try:
-            import base64
-            from flocks.workspace.manager import WorkspaceManager
-
-            header, _, encoded = data_url.partition(",")
-            if not encoded:
-                return data_url
-            raw_bytes = base64.b64decode(encoded)
-
-            ws = WorkspaceManager.get_instance()
-            # Use resolve_workspace_path to guard against path traversal if
-            # sessionID were ever user-controlled (e.g. ../../../tmp/x).
-            uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
-            uploads_root.mkdir(parents=True, exist_ok=True)
-
-            ext_map = {
-                "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
-                "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
-                "application/pdf": ".pdf",
-            }
-            ext = ext_map.get(mime_hint, "")
-            if not ext and filename_hint:
-                _, _, tail = filename_hint.rpartition(".")
-                if tail.lower() in _UPLOAD_SAFE_EXTS:
-                    ext = "." + tail.lower()
-            unique_name = f"{Identifier.create('part')}{ext}"
-            target = uploads_root / unique_name
-            target.write_bytes(raw_bytes)
-            return target.resolve().as_uri()
-        except Exception as exc:
-            log.warn("session.message.file_part.materialize_failed", {
-                "sessionID": sessionID,
-                "error": str(exc),
-            })
-            return data_url
-
     for raw_part in request.parts or []:
         part_type = raw_part.get("type")
         if part_type == "text":
@@ -2764,7 +2970,13 @@ async def _process_session_message(
                 continue
             # Materialize ``data:`` URLs to disk before persisting the part.
             if url.startswith("data:"):
-                url = _materialize_data_url_to_disk(url, mime, raw_part.get("filename"))
+                url = _materialize_data_url_part(
+                    sessionID,
+                    url,
+                    mime,
+                    raw_part.get("filename"),
+                    failure_event="session.message.file_part.materialize_failed",
+                )
             file_part_id = raw_part.get("id") or Identifier.create("part")
             file_part = FilePart(
                 id=file_part_id,
@@ -2867,6 +3079,7 @@ async def _process_session_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     # ------------------------------------------------------------------
@@ -3217,50 +3430,6 @@ def _materialize_queued_parts(session_id: str, parts: List[Dict[str, Any]]) -> L
     return prepared
 
 
-def _materialize_data_url_part(
-    session_id: str,
-    data_url: str,
-    mime_hint: str,
-    filename_hint: Optional[str],
-) -> str:
-    try:
-        import base64
-        from flocks.workspace.manager import WorkspaceManager
-        from flocks.utils.id import Identifier
-
-        _header, _sep, encoded = data_url.partition(",")
-        if not encoded:
-            return data_url
-        raw_bytes = base64.b64decode(encoded)
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{session_id}")
-        uploads_root.mkdir(parents=True, exist_ok=True)
-
-        ext_map = {
-            "image/png": ".png",
-            "image/jpeg": ".jpg",
-            "image/jpg": ".jpg",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-            "image/bmp": ".bmp",
-            "application/pdf": ".pdf",
-        }
-        ext = ext_map.get(mime_hint, "")
-        if not ext and filename_hint:
-            _, _, tail = filename_hint.rpartition(".")
-            if tail.lower() in _UPLOAD_SAFE_EXTS:
-                ext = "." + tail.lower()
-        target = uploads_root / f"{Identifier.create('part')}{ext}"
-        target.write_bytes(raw_bytes)
-        return target.resolve().as_uri()
-    except Exception as exc:
-        log.warn("session.prompt_queue.materialize_failed", {
-            "sessionID": session_id,
-            "error": str(exc),
-        })
-        return data_url
-
-
 def _event_from_queued_prompt(item, working_directory: str):
     from flocks.input.events import UserInputEvent
 
@@ -3561,6 +3730,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             auto=False,
             event_publish_callback=publish_event,
             focus_instruction=focus_instruction,
+            working_directory=working_directory,
         )
         return True
 
@@ -3715,7 +3885,7 @@ async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, A
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     try:
         await InteractionQueue.promote(sessionID, queueID)
     except QueueItemNotFoundError as exc:
@@ -3757,7 +3927,7 @@ async def send_session_message_async(
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
@@ -3854,7 +4024,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:

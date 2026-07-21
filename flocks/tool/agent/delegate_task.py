@@ -458,9 +458,13 @@ async def delegate_task_tool(
     if not parent_session:
         return ToolResult(success=False, error="Parent session not found")
 
+    from flocks.project.instance import Instance
+
+    runtime_directory = Instance.get_directory() or parent_session.directory
+
     create_kwargs = dict(
         project_id=parent_session.project_id,
-        directory=parent_session.directory,
+        directory=runtime_directory,
         title=f"{description} (@{agent_to_use} subagent)",
         parent_id=parent_session.id,
         agent=agent_to_use,

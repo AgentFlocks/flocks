@@ -31,7 +31,7 @@ import {
 import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
-  CustomModelCreate,
+  CustomModelCreate, ProviderCredentialInput,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -418,7 +418,7 @@ export default function ModelPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -505,7 +505,15 @@ export default function ModelPage() {
                   onConfigure={async () => {
                     await handleSelectProvider(provider);
                     if (selectedProviderRef.current?.id === provider.id) {
-                      setShowConfigDialog(true);
+                      try {
+                        const res = await providerAPI.revealCredentials(provider.id);
+                        if (selectedProviderRef.current?.id === provider.id) {
+                          setCredentials(res.data);
+                          setShowConfigDialog(true);
+                        }
+                      } catch (err: any) {
+                        toast.error(t('configFailed'), err.message);
+                      }
                     }
                   }}
                 />
@@ -554,7 +562,10 @@ export default function ModelPage() {
           provider={selectedProvider}
           existingCredentials={credentials}
           models={providerModels}
-          onClose={() => setShowConfigDialog(false)}
+          onClose={() => {
+            setShowConfigDialog(false);
+            setCredentials(null);
+          }}
           onConfigured={async () => {
             if (selectedProvider) {
               const res = await providerAPI.getCredentials(selectedProvider.id).catch(() => ({ data: null }));
@@ -2179,7 +2190,11 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
 
 function allowsBuiltInVisionToggle(modelId: string): boolean {
   const lowered = modelId.toLowerCase();
-  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+  return (
+    lowered.includes('qwen3.6-plus')
+    || lowered.includes('kimi-k2.6')
+    || lowered.includes('kimi-k2.7-code')
+  );
 }
 
 // ==================== Configure Dialog ====================
@@ -2269,19 +2284,22 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   };
 
   const handleSubmit = async () => {
-    if (!apiKey.trim() && !providerAllowsEmptyApiKey(provider.id)) {
+    const nextApiKey = apiKey.trim();
+    const apiKeyChanged = nextApiKey !== existingKey.trim();
+    if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
       toast.warning('Please enter API Key');
       return;
     }
     try {
       setLoading(true);
-      await providerAPI.setCredentials(provider.id, {
-        api_key: apiKey.trim() || 'not-needed',
+      const payload: ProviderCredentialInput = {
         base_url: baseUrl.trim() || undefined,
         provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
           ? (providerName.trim() || undefined)
           : undefined,
-      });
+      };
+      if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
+      await providerAPI.setCredentials(provider.id, payload);
 
       // Sync catalog model list: add newly selected, delete deselected
       if (catalogModels.length > 0) {
@@ -2320,24 +2338,29 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
       { apiKey, baseUrl },
     );
 
+    const nextApiKey = apiKey.trim();
+    const apiKeyChanged = nextApiKey !== existingKey.trim();
+    if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
+      toast.warning('Please enter API Key first');
+      return;
+    }
+
     // Persist pending credential changes before testing so the backend uses
     // the latest base URL even when the API key itself did not change.
-    if (apiKey.trim() && hasPendingChanges) {
+    if (hasPendingChanges) {
       try {
-        await providerAPI.setCredentials(provider.id, {
-          api_key: apiKey.trim(),
+        const payload: ProviderCredentialInput = {
           base_url: baseUrl.trim() || undefined,
           provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
             ? (providerName.trim() || undefined)
             : undefined,
-        });
+        };
+        if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
+        await providerAPI.setCredentials(provider.id, payload);
       } catch (err: any) {
         toast.error(t('deleteFailed'), err.message);
         return;
       }
-    } else if (!apiKey.trim() && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning('Please enter API Key first');
-      return;
     }
     try {
       setTesting(true);
@@ -2451,7 +2474,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1.5">
             API Key
-            {!providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
+            {!hasExisting && !providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
             {provider.id === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
             {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
               <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
@@ -2464,7 +2487,9 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               onChange={(e) => setApiKey(e.target.value)}
               className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
               placeholder={
-                provider.id === 'ollama'
+                hasExisting
+                  ? t('form.apiKeyKeepExisting')
+                  : provider.id === 'ollama'
                   ? 'Not required, leave empty'
                   : providerAllowsEmptyApiKey(provider.id)
                     ? t('form.apiKeyOptionalPlaceholder')

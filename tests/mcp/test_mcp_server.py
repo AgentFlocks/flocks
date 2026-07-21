@@ -4,7 +4,10 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData, METHOD_NOT_FOUND
 
+from flocks.mcp import server as mcp_server_module
 from flocks.mcp.server import McpServerManager
 from flocks.mcp.types import McpStatus
 
@@ -43,6 +46,19 @@ class _FakeMcpClient:
         return []
 
 
+def test_status_snapshot_is_read_only_and_does_not_initialize():
+    manager = McpServerManager()
+    status = SimpleNamespace(status=McpStatus.DISCONNECTED)
+    manager._status["demo"] = status
+
+    snapshot, initialized = manager.status_snapshot()
+
+    assert initialized is False
+    assert snapshot == {"demo": status}
+    snapshot.clear()
+    assert manager._status == {"demo": status}
+
+
 @pytest.mark.asyncio
 async def test_connect_and_register_accepts_legacy_env_alias(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, object] = {}
@@ -66,6 +82,70 @@ async def test_connect_and_register_accepts_legacy_env_alias(monkeypatch: pytest
 
     assert captured["env"] == {"DEMO_TOKEN": "secret"}
     assert manager._status["legacy-demo"].status == McpStatus.CONNECTED
+
+
+@pytest.mark.asyncio
+async def test_connect_treats_missing_resources_method_as_optional(monkeypatch: pytest.MonkeyPatch):
+    class ToolsOnlyClient(_FakeMcpClient):
+        async def list_resources(self) -> list:
+            raise McpError(
+                ErrorData(code=METHOD_NOT_FOUND, message="Unsupported operation")
+            )
+
+    info_events: list[str] = []
+    warn_events: list[str] = []
+    monkeypatch.setattr(mcp_server_module, "McpClient", ToolsOnlyClient)
+    monkeypatch.setattr(
+        mcp_server_module.log,
+        "info",
+        lambda event, _data=None: info_events.append(event),
+    )
+    monkeypatch.setattr(
+        mcp_server_module.log,
+        "warn",
+        lambda event, _data=None: warn_events.append(event),
+    )
+
+    manager = McpServerManager()
+    await manager._connect_and_register(
+        "tools-only",
+        {"type": "local", "command": ["python", "-m", "demo"]},
+    )
+
+    assert manager._resources_cache["tools-only"] == []
+    assert manager._status["tools-only"].status == McpStatus.CONNECTED
+    assert "mcp.resources_unsupported" in info_events
+    assert "mcp.resources_unavailable" not in warn_events
+
+
+@pytest.mark.asyncio
+async def test_connect_logs_resource_discovery_failure_once(monkeypatch: pytest.MonkeyPatch):
+    class BrokenResourcesClient(_FakeMcpClient):
+        async def list_resources(self) -> list:
+            raise RuntimeError("resource endpoint unavailable")
+
+    warn_events: list[str] = []
+    error_events: list[str] = []
+    monkeypatch.setattr(mcp_server_module, "McpClient", BrokenResourcesClient)
+    monkeypatch.setattr(
+        mcp_server_module.log,
+        "warn",
+        lambda event, _data=None: warn_events.append(event),
+    )
+    monkeypatch.setattr(
+        mcp_server_module.log,
+        "error",
+        lambda event, _data=None: error_events.append(event),
+    )
+
+    manager = McpServerManager()
+    await manager._connect_and_register(
+        "broken-resources",
+        {"type": "local", "command": ["python", "-m", "demo"]},
+    )
+
+    assert warn_events == ["mcp.resources_unavailable"]
+    assert error_events == []
 
 
 @pytest.mark.asyncio

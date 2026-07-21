@@ -8,6 +8,7 @@ Ported from original cli/cmd/session.ts
 import asyncio
 import json
 import os
+from functools import cache
 from typing import Optional
 
 import typer
@@ -76,9 +77,13 @@ async def _list_sessions(
     all_sessions = await Session.list_all()
 
     if project_filter == "":
-        result = await Project.from_directory(os.getcwd())
-        current_project_id = result["project"].id
-        all_sessions = [s for s in all_sessions if s.project_id == current_project_id]
+        resolve_worktree = cache(Project.worktree_for_directory)
+        current_worktree = resolve_worktree(os.getcwd())
+        all_sessions = [
+            session
+            for session in all_sessions
+            if session.directory and resolve_worktree(session.directory) == current_worktree
+        ]
     elif project_filter:
         all_sessions = [s for s in all_sessions if s.project_id == project_filter]
 

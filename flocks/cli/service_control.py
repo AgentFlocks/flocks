@@ -183,23 +183,6 @@ def request_restart_webui(
     return parse_supervisor_status(data)
 
 
-def request_prepare_upgrade(*, paths=None, timeout: float | None = 30.0) -> SupervisorStatus:
-    """Ask the supervisor daemon to pause managed services for upgrade handoff."""
-    payload = _post_control_json("/upgrade/prepare", paths=paths, timeout=timeout)
-    return parse_supervisor_status(payload)
-
-
-def request_resume_upgrade(
-    config: ServiceConfig,
-    *,
-    paths=None,
-    timeout: float | None = 180.0,
-) -> SupervisorStatus:
-    """Ask the supervisor daemon to resume managed services after upgrade handoff."""
-    payload = _post_control_json("/upgrade/resume", payload=service_config_payload(config), paths=paths, timeout=timeout)
-    return parse_supervisor_status(payload)
-
-
 def read_logs(
     *,
     service: str,

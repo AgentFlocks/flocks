@@ -5,6 +5,27 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Message } from '@/types';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function sessionListItem(id: string, projectID: string, updated = 1) {
+  return {
+    id,
+    projectID,
+    effectiveProjectID: projectID,
+    title: id,
+    time: { created: updated, updated },
+    category: 'user',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mocks — keep API calls from running in unit tests
 // ---------------------------------------------------------------------------
@@ -142,6 +163,9 @@ describe('applyMessagePartUpdate', () => {
 describe('updateMessagePart scheduling', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.mocked(client.get).mockReset();
+    vi.mocked(client.get).mockResolvedValue({ data: [] });
+    vi.useRealTimers();
   });
 
   it('keeps parentID from fetched messages for regenerate truncation', async () => {
@@ -236,7 +260,64 @@ describe('updateMessagePart scheduling', () => {
     expect((msg!.parts as any[])[0].text).toBe('hello world');
   });
 
-  it('resets known part tracking when session changes', async () => {
+  it('applies every known part update without waiting for an animation frame', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    const part = { id: 'part-batched', messageID: 'msg-batched', sessionID: 'sess-1', type: 'text', text: 'h' };
+
+    await act(async () => {
+      result.current.updateMessagePart(part);
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('h');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'he' }, 'e');
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('he');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'hel' }, 'l');
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hel');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'hello' }, 'lo');
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hello');
+  });
+
+  it('commits the final delta before an immediately following finish update', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    const part = {
+      id: 'part-final',
+      messageID: 'msg-final',
+      sessionID: 'sess-1',
+      type: 'text',
+      text: 'almost',
+    };
+    await act(async () => {
+      result.current.updateMessagePart(part);
+    });
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'almost done' }, ' done');
+      result.current.updateMessage({
+        id: 'msg-final',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        finish: 'stop',
+      });
+    });
+
+    const message = result.current.messages.find((item) => item.id === 'msg-final');
+    expect((message?.parts as any[])[0].text).toBe('almost done');
+    expect(message?.finish).toBe('stop');
+  });
+
+  it('resets streamed messages when session changes', async () => {
     const { result, rerender } = renderHook(
       ({ id }: { id?: string }) => useSessionMessages(id),
       { initialProps: { id: 'sess-a' } },
@@ -250,12 +331,281 @@ describe('updateMessagePart scheduling', () => {
       result.current.updateMessagePart(part);
     });
 
-    // Switch to a different session — messages and knownPartIds should reset
+    // Switching sessions must clear streamed state before the next paint.
     await act(async () => {
       rerender({ id: 'sess-b' });
     });
 
     expect(result.current.messages).toHaveLength(0);
+  });
+
+  it('ignores a stale first-page response after switching sessions', async () => {
+    let resolveSessionA: (value: unknown) => void = () => {};
+    let resolveSessionB: (value: unknown) => void = () => {};
+    vi.mocked(client.get).mockImplementation((url: string) => new Promise((resolve) => {
+      if (url.includes('sess-a')) resolveSessionA = resolve;
+      if (url.includes('sess-b')) resolveSessionB = resolve;
+    }) as any);
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionMessages(id),
+      { initialProps: { id: 'sess-a' } },
+    );
+    await act(async () => {});
+
+    rerender({ id: 'sess-b' });
+    await act(async () => {});
+
+    await act(async () => {
+      resolveSessionB({
+        data: [{
+          info: {
+            id: 'msg-b',
+            sessionID: 'sess-b',
+            role: 'assistant',
+            time: { created: 200 },
+          },
+          parts: [],
+        }],
+      });
+    });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+
+    await act(async () => {
+      resolveSessionA({
+        data: [{
+          info: {
+            id: 'msg-a',
+            sessionID: 'sess-a',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [],
+        }],
+      });
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('ignores an older-page response after switching sessions', async () => {
+    let resolveOlderSessionA: (value: unknown) => void = () => {};
+    vi.mocked(client.get).mockImplementation((url: string, config?: any) => {
+      if (url.includes('sess-a') && config?.params?.before) {
+        return new Promise((resolve) => {
+          resolveOlderSessionA = resolve;
+        }) as any;
+      }
+      if (url.includes('sess-a')) {
+        return Promise.resolve({
+          data: {
+            items: [{
+              info: {
+                id: 'msg-a-new',
+                sessionID: 'sess-a',
+                role: 'assistant',
+                time: { created: 200 },
+              },
+              parts: [],
+            }],
+            hasMore: true,
+            nextBefore: 'msg-a-new',
+          },
+        }) as any;
+      }
+      return Promise.resolve({
+        data: [{
+          info: {
+            id: 'msg-b',
+            sessionID: 'sess-b',
+            role: 'assistant',
+            time: { created: 300 },
+          },
+          parts: [],
+        }],
+      }) as any;
+    });
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionMessages(id),
+      { initialProps: { id: 'sess-a' } },
+    );
+    await act(async () => {});
+
+    let olderRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      olderRequest = result.current.loadOlder();
+    });
+
+    rerender({ id: 'sess-b' });
+    await act(async () => {});
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+
+    await act(async () => {
+      resolveOlderSessionA({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-a-old',
+              sessionID: 'sess-a',
+              role: 'user',
+              time: { created: 100 },
+            },
+            parts: [],
+          }],
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+      await olderRequest;
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+    expect(result.current.loadingOlder).toBe(false);
+  });
+
+  it('clears older-page loading when a first-page refetch invalidates it', async () => {
+    let resolveOlderPage: (value: unknown) => void = () => {};
+    let firstPageRequestCount = 0;
+    vi.mocked(client.get).mockImplementation((_url: string, config?: any) => {
+      if (config?.params?.before) {
+        return new Promise((resolve) => {
+          resolveOlderPage = resolve;
+        }) as any;
+      }
+
+      firstPageRequestCount += 1;
+      const messageId = firstPageRequestCount === 1 ? 'msg-current' : 'msg-refreshed';
+      return Promise.resolve({
+        data: {
+          items: [{
+            info: {
+              id: messageId,
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { created: 200 + firstPageRequestCount },
+            },
+            parts: [],
+          }],
+          hasMore: true,
+          nextBefore: messageId,
+        },
+      }) as any;
+    });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let olderRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      olderRequest = result.current.loadOlder();
+    });
+    expect(result.current.loadingOlder).toBe(true);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      'msg-current',
+      'msg-refreshed',
+    ]);
+
+    await act(async () => {
+      resolveOlderPage({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-stale-older',
+              sessionID: 'sess-1',
+              role: 'user',
+              time: { created: 100 },
+            },
+            parts: [],
+          }],
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+      await olderRequest;
+    });
+
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      'msg-current',
+      'msg-refreshed',
+    ]);
+  });
+
+  it('does not start an older-page request while a first-page refetch is pending', async () => {
+    let resolveRefetch: (value: unknown) => void = () => {};
+    let firstPageRequests = 0;
+    let olderPageRequests = 0;
+    vi.mocked(client.get).mockImplementation((_url: string, config?: any) => {
+      if (config?.params?.before) {
+        olderPageRequests += 1;
+        return Promise.resolve({ data: { items: [], hasMore: false, nextBefore: null } }) as any;
+      }
+
+      firstPageRequests += 1;
+      if (firstPageRequests === 1) {
+        return Promise.resolve({
+          data: {
+            items: [{
+              info: {
+                id: 'msg-current',
+                sessionID: 'sess-1',
+                role: 'assistant',
+                time: { created: 200 },
+              },
+              parts: [],
+            }],
+            hasMore: true,
+            nextBefore: 'old-cursor',
+          },
+        }) as any;
+      }
+
+      return new Promise((resolve) => {
+        resolveRefetch = resolve;
+      }) as any;
+    });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let refetchRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      refetchRequest = result.current.refetch();
+    });
+    await act(async () => {
+      await result.current.loadOlder();
+    });
+
+    expect(olderPageRequests).toBe(0);
+
+    await act(async () => {
+      resolveRefetch({
+        data: {
+          items: [{
+            info: {
+              id: 'msg-refreshed',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { created: 300 },
+            },
+            parts: [],
+          }],
+          hasMore: true,
+          nextBefore: 'new-cursor',
+        },
+      });
+      await refetchRequest;
+    });
+
+    expect(result.current.loading).toBe(false);
+    expect(olderPageRequests).toBe(0);
   });
 
   it('replaceMessageText updates the targeted text part by partId', async () => {
@@ -527,6 +877,51 @@ describe('updateMessagePart scheduling', () => {
     });
   });
 
+  it('starts only one older-page request when loadOlder is called twice before rerender', async () => {
+    let resolveOlderPage: (value: unknown) => void = () => {};
+    let olderPageRequests = 0;
+    vi.mocked(client.get).mockImplementation((_url: string, config?: any) => {
+      if (config?.params?.before) {
+        olderPageRequests += 1;
+        return new Promise((resolve) => {
+          resolveOlderPage = resolve;
+        }) as any;
+      }
+
+      return Promise.resolve({
+        data: {
+          items: [],
+          hasMore: true,
+          nextBefore: 'older-cursor',
+        },
+      }) as any;
+    });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let firstRequest: Promise<void> = Promise.resolve();
+    let secondRequest: Promise<void> = Promise.resolve();
+    act(() => {
+      firstRequest = result.current.loadOlder();
+      secondRequest = result.current.loadOlder();
+    });
+
+    expect(olderPageRequests).toBe(1);
+
+    await act(async () => {
+      resolveOlderPage({
+        data: {
+          items: [],
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+      await Promise.all([firstRequest, secondRequest]);
+    });
+    expect(result.current.loadingOlder).toBe(false);
+  });
+
 });
 
 describe('useSessions list loading', () => {
@@ -640,5 +1035,249 @@ describe('useSessions list loading', () => {
     await act(async () => {
       resolveSearch([]);
     });
+  });
+
+  it('loads and tracks pages independently for each project', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.projectID === 'default') {
+        return Array.from({ length: 100 }, (_, index) => ({
+          id: `default-${index}`,
+          projectID: 'legacy-project',
+          effectiveProjectID: 'default',
+          title: `Default ${index}`,
+          time: { created: index, updated: index },
+          category: 'user',
+        })) as any;
+      }
+      return [{
+        id: 'labs-1',
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        title: 'Labs',
+        time: { created: 1, updated: 1 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(101);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: false,
+    });
+  });
+
+  it('uses a custom page size for project session pagination', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(12);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: true,
+    });
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 6,
+    }));
+  });
+
+  it('preserves each project loaded depth during a background refetch', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+    expect(result.current.sessions).toHaveLength(18);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 12,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(18);
+  });
+
+  it('uses the selected project offset when loading more sessions', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [{
+          id: `${params.projectID}-1`,
+          projectID: params.projectID,
+          effectiveProjectID: params.projectID,
+          title: 'First page',
+          time: { created: 1, updated: 1 },
+          category: 'user',
+        }] as any;
+      }
+      return [{
+        id: `${params.projectID}-2`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: 'Second page',
+        time: { created: 2, updated: 2 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 1,
+    }));
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('loads more sessions for different projects concurrently', async () => {
+    const defaultPage = deferred<any[]>();
+    const labsPage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+      }
+      return params.projectID === 'default' ? defaultPage.promise : labsPage.promise;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadDefault!: Promise<void>;
+    let loadLabs!: Promise<void>;
+    act(() => {
+      loadDefault = result.current.loadMore('default');
+      loadLabs = result.current.loadMore('prj_labs');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default', 'prj_labs']));
+
+    await act(async () => {
+      defaultPage.resolve([sessionListItem('default-2', 'default', 2)] as any);
+      await loadDefault;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['prj_labs']));
+
+    await act(async () => {
+      labsPage.resolve([sessionListItem('prj_labs-2', 'prj_labs', 2)] as any);
+      await loadLabs;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'default-2',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('clears project pagination state when a background refresh supersedes it', async () => {
+    const stalePage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset > 0) return stalePage.promise;
+      return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadMore!: Promise<void>;
+    act(() => {
+      loadMore = result.current.loadMore('default');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default']));
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+
+    await act(async () => {
+      stalePage.resolve([sessionListItem('default-stale', 'default', 2)] as any);
+      await loadMore;
+    });
+    expect(result.current.sessions.map((item) => item.id)).not.toContain('default-stale');
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
   });
 });

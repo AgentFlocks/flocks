@@ -55,6 +55,8 @@
     "backendUnavailable": "Cannot connect to backend service",
     "backendError": "Backend service error",
     "backendErrorHint": "Please ensure the backend service is running",
+    "chunkLoadFailed": "Page resources failed to load",
+    "chunkLoadHint": "The application may have been updated. Refresh and try again.",
     "processingFailed": "Processing failed",
     "deleteFailed": "Delete failed",
     "saveFailed": "Save failed"
@@ -246,7 +248,7 @@
       "thirdPartySubtitle": "Choose another provider, enter its key, and select the default model.",
       "thirdPartyKeyPlaceholder": "Paste the third-party model API key",
       "thirdPartyBaseUrlPlaceholder": "Enter the model service base URL if needed",
-      "thirdPartyModelIdPlaceholder": "Enter the model ID (e.g. gpt-4o, deepseek-chat)",
+      "thirdPartyModelIdPlaceholder": "Enter the model ID (e.g. gpt-4o, deepseek-v4-flash)",
       "thirdPartyModelHint": "Will verify and set this as the default model: {{model}}",
       "thirdPartyAdvancedHint": "For advanced custom setups such as OpenAI Compatible, use the Models page instead.",
       "validateAndApply": "Validate & Apply",

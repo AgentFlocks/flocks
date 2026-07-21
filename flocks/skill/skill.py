@@ -6,6 +6,7 @@ access to skill information. Mirrors original Flocks Skill namespace.
 """
 
 import json
+import asyncio
 import os
 import glob
 import re
@@ -197,13 +198,51 @@ class Skill:
     Skill discovery and management.
 
     Discovers SKILL.md files from (lowest → highest priority):
-    - .flocks dirs   (global + project-level)
-    - .claude dirs     (global ~/.claude + project-level)
-    - ~/.flocks        (global user-level)
-    - <project>/.flocks (project-level, wins on collision)
+    - .claude dirs
+    - global built-in and project-bundled .flocks dirs
+    - ~/.flocks/plugins (user-level customizations, wins on collision)
     """
 
     _cache: Optional[Dict[str, SkillInfo]] = None
+    _cache_lock = threading.Lock()
+    _cache_generation = 0
+    _cache_loads: Dict[int, threading.Event] = {}
+
+    @classmethod
+    def _all_sync(cls) -> List[SkillInfo]:
+        """Discover skills once per cache generation without stale refills."""
+        while True:
+            with cls._cache_lock:
+                if cls._cache is not None:
+                    return list(cls._cache.values())
+                generation = cls._cache_generation
+                completion = cls._cache_loads.get(generation)
+                should_discover = completion is None
+                if completion is None:
+                    completion = threading.Event()
+                    cls._cache_loads[generation] = completion
+
+            if not should_discover:
+                completion.wait()
+                continue
+
+            try:
+                discovered = cls._discover()
+            except BaseException:
+                with cls._cache_lock:
+                    cls._cache_loads.pop(generation, None)
+                    completion.set()
+                raise
+
+            with cls._cache_lock:
+                if generation == cls._cache_generation and cls._cache is None:
+                    cls._cache = discovered
+                cls._cache_loads.pop(generation, None)
+                completion.set()
+                if generation == cls._cache_generation and cls._cache is not None:
+                    return list(cls._cache.values())
+            # The cache was invalidated while discovery was running. Repeat
+            # against the new generation instead of publishing stale data.
 
     @classmethod
     def _parse_skill_md(cls, filepath: str, source: Optional[str] = None) -> Optional[SkillInfo]:
@@ -352,11 +391,21 @@ class Skill:
                 skill_info = cls._parse_skill_md(match, source=source)
                 if skill_info:
                     if skill_info.name in skills:
-                        log.warn("skill.duplicate", {
-                            "name": skill_info.name,
-                            "existing": skills[skill_info.name].location,
-                            "duplicate": match,
-                        })
+                        existing = skills[skill_info.name]
+                        if existing.source != skill_info.source:
+                            log.info("skill.override", {
+                                "name": skill_info.name,
+                                "selected": match,
+                                "selected_source": skill_info.source,
+                                "replaced": existing.location,
+                                "replaced_source": existing.source,
+                            })
+                        else:
+                            log.warn("skill.duplicate", {
+                                "name": skill_info.name,
+                                "existing": existing.location,
+                                "duplicate": match,
+                            })
 
                     skills[skill_info.name] = skill_info
                     log.debug("skill.found", {
@@ -376,9 +425,10 @@ class Skill:
         Discover all skills. Last wins on name collision.
 
         Scan order (lowest → highest priority):
-          1. .claude dirs       (global ~/.claude + project-level)
-          2. ~/.flocks          (global user-level, overrides .claude)
-          3. <project>/.flocks  (project-level, highest priority)
+          1. .claude dirs
+          2. ~/.flocks/skill[s] built-ins
+          3. <project>/.flocks project-bundled skills
+          4. ~/.flocks/plugins user customizations
 
         Source labels:
           "flocks"   — built-in skills inside .flocks/skills/ directories
@@ -410,16 +460,12 @@ class Skill:
         for claude_dir in cls._find_dirs_up(".claude", current_dir, worktree):
             cls._scan_directory(claude_dir, "skills/**/SKILL.md", skills, source="claude")
 
-        # 2) Global ~/.flocks — overrides .claude
-        #    Built-in skills: source="flocks"; user-installed plugins: source="user"
+        # 2) Global built-in skills — overrides .claude
         if os.path.isdir(global_flocks):
             for pattern in builtin_patterns:
                 cls._scan_directory(global_flocks, pattern, skills, source="flocks")
-            for pattern in plugin_patterns:
-                cls._scan_directory(global_flocks, pattern, skills, source="user")
 
-        # 3) Project-level .flocks — highest priority
-        #    Built-in skills: source="flocks"; project-installed plugins: source="project"
+        # 3) Project-bundled .flocks skills — built-in baseline for this project
         for flocks_dir in cls._find_dirs_up(".flocks", current_dir, worktree):
             if os.path.normpath(flocks_dir) == os.path.normpath(global_flocks):
                 continue
@@ -427,6 +473,11 @@ class Skill:
                 cls._scan_directory(flocks_dir, pattern, skills, source="flocks")
             for pattern in plugin_patterns:
                 cls._scan_directory(flocks_dir, pattern, skills, source="project")
+
+        # 4) User-installed plugins — explicit customizations win over project bundles
+        if os.path.isdir(global_flocks):
+            for pattern in plugin_patterns:
+                cls._scan_directory(global_flocks, pattern, skills, source="user")
 
         log.info("skill.discovery.complete", {"count": len(skills), "names": list(skills.keys())})
         return skills
@@ -460,10 +511,7 @@ class Skill:
         Returns:
             List of all discovered skills
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        return list(cls._cache.values())
+        return await asyncio.to_thread(cls._all_sync)
 
     @classmethod
     async def list_enabled(cls) -> List[SkillInfo]:
@@ -495,10 +543,8 @@ class Skill:
         Returns:
             SkillInfo or None if not found
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        skill = cls._cache.get(name)
+        skills = await cls.all()
+        skill = next((item for item in skills if item.name == name), None)
         if not skill:
             return None
         return skill
@@ -506,7 +552,9 @@ class Skill:
     @classmethod
     def clear_cache(cls) -> None:
         """Clear the skill cache (for testing or forced refresh)"""
-        cls._cache = None
+        with cls._cache_lock:
+            cls._cache = None
+            cls._cache_generation += 1
         log.info("skill.cache.cleared")
 
     @classmethod

@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import flocks.skill.skill as skill_module
 from flocks.skill.skill import Skill, SkillInfo, SkillRequires, SkillInstallSpec
 
 
@@ -392,8 +393,8 @@ async def test_discover_flocks_source_for_builtin_skills(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_discover_project_overrides_global(tmp_path):
-    """Project-level plugin skill must override global skill of the same name."""
+async def test_discover_user_plugin_overrides_project_bundle(tmp_path):
+    """User plugin skills must override project-bundled skills of the same name."""
     fake_home = tmp_path / "home"
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
@@ -409,14 +410,24 @@ async def test_discover_project_overrides_global(tmp_path):
         patch("os.path.expanduser", return_value=str(fake_home)),
         patch("flocks.skill.skill.Instance.get_directory", return_value=str(project_dir)),
         patch("flocks.skill.skill.Instance.get_worktree", return_value=str(project_dir)),
+        patch.object(skill_module.log, "info") as info_log,
+        patch.object(skill_module.log, "warn") as warn_log,
     ):
         Skill.clear_cache()
         skills = await Skill.all()
 
     skill = next((s for s in skills if s.name == "shared-skill"), None)
     assert skill is not None
-    assert skill.source == "project", "project-level skill should override global"
-    assert "Project version" in skill.description
+    assert skill.source == "user", "user-level skill should override project bundle"
+    assert "Global version" in skill.description
+    assert any(
+        call.args and call.args[0] == "skill.override"
+        for call in info_log.call_args_list
+    )
+    assert not any(
+        call.args and call.args[0] == "skill.duplicate"
+        for call in warn_log.call_args_list
+    )
 
 
 @pytest.mark.asyncio

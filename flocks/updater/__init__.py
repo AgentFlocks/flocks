@@ -2,8 +2,8 @@
 Flocks Updater
 
 Provides self-update capability via GitHub releases.
-Downloads source archives, backs up the current installation,
-and replaces source files — no git binary required at runtime.
+Downloads source archives and delegates source replacement to a detached
+handoff — no git binary required at runtime.
 """
 
 from flocks.updater.deploy import DeployMode, detect_deploy_mode
@@ -13,6 +13,7 @@ from flocks.updater.updater import (
     check_update,
     get_current_version,
     get_latest_release,
+    install_or_repair_source,
     perform_pro_bundle_downgrade,
     perform_update,
     perform_pro_bundle_install,
@@ -28,6 +29,7 @@ __all__ = [
     "check_update",
     "get_current_version",
     "get_latest_release",
+    "install_or_repair_source",
     "perform_update",
     "perform_pro_bundle_install",
     "perform_pro_bundle_downgrade",

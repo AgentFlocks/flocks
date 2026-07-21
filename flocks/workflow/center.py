@@ -100,6 +100,11 @@ def _normalize_workflow_id(path: Path) -> str:
     return digest[:24]
 
 
+def _logical_workflow_id(path: Path) -> str:
+    """Return the filesystem workflow ID shared across discovery roots."""
+    return path.parent.name
+
+
 def _fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -153,6 +158,17 @@ def resolve_project_workflow_roots(base_dir: Optional[Path] = None) -> list[Path
         flocks / "plugins" / "workflow",  # legacy compat (read-only)
         flocks / "workflow",  # legacy compat (read-only)
         flocks / "plugins" / "workflows",  # new canonical (read + write)
+    ]
+
+
+def resolve_workflow_scan_roots(
+    base_dir: Optional[Path] = None,
+) -> list[tuple[Path, str]]:
+    """Return workflow roots ordered from lowest to highest priority."""
+    return [
+        (root, "project") for root in resolve_project_workflow_roots(base_dir)
+    ] + [
+        (root, "global") for root in resolve_global_workflow_roots()
     ]
 
 
@@ -256,6 +272,17 @@ async def _read_registry(workflow_id: str) -> Dict[str, Any]:
     return data
 
 
+def _load_discoverable_workflow(workflow_path: Path) -> Optional[Dict[str, Any]]:
+    """Load and validate a workflow, returning None when intentionally hidden."""
+    raw = json.loads(workflow_path.read_text(encoding="utf-8"))
+    meta_path = workflow_path.parent / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
+    if is_hidden_workflow(raw, meta):
+        return None
+    Workflow.from_dict(raw)
+    return raw
+
+
 async def _scan_workflow_dir(
     workflow_root: Path,
     source_type: str,
@@ -270,12 +297,9 @@ async def _scan_workflow_dir(
         return
     for workflow_path in sorted(workflow_root.glob("*/workflow.json")):
         try:
-            raw = json.loads(workflow_path.read_text(encoding="utf-8"))
-            meta_path = workflow_path.parent / "meta.json"
-            meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
-            if is_hidden_workflow(raw, meta):
+            raw = _load_discoverable_workflow(workflow_path)
+            if raw is None:
                 continue
-            Workflow.from_dict(raw)
         except Exception as exc:
             log.warning(
                 "workflow.center.scan.skip_invalid",
@@ -284,6 +308,7 @@ async def _scan_workflow_dir(
             continue
 
         workflow_id = _normalize_workflow_id(workflow_path)
+        logical_workflow_id = _logical_workflow_id(workflow_path)
         fp = _fingerprint(workflow_path)
         now_ms = _now_ms()
         existing = await WorkflowStore.kv_get(_registry_key(workflow_id)) or {}
@@ -291,6 +316,7 @@ async def _scan_workflow_dir(
         draft_changed = bool(existing) and existing.get("fingerprint") != fp
         entry = {
             "workflowId": workflow_id,
+            "logicalWorkflowId": logical_workflow_id,
             "name": raw.get("name") or workflow_path.parent.name,
             "description": raw.get("description") or "",
             "sourceType": source_type,
@@ -308,7 +334,7 @@ async def _scan_workflow_dir(
             "serviceUrl": existing.get("serviceUrl"),
         }
         await WorkflowStore.kv_put(_registry_key(workflow_id), entry)
-        by_id[workflow_id] = entry
+        by_id[logical_workflow_id] = entry
 
 
 async def scan_skill_workflows(base_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -316,21 +342,15 @@ async def scan_skill_workflows(base_dir: Optional[Path] = None) -> List[Dict[str
 
     Scan order (lowest → highest priority), see resolve_global_workflow_roots /
     resolve_project_workflow_roots:
-      1. ~/.flocks/plugins/workflow/        (global legacy, sourceType="global")
-      2. ~/.flocks/workflow/                (global compat, sourceType="global")
-      3. ~/.flocks/plugins/workflows/       (global canonical, sourceType="global")
-      4. <cwd>/.flocks/plugins/workflow/    (project legacy, sourceType="project")
-      5. <cwd>/.flocks/workflow/            (project compat, sourceType="project")
-      6. <cwd>/.flocks/plugins/workflows/   (project canonical, sourceType="project")
+      1. <cwd>/.flocks project-bundled workflows
+      2. ~/.flocks user workflows (highest priority)
 
     When two directories contain a workflow with the same ID, the later
     (higher-priority) entry wins.
     """
     by_id: Dict[str, Dict[str, Any]] = {}
-    for path in resolve_global_workflow_roots():
-        await _scan_workflow_dir(path, "global", by_id)
-    for path in resolve_project_workflow_roots(base_dir):
-        await _scan_workflow_dir(path, "project", by_id)
+    for path, source_type in resolve_workflow_scan_roots(base_dir):
+        await _scan_workflow_dir(path, source_type, by_id)
 
     entries = list(by_id.values())
     entries.sort(key=lambda item: item.get("updatedAt", 0), reverse=True)
@@ -376,14 +396,69 @@ def format_workflow_entries(
 async def list_registry_entries() -> List[Dict[str, Any]]:
     """List registered skill workflows."""
     keys = await WorkflowStore.kv_list(_REGISTRY_PREFIX)
-    items: List[Dict[str, Any]] = []
+    selected_entries: Dict[str, tuple[tuple[int, int, int], Dict[str, Any]]] = {}
     for raw_key in keys:
         key = _key_to_string(raw_key)
         entry = await WorkflowStore.kv_get(key)
         if entry:
-            items.append(entry)
+            logical_id = entry.get("logicalWorkflowId")
+            if not logical_id:
+                workflow_path = entry.get("workflowPath")
+                logical_id = (
+                    _logical_workflow_id(Path(str(workflow_path)))
+                    if workflow_path
+                    else str(entry.get("workflowId") or key)
+                )
+            priority = _registry_entry_priority(entry)
+            if priority[1] >= 0 and not _registry_entry_is_discoverable(entry):
+                continue
+            # Only collapse entries that belong to the currently active project
+            # or user roots. Registrations from another project remain manageable.
+            selection_key = (
+                f"logical:{logical_id}"
+                if priority[1] >= 0
+                else f"registry:{entry.get('workflowId') or key}"
+            )
+            selected = selected_entries.get(selection_key)
+            if selected is None or priority >= selected[0]:
+                selected_entries[selection_key] = (priority, entry)
+    items = [entry for _priority, entry in selected_entries.values()]
     items.sort(key=lambda item: item.get("updatedAt", 0), reverse=True)
     return items
+
+
+def _registry_entry_priority(entry: Dict[str, Any]) -> tuple[int, int, int]:
+    """Rank registry entries using the same project-then-user scan order."""
+    workflow_path = Path(str(entry.get("workflowPath") or ""))
+    try:
+        resolved_path = workflow_path.resolve()
+    except OSError:
+        resolved_path = workflow_path
+
+    roots = [root for root, _source in resolve_workflow_scan_roots(Path.cwd())]
+    root_priority = -1
+    for index, root in enumerate(roots):
+        try:
+            resolved_path.relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        root_priority = index
+        break
+
+    return (
+        int(resolved_path.is_file()),
+        root_priority,
+        int(entry.get("updatedAt") or 0),
+    )
+
+
+def _registry_entry_is_discoverable(entry: Dict[str, Any]) -> bool:
+    """Return whether an active-root registry entry still passes discovery."""
+    workflow_path = Path(str(entry.get("workflowPath") or ""))
+    try:
+        return _load_discoverable_workflow(workflow_path) is not None
+    except Exception:
+        return False
 
 
 def _service_release_file(workflow_id: str, release_id: str) -> Path:

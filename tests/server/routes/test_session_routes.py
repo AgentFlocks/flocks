@@ -35,6 +35,42 @@ from flocks.session.session import Session
 # CRUD
 # ===========================================================================
 
+
+@pytest.mark.asyncio
+async def test_missing_session_directory_uses_default_and_publishes_notice(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.project.project import Project
+    from flocks.server.routes import event as event_routes
+    from flocks.server.routes import session as session_routes
+
+    default_project = SimpleNamespace(
+        worktree=str(tmp_path),
+        path_status="available",
+    )
+    monkeypatch.setattr(Project, "get", AsyncMock(return_value=default_project))
+    publish_event = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish_event)
+
+    working_directory = await session_routes._resolve_session_working_directory(
+        SimpleNamespace(
+            id="ses_missing_directory",
+            directory=str(tmp_path / "missing"),
+        ),
+    )
+
+    assert working_directory == str(tmp_path)
+    publish_event.assert_awaited_once_with(
+        "session.notice",
+        {
+            "sessionID": "ses_missing_directory",
+            "kind": "directory-fallback",
+            "storedDirectory": str(tmp_path / "missing"),
+            "fallbackDirectory": str(tmp_path),
+        },
+    )
+
 class TestSessionCRUD:
     """Basic create / read / update / delete for sessions."""
 
@@ -64,6 +100,80 @@ class TestSessionCRUD:
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["category"] == "workflow"
+
+    @pytest.mark.asyncio
+    async def test_create_session_with_api_token_is_ownerless(self, client: AsyncClient):
+        """Sessions created by API-token clients remain manageable by WebUI admins."""
+        resp = await client.post("/api/session", json={"title": "TUI Session"})
+
+        assert resp.status_code == status.HTTP_200_OK
+        session = await Session.get_by_id(resp.json()["id"])
+        assert session is not None
+        assert session.owner_user_id is None
+        assert session.owner_username is None
+
+    @pytest.mark.asyncio
+    async def test_create_session_with_local_user_keeps_owner(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Browser-authenticated sessions remain private to their local user."""
+        from flocks.server.routes import session as session_routes
+
+        user = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+
+        resp = await client.post("/api/session", json={"title": "WebUI Session"})
+
+        assert resp.status_code == status.HTTP_200_OK
+        session = await Session.get_by_id(resp.json()["id"])
+        assert session is not None
+        assert session.owner_user_id == user.id
+        assert session.owner_username == user.username
+
+    @pytest.mark.asyncio
+    async def test_webui_admin_can_manage_api_token_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A WebUI admin can list, continue, rename, and delete a TUI session."""
+        from flocks.server.routes import session as session_routes
+
+        create_resp = await client.post("/api/session", json={"title": "TUI Session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+
+        admin = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true"},
+        )
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert session_id in {session["id"] for session in list_resp.json()}
+
+        message_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Continue from WebUI"}],
+                "noReply": True,
+            },
+        )
+        assert message_resp.status_code == status.HTTP_200_OK
+
+        rename_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"title": "Renamed in WebUI"},
+        )
+        assert rename_resp.status_code == status.HTTP_200_OK
+        assert rename_resp.json()["title"] == "Renamed in WebUI"
+
+        delete_resp = await client.delete(f"/api/session/{session_id}")
+        assert delete_resp.status_code == status.HTTP_200_OK
+        assert delete_resp.json() is True
 
     @pytest.mark.asyncio
     async def test_get_session_includes_persisted_goal(self, client: AsyncClient):
@@ -161,6 +271,9 @@ class TestSessionCRUD:
         row = next(item for item in data if item["id"] == user_id)
         assert set(row) == {
             "id",
+            "projectID",
+            "effectiveProjectID",
+            "directory",
             "title",
             "time",
             "category",
@@ -172,8 +285,109 @@ class TestSessionCRUD:
             "canDelete",
             "isShared",
         }
+        assert row["projectID"]
+        assert row["directory"]
         assert "goal" not in row
         assert "summary" not in row
+
+    @pytest.mark.asyncio
+    async def test_create_session_in_user_managed_project(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Session creation can target a user-managed project."""
+        worktree = tmp_path / "labs"
+        worktree.mkdir()
+        monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
+        project_resp = await client.post(
+            "/api/project",
+            json={"name": "Labs", "worktree": str(worktree)},
+        )
+        assert project_resp.status_code == status.HTTP_200_OK
+        project = project_resp.json()
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "Project Session", "projectID": project["id"]},
+        )
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json()["projectID"] == project["id"]
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+        row = next(item for item in list_resp.json() if item["id"] == session_resp.json()["id"])
+        assert row["projectID"] == project["id"]
+        assert row["effectiveProjectID"] == project["id"]
+        assert row["directory"] == project["worktree"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_session_is_grouped_under_default_without_rewrite(
+        self,
+        client: AsyncClient,
+        tmp_path,
+    ):
+        """Legacy project IDs are projected to Default while storage stays unchanged."""
+        legacy = await Session.create(
+            project_id="legacy-git-project",
+            directory=str(tmp_path),
+            title="Legacy Session",
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={
+                "view": "list",
+                "manager": "true",
+                "roots": "true",
+                "projectID": "default",
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == legacy.id)
+        assert row["projectID"] == "legacy-git-project"
+        assert row["effectiveProjectID"] == "default"
+        stored = await Session.get("legacy-git-project", legacy.id)
+        assert stored is not None
+        assert stored.project_id == "legacy-git-project"
+
+    @pytest.mark.asyncio
+    async def test_removed_project_sessions_fall_back_to_default(
+        self,
+        client: AsyncClient,
+        tmp_path,
+    ):
+        """Removing a project keeps its sessions and maps them to Default."""
+        worktree = tmp_path / "removable-project"
+        worktree.mkdir()
+        project_response = await client.post(
+            "/api/project",
+            json={"name": "Removable", "worktree": str(worktree)},
+        )
+        project = project_response.json()
+        session_response = await client.post(
+            "/api/session",
+            json={"title": "Keep Me", "projectID": project["id"]},
+        )
+        session_id = session_response.json()["id"]
+
+        delete_response = await client.delete(f"/api/project/{project['id']}")
+        assert delete_response.status_code == status.HTTP_200_OK
+        assert worktree.exists()
+
+        default_response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "projectID": "default"},
+        )
+        row = next(item for item in default_response.json() if item["id"] == session_id)
+        assert row["projectID"] == project["id"]
+        assert row["effectiveProjectID"] == "default"
+        stored = await Session.get(project["id"], session_id)
+        assert stored is not None
 
     @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):
@@ -181,6 +395,135 @@ class TestSessionCRUD:
         resp = await client.get(f"/api/session/{session_id}")
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["id"] == session_id
+
+    @pytest.mark.asyncio
+    async def test_context_usage_keeps_inflight_task_after_cancelled_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.context_usage import ContextUsageSnapshot
+
+        session_routes._context_usage_cache.clear()
+        session_routes._context_usage_inflight.clear()
+
+        calls = 0
+        started = asyncio.Event()
+        release = asyncio.Event()
+        session = SimpleNamespace(time=SimpleNamespace(updated=123), provider=None, model=None)
+
+        async def fake_build_context_usage_snapshot(session_id: str, *, session=None):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return ContextUsageSnapshot(
+                sessionID=session_id,
+                usedTokens=42,
+                contextWindow=100,
+                estimatedTokens=42,
+            )
+
+        monkeypatch.setattr(
+            session_routes,
+            "build_context_usage_snapshot",
+            fake_build_context_usage_snapshot,
+        )
+
+        first = asyncio.create_task(
+            session_routes._cached_context_usage_snapshot("ses_context_cancel", session=session)
+        )
+        second = None
+        try:
+            await started.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            second = asyncio.create_task(
+                session_routes._cached_context_usage_snapshot("ses_context_cancel", session=session)
+            )
+            await asyncio.sleep(0)
+            assert calls == 1
+
+            release.set()
+            snapshot = await asyncio.wait_for(second, timeout=1)
+            assert snapshot.used_tokens == 42
+
+            cached = await session_routes._cached_context_usage_snapshot("ses_context_cancel", session=session)
+            assert cached.used_tokens == 42
+            assert calls == 1
+        finally:
+            release.set()
+            if second is not None and not second.done():
+                await asyncio.wait_for(second, timeout=1)
+            session_routes._context_usage_cache.clear()
+            session_routes._context_usage_inflight.clear()
+
+    @pytest.mark.asyncio
+    async def test_context_usage_keeps_newer_cache_when_older_task_finishes_late(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.context_usage import ContextUsageSnapshot
+
+        session_routes._context_usage_cache.clear()
+        session_routes._context_usage_inflight.clear()
+
+        old_started = asyncio.Event()
+        new_started = asyncio.Event()
+        old_release = asyncio.Event()
+        new_release = asyncio.Event()
+        old_session = SimpleNamespace(time=SimpleNamespace(updated=100), provider=None, model=None)
+        new_session = SimpleNamespace(time=SimpleNamespace(updated=200), provider=None, model=None)
+
+        async def fake_build_context_usage_snapshot(session_id: str, *, session=None):
+            updated = session.time.updated
+            if updated == 100:
+                old_started.set()
+                await old_release.wait()
+            else:
+                new_started.set()
+                await new_release.wait()
+            return ContextUsageSnapshot(
+                sessionID=session_id,
+                usedTokens=updated,
+                contextWindow=1000,
+                estimatedTokens=updated,
+            )
+
+        monkeypatch.setattr(
+            session_routes,
+            "build_context_usage_snapshot",
+            fake_build_context_usage_snapshot,
+        )
+
+        old_task = asyncio.create_task(
+            session_routes._cached_context_usage_snapshot("ses_context_order", session=old_session)
+        )
+        new_task = asyncio.create_task(
+            session_routes._cached_context_usage_snapshot("ses_context_order", session=new_session)
+        )
+        try:
+            await old_started.wait()
+            await new_started.wait()
+
+            new_release.set()
+            new_snapshot = await asyncio.wait_for(new_task, timeout=1)
+            assert new_snapshot.used_tokens == 200
+
+            old_release.set()
+            old_snapshot = await asyncio.wait_for(old_task, timeout=1)
+            assert old_snapshot.used_tokens == 100
+
+            assert ("ses_context_order", 200) in session_routes._context_usage_cache
+            assert ("ses_context_order", 100) not in session_routes._context_usage_cache
+        finally:
+            old_release.set()
+            new_release.set()
+            session_routes._context_usage_cache.clear()
+            session_routes._context_usage_inflight.clear()
 
     @pytest.mark.asyncio
     async def test_get_session_not_found(self, client: AsyncClient):
@@ -600,6 +943,7 @@ class TestSessionLocalSharing:
         create_resp = await client.post("/api/session", json={"title": "share-session"})
         assert create_resp.status_code == status.HTTP_200_OK
         session_id = create_resp.json()["id"]
+        assert await Session.get_by_id(session_id) is not None
 
         share_resp = await client.post(f"/api/session/{session_id}/share-local")
         assert share_resp.status_code == status.HTTP_200_OK

@@ -38,10 +38,12 @@ async def _get_session_memory(ctx: ToolContext) -> tuple[Optional[SessionMemory]
     if not session:
         return None, ToolResult(success=False, error="Session not found")
 
+    from flocks.project.instance import Instance
+
     memory = SessionMemory(
         session_id=session.id,
         project_id=session.project_id,
-        workspace_dir=session.directory,
+        workspace_dir=Instance.get_directory() or session.directory,
         enabled=session.memory_enabled,
     )
 

@@ -187,13 +187,13 @@ class TestConfigWriter:
             "deepseek",
             npm="@ai-sdk/openai-compatible",
             base_url="https://api.deepseek.com/v1",
-            models={"deepseek-chat": {"name": "DeepSeek Chat"}},
+            models={"deepseek-v4-flash": {"name": "DeepSeek V4 Flash"}},
         )
 
         assert config["npm"] == "@ai-sdk/openai-compatible"
         assert config["options"]["apiKey"] == "{secret:deepseek_llm_key}"
         assert config["options"]["baseURL"] == "https://api.deepseek.com/v1"
-        assert config["models"]["deepseek-chat"]["name"] == "DeepSeek Chat"
+        assert config["models"]["deepseek-v4-flash"]["name"] == "DeepSeek V4 Flash"
 
     def test_build_provider_config_no_url(self, temp_project):
         from flocks.config.config_writer import ConfigWriter

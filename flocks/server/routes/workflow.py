@@ -329,9 +329,9 @@ def _workflow_integration_config_key(workflow_id: str) -> str:
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Read workflow data from the filesystem.
 
-    Search order (lowest → highest priority), same roots as
-    resolve_global_workflow_roots / resolve_project_workflow_roots; per-id dir
-    is ``<root>/<id>/`` with ``workflow.json`` inside.
+    Search order (lowest → highest priority) visits project-bundled roots before
+    global user roots; per-id dir is ``<root>/<id>/`` with ``workflow.json``
+    inside.
     """
     return shared_read_workflow_from_fs(workflow_id)
 
@@ -531,9 +531,8 @@ def _scan_workflow_base_dir(base_dir: Path, source: str) -> Dict[str, Dict[str, 
 def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     """Scan global and project workflow directories and return merged list.
 
-    Scan order matches *_all_scan_dirs()* (lowest -> highest priority): each
-    root from *resolve_global_workflow_roots* then each from
-    *resolve_project_workflow_roots(workspace)*; under each root, immediate
+    Scan order matches *_all_scan_dirs()* (lowest -> highest priority): project
+    bundle roots first, then global user roots; under each root, immediate
     subdirectories with *workflow.json* are workflows.
 
     Later entries override earlier ones when the workflow directory name (*id*)

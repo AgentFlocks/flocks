@@ -89,21 +89,6 @@ class RuntimeRecord:
     started_at: float | None = None
 
 
-@dataclass(frozen=True)
-class UpgradeRuntimeInfo:
-    payload_present: bool = False
-    pid_file_present: bool = False
-    upgrade_pid: int | None = None
-    frontend_host: str | None = None
-    frontend_port: int | None = None
-    listener_pids: tuple[int, ...] = ()
-    page_active: bool = False
-
-    @property
-    def has_artifacts(self) -> bool:
-        return self.payload_present or self.pid_file_present
-
-
 def repo_root() -> Path:
     """Return the installed repository root."""
     override = os.getenv("FLOCKS_REPO_ROOT")
@@ -723,51 +708,6 @@ def _console_print(console, message: str) -> None:
     console.print(message)
 
 
-def _read_upgrade_runtime_info(frontend_port: int | None = None) -> UpgradeRuntimeInfo:
-    try:
-        from flocks.updater import updater as updater_module
-
-        payload = updater_module.read_upgrade_runtime_state(frontend_port=frontend_port)
-    except Exception:
-        return UpgradeRuntimeInfo(frontend_port=frontend_port)
-
-    listener_pids = tuple(int(pid) for pid in payload.get("listener_pids", []) if isinstance(pid, int))
-    return UpgradeRuntimeInfo(
-        payload_present=bool(payload.get("payload_present")),
-        pid_file_present=bool(payload.get("pid_file_present")),
-        upgrade_pid=payload.get("upgrade_pid") if isinstance(payload.get("upgrade_pid"), int) else None,
-        frontend_host=payload.get("frontend_host") if isinstance(payload.get("frontend_host"), str) else None,
-        frontend_port=payload.get("frontend_port") if isinstance(payload.get("frontend_port"), int) else frontend_port,
-        listener_pids=listener_pids,
-        page_active=bool(payload.get("page_active")),
-    )
-
-
-def _resolve_upgrade_runtime(console, *, frontend_port: int, attempt_recover: bool) -> dict[str, object]:
-    upgrade_info = _read_upgrade_runtime_info(frontend_port)
-    if not upgrade_info.has_artifacts:
-        return {"action": "noop", "error": None}
-
-    from flocks.updater import updater as updater_module
-
-    _console_print(console, "[flocks] 检测到升级临时页残留，正在尝试恢复或清理...")
-    result = updater_module.resolve_upgrade_runtime_state(
-        attempt_recover=attempt_recover,
-        frontend_port=upgrade_info.frontend_port or frontend_port,
-    )
-
-    action = str(result.get("action") or "noop")
-    error = result.get("error")
-    if action == "recovered":
-        _console_print(console, "[flocks] 已恢复未完成升级，正式 WebUI 将继续接管端口。")
-    elif action != "noop":
-        _console_print(console, "[flocks] 已清理升级临时页残留。")
-
-    if isinstance(error, str) and error:
-        _console_print(console, f"[flocks] 未完成升级的自动恢复失败，已清理临时升级页: {error}")
-    return result
-
-
 def cleanup_stale_pid_file(pid_file: Path) -> None:
     """Remove pid files that no longer point to running processes."""
     if not pid_file.exists():
@@ -838,6 +778,8 @@ def port_is_in_use(port: int, listeners: Sequence[int] | None = None) -> bool:
     current_listeners = list(listeners) if listeners is not None else port_owner_pids(port)
     if current_listeners:
         return True
+    if sys.platform == "win32":
+        return not _bind_port_available(port)
     if _port_owner_lookup_available():
         return False
     return not _bind_port_available(port)
@@ -1042,17 +984,6 @@ def _is_running_status_response(response: httpx.Response) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "running"
 
 
-def _is_healthy_status_response(response: httpx.Response) -> bool:
-    """Return True when the backend health endpoint reports healthy."""
-    if response.status_code != 200:
-        return False
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    return isinstance(payload, dict) and payload.get("status") == "healthy"
-
-
 def wait_for_http(
     urls: Sequence[str],
     name: str,
@@ -1084,10 +1015,6 @@ class _StdoutConsole:
     def print(self, *args, **_kwargs) -> None:
         sys.stdout.write(" ".join(str(arg) for arg in args) + "\n")
         sys.stdout.flush()
-
-
-def _backend_health_url(host: str, port: int) -> str:
-    return f"http://{_format_host_for_url(access_host(host))}:{port}/api/health"
 
 
 def _terminate_process(
@@ -1582,7 +1509,6 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
 
 def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) -> None:
     """Ensure the supervisor daemon is running; caller must hold lifecycle lock."""
-    _resolve_upgrade_runtime(console, frontend_port=config.frontend_port, attempt_recover=False)
     if supervisor_is_running(paths):
         status = None
         try:
@@ -2184,7 +2110,7 @@ def _run_windows_netstat(port: int) -> str:
         return ""
     target = f":{port}"
     lines = []
-    for line in completed.stdout.splitlines():
+    for line in (completed.stdout or "").splitlines():
         if "LISTENING" not in line.upper():
             continue
         if target not in line:

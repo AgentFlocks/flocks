@@ -297,6 +297,7 @@ class SessionLoop:
         model_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
     ) -> LoopResult:
         """
         Run session loop
@@ -339,6 +340,8 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} not found",
             )
+        if working_directory:
+            session = session.model_copy(update={"directory": working_directory})
         
         # Resolve model when not explicitly provided
         if not provider_id or not model_id:
