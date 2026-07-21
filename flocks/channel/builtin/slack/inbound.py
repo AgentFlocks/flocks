@@ -11,6 +11,10 @@ from .config import allow_bot_messages
 from .format import strip_bot_mention
 
 
+def slack_thread_cache_key(account_id: str, channel_id: str, thread_ts: str) -> str:
+    return f"{account_id or 'default'}:{channel_id}:{thread_ts}"
+
+
 def _join_parts(parts: list[str]) -> str:
     return "\n\n".join(part for part in (p.strip() for p in parts) if part)
 
@@ -257,13 +261,15 @@ def build_inbound_message(
         # as channel surfaces while preserving group-trigger behavior in the
         # dispatcher (all non-DIRECT chats use the same trigger policy).
         chat_type = ChatType.CHANNEL
+    account_id = str(event.get("team") or event.get("team_id") or "default")
     thread_ts = str(event.get("thread_ts") or "")
     is_thread_reply = bool(thread_ts and thread_ts != ts)
     mentioned = bool(bot_user_id and f"<@{bot_user_id}>" in text)
+    thread_key = slack_thread_cache_key(account_id, channel_id, thread_ts) if thread_ts else ""
     continues_bot_thread = bool(
         is_thread_reply
         and (
-            thread_ts in known_thread_ids
+            thread_key in known_thread_ids
             or (bot_user_id and str(event.get("parent_user_id") or "") == bot_user_id)
         )
     )
@@ -281,7 +287,7 @@ def build_inbound_message(
 
     return InboundMessage(
         channel_id="slack",
-        account_id=str(event.get("team") or event.get("team_id") or "default"),
+        account_id=account_id,
         message_id=ts,
         sender_id=user_id,
         sender_name=sender_name,

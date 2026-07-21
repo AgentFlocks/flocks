@@ -163,7 +163,10 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
       non-empty, but are otherwise unrestricted.
     """
     allow_from = config.allow_from
-    dm_policy = config.dm_policy or "open"
+    dm_policy = config.dm_policy
+    if msg.channel_id == "slack" and dm_policy is None and allow_from:
+        dm_policy = "allowlist"
+    dm_policy = dm_policy or "open"
 
     if msg.chat_type == ChatType.DIRECT:
         if dm_policy == "open":

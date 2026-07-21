@@ -28,7 +28,7 @@ from .config import (
     should_reply_in_thread,
 )
 from .format import markdown_to_slack_mrkdwn
-from .inbound import build_inbound_message
+from .inbound import build_inbound_message, slack_thread_cache_key
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -343,10 +343,10 @@ class SlackChannel(ChannelPlugin):
 
             result = await self._app.client.chat_postMessage(**payload)
             message_id = str(result.get("ts") or "")
-            if message_id:
-                self._remember_thread(message_id)
             if thread_ts:
-                self._remember_thread(thread_ts)
+                self._remember_thread(ctx.account_id or "default", target, thread_ts)
+            elif message_id:
+                self._remember_thread(ctx.account_id or "default", target, message_id)
             await self._persist_known_threads()
             self.record_message()
             return DeliveryResult(
@@ -399,11 +399,12 @@ class SlackChannel(ChannelPlugin):
             return ctx.reply_to_id
         return None
 
-    def _remember_thread(self, thread_ts: str) -> None:
+    def _remember_thread(self, account_id: str, channel_id: str, thread_ts: str) -> None:
         if not thread_ts:
             return
-        self._known_thread_ids[thread_ts] = None
-        self._known_thread_ids.move_to_end(thread_ts)
+        thread_key = slack_thread_cache_key(account_id, channel_id, thread_ts)
+        self._known_thread_ids[thread_key] = None
+        self._known_thread_ids.move_to_end(thread_key)
         if len(self._known_thread_ids) > self._known_thread_ids_max:
             while len(self._known_thread_ids) > self._known_thread_ids_max // 2:
                 self._known_thread_ids.popitem(last=False)

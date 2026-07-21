@@ -1084,6 +1084,23 @@ class TestCheckAllowlist:
         cfg = ChannelConfig(dm_policy="allowlist", allow_from=["u1"])
         assert _check_allowlist(self._make_msg(sender_id="u1"), cfg) is True
 
+    def test_slack_dm_allow_from_without_policy_blocks_unlisted(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["U_ALLOWED"])
+        msg = self._make_msg(channel_id="slack", sender_id="U_BLOCKED")
+        assert _check_allowlist(msg, cfg) is False
+
+    def test_slack_dm_allow_from_without_policy_passes_listed(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["U_ALLOWED"])
+        msg = self._make_msg(channel_id="slack", sender_id="U_ALLOWED")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_non_slack_dm_allow_from_without_policy_stays_open(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["u2"])
+        assert _check_allowlist(self._make_msg(channel_id="test", sender_id="u1"), cfg) is True
+
     def test_dm_allowlist_empty_blocks_all(self):
         from flocks.channel.inbound.dispatcher import _check_allowlist
         cfg = ChannelConfig(dm_policy="allowlist", allow_from=None)

@@ -3486,8 +3486,12 @@ function stripEmpty(obj: Record<string, any>): Record<string, any> {
 function stripChannelConfigForSave(channelId: string, cfg: Record<string, any>): Record<string, any> {
   const result = stripEmpty(cfg);
 
-  if (channelId === 'slack' && cfg.allowFrom === undefined) {
-    result.allowFrom = null;
+  if (channelId === 'slack') {
+    const allowFrom = Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [];
+    result.dmPolicy = allowFrom.length > 0 ? 'allowlist' : 'open';
+    if (cfg.allowFrom === undefined) {
+      result.allowFrom = null;
+    }
   }
 
   return result;

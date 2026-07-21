@@ -546,6 +546,34 @@ class TestConfigRoutes:
 
         saved = json.loads(config_file.read_text(encoding="utf-8"))
         assert "allowFrom" not in saved["channels"]["slack"]
+        assert saved["channels"]["slack"]["dmPolicy"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_slack_allow_from_save_sets_dm_policy_allowlist(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Slack allowFrom must also enable DM allowlist enforcement."""
+        from flocks.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "flocks.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        async def fake_get_config():
+            return {}
+
+        monkeypatch.setattr(config_routes, "get_config", fake_get_config)
+
+        await config_routes.update_config(
+            {"channels": {"slack": {"enabled": False, "allowFrom": ["U123"]}}}
+        )
+
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert saved["channels"]["slack"]["allowFrom"] == ["U123"]
+        assert saved["channels"]["slack"]["dmPolicy"] == "allowlist"
 
     @pytest.mark.asyncio
     async def test_invalid_patch_does_not_delete_channel_allow_from(

@@ -10,7 +10,7 @@ from flocks.channel.base import ChatType, NonRetryableChannelError, OutboundCont
 import flocks.channel.builtin.slack.channel as slack_mod
 from flocks.channel.builtin.slack.channel import SlackChannel
 from flocks.channel.builtin.slack.format import markdown_to_slack_mrkdwn
-from flocks.channel.builtin.slack.inbound import build_inbound_message
+from flocks.channel.builtin.slack.inbound import build_inbound_message, slack_thread_cache_key
 from flocks.channel.builtin.slack.manifest import build_slack_app_manifest
 
 
@@ -101,6 +101,29 @@ def test_markdown_to_slack_mrkdwn_keeps_escaped_special_mentions():
     assert "&lt;!channel&gt;" in rendered
     assert "<!channel>" not in rendered
     assert "&amp;" in rendered
+
+
+def test_markdown_to_slack_mrkdwn_escapes_raw_slack_special_mentions():
+    rendered = markdown_to_slack_mrkdwn(
+        "notify <!here> <!channel> <!everyone> <@U123>; compare 1 < 2 & 3 > 2"
+    )
+
+    assert "<!here>" not in rendered
+    assert "<!channel>" not in rendered
+    assert "<!everyone>" not in rendered
+    assert "<@U123>" not in rendered
+    assert "&lt;!here&gt;" in rendered
+    assert "&lt;!channel&gt;" in rendered
+    assert "&lt;!everyone&gt;" in rendered
+    assert "&lt;@U123&gt;" in rendered
+    assert "1 &lt; 2 &amp; 3 &gt; 2" in rendered
+
+
+def test_markdown_to_slack_mrkdwn_escapes_unsafe_link_url_delimiters():
+    rendered = markdown_to_slack_mrkdwn("[x](https://example.com/a|<!here>)")
+
+    assert rendered == "<https://example.com/a%7C%3C!here%3E|x>"
+    assert "|<!here>" not in rendered
 
 
 def test_build_inbound_direct_message():
@@ -291,13 +314,33 @@ def test_build_inbound_thread_reply_to_known_bot_thread_triggers_without_mention
         },
         bot_user_id="UBOT",
         config={},
-        known_thread_ids={"171.2"},
+        known_thread_ids={slack_thread_cache_key("default", "C123", "171.2")},
     )
 
     assert msg is not None
     assert msg.mentioned is True
     assert msg.mention_text == "continue"
     assert msg.thread_id == "171.2"
+
+
+def test_build_inbound_same_thread_ts_in_other_channel_does_not_trigger():
+    msg = build_inbound_message(
+        {
+            "channel": "C999",
+            "channel_type": "channel",
+            "user": "U123",
+            "ts": "171.3",
+            "thread_ts": "171.2",
+            "text": "same timestamp, different channel",
+            "team": "T1",
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids={slack_thread_cache_key("T1", "C123", "171.2")},
+    )
+
+    assert msg is not None
+    assert msg.mentioned is False
 
 
 def test_build_inbound_thread_reply_to_parent_bot_user_triggers_after_restart():
@@ -421,8 +464,8 @@ async def test_send_text_posts_thread_reply_and_remembers_thread():
         thread_ts="171.1",
         reply_broadcast=True,
     )
-    assert "171.1" in plugin._known_thread_ids
-    assert "172.1" in plugin._known_thread_ids
+    assert slack_thread_cache_key("default", "C123", "171.1") in plugin._known_thread_ids
+    assert slack_thread_cache_key("default", "C123", "172.1") not in plugin._known_thread_ids
 
 
 @pytest.mark.asyncio
@@ -441,7 +484,7 @@ async def test_known_thread_roots_are_persisted_and_restored(monkeypatch):
     monkeypatch.setattr(slack_mod, "Storage", FakeStorage)
 
     plugin = SlackChannel()
-    plugin._remember_thread("171.2")
+    plugin._remember_thread("T1", "C123", "171.2")
     await plugin._persist_known_threads()
 
     restarted = SlackChannel()
@@ -455,6 +498,7 @@ async def test_known_thread_roots_are_persisted_and_restored(monkeypatch):
             "thread_ts": "171.2",
             "parent_user_id": "U123",
             "text": "continue after process restart",
+            "team": "T1",
         },
         bot_user_id="UBOT",
         config={},
