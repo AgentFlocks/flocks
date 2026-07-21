@@ -2382,14 +2382,14 @@ export default function SessionPage() {
         if (!session) return null;
         return (
           <div
-            className="fixed z-50 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
+            className="fixed z-50 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
             style={{ top: menuAnchor.top, right: menuAnchor.right }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <PencilLine className="w-3.5 h-3.5" />
               <span>{t('rename')}</span>
@@ -2397,7 +2397,7 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               disabled={downloadingSessionId === session.id}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
@@ -2405,16 +2405,16 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
               disabled={session.canWrite === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
-            <div className="mx-2.5 my-1 border-t border-gray-100 dark:border-zinc-800" />
+            <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
               disabled={session.canDelete === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>{t('deleteAction')}</span>

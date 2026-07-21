@@ -1015,6 +1015,9 @@ describe('SessionPage session actions menu', () => {
     await screen.findByText('Original Session');
     await user.click(screen.getByRole('button', { name: 'moreActions' }));
 
+    const menu = document.querySelector('[data-session-menu-portal]');
+    expect(menu).toHaveClass('min-w-28', 'rounded-md', 'p-1');
+    expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'deleteAction' })).toBeInTheDocument();
