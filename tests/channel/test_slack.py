@@ -626,7 +626,8 @@ async def test_connect_socket_mode_preflights_app_token_before_handler(monkeypat
         def __init__(self, token):
             self.token = token
 
-        async def apps_connections_open(self):
+        async def apps_connections_open(self, *, app_token):
+            assert app_token == "xapp-bad"
             raise FakeSlackError()
 
     class FakeHandler:

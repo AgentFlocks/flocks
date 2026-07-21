@@ -280,7 +280,7 @@ class SlackChannel(ChannelPlugin):
         assert AsyncWebClient is not None
         client = AsyncWebClient(token=app_token)
         try:
-            await client.apps_connections_open()
+            await client.apps_connections_open(app_token=app_token)
         except Exception as exc:
             message = _format_slack_start_error(exc, phase="socket_mode")
             self.mark_disconnected(message)
