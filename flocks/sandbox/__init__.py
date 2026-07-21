@@ -44,7 +44,7 @@ from .shared import (
     resolve_sandbox_workspace_dir,
     slugify_session_key,
 )
-from .tool_policy import is_tool_allowed, resolve_tool_policy
+from .tool_policy import build_tool_policy_metadata
 from .system_prompt import build_sandbox_system_prompt
 from .types import (
     BashSandboxConfig,
@@ -87,9 +87,8 @@ __all__ = [
     "resolve_sandbox_scope_key",
     "resolve_sandbox_workspace_dir",
     "slugify_session_key",
-    # Policy
-    "is_tool_allowed",
-    "resolve_tool_policy",
+    # Opaque policy metadata
+    "build_tool_policy_metadata",
     "build_sandbox_system_prompt",
     # Types
     "BashSandboxConfig",

@@ -274,6 +274,31 @@ async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
 
 
 @pytest.mark.asyncio
+async def test_workflow_tool_context_preserves_current_opaque_extension_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def build_context(**kwargs):
+        observed.update(kwargs)
+        return ToolContext(session_id="session-1", message_id="message-1", agent="rex")
+
+    monkeypatch.setattr(workflow_module, "build_workflow_tool_context", build_context)
+    monkeypatch.setattr(
+        workflow_module,
+        "current_execution_context",
+        lambda: {"workflow_transfer": "opaque-pro-token"},
+    )
+
+    await workflow_module._build_workflow_tool_context(
+        workflow_id="wf-1",
+        action_name="run",
+    )
+
+    assert observed["execution_context"] == {"workflow_transfer": "opaque-pro-token"}
+
+
+@pytest.mark.asyncio
 async def test_save_kafka_config_persists_consumer_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

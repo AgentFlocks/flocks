@@ -305,65 +305,36 @@ class TestPaths:
 
 
 class TestToolPolicy:
-    """工具策略测试."""
+    """OSS transports raw policy configuration without interpreting it."""
 
-    def test_default_policy_allows_bash(self):
-        """默认策略允许 bash."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
+    def test_tool_policy_metadata_preserves_global_and_agent_values(self):
+        from flocks.sandbox.tool_policy import build_tool_policy_metadata
 
-        policy = resolve_tool_policy()
-        assert is_tool_allowed(policy, "bash") is True
-
-    def test_default_policy_allows_delegate_task(self):
-        """未配置策略时默认允许所有工具."""
-        from flocks.sandbox.tool_policy import is_tool_allowed, resolve_tool_policy
-
-        policy = resolve_tool_policy()
-        assert is_tool_allowed(policy, "delegate_task") is True
-
-    def test_deny_overrides_allow(self):
-        """deny 优先于 allow."""
-        from flocks.sandbox.tool_policy import is_tool_allowed
-        from flocks.sandbox.types import SandboxToolPolicy
-
-        policy = SandboxToolPolicy(allow=["*"], deny=["bash"])
-        assert is_tool_allowed(policy, "bash") is False
-        assert is_tool_allowed(policy, "read") is True
-
-    def test_wildcard_allow(self):
-        """通配符允许."""
-        from flocks.sandbox.tool_policy import is_tool_allowed
-        from flocks.sandbox.types import SandboxToolPolicy
-
-        policy = SandboxToolPolicy(allow=["*"], deny=[])
-        assert is_tool_allowed(policy, "anything") is True
-
-    def test_empty_allow_allows_all(self):
-        """空 allow 列表允许所有."""
-        from flocks.sandbox.tool_policy import is_tool_allowed
-        from flocks.sandbox.types import SandboxToolPolicy
-
-        policy = SandboxToolPolicy(allow=None, deny=None)
-        assert is_tool_allowed(policy, "bash") is True
-
-    def test_glob_pattern(self):
-        """通配符模式匹配."""
-        from flocks.sandbox.tool_policy import is_tool_allowed
-        from flocks.sandbox.types import SandboxToolPolicy
-
-        policy = SandboxToolPolicy(allow=["session*"], deny=[])
-        assert is_tool_allowed(policy, "sessions_list") is True
-        assert is_tool_allowed(policy, "bash") is False
-
-    def test_agent_overrides_global(self):
-        """Agent 覆盖 global 策略."""
-        from flocks.sandbox.tool_policy import resolve_tool_policy
-
-        policy = resolve_tool_policy(
-            global_allow=["bash", "read"],
-            agent_allow=["bash"],
+        metadata = build_tool_policy_metadata(
+            {
+                "sandbox": {"tools": {"allow": ["read"], "deny": []}},
+                "agent": {
+                    "rex": {"sandbox": {"tools": {"allow": ["bash"], "deny": ["write"]}}}
+                },
+            },
+            "rex",
         )
-        assert policy.allow == ["bash"]
+
+        assert metadata == {
+            "source": "sandbox.tool_policy",
+            "global": {"allow": ["read"], "deny": []},
+            "agent": {"allow": ["bash"], "deny": ["write"]},
+        }
+
+    def test_tool_policy_metadata_does_not_sanitize_invalid_raw_values(self):
+        from flocks.sandbox.tool_policy import build_tool_policy_metadata
+
+        metadata = build_tool_policy_metadata(
+            {"sandbox": {"tools": "not-a-policy-object"}},
+            "rex",
+        )
+
+        assert metadata["global"] == "not-a-policy-object"
 
 
 # ==================== 5. Docker 参数构建测试 ====================
@@ -1084,8 +1055,8 @@ class TestStreamProcessorSandboxMeta:
         assert result["extra"] == {}
 
     @pytest.mark.asyncio
-    async def test_sandbox_meta_tool_blocked_by_policy(self):
-        """工具被策略阻断."""
+    async def test_sandbox_meta_never_blocks_tool_by_policy(self):
+        """OSS carries tool constraints instead of enforcing them."""
         from unittest.mock import AsyncMock, MagicMock
 
         from flocks.session.streaming.stream_processor import StreamProcessor
@@ -1110,12 +1081,16 @@ class TestStreamProcessorSandboxMeta:
             main_session_key="main-session",
         )
         result = await processor._resolve_sandbox_meta("delegate_task")
-        assert result["blocked"] is True
-        assert "blocked by sandbox tool policy" in result["error"]
+        assert result["blocked"] is False
+        assert result["error"] is None
+        assert result["extra"]["sandbox_tool_policy"]["global"] == {
+            "allow": ["bash"],
+            "deny": ["delegate_task"],
+        }
 
     @pytest.mark.asyncio
-    async def test_sandbox_meta_non_file_tool_passes(self):
-        """非 bash/read/write/edit 工具放行但无 extra."""
+    async def test_sandbox_meta_non_file_tool_carries_policy_metadata(self):
+        """Non-sandbox tools still expose neutral policy metadata to hooks."""
         from unittest.mock import AsyncMock, MagicMock
 
         from flocks.session.streaming.stream_processor import StreamProcessor
@@ -1138,7 +1113,11 @@ class TestStreamProcessorSandboxMeta:
         )
         result = await processor._resolve_sandbox_meta("grep")
         assert result["blocked"] is False
-        assert result["extra"] == {}
+        assert result["extra"]["sandbox_tool_policy"] == {
+            "source": "sandbox.tool_policy",
+            "global": {},
+            "agent": {},
+        }
 
     @pytest.mark.asyncio
     async def test_sandbox_runtime_cache(self):

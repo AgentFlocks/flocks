@@ -25,7 +25,11 @@ from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
 from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
-from flocks.hooks.execution import ExecutionStopped, execution_lifecycle_scope
+from flocks.hooks.execution import (
+    ExecutionStopped,
+    execution_context_scope,
+    execution_lifecycle_scope,
+)
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
 from flocks.server.static_webui import maybe_serve_static_webui
 
@@ -964,7 +968,9 @@ async def auth_guard_middleware(request: Request, call_next):
 
         subject_token = set_current_subject(getattr(request.state, "subject", None))
         try:
-            return await call_next(request)
+            extension_context = getattr(request.state, "extension_context", None)
+            with execution_context_scope(extension_context):
+                return await call_next(request)
         finally:
             reset_current_subject(subject_token)
             clear_auth_context(token)

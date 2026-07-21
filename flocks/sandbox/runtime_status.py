@@ -9,8 +9,8 @@
 from typing import Any, Dict, Optional
 
 from .config import resolve_sandbox_config_for_agent
-from .tool_policy import resolve_tool_policy
-from .types import SandboxConfig, SandboxMode, SandboxToolPolicy
+from .tool_policy import build_tool_policy_metadata
+from .types import SandboxConfig, SandboxMode
 
 
 def should_sandbox_session(
@@ -40,14 +40,16 @@ class SandboxRuntimeStatus:
         main_session_key: str,
         mode: SandboxMode,
         sandboxed: bool,
-        tool_policy: SandboxToolPolicy,
+        tool_policy_metadata: Dict[str, Any],
     ):
         self.agent_id = agent_id
         self.session_key = session_key
         self.main_session_key = main_session_key
         self.mode = mode
         self.sandboxed = sandboxed
-        self.tool_policy = tool_policy
+        # Opaque configuration carrier for optional extensions.  Flocks never
+        # evaluates this data to allow or deny a tool.
+        self.tool_policy_metadata = tool_policy_metadata
 
 
 def resolve_sandbox_runtime_status(
@@ -82,30 +84,11 @@ def resolve_sandbox_runtime_status(
         else False
     )
 
-    # 解析工具策略
-    global_sandbox = (config_data or {}).get("sandbox", {}) or {}
-    agent_data = (config_data or {}).get("agent", {}) or {}
-    agent_sandbox = {}
-    if agent_id and agent_id in agent_data:
-        ac = agent_data[agent_id]
-        if isinstance(ac, dict):
-            agent_sandbox = ac.get("sandbox", {}) or {}
-
-    global_tools = global_sandbox.get("tools", {}) or {}
-    agent_tools = agent_sandbox.get("tools", {}) or {}
-
-    tool_policy = resolve_tool_policy(
-        global_allow=global_tools.get("allow"),
-        global_deny=global_tools.get("deny"),
-        agent_allow=agent_tools.get("allow"),
-        agent_deny=agent_tools.get("deny"),
-    )
-
     return SandboxRuntimeStatus(
         agent_id=agent_id,
         session_key=session_key,
         main_session_key=main_session_key,
         mode=sandbox_cfg.mode,
         sandboxed=sandboxed,
-        tool_policy=tool_policy,
+        tool_policy_metadata=build_tool_policy_metadata(config_data, agent_id),
     )

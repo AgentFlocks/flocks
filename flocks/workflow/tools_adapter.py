@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from flocks.hooks.execution import current_execution_context
 from flocks.tool import ToolContext, ToolRegistry, ToolResult
 from flocks.workflow.errors import NodeExecutionError, RunCancelledError
 from flocks.workflow._async_runtime import (
@@ -37,6 +38,26 @@ class FlocksToolAdapter:
     def _blocked(self, name: str) -> bool:
         return (name or "").strip() in WORKFLOW_TOOL_BLOCKLIST
 
+    def _tool_context(self) -> ToolContext:
+        """Return workflow context with any neutral parent carrier preserved."""
+        if self._ctx is None:
+            return ToolContext(session_id="workflow", message_id="workflow")
+        existing = self._ctx.extra.get("execution_context")
+        inherited = current_execution_context()
+        if isinstance(existing, Mapping) or not inherited:
+            return self._ctx
+        return ToolContext(
+            session_id=self._ctx.session_id,
+            message_id=self._ctx.message_id,
+            agent=self._ctx.agent,
+            call_id=self._ctx.call_id,
+            extra={**self._ctx.extra, "execution_context": inherited},
+            abort_event=self._ctx.abort,
+            permission_callback=self._ctx._permission_callback,
+            metadata_callback=self._ctx._metadata_callback,
+            event_publish_callback=self._ctx.event_publish_callback,
+        )
+
     def _execute_tool_async(self, name: str, ctx: ToolContext, kwargs: Dict[str, Any]) -> ToolResult:
         """
         Execute an async tool from a sync context safely.
@@ -65,7 +86,7 @@ class FlocksToolAdapter:
         if tool is None:
             raise NodeExecutionError(node_id="<tool>", message=f"Tool not found: {name!r}")
 
-        ctx = self._ctx or ToolContext(session_id="workflow", message_id="workflow")
+        ctx = self._tool_context()
         try:
             if self.cancel_checker is not None and self.cancel_checker():
                 raise RunCancelledError("<tool>")

@@ -118,6 +118,53 @@ async def test_unregistered_action_hook_leaves_operation_and_result_unmodified()
 
 
 @pytest.mark.asyncio
+async def test_execute_with_hooks_preserves_structured_terminal_outcome_and_context() -> None:
+    """The paired after stage receives neutral, structured terminal facts."""
+
+    observed_after_payloads: list[dict] = []
+
+    class ContextLifecycle(HookBase):
+        async def action_before(self, _ctx):
+            return {
+                "context": {
+                    "subject": {
+                        "subject_id": "principal-1",
+                        "subject_type": "service_account",
+                    },
+                    "entry": "workflow_service",
+                }
+            }
+
+        async def action_after(self, ctx):
+            observed_after_payloads.append(dict(ctx.input))
+
+    HookPipeline.register("terminal-outcome-context", ContextLifecycle())
+
+    assert await execute_with_hooks(
+        {
+            "action": "workflow.invoke",
+            "resource": {"type": "workflow", "id": "wf-1"},
+        },
+        AsyncMock(return_value={"raw": "result"}),
+    ) == {"raw": "result"}
+
+    after_payload = observed_after_payloads[-1]
+    assert after_payload["outcome"] == "success"
+    assert after_payload["terminal_outcome"] == {
+        "status": "success",
+        "success": True,
+        "executed": True,
+    }
+    assert after_payload["context"] == {
+        "subject": {
+            "subject_id": "principal-1",
+            "subject_type": "service_account",
+        },
+        "entry": "workflow_service",
+    }
+
+
+@pytest.mark.asyncio
 async def test_execute_with_hooks_binds_and_resets_valid_neutral_subject() -> None:
     class SubjectLifecycle(HookBase):
         async def ingress_before(self, _ctx):
@@ -176,6 +223,38 @@ async def test_execute_with_hooks_forwards_successful_after_subject_to_sink() ->
 
     assert len(sunk_subjects) == 1
     assert sunk_subjects[0].subject_id == "authenticated-local-user"
+
+
+@pytest.mark.asyncio
+async def test_execute_with_hooks_forwards_after_opaque_context_to_sink() -> None:
+    """An extension context can survive auth without OSS interpreting it."""
+
+    class AfterContext(HookBase):
+        async def ingress_after(self, _ctx):
+            return {
+                "context": {
+                    "workflow_transfer": "opaque-pro-token",
+                    "extension_marker": "value",
+                }
+            }
+
+    HookPipeline.register("after-context", AfterContext())
+    sunk_contexts: list[dict] = []
+
+    assert await execute_with_hooks(
+        {"operation": "auth.request", "transport": "http"},
+        AsyncMock(return_value="authenticated"),
+        before=HookPipeline.run_ingress_before,
+        after=HookPipeline.run_ingress_after,
+        context_sink=sunk_contexts.append,
+    ) == "authenticated"
+
+    assert sunk_contexts == [
+        {
+            "workflow_transfer": "opaque-pro-token",
+            "extension_marker": "value",
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -231,7 +231,7 @@ class TestSessionBindingDirectoryPropagation:
 
 class TestChannelSessionOwnerPropagation:
     @pytest.mark.asyncio
-    async def test_create_session_assigns_local_admin_owner(self):
+    async def test_create_session_does_not_assign_unrelated_local_admin_owner(self):
         captured = {}
 
         class _StubSession:
@@ -241,11 +241,9 @@ class TestChannelSessionOwnerPropagation:
             captured.update(kwargs)
             return _StubSession()
 
-        admin = SimpleNamespace(id="usr_admin", username="admin", role="admin")
-
         with patch("flocks.session.session.Session.create", new=_fake_create), \
              patch("flocks.auth.service.AuthService.has_users", new=AsyncMock(return_value=True)), \
-             patch("flocks.auth.service.AuthService.list_users", new=AsyncMock(return_value=[admin])):
+             patch("flocks.auth.service.AuthService.list_users", new=AsyncMock()) as list_users:
             sid = await SessionBindingService._create_session(
                 _msg(),
                 default_agent="rex",
@@ -253,8 +251,9 @@ class TestChannelSessionOwnerPropagation:
             )
 
         assert sid == "ses_admin_owned"
-        assert captured["owner_user_id"] == "usr_admin"
-        assert captured["owner_username"] == "admin"
+        assert "owner_user_id" not in captured
+        assert "owner_username" not in captured
+        list_users.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_session_stays_ownerless_without_local_accounts(self):

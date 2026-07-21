@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 import os
 from typing import Any, Optional
 
@@ -22,6 +22,7 @@ async def build_workflow_tool_context(
     message_id: Optional[str] = None,
     agent: Optional[str] = None,
     event_publish_callback: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None,
+    execution_context: Mapping[str, Any] | None = None,
 ) -> ToolContext:
     """Build a real ToolContext for workflow execution.
 
@@ -85,13 +86,20 @@ async def build_workflow_tool_context(
         )
         effective_message_id = message.id
 
+    extra = {
+        "workspace_dir": workspace_dir,
+        "main_session_key": effective_session_id,
+    }
+    if isinstance(execution_context, Mapping):
+        # Generic opaque context transport for nested workflow work.  No OSS
+        # component interprets this carrier as identity, authorization, or
+        # permission information.
+        extra["execution_context"] = dict(execution_context)
+
     return ToolContext(
         session_id=effective_session_id,
         message_id=effective_message_id,
         agent=effective_agent or "rex",
         event_publish_callback=event_publish_callback,
-        extra={
-            "workspace_dir": workspace_dir,
-            "main_session_key": effective_session_id,
-        },
+        extra=extra,
     )

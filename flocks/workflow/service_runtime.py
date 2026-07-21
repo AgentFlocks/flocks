@@ -17,7 +17,11 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
+from flocks.hooks.execution import (
+    ExecutionStopped,
+    current_execution_context,
+    execute_with_hooks,
+)
 from flocks.hooks.pipeline import HookPipeline
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
@@ -133,9 +137,14 @@ def create_service_app(
 
         try:
             async def _effect() -> RunWorkflowResult:
+                context_kwargs: dict[str, Any] = {}
+                execution_context = current_execution_context()
+                if execution_context:
+                    context_kwargs["execution_context"] = execution_context
                 tool_context = await build_workflow_tool_context(
                     workflow_id=app.state.workflow_id,
                     action_name="invoke",
+                    **context_kwargs,
                 )
                 return await asyncio.to_thread(
                     run_workflow,

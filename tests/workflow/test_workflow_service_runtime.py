@@ -127,6 +127,58 @@ def test_service_runtime_invoke_builds_real_tool_context(
     assert run_workflow_mock.call_args.kwargs["tool_context"] is tool_context
 
 
+def test_service_runtime_passes_opaque_ingress_context_to_workflow_tool_context(
+    monkeypatch,
+) -> None:
+    """The service transports hook context without interpreting its contents."""
+    observed = []
+
+    class TransferIngress(HookBase):
+        async def ingress_before(self, _ctx):
+            return {"context": {"workflow_transfer": "opaque-token"}}
+
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("transfer-ingress", TransferIngress())
+    monkeypatch.setattr(service_runtime.MCP, "init", AsyncMock())
+    monkeypatch.setattr(
+        service_runtime,
+        "get_manager",
+        lambda: SimpleNamespace(shutdown=AsyncMock()),
+    )
+
+    async def build_context(**kwargs):
+        observed.append(kwargs)
+        return ToolContext(session_id="session-1", message_id="message-1")
+
+    monkeypatch.setattr(service_runtime, "build_workflow_tool_context", build_context)
+    monkeypatch.setattr(
+        service_runtime,
+        "run_workflow",
+        Mock(return_value=SimpleNamespace(status="SUCCEEDED", run_id="r", outputs={}, error=None)),
+    )
+    app = service_runtime.create_service_app(
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        workflow_id="wf-1",
+        release_id="rel-1",
+    )
+
+    try:
+        with TestClient(app, raise_server_exceptions=True) as client:
+            response = client.post("/invoke", json={"inputs": {}})
+    finally:
+        HookPipeline.reset()
+
+    assert response.status_code == 200
+    assert observed == [
+        {
+            "workflow_id": "wf-1",
+            "action_name": "invoke",
+            "execution_context": {"workflow_transfer": "opaque-token"},
+        }
+    ]
+
+
 def test_service_runtime_requires_api_key_when_configured(
     monkeypatch,
 ) -> None:

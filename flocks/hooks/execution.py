@@ -15,6 +15,7 @@ from flocks.identity import Subject, reset_current_subject, set_current_subject
 T = TypeVar("T")
 StageRunner = Callable[[dict[str, Any]], Awaitable[HookContext]]
 SubjectSink = Callable[[Subject], None]
+ContextSink = Callable[[dict[str, Any]], None]
 
 
 @dataclass(eq=False, slots=True)
@@ -35,10 +36,39 @@ _current_execution_lifecycle_scope: ContextVar[ExecutionLifecycleScope | None] =
     ContextVar("flocks_execution_lifecycle_scope", default=None)
 )
 
+# Extension-provided context is a neutral, opaque carrier.  Flocks never
+# assigns policy meaning to its keys or values; it only keeps the paired
+# before-stage context available while an effect creates child work.
+_current_execution_context: ContextVar[dict[str, Any]] = ContextVar(
+    "flocks_execution_context", default={}
+)
+
 
 def current_execution_lifecycle_scope() -> ExecutionLifecycleScope | None:
     """Return the opaque scope for the current generic execution, if any."""
     return _current_execution_lifecycle_scope.get()
+
+
+def current_execution_context() -> dict[str, Any]:
+    """Return a copy of the current opaque execution context carrier."""
+    return dict(_current_execution_context.get())
+
+
+@contextmanager
+def execution_context_scope(context: Mapping[str, Any] | None):
+    """Temporarily expose extension-owned context as an opaque carrier.
+
+    This adapter intentionally neither validates nor interprets the mapping.
+    It allows an ingress hook to associate opaque state with child work after
+    the authentication effect itself has completed.
+    """
+    inherited = current_execution_context()
+    supplied = dict(context) if isinstance(context, Mapping) else {}
+    token = _current_execution_context.set({**inherited, **supplied})
+    try:
+        yield
+    finally:
+        _current_execution_context.reset(token)
 
 
 def is_execution_lifecycle_scope_active(scope: object) -> bool:
@@ -138,16 +168,38 @@ def subject_from_hook_context(ctx: HookContext) -> Subject | None:
         return None
 
 
+def _terminal_outcome(
+    status: str,
+    *,
+    executed: bool,
+    error: BaseException | None = None,
+) -> dict[str, Any]:
+    """Return neutral terminal facts without exposing an effect result body."""
+    outcome: dict[str, Any] = {
+        "status": status,
+        "success": status == "success",
+        "executed": executed,
+    }
+    if error is not None:
+        outcome["error_type"] = type(error).__name__
+    return outcome
+
+
 async def execute_with_hooks(
     payload: dict[str, Any],
     effect: Callable[[], Awaitable[T]],
     *,
-    before: StageRunner = HookPipeline.run_action_before,
-    after: StageRunner = HookPipeline.run_action_after,
+    before: StageRunner | None = None,
+    after: StageRunner | None = None,
     subject_sink: SubjectSink | None = None,
+    context_sink: ContextSink | None = None,
     reuse_execution_scope: bool = False,
 ) -> T:
     """Run an operation between generic before/after lifecycle stages."""
+    if before is None:
+        before = HookPipeline.run_action_before
+    if after is None:
+        after = HookPipeline.run_action_after
     with execution_lifecycle_scope(reuse_current=reuse_execution_scope):
         return await _execute_with_hooks_in_scope(
             payload,
@@ -155,6 +207,7 @@ async def execute_with_hooks(
             before=before,
             after=after,
             subject_sink=subject_sink,
+            context_sink=context_sink,
         )
 
 
@@ -165,24 +218,45 @@ async def _execute_with_hooks_in_scope(
     before: StageRunner,
     after: StageRunner,
     subject_sink: SubjectSink | None,
+    context_sink: ContextSink | None,
 ) -> T:
     """Execute one lifecycle operation while its neutral scope is active."""
     from flocks.plugin import PluginLoader
 
     if PluginLoader.has_runtime_critical_entrypoint_failure():
         stopped = ExecutionStopped("critical plugin entrypoint failure")
-        after_ctx = await after({**payload, "outcome": "stopped", "error": stopped})
+        after_ctx = await after({
+            **payload,
+            "outcome": "stopped",
+            "terminal_outcome": _terminal_outcome(
+                "stopped", executed=False, error=stopped
+            ),
+            "error": stopped,
+        })
         raise_if_execution_stopped(after_ctx)
         raise stopped
 
     try:
         before_ctx = await before(payload)
     except BaseException as exc:
-        after_ctx = await after({**payload, "outcome": "error", "error": exc})
+        after_ctx = await after({
+            **payload,
+            "outcome": "error",
+            "terminal_outcome": _terminal_outcome(
+                "error", executed=False, error=exc
+            ),
+            "error": exc,
+        })
         raise_if_execution_stopped(after_ctx)
         raise
     stopped = execution_stop_error(before_ctx)
     before_context = before_ctx.output.get("context")
+    inherited_context = current_execution_context()
+    effective_context = (
+        {**inherited_context, **before_context}
+        if isinstance(before_context, Mapping)
+        else inherited_context
+    )
 
     def _after_payload(data: dict[str, Any]) -> dict[str, Any]:
         """Carry opaque hook context to the paired after lifecycle stage."""
@@ -198,7 +272,14 @@ async def _execute_with_hooks_in_scope(
 
     if stopped is not None:
         after_ctx = await after(
-            _after_payload({**payload, "outcome": "stopped", "error": stopped})
+            _after_payload({
+                **payload,
+                "outcome": "stopped",
+                "terminal_outcome": _terminal_outcome(
+                    "stopped", executed=False, error=stopped
+                ),
+                "error": stopped,
+            })
         )
         raise_if_execution_stopped(after_ctx)
         raise stopped
@@ -207,32 +288,58 @@ async def _execute_with_hooks_in_scope(
     if subject is not None and subject_sink is not None:
         subject_sink(subject)
     subject_token = set_current_subject(subject) if subject is not None else None
+    context_token = _current_execution_context.set(effective_context)
     try:
         result = await effect()
     except Exception as exc:
         if subject_token is not None:
             reset_current_subject(subject_token)
+        _current_execution_context.reset(context_token)
         after_ctx = await after(
-            _after_payload({**payload, "outcome": "error", "error": exc})
+            _after_payload({
+                **payload,
+                "outcome": "error",
+                "terminal_outcome": _terminal_outcome(
+                    "error", executed=True, error=exc
+                ),
+                "error": exc,
+            })
         )
         raise_if_execution_stopped(after_ctx)
         raise
     except BaseException as exc:
         if subject_token is not None:
             reset_current_subject(subject_token)
+        _current_execution_context.reset(context_token)
         after_ctx = await after(
-            _after_payload({**payload, "outcome": "error", "error": exc})
+            _after_payload({
+                **payload,
+                "outcome": "error",
+                "terminal_outcome": _terminal_outcome(
+                    "error", executed=True, error=exc
+                ),
+                "error": exc,
+            })
         )
         raise_if_execution_stopped(after_ctx)
         raise
 
     if subject_token is not None:
         reset_current_subject(subject_token)
+    _current_execution_context.reset(context_token)
     after_ctx = await after(
-        _after_payload({**payload, "outcome": "success", "result": result})
+        _after_payload({
+            **payload,
+            "outcome": "success",
+            "terminal_outcome": _terminal_outcome("success", executed=True),
+            "result": result,
+        })
     )
     raise_if_execution_stopped(after_ctx)
     after_subject = subject_from_hook_context(after_ctx)
     if after_subject is not None and subject_sink is not None:
         subject_sink(after_subject)
+    after_context = after_ctx.output.get("context")
+    if isinstance(after_context, Mapping) and context_sink is not None:
+        context_sink(dict(after_context))
     return result

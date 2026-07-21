@@ -268,6 +268,9 @@ async def apply_auth_for_request(request: HTTPConnection):
             before=HookPipeline.run_ingress_before,
             after=HookPipeline.run_ingress_after,
             subject_sink=lambda subject: setattr(request.state, "subject", subject),
+            context_sink=lambda context: setattr(
+                request.state, "extension_context", dict(context)
+            ),
             reuse_execution_scope=True,
         )
     except BaseException:

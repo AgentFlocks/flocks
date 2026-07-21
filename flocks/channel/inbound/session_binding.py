@@ -85,9 +85,10 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     Channel dispatch runs outside the HTTP auth middleware, so
     ``Session.create`` cannot infer the owner from ``current_auth_user``.
     When an existing channel session is being replaced, preserve its owner.
-    Otherwise, attach new channel sessions to the local admin if one exists.
-    Installs without local accounts remain ownerless for backward-compatible
-    no-login operation.
+    A channel message must never be implicitly attributed to an unrelated
+    local administrator.  Any identity-to-owner mapping belongs to a Pro
+    ingress extension; neutral Flocks sessions remain ownerless when no
+    explicit owner carrier was supplied.
     """
     owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
     owner_username = getattr(source_session, "owner_username", None) if source_session else None
@@ -99,23 +100,7 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
             owner_kwargs["owner_username"] = str(owner_username)
         return owner_kwargs
 
-    try:
-        from flocks.auth.service import AuthService
-
-        if not await AuthService.has_users():
-            return {}
-        users = await AuthService.list_users()
-    except Exception as exc:
-        log.warn("channel.owner.resolve_failed", {"error": str(exc)})
-        return {}
-
-    admin = next((user for user in users if getattr(user, "role", None) == "admin"), None)
-    if admin is None:
-        return {}
-    return {
-        "owner_user_id": str(admin.id),
-        "owner_username": str(admin.username),
-    }
+    return {}
 
 
 # Register channel_bindings DDL with Storage so the tables are created
