@@ -18,6 +18,7 @@ from flocks.workflow.execution_store import (
 from flocks.workflow.fs_store import read_workflow_dir, workflow_scan_dirs
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.tool_context import build_workflow_tool_context
 
 from .compat import (
     LEGACY_KAFKA_CONFIG_PREFIX,
@@ -219,11 +220,16 @@ class TriggerRuntime:
         exec_id = exec_data["id"]
         started_at = time.time()
         try:
+            tool_context = await build_workflow_tool_context(
+                workflow_id=workflow_id,
+                action_name=f"trigger:{trigger.type}",
+            )
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
                 inputs=mapped_inputs,
                 trace=False,
+                tool_context=tool_context,
             )
             status_value, error_message = resolve_execution_outcome(result)
             exec_data.update(

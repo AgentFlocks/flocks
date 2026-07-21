@@ -18,12 +18,21 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from flocks.ingest.syslog import manager as syslog_manager
 from flocks.workflow import execution_store
 from flocks.workflow.triggers.models import TriggerDefinition
+
+
+@pytest.fixture(autouse=True)
+def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    context = object()
+    builder = AsyncMock(return_value=context)
+    monkeypatch.setattr(syslog_manager, "build_workflow_tool_context", builder)
+    return SimpleNamespace(context=context, builder=builder)
 
 
 @pytest.mark.asyncio
@@ -96,8 +105,7 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
 
     assert completed == burst_size, f"expected {burst_size} dispatches, got {completed}"
     assert max_in_flight <= pool_size, (
-        f"in-flight dispatches exceeded worker pool size: "
-        f"max_in_flight={max_in_flight}, pool_size={pool_size}"
+        f"in-flight dispatches exceeded worker pool size: max_in_flight={max_in_flight}, pool_size={pool_size}"
     )
 
 
@@ -167,6 +175,7 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
 @pytest.mark.asyncio
 async def test_trigger_workflow_applies_mapping_and_filter(
     monkeypatch: pytest.MonkeyPatch,
+    trigger_tool_context: SimpleNamespace,
 ) -> None:
     manager = syslog_manager.SyslogManager()
     captured_run_kwargs: dict = {}
@@ -240,7 +249,12 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["inputs"]["pipeline"] == "syslog"
     assert captured_run_kwargs["run_id"] == "exec-syslog"
     assert captured_run_kwargs["execution_profile"] == "high_frequency"
+    assert captured_run_kwargs["tool_context"] is trigger_tool_context.context
     assert callable(captured_run_kwargs["on_step_complete"])
+    trigger_tool_context.builder.assert_awaited_once_with(
+        workflow_id="wf-syslog",
+        action_name="trigger:syslog",
+    )
     assert recorded_steps[0][0] == "exec-syslog"
     assert recorded_steps[0][1] == 1
     assert recorded_steps[0][2]["node_id"] == "receive_alert"

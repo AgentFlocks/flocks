@@ -42,6 +42,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.tool_context import build_workflow_tool_context
 
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
 from flocks.workflow.triggers.compat import legacy_kafka_trigger_from_config
@@ -699,6 +700,10 @@ class KafkaManager:
                 ),
             )
             try:
+                tool_context = await build_workflow_tool_context(
+                    workflow_id=workflow_id,
+                    action_name=f"trigger:{trigger.type}",
+                )
                 result = await asyncio.to_thread(
                     run_workflow,
                     workflow=workflow_plan,
@@ -707,6 +712,7 @@ class KafkaManager:
                     trace=False,
                     execution_profile="high_frequency",
                     on_step_complete=step_recorder.on_step_complete,
+                    tool_context=tool_context,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time
