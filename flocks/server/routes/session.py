@@ -3942,6 +3942,7 @@ class ShellRequest(BaseModel):
 )
 async def run_shell_command(sessionID: str, request: ShellRequest, http_request: Request):
     """Run shell command"""
+    from flocks.hooks.execution import ExecutionStopped
     from flocks.session.runner import SessionRunner
 
     current_user = require_user(http_request)
@@ -3957,12 +3958,20 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
     if request.model:
         model = {"providerID": request.model.providerID, "modelID": request.model.modelID}
     
-    result = await SessionRunner.shell(
-        session_id=sessionID,
-        agent=request.agent,
-        command=request.command,
-        model=model,
-    )
+    try:
+        result = await SessionRunner.shell(
+            session_id=sessionID,
+            agent=request.agent,
+            command=request.command,
+            model=model,
+        )
+    except ExecutionStopped as exc:
+        # A generic extension lifecycle may stop this operation.  Keep the
+        # response stable without interpreting extension-specific policy data.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="execution stopped by extension",
+        ) from exc
     
     log.info("session.shell.executed", {
         "sessionID": sessionID,

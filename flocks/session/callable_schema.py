@@ -16,6 +16,7 @@ from flocks.session.callable_state import (
     initialize_session_callable_tools,
 )
 from flocks.hooks.pipeline import HookPipeline
+from flocks.identity import get_current_subject
 from flocks.tool.registry import ToolRegistry
 
 
@@ -75,6 +76,7 @@ async def list_session_callable_tool_infos(
     session_id: str,
     declared_tool_names: Optional[Iterable[str]] = None,
     *,
+    agent: str | None = None,
     step: int = 0,
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> CallableSchemaResult:
@@ -92,7 +94,7 @@ async def list_session_callable_tool_infos(
     effective_callable_names = set(callable_tool_names) | always_load_names
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
 
-    projection_ctx = await HookPipeline.run_capability_filter({
+    projection_payload: Dict[str, Any] = {
         "session_id": session_id,
         "step": step,
         "candidates": [
@@ -104,7 +106,16 @@ async def list_session_callable_tool_infos(
             }
             for tool_info in tool_infos
         ],
-    })
+    }
+    if agent:
+        projection_payload["agent"] = agent
+    subject = get_current_subject()
+    if subject is not None:
+        # Subject is an opaque extension carrier.  Flocks deliberately keeps
+        # its attributes nested and does not interpret them as policy fields.
+        projection_payload["subject"] = subject.model_dump()
+
+    projection_ctx = await HookPipeline.run_capability_filter(projection_payload)
     replacement = projection_ctx.output.get("candidates")
     if isinstance(replacement, list):
         candidate_by_name = {tool_info.name: tool_info for tool_info in tool_infos}

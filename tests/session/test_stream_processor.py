@@ -400,6 +400,39 @@ class TestToolInputStart:
 
 class TestToolCallExecution:
     @pytest.mark.asyncio
+    async def test_stream_tool_hook_is_marked_as_non_authoritative_intent(self):
+        proc = _make_processor()
+        observed = {}
+
+        async def _capture_tool_before(payload):
+            observed.update(payload)
+            return MagicMock(input=payload, output={})
+
+        mock_result = ToolResult(success=True, output="ok", title="bash", metadata={})
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(side_effect=_capture_tool_before),
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=mock_result),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc-intent", tool_name="bash"))
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc-intent",
+                    tool_name="bash",
+                    input={"command": "git status"},
+                )
+            )
+
+        assert observed["phase"] == "intent"
+
+    @pytest.mark.asyncio
     async def test_tool_call_executes_tool(self):
         proc = _make_processor()
 

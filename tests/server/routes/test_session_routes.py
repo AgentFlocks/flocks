@@ -20,6 +20,8 @@ import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 from flocks.auth.context import AuthUser
+from flocks.hooks.execution import ExecutionStopped
+from flocks.server.routes import session as session_routes
 from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.message import (
     Message,
@@ -34,6 +36,39 @@ from flocks.session.session import Session
 # ===========================================================================
 # CRUD
 # ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_shell_route_maps_extension_stop_to_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Pro policy stop must not surface as an unhandled server error."""
+
+    monkeypatch.setattr(session_routes, "require_user", lambda _request: object())
+    monkeypatch.setattr(
+        session_routes,
+        "_get_session_by_id_unfiltered",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        session_routes,
+        "_require_session_write_access",
+        lambda _session, _user: None,
+    )
+    monkeypatch.setattr(
+        "flocks.session.runner.SessionRunner.shell",
+        AsyncMock(side_effect=ExecutionStopped("hard_deny_system_delete")),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await session_routes.run_shell_command(
+            "ses_1",
+            session_routes.ShellRequest(agent="build", command="rm -rf /etc"),
+            SimpleNamespace(),
+        )
+
+    assert error.value.status_code == status.HTTP_403_FORBIDDEN
+    assert error.value.detail == "execution stopped by extension"
 
 class TestSessionCRUD:
     """Basic create / read / update / delete for sessions."""

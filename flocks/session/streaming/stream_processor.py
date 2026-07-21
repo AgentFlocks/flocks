@@ -661,6 +661,9 @@ class StreamProcessor:
         try:
             from flocks.hooks.pipeline import HookPipeline
             hook_ctx = await HookPipeline.run_tool_before({
+                # This stream-stage hook is observational only.  The actual
+                # executor below owns the authoritative action lifecycle.
+                "phase": "intent",
                 "sessionID": self.session_id,
                 "workspace": self._workspace_dir,
                 "agent": self.agent.name,
