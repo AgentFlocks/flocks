@@ -42,7 +42,10 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
-from flocks.workflow.tool_context import build_workflow_tool_context
+from flocks.workflow.tool_context import (
+    build_workflow_tool_context,
+    cleanup_workflow_tool_context,
+)
 
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
 from flocks.workflow.triggers.compat import legacy_kafka_trigger_from_config
@@ -699,6 +702,7 @@ class KafkaManager:
                     input_keys=trigger_input_keys,
                 ),
             )
+            tool_context = None
             try:
                 tool_context = await build_workflow_tool_context(
                     workflow_id=workflow_id,
@@ -760,6 +764,7 @@ class KafkaManager:
                     }
                 )
             finally:
+                await cleanup_workflow_tool_context(tool_context)
                 try:
                     await record_execution_result(workflow_id, exec_id, exec_data)
                 except Exception as exc:

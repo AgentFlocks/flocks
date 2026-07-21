@@ -30,8 +30,10 @@ from flocks.workflow.triggers.models import TriggerDefinition
 def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     context = object()
     builder = AsyncMock(return_value=context)
+    cleanup = AsyncMock()
     monkeypatch.setattr(kafka_manager, "build_workflow_tool_context", builder)
-    return SimpleNamespace(context=context, builder=builder)
+    monkeypatch.setattr(kafka_manager, "cleanup_workflow_tool_context", cleanup)
+    return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
 
 
 @pytest.mark.asyncio
@@ -470,6 +472,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         workflow_id="wf-orders",
         action_name="trigger:kafka",
     )
+    trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
     assert recorded_exec_data["triggerId"] == "kafka-orders"
     assert recorded_exec_data["triggerSource"] == "orders-topic"
 

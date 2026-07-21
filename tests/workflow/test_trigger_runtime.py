@@ -21,6 +21,7 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
         agent="rex",
     )
     build_context = AsyncMock(return_value=tool_context)
+    cleanup_context = AsyncMock()
 
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
         missing_context = kwargs.get("tool_context") is None
@@ -37,8 +38,8 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
         runtime_module,
         "build_workflow_tool_context",
         build_context,
-        raising=False,
     )
+    monkeypatch.setattr(runtime_module, "cleanup_workflow_tool_context", cleanup_context)
     monkeypatch.setattr(runtime_module, "run_workflow", Mock(side_effect=_fake_run_workflow))
     monkeypatch.setattr(
         runtime_module,
@@ -63,6 +64,7 @@ async def test_trigger_execution_builds_tool_context_for_workflow_tools(
         action_name="trigger:custom_webhook",
     )
     assert runtime_module.run_workflow.call_args.kwargs["tool_context"] is tool_context
+    cleanup_context.assert_awaited_once_with(tool_context)
 
 
 @pytest.mark.asyncio

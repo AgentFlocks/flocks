@@ -474,6 +474,8 @@ async def delegate_task_tool(
             model_pinned=bool(explicit_model),
         )
     created = await Session.create(**create_kwargs)
+    if ctx.extra.get("workflow_temp_parent") is True:
+        ctx.extra["workflow_child_session_created"] = True
     await Message.create(
         session_id=created.id,
         role=MessageRole.USER,

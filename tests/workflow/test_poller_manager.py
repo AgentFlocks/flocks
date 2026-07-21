@@ -22,8 +22,10 @@ def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         agent="rex",
     )
     builder = AsyncMock(return_value=context)
+    cleanup = AsyncMock()
     monkeypatch.setattr(poller_manager, "build_workflow_tool_context", builder)
-    return SimpleNamespace(context=context, builder=builder)
+    monkeypatch.setattr(poller_manager, "cleanup_workflow_tool_context", cleanup)
+    return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
 
 
 @pytest.mark.asyncio
@@ -153,6 +155,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(
         workflow_id="wf-run-once",
         action_name="trigger:schedule",
     )
+    trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
 
 
 @pytest.mark.asyncio

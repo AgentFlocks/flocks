@@ -18,7 +18,10 @@ from flocks.workflow.execution_store import (
 from flocks.workflow.fs_store import read_workflow_dir, workflow_scan_dirs
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
-from flocks.workflow.tool_context import build_workflow_tool_context
+from flocks.workflow.tool_context import (
+    build_workflow_tool_context,
+    cleanup_workflow_tool_context,
+)
 
 from .compat import (
     LEGACY_KAFKA_CONFIG_PREFIX,
@@ -219,6 +222,7 @@ class TriggerRuntime:
         )
         exec_id = exec_data["id"]
         started_at = time.time()
+        tool_context = None
         try:
             tool_context = await build_workflow_tool_context(
                 workflow_id=workflow_id,
@@ -264,6 +268,8 @@ class TriggerRuntime:
                     "triggerSource": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("source"),
                 }
             )
+        finally:
+            await cleanup_workflow_tool_context(tool_context)
         await record_execution_result(workflow_id, exec_id, exec_data)
         return exec_data
 

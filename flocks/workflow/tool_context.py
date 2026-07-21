@@ -11,7 +11,10 @@ from fastapi import HTTPException
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.tool import ToolContext
+from flocks.utils.log import Log
 from flocks.workflow.fs_store import find_workspace_root
+
+log = Log.create(service="workflow.tool_context")
 
 
 async def build_workflow_tool_context(
@@ -33,6 +36,7 @@ async def build_workflow_tool_context(
     effective_session_id = str(session_id or "").strip()
     effective_message_id = str(message_id or "").strip()
     effective_agent = str(agent or "").strip()
+    created_temp_parent = not effective_session_id
 
     workspace_dir = os.getcwd()
     project_id = "default"
@@ -93,5 +97,56 @@ async def build_workflow_tool_context(
         extra={
             "workspace_dir": workspace_dir,
             "main_session_key": effective_session_id,
+            "workflow_temp_parent": created_temp_parent,
         },
     )
+
+
+async def cleanup_workflow_tool_context(tool_context: Optional[ToolContext]) -> bool:
+    """Purge an unused temporary workflow parent session.
+
+    Parents with delegated child sessions are retained so returned task session
+    IDs remain valid. Caller-provided sessions are never modified.
+    """
+    if tool_context is None:
+        return False
+    extra = getattr(tool_context, "extra", None)
+    if not isinstance(extra, dict) or extra.get("workflow_temp_parent") is not True:
+        return False
+
+    session_id = str(getattr(tool_context, "session_id", "") or "").strip()
+    if not session_id:
+        return False
+
+    try:
+        session = await Session.get_by_id(session_id)
+        metadata = getattr(session, "metadata", None) if session is not None else None
+        if session is None or not isinstance(metadata, dict) or metadata.get("workflowTempParent") is not True:
+            return False
+
+        if extra.get("workflow_child_session_created") is True:
+            return False
+
+        await Session.delete(session.project_id, session.id)
+
+        # Session.delete is intentionally a soft delete. Trigger parents without
+        # child tasks are implementation details, so remove their residual rows
+        # to keep high-frequency trigger traffic storage-bounded.
+        from flocks.storage.storage import Storage
+
+        await Storage.delete(f"session:{session.project_id}:{session.id}")
+        await Storage.delete(f"message:{session.id}")
+        await Storage.delete(f"todo:{session.id}")
+        await Storage.delete(f"goal:{session.id}")
+        await Storage.delete(f"session_diff:{session.id}")
+        await Storage.clear(prefix=f"message_diff:{session.id}:")
+        await Storage.clear(prefix=f"system_prompts:{session.id}:")
+
+        Message.invalidate_cache(session.id)
+        return True
+    except Exception as exc:
+        log.warning(
+            "workflow.tool_context.cleanup_failed",
+            {"session_id": session_id, "error": str(exc)},
+        )
+        return False

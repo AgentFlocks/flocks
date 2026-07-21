@@ -31,8 +31,10 @@ from flocks.workflow.triggers.models import TriggerDefinition
 def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     context = object()
     builder = AsyncMock(return_value=context)
+    cleanup = AsyncMock()
     monkeypatch.setattr(syslog_manager, "build_workflow_tool_context", builder)
-    return SimpleNamespace(context=context, builder=builder)
+    monkeypatch.setattr(syslog_manager, "cleanup_workflow_tool_context", cleanup)
+    return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
 
 
 @pytest.mark.asyncio
@@ -255,6 +257,7 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         workflow_id="wf-syslog",
         action_name="trigger:syslog",
     )
+    trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
     assert recorded_steps[0][0] == "exec-syslog"
     assert recorded_steps[0][1] == 1
     assert recorded_steps[0][2]["node_id"] == "receive_alert"
