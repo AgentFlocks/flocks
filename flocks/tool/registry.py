@@ -878,7 +878,11 @@ class ToolRegistry:
         if result.success:
             cls._reset_failure_state(tool_name)
         else:
-            disabled = cls._record_failure(tool, kwargs, result.error)
+            if await cls._failure_auto_disable_enabled():
+                disabled = cls._record_failure(tool, kwargs, result.error)
+            else:
+                cls._reset_failure_state(tool_name)
+                disabled = False
             if disabled:
                 result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
                 suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"
@@ -1742,6 +1746,19 @@ class ToolRegistry:
         """Reset failure tracking for a tool after success."""
         if tool_name in cls._failure_state:
             cls._failure_state.pop(tool_name, None)
+
+    @classmethod
+    async def _failure_auto_disable_enabled(cls) -> bool:
+        """Return the configured repeated-failure behavior, defaulting on."""
+        try:
+            from flocks.config.config import Config
+
+            config = await Config.get()
+            if config.tool_failure is not None:
+                return config.tool_failure.disable_on_repeated_failure
+        except Exception:
+            pass
+        return True
 
     @classmethod
     def _should_track_failure(cls, tool: Tool) -> bool:

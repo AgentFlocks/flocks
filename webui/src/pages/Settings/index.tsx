@@ -26,6 +26,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
+import { toolFailureConfigApi } from '@/api/toolFailureConfig';
 import { preloadI18nNamespaces } from '@/i18nResources';
 
 type LazySettingsModule = { default: ComponentType<any> };
@@ -156,6 +157,38 @@ function SegmentedOption({
   );
 }
 
+function PreferenceSwitch({
+  checked,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  label: string;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onChange}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60 ${
+        checked ? 'bg-zinc-950 dark:bg-zinc-100' : 'bg-zinc-300 dark:bg-zinc-700'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition-transform dark:bg-zinc-950 ${
+          checked ? 'translate-x-5' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
+  );
+}
+
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
   const { theme, setTheme } = useContext(ThemeContext);
@@ -168,26 +201,58 @@ function PreferencesPanel() {
     uploadProductFavicon,
     resetProductFavicon,
   } = useProductName();
-  const toast = useToast();
+  const { error: showToastError, success: showToastSuccess } = useToast();
   const language = i18n.language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
   const faviconInputRef = useRef<HTMLInputElement | null>(null);
   const [displayNameDraft, setDisplayNameDraft] = useState(configuredDisplayName ?? '');
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [savingFavicon, setSavingFavicon] = useState(false);
+  const [toolFailureAutoDisable, setToolFailureAutoDisable] = useState(true);
+  const [loadingToolFailure, setLoadingToolFailure] = useState(true);
+  const [savingToolFailure, setSavingToolFailure] = useState(false);
   const normalizedDisplayName = displayNameDraft.trim();
   const displayNameChanged = normalizedDisplayName !== (configuredDisplayName ?? '');
+  const toolFailureSettingLoadFailedMessage = t('toolFailureSettingLoadFailed');
 
   useEffect(() => {
     setDisplayNameDraft(configuredDisplayName ?? '');
   }, [configuredDisplayName]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingToolFailure(true);
+    toolFailureConfigApi.get()
+      .then((config) => {
+        if (!cancelled) {
+          setToolFailureAutoDisable(config.disableOnRepeatedFailure);
+        }
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          showToastError(
+            toolFailureSettingLoadFailedMessage,
+            err?.response?.data?.detail || err?.message,
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingToolFailure(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showToastError, toolFailureSettingLoadFailedMessage]);
+
   const handleSaveDisplayName = async () => {
     setSavingDisplayName(true);
     try {
       await updateProductName(normalizedDisplayName || null);
-      toast.success(t('displayNameSaved'));
+      showToastSuccess(t('displayNameSaved'));
     } catch (err: any) {
-      toast.error(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingDisplayName(false);
     }
@@ -197,9 +262,9 @@ function PreferencesPanel() {
     setSavingDisplayName(true);
     try {
       await updateProductName(null);
-      toast.success(t('displayNameSaved'));
+      showToastSuccess(t('displayNameSaved'));
     } catch (err: any) {
-      toast.error(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingDisplayName(false);
     }
@@ -213,9 +278,9 @@ function PreferencesPanel() {
     setSavingFavicon(true);
     try {
       await uploadProductFavicon(file);
-      toast.success(t('faviconSaved'));
+      showToastSuccess(t('faviconSaved'));
     } catch (err: any) {
-      toast.error(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingFavicon(false);
     }
@@ -225,11 +290,28 @@ function PreferencesPanel() {
     setSavingFavicon(true);
     try {
       await resetProductFavicon();
-      toast.success(t('faviconSaved'));
+      showToastSuccess(t('faviconSaved'));
     } catch (err: any) {
-      toast.error(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingFavicon(false);
+    }
+  };
+
+  const handleToolFailureAutoDisableChange = async () => {
+    const nextValue = !toolFailureAutoDisable;
+    setSavingToolFailure(true);
+    try {
+      const config = await toolFailureConfigApi.update(nextValue);
+      setToolFailureAutoDisable(config.disableOnRepeatedFailure);
+      showToastSuccess(t('toolFailureSettingSaved'));
+    } catch (err: any) {
+      showToastError(
+        t('toolFailureSettingSaveFailed'),
+        err?.response?.data?.detail || err?.message,
+      );
+    } finally {
+      setSavingToolFailure(false);
     }
   };
 
@@ -370,6 +452,19 @@ function PreferencesPanel() {
               {t('darkTheme')}
             </SegmentedOption>
           </div>
+        </PreferenceRow>
+
+        <PreferenceRow
+          icon={ShieldCheck}
+          title={t('toolFailureAutoDisable')}
+          description={t('toolFailureAutoDisableDescription')}
+        >
+          <PreferenceSwitch
+            checked={toolFailureAutoDisable}
+            disabled={loadingToolFailure || savingToolFailure}
+            label={t('toolFailureAutoDisable')}
+            onChange={() => void handleToolFailureAutoDisableChange()}
+          />
         </PreferenceRow>
       </div>
     </div>

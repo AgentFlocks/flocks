@@ -349,6 +349,20 @@ class ToolOutputConfig(BaseModel):
     )
 
 
+class ToolFailureConfig(BaseModel):
+    """Repeated tool-failure handling."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        True,
+        alias="disableOnRepeatedFailure",
+        description=(
+            "Disable a standalone custom tool after repeated identical failures."
+        ),
+    )
+
+
 class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
 
@@ -674,6 +688,11 @@ class ConfigInfo(BaseModel):
         None,
         alias="toolOutput",
         description="Tool output size limits (read, truncation caps).",
+    )
+    tool_failure: Optional[ToolFailureConfig] = Field(
+        None,
+        alias="toolFailure",
+        description="Repeated tool-failure handling.",
     )
     experimental: Optional[ExperimentalConfig] = None
     
