@@ -15,7 +15,7 @@ const { listMock, getMock } = vi.hoisted(() => ({
 
 vi.mock('@/api/workflow', () => ({
   workflowAPI: {
-    list: listMock,
+    listSummaries: listMock,
     get: getMock,
   },
 }));

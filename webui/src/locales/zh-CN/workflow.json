@@ -21,6 +21,33 @@
     "avgRuntime": "平均耗时",
     "nodes": "节点"
   },
+  "integration": {
+    "aria": "发布与触发状态",
+    "api": "API",
+    "trigger": "Trigger",
+    "moreStatuses": "更多状态",
+    "triggerType": {
+      "manual": "Manual",
+      "schedule": "Schedule",
+      "webhook": "Webhook",
+      "syslog": "Syslog",
+      "kafka": "Kafka",
+      "internal_event": "内部事件",
+      "custom_webhook": "Webhook",
+      "custom_adapter": "自定义 Trigger",
+      "plugin": "Plugin"
+    },
+    "state": {
+      "enabled": "启用",
+      "disabled": "关闭"
+    },
+    "detailState": {
+      "unconfigured": "未配置",
+      "starting": "启动中",
+      "stopped": "已暂停",
+      "error": "异常"
+    }
+  },
   "noDescription": "无描述",
   "totalCount": "共 {{total}} 个工作流",
   "filter": {

@@ -21,6 +21,33 @@
     "avgRuntime": "Avg Runtime",
     "nodes": "Nodes"
   },
+  "integration": {
+    "aria": "Publishing and trigger status",
+    "api": "API",
+    "trigger": "Trigger",
+    "moreStatuses": "More statuses",
+    "triggerType": {
+      "manual": "Manual",
+      "schedule": "Schedule",
+      "webhook": "Webhook",
+      "syslog": "Syslog",
+      "kafka": "Kafka",
+      "internal_event": "Internal Event",
+      "custom_webhook": "Webhook",
+      "custom_adapter": "Custom Trigger",
+      "plugin": "Plugin"
+    },
+    "state": {
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "detailState": {
+      "unconfigured": "Not configured",
+      "starting": "Starting",
+      "stopped": "Paused",
+      "error": "Error"
+    }
+  },
   "noDescription": "No description",
   "totalCount": "{{total}} workflows",
   "filter": {

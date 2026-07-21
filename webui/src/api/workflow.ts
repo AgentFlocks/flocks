@@ -171,6 +171,59 @@ export interface WorkflowJSON {
   metadata?: WorkflowMetadata;
 }
 
+export type WorkflowCapabilityState =
+  | 'unconfigured'
+  | 'starting'
+  | 'running'
+  | 'stopped'
+  | 'error';
+
+export interface WorkflowCapabilityStatus {
+  configured: boolean;
+  state: WorkflowCapabilityState;
+  count?: number;
+}
+
+export interface WorkflowTriggerStatusSummary {
+  id: string;
+  type: WorkflowTriggerType;
+  name?: string;
+  state: WorkflowCapabilityState;
+  rawState?: string;
+}
+
+export interface WorkflowTriggerCapabilityStatus extends WorkflowCapabilityStatus {
+  items?: WorkflowTriggerStatusSummary[];
+}
+
+export interface WorkflowIntegrationStatus {
+  api: WorkflowCapabilityStatus;
+  trigger: WorkflowTriggerCapabilityStatus;
+}
+
+export interface WorkflowSummary {
+  id: string;
+  name: string;
+  nameI18n?: Record<string, string>;
+  description?: string;
+  category: string;
+  status: 'draft' | 'active' | 'archived';
+  source?: 'project' | 'global';
+  createdAt: number;
+  updatedAt: number;
+  nodeCount: number;
+  integrationStatus?: WorkflowIntegrationStatus;
+  stats: {
+    callCount: number;
+    successCount: number;
+    errorCount: number;
+    totalRuntime: number;
+    avgRuntime: number;
+    thumbsUp: number;
+    thumbsDown: number;
+  };
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -185,6 +238,7 @@ export interface Workflow {
   createdBy?: string;
   createdAt: number;
   updatedAt: number;
+  integrationStatus?: WorkflowIntegrationStatus;
   stats: {
     callCount: number;
     successCount: number;
@@ -379,6 +433,9 @@ export interface WorkflowPollerStatus {
 export const workflowAPI = {
   list: (params?: { category?: string; status?: string; excludeId?: string }) =>
     client.get<Workflow[]>('/api/workflow', { params }),
+
+  listSummaries: (params?: { category?: string; status?: string; excludeId?: string }) =>
+    client.get<WorkflowSummary[]>('/api/workflow-summaries', { params }),
   
   get: (id: string) =>
     client.get<Workflow>(`/api/workflow/${id}`),
