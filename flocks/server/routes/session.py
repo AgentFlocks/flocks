@@ -191,6 +191,10 @@ class SessionCreateRequest(BaseModel):
     title: Optional[str] = Field(None, description="Session title")
     permission: Optional[List[PermissionRule]] = Field(None, description="Permission rules")
     category: Optional[str] = Field(None, description="Session category (e.g. 'user', 'workflow')")
+    model_auto: bool = Field(
+        False,
+        description="Enable WebUI runtime model failover for this session",
+    )
 
 
 class FileDiff(BaseModel):
@@ -247,6 +251,7 @@ class SessionResponse(BaseModel):
     provider: Optional[str] = Field(None, description="Pinned provider ID")
     model: Optional[str] = Field(None, description="Pinned model ID")
     model_pinned: bool = Field(False, description="Whether provider/model are pinned for this session")
+    model_auto: bool = Field(False, description="Whether WebUI Auto mode is selected")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
     ownerUsername: Optional[str] = Field(None, description="Session owner username")
     canWrite: bool = Field(False, description="Whether current user can continue this session")
@@ -270,6 +275,7 @@ class SessionListItem(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     model_pinned: bool = False
+    model_auto: bool = False
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
@@ -317,6 +323,7 @@ def _session_to_response(
         provider=session.provider,
         model=session.model,
         model_pinned=session.model_pinned,
+        model_auto=session.model_auto,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
         canWrite=can_write,
@@ -356,6 +363,7 @@ def _session_to_list_item(
         provider=session.provider,
         model=session.model,
         model_pinned=session.model_pinned,
+        model_auto=session.model_auto,
         canWrite=SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
         isShared=SessionPolicy.is_shared(session, shared_project_ids),
@@ -705,6 +713,25 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     await assert_license_active(feature="session_create")
     if request is None:
         request = SessionCreateRequest()
+    if request.model_auto:
+        if request.category not in (None, "user"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Auto mode is only available for user sessions",
+            )
+        if current_user.id == API_TOKEN_SERVICE_USER_ID:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Auto mode can only be enabled from the WebUI",
+            )
+        from flocks.session.session_loop import SessionLoop
+
+        auto_available, auto_reason = await SessionLoop.validate_auto_configuration()
+        if not auto_available:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Auto mode is unavailable: {auto_reason}",
+            )
 
     from flocks.project.project import DEFAULT_PROJECT_ID, Project
 
@@ -778,6 +805,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         permission=permission,
         owner_user_id=None if is_api_token_client else current_user.id,
         owner_username=None if is_api_token_client else current_user.username,
+        model_auto=request.model_auto,
+        model_pinned=False,
         **({"category": request.category} if request.category else {}),
     )
     Project.invalidate_session_stats()
@@ -1068,6 +1097,7 @@ class SessionUpdateRequest(BaseModel):
     provider: Optional[str] = Field(None, description="Pinned provider ID")
     model: Optional[str] = Field(None, description="Pinned model ID")
     model_pinned: Optional[bool] = Field(None, description="Whether provider/model are pinned for this session")
+    model_auto: Optional[bool] = Field(None, description="Whether WebUI Auto mode is selected")
 
 
 @router.patch(
@@ -1092,6 +1122,40 @@ async def update_session(
     current_user = require_user(http_request)
     _require_session_write_access(existing, current_user)
 
+    if request.model_auto is True and (
+        request.provider is not None
+        or request.model is not None
+        or request.model_pinned is True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Auto mode cannot be combined with a pinned provider/model",
+        )
+    if request.model_auto is True:
+        if existing.category != "user":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Auto mode is only available for user sessions",
+            )
+        if current_user.id == API_TOKEN_SERVICE_USER_ID:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Auto mode can only be enabled from the WebUI",
+            )
+        from flocks.session.session_loop import SessionLoop
+
+        auto_available, auto_reason = await SessionLoop.validate_auto_configuration()
+        if not auto_available:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Auto mode is unavailable: {auto_reason}",
+            )
+    if (request.provider is None) != (request.model is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="provider and model must be updated together",
+        )
+
     updates = {}
     if request.title is not None:
         updates["title"] = request.title
@@ -1103,6 +1167,15 @@ async def update_session(
         updates["model"] = request.model
     if request.model_pinned is not None:
         updates["model_pinned"] = request.model_pinned
+        if request.model_pinned:
+            updates["model_auto"] = False
+    if request.model_auto is not None:
+        updates["model_auto"] = request.model_auto
+        if request.model_auto:
+            updates["model_pinned"] = False
+    if request.provider is not None and request.model is not None:
+        updates["model_auto"] = False
+        updates["model_pinned"] = True
     
     session = await Session.update(
         project_id=existing.project_id,
@@ -1115,6 +1188,15 @@ async def update_session(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
+
+    if (
+        request.model_auto is False
+        or request.model_pinned is True
+        or (request.provider is not None and request.model is not None)
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        SessionLoop.clear_auto_failover_state(sessionID)
     
     log.info("session.updated", {"session_id": sessionID})
     return await _session_to_response_with_goal(session)
@@ -2119,7 +2201,7 @@ def _schedule_background_coro(
 async def _prepare_replay_runtime(
     session_id: str,
     user_message,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """Resolve replay runtime state before mutating session history."""
     from flocks.agent.registry import Agent
     from flocks.config.config import Config
@@ -2127,21 +2209,40 @@ async def _prepare_replay_runtime(
 
     agent_name = getattr(user_message, "agent", None) or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
-    # Replay should follow the model that is active *now* for this session
-    # (current session pin / current default / current agent override), not the
-    # historical model stored on the original user message being replayed.
-    dummy_request = type(
-        "_MessageReplayRequest",
-        (),
-        {"model": None, "agent": agent_name},
-    )()
-    provider_id, model_id, _ = await _resolve_model(dummy_request, agent, session_id)
+    session = await Session.get_by_id(session_id)
+    auto_failover = bool(
+        session
+        and getattr(session, "category", "user") == "user"
+        and getattr(session, "model_auto", False)
+    )
+    if auto_failover:
+        default_llm = await Config.resolve_default_llm()
+        if not default_llm:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Auto mode requires a configured default LLM",
+            )
+        provider_id = default_llm["provider_id"]
+        model_id = default_llm["model_id"]
+    else:
+        # Replay follows the model active *now*, not the model stored on the
+        # historical user message.
+        dummy_request = type(
+            "_MessageReplayRequest",
+            (),
+            {"model": None, "agent": agent_name},
+        )()
+        provider_id, model_id, _ = await _resolve_model(
+            dummy_request,
+            agent,
+            session_id,
+        )
 
     Provider._ensure_initialized()
     config = await Config.get()
     await Provider.apply_config(config, provider_id=provider_id)
     provider = Provider.get(provider_id)
-    if not provider:
+    if not provider and not auto_failover:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Provider {provider_id} not found",
@@ -2151,6 +2252,7 @@ async def _prepare_replay_runtime(
         "agent_name": agent_name,
         "provider_id": provider_id,
         "model_id": model_id,
+        "auto_failover": auto_failover,
     }
 
 
@@ -2159,7 +2261,7 @@ async def _run_existing_user_message(
     session,
     user_message,
     working_directory: str,
-    runtime: Optional[Dict[str, str]] = None,
+    runtime: Optional[Dict[str, Any]] = None,
 ):
     """Run SessionLoop using an already-persisted user message."""
     from flocks.server.routes.event import publish_event
@@ -2192,6 +2294,7 @@ async def _run_existing_user_message(
         agent_name=agent_name,
         callbacks=loop_callbacks,
         working_directory=working_directory,
+        auto_failover=bool(runtime.get("auto_failover", False)),
     )
 
     if result.action == "queued":
@@ -2211,6 +2314,8 @@ async def _run_existing_user_message(
     assistant_message_id = None
     created_ms = end_ms
     final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    actual_provider_id = result.provider_id or provider_id
+    actual_model_id = result.model_id or model_id
 
     if result.last_message:
         assistant_message_id = result.last_message.id
@@ -2219,6 +2324,14 @@ async def _run_existing_user_message(
         finish = getattr(result.last_message, "finish", None)
         if finish:
             finish_reason = finish
+        actual_provider_id = (
+            getattr(result.last_message, "providerID", None)
+            or actual_provider_id
+        )
+        actual_model_id = (
+            getattr(result.last_message, "modelID", None)
+            or actual_model_id
+        )
         result_time = getattr(result.last_message, "time", None)
         if isinstance(result_time, dict):
             created_ms = result_time.get("created", created_ms)
@@ -2238,8 +2351,8 @@ async def _run_existing_user_message(
             "role": "assistant",
             "time": {"created": created_ms, "completed": end_ms},
             "parentID": user_message.id,
-            "modelID": model_id,
-            "providerID": provider_id,
+            "modelID": actual_model_id,
+            "providerID": actual_provider_id,
             "mode": agent_name,
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
@@ -2252,8 +2365,8 @@ async def _run_existing_user_message(
         publish_event,
         session_id,
         session=session,
-        provider_id=provider_id,
-        model_id=model_id,
+        provider_id=actual_provider_id,
+        model_id=actual_model_id,
     )
 
     log.info("session.message.replay.completed", {
@@ -2851,9 +2964,27 @@ async def _process_session_message(
     agent_name = request.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
-    provider_id, model_id, model_source = await _resolve_model(
-        request, agent, sessionID
+    auto_failover = bool(
+        getattr(session, "category", "user") == "user"
+        and getattr(session, "model_auto", False)
+        and not request.model
     )
+    if auto_failover:
+        from flocks.config.config import Config
+
+        default_llm = await Config.resolve_default_llm()
+        if not default_llm:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Auto mode requires a configured default LLM",
+            )
+        provider_id = default_llm["provider_id"]
+        model_id = default_llm["model_id"]
+        model_source = "auto_primary"
+    else:
+        provider_id, model_id, model_source = await _resolve_model(
+            request, agent, sessionID
+        )
     
     log.info("session.message.model", {
         "provider_id": provider_id,
@@ -2873,15 +3004,17 @@ async def _process_session_message(
             session.provider = provider_id
             session.model = model_id
             session.model_pinned = True
+            session.model_auto = False
+        SessionLoop.clear_auto_failover_state(sessionID)
     
     # Ensure providers are initialized and configured
     Provider._ensure_initialized()
     from flocks.config.config import Config
     config = await Config.get()
     await Provider.apply_config(config, provider_id=provider_id)
-    
+
     provider = Provider.get(provider_id)
-    if not provider:
+    if not provider and not auto_failover:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Provider {provider_id} not found"
@@ -3080,6 +3213,7 @@ async def _process_session_message(
         agent_name=agent_name,
         callbacks=loop_callbacks,
         working_directory=working_directory,
+        auto_failover=auto_failover,
     )
 
     # ------------------------------------------------------------------
@@ -3109,6 +3243,8 @@ async def _process_session_message(
     final_content = ""
     assistant_message_id = None
     final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    actual_provider_id = result.provider_id or provider_id
+    actual_model_id = result.model_id or model_id
     
     if result.last_message:
         assistant_message_id = result.last_message.id
@@ -3117,6 +3253,14 @@ async def _process_session_message(
         finish = getattr(result.last_message, 'finish', None)
         if finish:
             finish_reason = finish
+        actual_provider_id = (
+            getattr(result.last_message, "providerID", None)
+            or actual_provider_id
+        )
+        actual_model_id = (
+            getattr(result.last_message, "modelID", None)
+            or actual_model_id
+        )
     
     if result.action == "error":
         finish_reason = "error"
@@ -3134,8 +3278,8 @@ async def _process_session_message(
             "role": "assistant",
             "time": {"created": now_ms, "completed": end_ms},
             "parentID": user_message_id,
-            "modelID": model_id,
-            "providerID": provider_id,
+            "modelID": actual_model_id,
+            "providerID": actual_provider_id,
             "mode": agent_name,
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
@@ -3148,8 +3292,8 @@ async def _process_session_message(
         publish_event,
         sessionID,
         session=session,
-        provider_id=provider_id,
-        model_id=model_id,
+        provider_id=actual_provider_id,
+        model_id=actual_model_id,
     )
     
     # Collect parts for the response
@@ -3177,8 +3321,8 @@ async def _process_session_message(
         title_task = loop.create_task(
             SessionTitle.generate_title_after_first_message(
                 session_id=sessionID,
-                model_id=model_id,
-                provider_id=provider_id,
+                model_id=actual_model_id,
+                provider_id=actual_provider_id,
                 event_publish_callback=publish_event,
             )
         )
@@ -3196,8 +3340,8 @@ async def _process_session_message(
             "role": "assistant",
             "time": {"created": now_ms, "completed": end_ms},
             "parentID": user_message_id,
-            "modelID": model_id,
-            "providerID": provider_id,
+            "modelID": actual_model_id,
+            "providerID": actual_provider_id,
             "mode": agent_name,
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},

@@ -21,6 +21,8 @@ export interface Session {
   provider?: string;
   model?: string;
   model_pinned?: boolean;
+  /** Runtime provider failover is enabled only after an explicit WebUI selection. */
+  model_auto?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
@@ -513,6 +515,15 @@ export interface DefaultModelConfig {
   model_type: string;
   provider_id: string;
   model_id: string;
+}
+
+export interface FallbackModelRef {
+  provider_id: string;
+  model_id: string;
+}
+
+export interface FallbackModelsConfig {
+  fallback_providers: FallbackModelRef[];
 }
 
 /** Usage summary from /api/usage/summary */

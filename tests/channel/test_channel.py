@@ -495,6 +495,7 @@ class TestFeishuNativeCommands:
                     "provider": "anthropic",
                     "model": "claude-sonnet-4-20250514",
                     "model_pinned": True,
+                    "model_auto": False,
                 },
             )
         ]

@@ -1691,6 +1691,7 @@ export default function SessionChat({
     addMessage,
     updateMessage,
     updateMessagePart,
+    removeMessage,
     replaceMessageText,
     markMessageStopped,
     truncateAfterMessage,
@@ -1853,6 +1854,17 @@ export default function SessionChat({
           }
           return;
         }
+        case 'message-removed': {
+          const removedMessage = messagesRef.current.find((message) => message.id === action.messageID);
+          removedMessage?.parts.forEach((part) => {
+            if (part.id) activeToolPartIdsRef.current.delete(part.id);
+          });
+          if (abortedMessageIdRef.current === action.messageID) {
+            abortedMessageIdRef.current = null;
+          }
+          removeMessage(action.messageID);
+          return;
+        }
         case 'message-part-updated': {
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
           if (part.id) {
@@ -1930,6 +1942,7 @@ export default function SessionChat({
       sessionId,
       updateMessage,
       updateMessagePart,
+      removeMessage,
       refetch,
       refreshContextUsage,
       applyContextUsagePushSnapshot,

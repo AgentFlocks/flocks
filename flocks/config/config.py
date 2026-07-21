@@ -628,6 +628,15 @@ class ChannelConfig(BaseModel):
 
 # ==================== Main Configuration ====================
 
+class FallbackProviderConfig(BaseModel):
+    """Ordered model identity used for runtime provider fallback."""
+
+    model_config = {"extra": "forbid"}
+
+    provider_id: str
+    model_id: str
+
+
 class ConfigInfo(BaseModel):
     """
     Main configuration schema
@@ -660,6 +669,7 @@ class ConfigInfo(BaseModel):
     enabled_providers: Optional[List[str]] = None
     model: Optional[str] = None
     small_model: Optional[str] = Field(None, alias="smallModel")
+    fallback_providers: Optional[List[FallbackProviderConfig]] = None
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
     username: Optional[str] = None
     mode: Optional[Dict[str, AgentConfig]] = Field(None, description="@deprecated Use 'agent'")
@@ -711,6 +721,72 @@ class ConfigInfo(BaseModel):
             "workspace_access (none/ro/rw), workspace_root, docker, tools, prune."
         ),
     )
+
+    @field_validator("fallback_providers", mode="before")
+    @classmethod
+    def normalize_fallback_providers(cls, value: Any) -> Any:
+        """Keep config loading tolerant of malformed fallback entries.
+
+        Runtime and API readers still receive typed, trimmed, ordered entries.
+        Invalid identities are ignored and duplicate identities retain their
+        first position, matching :class:`ConfigWriter` raw-read behavior.
+        """
+        if value is None:
+            return None
+
+        from flocks.utils.log import Log
+
+        config_log = Log.create(service="config")
+        if not isinstance(value, list):
+            config_log.warning("config.fallback_providers_invalid", {
+                "reason": "not_a_list",
+            })
+            return []
+
+        normalized: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, raw in enumerate(value):
+            if not isinstance(raw, dict):
+                config_log.warning("config.fallback_provider_invalid", {
+                    "index": index,
+                    "reason": "not_an_object",
+                })
+                continue
+
+            provider_id = raw.get("provider_id")
+            model_id = raw.get("model_id")
+            if not isinstance(provider_id, str) or not isinstance(model_id, str):
+                config_log.warning("config.fallback_provider_invalid", {
+                    "index": index,
+                    "reason": "invalid_identity",
+                })
+                continue
+
+            provider_id = provider_id.strip()
+            model_id = model_id.strip()
+            if not provider_id or not model_id:
+                config_log.warning("config.fallback_provider_invalid", {
+                    "index": index,
+                    "reason": "empty_identity",
+                })
+                continue
+
+            identity = (provider_id, model_id)
+            if identity in seen:
+                config_log.warning("config.fallback_provider_duplicate", {
+                    "index": index,
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                })
+                continue
+
+            seen.add(identity)
+            normalized.append({
+                "provider_id": provider_id,
+                "model_id": model_id,
+            })
+
+        return normalized
     allow_read_paths: Optional[List[str]] = Field(
         None,
         alias="allowReadPaths",

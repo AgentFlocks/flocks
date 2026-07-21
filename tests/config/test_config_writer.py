@@ -446,3 +446,100 @@ class TestConfigWriterDefaultModels:
         data = ConfigWriter._read_raw()
         assert "provider" in data
         assert "mcp" in data
+
+
+class TestFallbackProviderConfigWriter:
+    """Test ordered runtime fallback model configuration."""
+
+    def test_get_fallback_providers_empty(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        assert ConfigWriter.get_fallback_providers() == []
+
+    def test_set_and_get_fallback_providers_preserves_order(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        fallbacks = [
+            {"provider_id": "anthropic", "model_id": "claude-sonnet-4-5"},
+            {"provider_id": "openrouter", "model_id": "vendor/model-v2"},
+        ]
+        ConfigWriter.set_fallback_providers(fallbacks)
+
+        assert ConfigWriter.get_fallback_providers() == fallbacks
+
+    def test_set_fallback_providers_preserves_small_model(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw["smallModel"] = "anthropic/claude-haiku"
+        ConfigWriter._write_raw(raw)
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "anthropic", "model_id": "claude-sonnet-4-5"},
+        ])
+
+        updated = ConfigWriter._read_raw()
+        assert updated["smallModel"] == "anthropic/claude-haiku"
+
+    def test_empty_fallback_providers_removes_key(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw["smallModel"] = "anthropic/claude-haiku"
+        raw["fallback_providers"] = [
+            {"provider_id": "anthropic", "model_id": "claude-sonnet-4-5"},
+        ]
+        ConfigWriter._write_raw(raw)
+
+        ConfigWriter.set_fallback_providers([])
+
+        updated = ConfigWriter._read_raw()
+        assert "fallback_providers" not in updated
+        assert updated["smallModel"] == "anthropic/claude-haiku"
+
+    def test_get_skips_malformed_and_duplicate_entries_without_rewriting(
+        self, temp_project
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw_entries = [
+            {"provider_id": " anthropic ", "model_id": " claude-sonnet-4-5 "},
+            {"provider_id": "anthropic", "model_id": "claude-sonnet-4-5"},
+            {"provider_id": "", "model_id": "empty-provider"},
+            {"provider_id": "openai"},
+            "not-an-object",
+            {"provider_id": "stale", "model_id": "removed/model"},
+        ]
+        raw["fallback_providers"] = raw_entries
+        ConfigWriter._write_raw(raw)
+
+        assert ConfigWriter.get_fallback_providers() == [
+            {"provider_id": "anthropic", "model_id": "claude-sonnet-4-5"},
+            {"provider_id": "stale", "model_id": "removed/model"},
+        ]
+        assert ConfigWriter._read_raw()["fallback_providers"] == raw_entries
+
+    def test_typed_config_skips_malformed_fallbacks_and_keeps_small_model(self):
+        from flocks.config.config import ConfigInfo
+
+        config = ConfigInfo.model_validate({
+            "smallModel": "anthropic/claude-haiku",
+            "fallback_providers": [
+                {
+                    "provider_id": " openrouter ",
+                    "model_id": " vendor/model-v2 ",
+                },
+                {"provider_id": "openrouter", "model_id": "vendor/model-v2"},
+                {"provider_id": "", "model_id": "missing-provider"},
+                {"provider_id": "openai"},
+                None,
+                {"provider_id": "stale", "model_id": "removed-model"},
+            ],
+        })
+
+        assert config.small_model == "anthropic/claude-haiku"
+        assert [entry.model_dump() for entry in config.fallback_providers or []] == [
+            {"provider_id": "openrouter", "model_id": "vendor/model-v2"},
+            {"provider_id": "stale", "model_id": "removed-model"},
+        ]

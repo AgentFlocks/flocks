@@ -59,6 +59,17 @@ describe('resolveSessionChatSSEAction', () => {
     });
 
     expect(resolveSessionChatSSEAction({
+      type: 'message.removed',
+      properties: {
+        sessionID: 'sess-1',
+        messageID: 'msg-1',
+      },
+    }, 'sess-1')).toEqual({
+      kind: 'message-removed',
+      messageID: 'msg-1',
+    });
+
+    expect(resolveSessionChatSSEAction({
       type: 'message.part.updated',
       properties: {
         part: {
@@ -75,6 +86,14 @@ describe('resolveSessionChatSSEAction', () => {
       part: { id: 'part-1' },
       delta: 'hello',
     });
+
+    expect(resolveSessionChatSSEAction({
+      type: 'message.removed',
+      properties: {
+        sessionID: 'other-session',
+        messageID: 'msg-1',
+      },
+    }, 'sess-1')).toEqual({ kind: 'ignore' });
   });
 
   it('resolves questions only when request and call ids are present', () => {

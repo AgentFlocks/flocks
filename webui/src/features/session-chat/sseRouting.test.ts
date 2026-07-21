@@ -28,6 +28,10 @@ describe('shouldForwardSSEEventToParent', () => {
       properties: { part: { sessionID: 'session-1' } },
     }, 'session-1')).toBe(true);
     expect(shouldForwardSSEEventToParent({
+      type: 'message.removed',
+      properties: { sessionID: 'session-1', messageID: 'message-1' },
+    }, 'session-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
       type: 'session.status',
       properties: { sessionID: 'session-1' },
     }, 'session-1')).toBe(true);

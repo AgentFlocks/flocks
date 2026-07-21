@@ -8,6 +8,8 @@ Verifies that:
 4. _resolve_model implements 5-level priority correctly
 """
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
@@ -279,7 +281,221 @@ class TestResolveModel:
             provider="anthropic",
             model="claude-sonnet-4-5",
             model_pinned=True,
+            model_auto=False,
         )
+
+    @pytest.mark.asyncio
+    async def test_webui_auto_uses_default_primary_and_returns_actual_model(self, monkeypatch):
+        """Auto ignores agent overrides and reports the model that recovered."""
+        from types import SimpleNamespace
+
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import LoopResult, SessionLoop
+
+        request = session_routes.PromptRequest(
+            parts=[{"type": "text", "text": "hello"}],
+        )
+        session = SimpleNamespace(
+            id="ses_auto",
+            project_id="proj",
+            directory="/tmp/project",
+            agent="rex",
+            provider="stale",
+            model="stale-model",
+            model_pinned=False,
+            model_auto=True,
+            category="user",
+        )
+        agent = SimpleNamespace(
+            name="rex",
+            model={"providerID": "agent-provider", "modelID": "agent-model"},
+        )
+        fallback_message = SimpleNamespace(
+            id="msg_assistant",
+            providerID="fallback",
+            modelID="fallback-model",
+            finish="stop",
+            tokens=None,
+        )
+        loop_run = AsyncMock(return_value=LoopResult(
+            action="stop",
+            last_message=fallback_message,
+            provider_id="fallback",
+            model_id="fallback-model",
+        ))
+        message_create = AsyncMock(return_value=SimpleNamespace(id="msg_user"))
+        context_usage_update = AsyncMock()
+        title_generation = AsyncMock()
+
+        monkeypatch.setattr(session_routes, "_require_agent_usable_for_chat", AsyncMock())
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.default_agent",
+            AsyncMock(return_value="rex"),
+        )
+        monkeypatch.setattr("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent))
+        monkeypatch.setattr(
+            "flocks.config.config.Config.resolve_default_llm",
+            AsyncMock(return_value={
+                "provider_id": "primary",
+                "model_id": "primary-model",
+            }),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_runtime_model",
+            AsyncMock(return_value=(True, "available")),
+        )
+        monkeypatch.setattr(SessionLoop, "run", loop_run)
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: object())
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.init", lambda: None)
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+            AsyncMock(),
+        )
+        monkeypatch.setattr("flocks.session.message.Message.create", message_create)
+        monkeypatch.setattr(
+            "flocks.session.message.Message.get_text_content",
+            AsyncMock(return_value="recovered"),
+        )
+        monkeypatch.setattr("flocks.session.message.Message.parts", AsyncMock(return_value=[]))
+        monkeypatch.setattr("flocks.server.routes.event.publish_event", AsyncMock())
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage_update,
+        )
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.title.SessionTitle.generate_title_after_first_message",
+            title_generation,
+        )
+
+        response = await session_routes._process_session_message(
+            session.id,
+            session,
+            request,
+            session.directory,
+        )
+
+        assert message_create.await_args.kwargs["model"] == {
+            "providerID": "primary",
+            "modelID": "primary-model",
+        }
+        assert loop_run.await_args.kwargs["auto_failover"] is True
+        assert loop_run.await_args.kwargs["provider_id"] == "primary"
+        assert response["info"]["providerID"] == "fallback"
+        assert response["info"]["modelID"] == "fallback-model"
+        assert context_usage_update.await_args.kwargs["provider_id"] == "fallback"
+        assert context_usage_update.await_args.kwargs["model_id"] == "fallback-model"
+        await asyncio.sleep(0)
+        assert title_generation.await_args.kwargs["provider_id"] == "fallback"
+        assert title_generation.await_args.kwargs["model_id"] == "fallback-model"
+
+    @pytest.mark.asyncio
+    async def test_non_user_session_ignores_legacy_auto_flag(self, monkeypatch):
+        """Corrupt or historical workflow flags cannot activate WebUI Auto."""
+        from types import SimpleNamespace
+
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import SessionLoop
+
+        request = session_routes.PromptRequest(
+            parts=[{"type": "text", "text": "workflow input"}],
+            noReply=True,
+        )
+        session = SimpleNamespace(
+            id="ses_workflow",
+            project_id="proj",
+            directory="/tmp/project",
+            agent="rex",
+            provider="direct",
+            model="direct-model",
+            model_pinned=True,
+            model_auto=True,
+            category="workflow",
+        )
+        agent = SimpleNamespace(name="rex", model=None)
+        resolve = AsyncMock(return_value=("direct", "direct-model", "session"))
+        default_llm = AsyncMock()
+        validate = AsyncMock()
+        message_create = AsyncMock(return_value=SimpleNamespace(id="msg_user"))
+
+        monkeypatch.setattr(
+            session_routes,
+            "_require_agent_usable_for_chat",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.default_agent",
+            AsyncMock(return_value="rex"),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(session_routes, "_resolve_model", resolve)
+        monkeypatch.setattr(
+            "flocks.config.config.Config.resolve_default_llm",
+            default_llm,
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider._ensure_initialized",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider.apply_config",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider.get",
+            lambda _provider_id: object(),
+        )
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.init", lambda: None)
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            message_create,
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            AsyncMock(),
+        )
+        context_usage = AsyncMock()
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage,
+        )
+
+        await session_routes._process_session_message(
+            session.id,
+            session,
+            request,
+            session.directory,
+        )
+
+        resolve.assert_awaited_once()
+        default_llm.assert_not_awaited()
+        validate.assert_not_awaited()
+        assert message_create.await_args.kwargs["model"] == {
+            "providerID": "direct",
+            "modelID": "direct-model",
+        }
+        assert context_usage.await_args.kwargs["provider_id"] == "direct"
+        assert context_usage.await_args.kwargs["model_id"] == "direct-model"
 
     @pytest.mark.asyncio
     async def test_display_text_does_not_replace_model_prompt(self, monkeypatch):

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, status
@@ -30,6 +30,16 @@ from flocks.session.message import (
 )
 from flocks.session.orphan_tools import INTERRUPTED_TOOL_ERROR
 from flocks.session.session import Session
+
+
+def _use_webui_admin(monkeypatch: pytest.MonkeyPatch) -> AuthUser:
+    """Authenticate a route test as a browser user instead of the API token."""
+    from flocks.server.routes import session as session_routes
+
+    user = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+    monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+    return user
+
 
 # ===========================================================================
 # CRUD
@@ -100,6 +110,97 @@ class TestSessionCRUD:
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["category"] == "workflow"
+
+    @pytest.mark.asyncio
+    async def test_create_session_with_manual_auto_mode(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Auto is persisted only when explicitly requested by the WebUI."""
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        resp = await client.post(
+            "/api/session",
+            json={"title": "Auto Session", "model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["model_auto"] is True
+        assert resp.json()["model_pinned"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", ["workflow", "task"])
+    async def test_create_non_user_session_rejects_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        category: str,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.post(
+            "/api/session",
+            json={"category": category, "model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert "only available for user sessions" in str(resp.json())
+        validate_auto.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_rejects_unavailable_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(False, "fallback_unavailable")),
+        )
+
+        resp = await client.post("/api/session", json={"model_auto": True})
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "fallback_unavailable" in str(resp.json())
+
+    @pytest.mark.asyncio
+    async def test_api_token_cannot_create_auto_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.post("/api/session", json={"model_auto": True})
+
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert "only be enabled from the WebUI" in str(resp.json())
+        validate_auto.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_session_with_api_token_is_ownerless(self, client: AsyncClient):
@@ -281,6 +382,7 @@ class TestSessionCRUD:
             "provider",
             "model",
             "model_pinned",
+            "model_auto",
             "canWrite",
             "canDelete",
             "isShared",
@@ -540,6 +642,160 @@ class TestSessionCRUD:
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["title"] == "Updated Title"
+
+    @pytest.mark.asyncio
+    async def test_update_session_auto_and_concrete_model_are_exclusive(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        auto_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+        assert auto_resp.status_code == status.HTTP_200_OK
+        assert auto_resp.json()["model_auto"] is True
+        assert auto_resp.json()["model_pinned"] is False
+
+        invalid_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={
+                "model_auto": True,
+                "provider": "openai",
+                "model": "gpt-4o",
+                "model_pinned": True,
+            },
+        )
+        assert invalid_resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+        concrete_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"provider": "openai", "model": "gpt-4o"},
+        )
+        assert concrete_resp.status_code == status.HTTP_200_OK
+        assert concrete_resp.json()["model_auto"] is False
+        assert concrete_resp.json()["model_pinned"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_session_rejects_unavailable_auto(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(False, "primary_provider_not_configured")),
+        )
+
+        resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "primary_provider_not_configured" in str(resp.json())
+
+    @pytest.mark.asyncio
+    async def test_pinning_existing_auto_session_disables_auto(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        clear_state = MagicMock()
+        monkeypatch.setattr(SessionLoop, "clear_auto_failover_state", clear_state)
+        auto_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+        assert auto_resp.status_code == status.HTTP_200_OK
+
+        pin_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_pinned": True},
+        )
+
+        assert pin_resp.status_code == status.HTTP_200_OK
+        assert pin_resp.json()["model_pinned"] is True
+        assert pin_resp.json()["model_auto"] is False
+        clear_state.assert_called_once_with(session_id)
+
+    @pytest.mark.asyncio
+    async def test_api_token_cannot_enable_auto_on_existing_session(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert "only be enabled from the WebUI" in str(resp.json())
+        validate_auto.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_non_user_session_rejects_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        create_resp = await client.post(
+            "/api/session",
+            json={"title": "Workflow Session", "category": "workflow"},
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert "only available for user sessions" in str(resp.json())
+        validate_auto.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_session_not_found(self, client: AsyncClient):
@@ -1432,7 +1688,185 @@ class TestSessionMessagesRemaining:
             "agent_name": "rex",
             "provider_id": "openai",
             "model_id": "gpt-4.1",
+            "auto_failover": False,
         }
+
+    @pytest.mark.asyncio
+    async def test_auto_replay_reports_actual_fallback_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Replay passes Auto authorization and publishes the recovered model."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import LoopResult, SessionLoop
+
+        user_message = SimpleNamespace(id="msg_user", agent="rex")
+        session = SimpleNamespace(id="ses_auto", directory="/tmp/project")
+        assistant = SimpleNamespace(
+            id="msg_assistant",
+            providerID="fallback",
+            modelID="fallback-model",
+            finish="stop",
+            tokens=None,
+            time={"created": 123},
+        )
+        run = AsyncMock(return_value=LoopResult(
+            action="stop",
+            last_message=assistant,
+            provider_id="fallback",
+            model_id="fallback-model",
+        ))
+        publish = AsyncMock()
+        context_usage = AsyncMock()
+
+        monkeypatch.setattr(SessionLoop, "run", run)
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.get_text_content",
+            AsyncMock(return_value="recovered"),
+        )
+        monkeypatch.setattr("flocks.server.routes.event.publish_event", publish)
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage,
+        )
+
+        result = await session_routes._run_existing_user_message(
+            session.id,
+            session,
+            user_message,
+            session.directory,
+            runtime={
+                "agent_name": "rex",
+                "provider_id": "primary",
+                "model_id": "primary-model",
+                "auto_failover": True,
+            },
+        )
+
+        assert result["status"] == "completed"
+        assert run.await_args.kwargs["auto_failover"] is True
+        completion = next(
+            call.args[1]
+            for call in publish.await_args_list
+            if call.args[0] == "message.updated"
+        )
+        assert completion["info"]["providerID"] == "fallback"
+        assert completion["info"]["modelID"] == "fallback-model"
+        assert context_usage.await_args.kwargs["provider_id"] == "fallback"
+        assert context_usage.await_args.kwargs["model_id"] == "fallback-model"
+
+    @pytest.mark.asyncio
+    async def test_prepare_auto_replay_defers_unavailable_primary_to_failover(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import SessionLoop
+
+        user_message = SimpleNamespace(agent="rex")
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(model_auto=True, category="user")),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.resolve_default_llm",
+            AsyncMock(return_value={
+                "provider_id": "primary",
+                "model_id": "primary-model",
+            }),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        validate = AsyncMock(return_value=(False, "provider_not_configured"))
+        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: None)
+        resolve = AsyncMock()
+        monkeypatch.setattr(session_routes, "_resolve_model", resolve)
+
+        runtime = await session_routes._prepare_replay_runtime("ses_auto", user_message)
+
+        assert runtime == {
+            "agent_name": "rex",
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "auto_failover": True,
+        }
+        validate.assert_not_awaited()
+        resolve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prepare_replay_ignores_legacy_auto_on_non_user_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import SessionLoop
+
+        user_message = SimpleNamespace(agent="rex")
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(
+                model_auto=True,
+                category="workflow",
+            )),
+        )
+        resolve = AsyncMock(return_value=("direct", "direct-model", "session"))
+        monkeypatch.setattr(session_routes, "_resolve_model", resolve)
+        default_llm = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.config.config.Config.resolve_default_llm",
+            default_llm,
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        validate = AsyncMock()
+        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider._ensure_initialized",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider.apply_config",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider.get",
+            lambda _provider_id: object(),
+        )
+
+        runtime = await session_routes._prepare_replay_runtime(
+            "ses_workflow",
+            user_message,
+        )
+
+        assert runtime == {
+            "agent_name": "rex",
+            "provider_id": "direct",
+            "model_id": "direct-model",
+            "auto_failover": False,
+        }
+        resolve.assert_awaited_once()
+        default_llm.assert_not_awaited()
+        validate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_resend_uses_current_model_for_replay(

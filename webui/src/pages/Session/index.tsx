@@ -25,7 +25,11 @@ import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
-import { useEnabledChatModelDefinitions, useResolvedDefaultModel } from '@/hooks/useChatModelResources';
+import {
+  useEnabledChatModelDefinitions,
+  useFallbackModels,
+  useResolvedDefaultModel,
+} from '@/hooks/useChatModelResources';
 import client from '@/api/client';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
@@ -48,6 +52,7 @@ const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
+const AUTO_MODEL_KEY = '__flocks_auto__';
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ProjectSummary = {
   id: string;
@@ -420,6 +425,10 @@ export default function SessionPage() {
     data: enabledModelDefinitions,
     loading: loadingEnabledModels,
   } = useEnabledChatModelDefinitions();
+  const {
+    data: fallbackModels,
+    loading: loadingFallbackModels,
+  } = useFallbackModels();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
   const subAgents = useMemo(
     () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
@@ -461,6 +470,7 @@ export default function SessionPage() {
     };
 
     return enabledModelDefinitions.flatMap((model) => {
+      if (model.model_type !== 'llm') return [];
       const provider = providerById.get(model.provider_id);
       if (!provider) return [];
       return [{
@@ -515,18 +525,50 @@ export default function SessionPage() {
     ? makeModelKey(selectedSession.provider, selectedSession.model)
     : null;
   const hasPinnedModelOption = !!pinnedModelKey && chatModelOptions.some((option) => option.key === pinnedModelKey);
+  const selectedModelAuto = selectedModelKey === AUTO_MODEL_KEY;
   const selectedModelOption = useMemo(
     () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? (selectedModelKey ? null : chatModelOptions[0] ?? null),
     [chatModelOptions, selectedModelKey],
   );
-  const selectedPromptModel = selectedModelOption
-    ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
-    : null;
   const {
     data: resolvedDefaultModel,
     initialized: resolvedDefaultModelInitialized,
-  } = useResolvedDefaultModel(chatModelOptions.length > 0 && !hasPinnedModelOption);
-  const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
+  } = useResolvedDefaultModel(chatModelOptions.length > 0);
+  const primaryModelOption = useMemo(() => {
+    if (!resolvedDefaultModel) return null;
+    const key = makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID);
+    return chatModelOptions.find((option) => option.key === key) ?? null;
+  }, [chatModelOptions, resolvedDefaultModel]);
+  const availableFallbackOptions = useMemo(() => {
+    const primaryKey = primaryModelOption?.key;
+    return fallbackModels.flatMap((fallback) => {
+      const option = chatModelOptions.find(
+        (candidate) => candidate.key === makeModelKey(fallback.provider_id, fallback.model_id),
+      );
+      return option && option.key !== primaryKey ? [option] : [];
+    });
+  }, [chatModelOptions, fallbackModels, primaryModelOption?.key]);
+  const canSelectAuto = Boolean(primaryModelOption && availableFallbackOptions.length > 0);
+  const effectiveModelOption = selectedModelAuto ? primaryModelOption : selectedModelOption;
+  const selectedPromptModel = selectedModelAuto
+    ? null
+    : selectedModelOption
+      ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
+      : null;
+  const effectiveSupportsVision = effectiveModelOption?.supportsVision ?? supportsVision;
+  const autoRouteLabel = primaryModelOption
+    ? [primaryModelOption, ...availableFallbackOptions]
+      .map((option) => `${option.providerName} / ${option.label}`)
+      .join(' → ')
+    : t('modelPicker.autoUnavailable');
+  const firstChatModelKey = chatModelOptions[0]?.key ?? null;
+  const resolvedDefaultKey = resolvedDefaultModel
+    ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
+    : null;
+  const defaultSelectionKey = resolvedDefaultKey
+    && chatModelOptions.some(option => option.key === resolvedDefaultKey)
+    ? resolvedDefaultKey
+    : firstChatModelKey;
 
   const toggleProjectCollapsed = useCallback((projectId: string) => {
     setCollapsedProjectIds(prev => {
@@ -837,7 +879,12 @@ export default function SessionPage() {
   }, [showModelOptions]);
 
   useEffect(() => {
-    if (chatModelOptions.length === 0) {
+    if (selectedSession?.model_auto) {
+      setSelectedModelKey(AUTO_MODEL_KEY);
+      return;
+    }
+
+    if (!firstChatModelKey) {
       setSelectedModelKey(null);
       return;
     }
@@ -849,25 +896,22 @@ export default function SessionPage() {
 
     setSelectedModelKey(null);
     if (!resolvedDefaultModelInitialized) return;
-    const defaultKey = resolvedDefaultModel
-      ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
-      : null;
-    const fallbackKey = chatModelOptions[0]?.key ?? null;
-    setSelectedModelKey(defaultKey && chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
+    setSelectedModelKey(defaultSelectionKey);
   }, [
-    chatModelOptions,
+    defaultSelectionKey,
+    firstChatModelKey,
     hasPinnedModelOption,
     pinnedModelKey,
-    resolvedDefaultModel,
     resolvedDefaultModelInitialized,
+    selectedSession?.model_auto,
     selectedSessionId,
   ]);
 
   useEffect(() => {
-    if (loadingEnabledModels || chatModelOptions.length === 0 || !selectedModelKey) return;
+    if (loadingEnabledModels || chatModelOptions.length === 0 || !selectedModelKey || selectedModelAuto) return;
     if (chatModelOptions.some((option) => option.key === selectedModelKey)) return;
     setSelectedModelKey(chatModelOptions[0].key);
-  }, [chatModelOptions, loadingEnabledModels, selectedModelKey]);
+  }, [chatModelOptions, loadingEnabledModels, selectedModelAuto, selectedModelKey]);
 
   useEffect(() => {
     if (showAgentOptions || showModelOptions) return;
@@ -903,11 +947,13 @@ export default function SessionPage() {
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const projectID = projectIdOverride ?? selectedProjectIDForCreate;
+    const carryAutoSelection = !selectedSessionId && selectedModelAuto;
     setCreating(true);
     try {
       const response = await client.post('/api/session', {
         title: 'New Session',
         ...(projectID ? { projectID } : {}),
+        ...(carryAutoSelection ? { model_auto: true } : {}),
       });
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
@@ -921,20 +967,21 @@ export default function SessionPage() {
         });
       }
       setSelectedAgent('rex');
-      setSelectedModelKey(null);
+      setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectIDForCreate, addSession, fetchProjects, searchQuery, toast, t]);
+  }, [creating, selectedProjectIDForCreate, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
   }, [handleCreateSession]);
 
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
+    const previousModelKey = selectedModelKey;
     setSelectedModelKey(option.key);
     setShowModelOptions(false);
     if (!selectedSessionId) return;
@@ -944,12 +991,33 @@ export default function SessionPage() {
         provider: option.providerID,
         model: option.modelID,
         model_pinned: true,
+        model_auto: false,
       });
       refetchSessions();
     } catch (err: any) {
+      setSelectedModelKey(previousModelKey);
       toast.error(t('chat.error', 'Error'), err.message);
     }
-  }, [refetchSessions, selectedSessionId, toast, t]);
+  }, [refetchSessions, selectedModelKey, selectedSessionId, toast, t]);
+
+  const handleSelectAutoModel = useCallback(async () => {
+    if (!canSelectAuto && !selectedModelAuto) return;
+    const previousModelKey = selectedModelKey;
+    setSelectedModelKey(AUTO_MODEL_KEY);
+    setShowModelOptions(false);
+    if (!selectedSessionId) return;
+
+    try {
+      await sessionApi.update(selectedSessionId, {
+        model_auto: true,
+        model_pinned: false,
+      });
+      refetchSessions();
+    } catch (err: any) {
+      setSelectedModelKey(previousModelKey);
+      toast.error(t('chat.error', 'Error'), err.message);
+    }
+  }, [canSelectAuto, refetchSessions, selectedModelAuto, selectedModelKey, selectedSessionId, toast, t]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -962,13 +1030,14 @@ export default function SessionPage() {
       const response = await client.post('/api/session', {
         title: 'New Session',
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
+        ...(selectedModelAuto ? { model_auto: true } : {}),
       });
       const newSessionId = response.data.id;
 
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
-      setSelectedModelKey(null);
+      setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
@@ -976,7 +1045,7 @@ export default function SessionPage() {
       };
       const effectiveAgent = agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
-      if (modelOverride) payload.model = modelOverride;
+      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
       if (options?.displayText) payload.displayText = options.displayText;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
@@ -984,7 +1053,7 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedProjectIDForCreate, toast, t]);
+  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedModelAuto, selectedProjectIDForCreate, toast, t]);
 
   const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
@@ -1976,7 +2045,7 @@ export default function SessionPage() {
             setPendingInitialDisplayText(null);
           }}
           supportsVision={effectiveSupportsVision}
-          contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
+          contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (
             <WelcomeScreen
@@ -2102,11 +2171,19 @@ export default function SessionPage() {
                 onClick={() => setShowModelOptions(!showModelOptions)}
                 disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
                 className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                title={selectedModelOption ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}` : t('modelPicker.empty')}
+                title={selectedModelAuto
+                  ? `${t('modelPicker.auto')}: ${autoRouteLabel}`
+                  : selectedModelOption
+                    ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}`
+                    : t('modelPicker.empty')}
               >
-                <Cpu className="h-3 w-3 shrink-0" />
+                {selectedModelAuto
+                  ? <Sparkles className="h-3 w-3 shrink-0" />
+                  : <Cpu className="h-3 w-3 shrink-0" />}
                 <span className="truncate font-medium">
-                  {selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
+                  {selectedModelAuto
+                    ? t('modelPicker.auto')
+                    : selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
                 </span>
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
@@ -2116,11 +2193,48 @@ export default function SessionPage() {
                     <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
                     <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
                   </div>
-                  <div className="h-[13.5rem] overflow-y-auto p-1.5">
-                    {loadingProviders || loadingEnabledModels ? (
+                  <div className="h-[15.5rem] overflow-y-auto p-1.5">
+                    {loadingProviders || loadingEnabledModels || loadingFallbackModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
-                    ) : groupedChatModelOptions.length > 0 ? (
-                      groupedChatModelOptions.map((group) => (
+                    ) : (
+                      <>
+                        <div className="mb-1 border-b border-zinc-100 pb-1.5 dark:border-zinc-800">
+                          <button
+                            type="button"
+                            onClick={() => void handleSelectAutoModel()}
+                            disabled={!canSelectAuto && !selectedModelAuto}
+                            className={`w-full rounded-md px-2 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                              selectedModelAuto
+                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <Sparkles className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{t('modelPicker.auto')}</div>
+                                <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                                  {canSelectAuto || selectedModelAuto
+                                    ? t('modelPicker.autoHint')
+                                    : t('modelPicker.autoUnavailable')}
+                                </div>
+                              </div>
+                              <span
+                                className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoRouteLabel])}
+                                onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoRouteLabel])}
+                                onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoRouteLabel])}
+                                onMouseLeave={() => setSelectorTooltip(null)}
+                                onPointerLeave={() => setSelectorTooltip(null)}
+                              >
+                                <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                              </span>
+                            </div>
+                          </button>
+                        </div>
+                        {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
                             <span className="truncate">{group.providerName}</span>
@@ -2167,9 +2281,10 @@ export default function SessionPage() {
                             ))}
                           </div>
                         </div>
-                      ))
-                    ) : (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                        )) : (
+                          <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                        )}
+                      </>
                     )}
                   </div>
                   <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">

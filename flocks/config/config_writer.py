@@ -401,6 +401,98 @@ class ConfigWriter:
         return data.get("default_models", {})
 
     # ------------------------------------------------------------------
+    # Runtime model fallbacks (fallback_providers section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_fallback_providers(cls) -> List[Dict[str, str]]:
+        """Return the ordered, structurally valid runtime fallback models.
+
+        Malformed entries are ignored without rewriting the user's config.
+        Duplicate identities retain their first position. Model availability is
+        intentionally not checked here so stale references remain visible to
+        configuration clients and can be repaired.
+        """
+        data = cls._read_raw()
+        raw_fallbacks = data.get("fallback_providers", [])
+        if not isinstance(raw_fallbacks, list):
+            log.warning("config_writer.fallback_providers_invalid", {
+                "reason": "not_a_list",
+            })
+            return []
+
+        fallbacks: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, raw in enumerate(raw_fallbacks):
+            if not isinstance(raw, dict):
+                log.warning("config_writer.fallback_provider_invalid", {
+                    "index": index,
+                    "reason": "not_an_object",
+                })
+                continue
+
+            provider_id = raw.get("provider_id")
+            model_id = raw.get("model_id")
+            if not isinstance(provider_id, str) or not isinstance(model_id, str):
+                log.warning("config_writer.fallback_provider_invalid", {
+                    "index": index,
+                    "reason": "invalid_identity",
+                })
+                continue
+
+            provider_id = provider_id.strip()
+            model_id = model_id.strip()
+            if not provider_id or not model_id:
+                log.warning("config_writer.fallback_provider_invalid", {
+                    "index": index,
+                    "reason": "empty_identity",
+                })
+                continue
+
+            identity = (provider_id, model_id)
+            if identity in seen:
+                log.warning("config_writer.fallback_provider_duplicate", {
+                    "index": index,
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                })
+                continue
+
+            seen.add(identity)
+            fallbacks.append({
+                "provider_id": provider_id,
+                "model_id": model_id,
+            })
+
+        return fallbacks
+
+    @classmethod
+    def set_fallback_providers(
+        cls,
+        fallbacks: List[Dict[str, str]],
+    ) -> None:
+        """Atomically replace the ordered runtime fallback model list.
+
+        An empty list removes the top-level key instead of persisting redundant
+        empty configuration. Callers are responsible for validating identities.
+        """
+        data = cls._read_raw()
+        if fallbacks:
+            data["fallback_providers"] = [
+                {
+                    "provider_id": fallback["provider_id"],
+                    "model_id": fallback["model_id"],
+                }
+                for fallback in fallbacks
+            ]
+        else:
+            data.pop("fallback_providers", None)
+        cls._write_raw(data)
+        log.info("config_writer.fallback_providers_set", {
+            "count": len(fallbacks),
+        })
+
+    # ------------------------------------------------------------------
     # MCP server CRUD (mcp section)
     # ------------------------------------------------------------------
 

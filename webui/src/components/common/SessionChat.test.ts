@@ -255,6 +255,7 @@ beforeEach(() => {
     addMessage: vi.fn(),
     updateMessage: vi.fn(),
     updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
     replaceMessageText: vi.fn(),
     truncateAfterMessage: vi.fn(),
   });
@@ -306,6 +307,9 @@ function mockStatefulSessionMessages() {
       addMessage: (message: Message) => setMessages((prev) => [...prev, message]),
       updateMessage: upsertMessage,
       updateMessagePart: vi.fn(),
+      removeMessage: (messageId: string) => setMessages((prev) => prev.filter(
+        (message) => message.id !== messageId,
+      )),
       replaceMessageText: vi.fn(),
       markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
         (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
@@ -881,6 +885,36 @@ describe('SessionChat standalone thinking indicator', () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it('removes an intermediate assistant when message.removed arrives', () => {
+    const removeMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'assistant-failed', role: 'assistant', parts: [] })],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage,
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.removed',
+        properties: {
+          sessionID: 'sess-1',
+          messageID: 'assistant-failed',
+        },
+      });
+    });
+
+    expect(removeMessage).toHaveBeenCalledWith('assistant-failed');
   });
 });
 

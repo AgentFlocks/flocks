@@ -7,7 +7,7 @@ import {
   Plus, ToggleLeft, ToggleRight,
   ChevronDown, Check, AlertCircle, Loader2,
   X, Shield, Pencil, Star, AlertTriangle,
-  CheckCircle2,
+  CheckCircle2, ArrowUp, ArrowDown, ListOrdered,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -17,6 +17,7 @@ import EntitySheet from '@/components/common/EntitySheet';
 import { useProviders, type EnrichedProvider } from '@/hooks/useProviders';
 import { useSSE } from '@/hooks/useSSE';
 import { MODEL_CHANGED_EVENT } from '@/hooks/useDefaultModelVision';
+import { invalidateFallbackModels } from '@/hooks/useChatModelResources';
 import {
   providerAPI, modelV2API, usageAPI,
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
@@ -32,6 +33,7 @@ import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput,
+  FallbackModelRef,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -131,6 +133,9 @@ export default function ModelPage() {
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [defaultModel, setDefaultModel] = useState<{ provider_id: string; model_id: string } | null>(null);
   const [showDefaultModelDialog, setShowDefaultModelDialog] = useState(false);
+  const [fallbackModels, setFallbackModels] = useState<FallbackModelRef[]>([]);
+  const [availableRoutingModels, setAvailableRoutingModels] = useState<ModelDefinitionV2[]>([]);
+  const [showFallbackModelsDialog, setShowFallbackModelsDialog] = useState(false);
 
   // Refs for latest handler/state values (avoid stale closures in SSE & one-time effects)
   const sseRefetchTimer = useRef<number | null>(null);
@@ -160,11 +165,15 @@ export default function ModelPage() {
     Promise.all([
       defaultModelAPI.getResolved().catch(() => ({ data: null })),
       modelV2API.listDefinitions({ enabled_only: true }).catch(() => ({ data: { models: [] } })),
-    ]).then(([defaultRes, modelsRes]) => {
+      defaultModelAPI.getFallbacks().catch(() => ({ data: { fallback_providers: [] } })),
+    ]).then(([defaultRes, modelsRes, fallbackRes]) => {
+      const availableModels = modelsRes.data.models || [];
+      setAvailableRoutingModels(availableModels);
+      setFallbackModels(fallbackRes.data.fallback_providers || []);
+
       const dm = defaultRes.data;
       if (!dm) return;
 
-      const availableModels = modelsRes.data.models || [];
       const isValid = availableModels.some(
         m => m.provider_id === dm.provider_id && m.id === dm.model_id
       );
@@ -201,6 +210,22 @@ export default function ModelPage() {
     configuredProviders.filter(p => connectionStatus[p.id] === 'connected').length,
     [configuredProviders, connectionStatus]
   );
+
+  const availableFallbackCount = useMemo(() => {
+    const configuredProviderIds = new Set(configuredProviders.map(provider => provider.id));
+    const availableKeys = new Set(
+      availableRoutingModels
+        .filter(model => model.model_type === 'llm')
+        .map(model => `${model.provider_id}\u0000${model.id}`),
+    );
+    return fallbackModels.filter(model => (
+      configuredProviderIds.has(model.provider_id)
+      && availableKeys.has(`${model.provider_id}\u0000${model.model_id}`)
+      && !(defaultModel
+        && model.provider_id === defaultModel.provider_id
+        && model.model_id === defaultModel.model_id)
+    )).length;
+  }, [availableRoutingModels, configuredProviders, defaultModel, fallbackModels]);
 
   // Auto-select last-used provider (persisted in sessionStorage), fallback to first
   const autoSelectedRef = useRef(false);
@@ -472,6 +497,9 @@ export default function ModelPage() {
         usageStats={usageStats}
         defaultModel={defaultModel}
         onEditDefault={() => setShowDefaultModelDialog(true)}
+        fallbackCount={fallbackModels.length}
+        availableFallbackCount={availableFallbackCount}
+        onEditFallbacks={() => setShowFallbackModelsDialog(true)}
       />
 
       {/* Main Content: Provider List + Detail Panel */}
@@ -633,6 +661,20 @@ export default function ModelPage() {
           }}
         />
       )}
+
+      {showFallbackModelsDialog && (
+        <FallbackModelsDialog
+          current={fallbackModels}
+          primary={defaultModel}
+          providers={providers}
+          onClose={() => setShowFallbackModelsDialog(false)}
+          onSaved={(models, availableModels) => {
+            setFallbackModels(models);
+            setAvailableRoutingModels(availableModels);
+            setShowFallbackModelsDialog(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -645,12 +687,18 @@ function DashboardStrip({
   usageStats,
   defaultModel,
   onEditDefault,
+  fallbackCount,
+  availableFallbackCount,
+  onEditFallbacks,
 }: {
   connectedCount: number;
   totalModels: number;
   usageStats: UsageStats | null;
   defaultModel: { provider_id: string; model_id: string } | null;
   onEditDefault: () => void;
+  fallbackCount: number;
+  availableFallbackCount: number;
+  onEditFallbacks: () => void;
 }) {
   const { t, i18n } = useTranslation('model');
   const totalTokens = usageStats?.summary?.total_tokens ?? 0;
@@ -666,7 +714,7 @@ function DashboardStrip({
   }, [i18n.language]);
 
   return (
-    <div className="grid grid-cols-5 gap-3 mb-4">
+    <div className="grid grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
       {/* Default Model Card */}
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
@@ -689,6 +737,17 @@ function DashboardStrip({
           <div className="text-xs opacity-60 truncate">{defaultModel.provider_id}</div>
         )}
       </div>
+      <StatCard
+        icon={<ListOrdered className="w-5 h-5" />}
+        label={t('dashboard.fallbackModels')}
+        value={fallbackCount > 0
+          ? t('dashboard.fallbackAvailability', { available: availableFallbackCount, total: fallbackCount })
+          : t('dashboard.noFallbackModels')}
+        color="purple"
+        small={fallbackCount > 0}
+        onClick={onEditFallbacks}
+        title={t('dashboard.editFallbackModels')}
+      />
       <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
       <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
       <StatCard
@@ -3015,6 +3074,322 @@ function SetDefaultModelDialog({
               </div>
             ))
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==================== Runtime Fallback Models Dialog ====================
+
+function FallbackModelsDialog({
+  current,
+  primary,
+  providers,
+  onClose,
+  onSaved,
+}: {
+  current: FallbackModelRef[];
+  primary: { provider_id: string; model_id: string } | null;
+  providers: EnrichedProvider[];
+  onClose: () => void;
+  onSaved: (models: FallbackModelRef[], availableModels: ModelDefinitionV2[]) => void;
+}) {
+  const { t } = useTranslation('model');
+  const toast = useToast();
+  const [draft, setDraft] = useState<FallbackModelRef[]>(() => current.map(model => ({ ...model })));
+  const [models, setModels] = useState<ModelDefinitionV2[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    modelV2API.listDefinitions({ enabled_only: true })
+      .then(response => setModels(response.data.models || []))
+      .catch(() => setModels([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const configuredProviderIds = useMemo(
+    () => new Set(providers.filter(provider => provider.configured).map(provider => provider.id)),
+    [providers],
+  );
+  const providerNames = useMemo(
+    () => new Map(providers.map(provider => [provider.id, provider.name || provider.id])),
+    [providers],
+  );
+  const validModels = useMemo(
+    () => models.filter(model => model.model_type === 'llm'),
+    [models],
+  );
+  const validByKey = useMemo(
+    () => new Map(validModels.map(model => [`${model.provider_id}\u0000${model.id}`, model])),
+    [validModels],
+  );
+  const availableModels = useMemo(
+    () => validModels.filter(model => (
+      configuredProviderIds.has(model.provider_id)
+    )),
+    [configuredProviderIds, validModels],
+  );
+  const availableByKey = useMemo(
+    () => new Map(availableModels.map(model => [`${model.provider_id}\u0000${model.id}`, model])),
+    [availableModels],
+  );
+  const draftKeys = useMemo(
+    () => new Set(draft.map(model => `${model.provider_id}\u0000${model.model_id}`)),
+    [draft],
+  );
+  const selectableGroups = useMemo(() => {
+    const grouped = new Map<string, ModelDefinitionV2[]>();
+    validModels.forEach(model => {
+      const key = `${model.provider_id}\u0000${model.id}`;
+      const isPrimary = primary?.provider_id === model.provider_id && primary.model_id === model.id;
+      if (isPrimary || draftKeys.has(key)) return;
+      const entries = grouped.get(model.provider_id) ?? [];
+      entries.push(model);
+      grouped.set(model.provider_id, entries);
+    });
+    return Array.from(grouped.entries())
+      .map(([providerId, providerModels]) => ({
+        providerId,
+        providerName: providerNames.get(providerId) || providerId,
+        models: providerModels.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id)),
+      }))
+      .sort((a, b) => a.providerName.localeCompare(b.providerName));
+  }, [draftKeys, primary, providerNames, validModels]);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(current);
+  const hasInvalidDraft = useMemo(
+    () => draft.some((fallback) => {
+      const key = `${fallback.provider_id}\u0000${fallback.model_id}`;
+      const isPrimary = primary?.provider_id === fallback.provider_id
+        && primary.model_id === fallback.model_id;
+      return isPrimary || !validByKey.has(key);
+    }),
+    [draft, primary, validByKey],
+  );
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    closeButtonRef.current?.focus();
+    return () => previouslyFocused?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || saving) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, saving]);
+
+  const move = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= draft.length) return;
+    setDraft(previous => {
+      const next = [...previous];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const handleSave = async () => {
+    if (!dirty || saving || hasInvalidDraft) return;
+    setSaving(true);
+    try {
+      await defaultModelAPI.setFallbacks(draft);
+      invalidateFallbackModels();
+      toast.success(t('fallbacks.saved'));
+      onSaved(draft, models);
+    } catch (error: any) {
+      toast.error(t('operationFailed'), error?.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+      onClick={() => {
+        if (!saving) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fallback-models-dialog-title"
+        className="flex max-h-[78vh] w-full max-w-xl flex-col rounded-xl bg-white shadow-xl"
+        onClick={event => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+          <div>
+            <h2 id="fallback-models-dialog-title" className="text-lg font-semibold text-gray-900">{t('fallbacks.title')}</h2>
+            <p className="mt-0.5 text-xs text-gray-500">{t('fallbacks.description')}</p>
+          </div>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            aria-label={t('fallbacks.close')}
+            className="text-gray-400 hover:text-gray-600 disabled:opacity-50"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {loading ? (
+            <div className="flex justify-center py-10">
+              <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {draft.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-gray-300 px-4 py-8 text-center">
+                  <ListOrdered className="mx-auto mb-2 h-6 w-6 text-gray-300" />
+                  <p className="text-sm font-medium text-gray-600">{t('fallbacks.empty')}</p>
+                  <p className="mt-1 text-xs text-gray-400">{t('fallbacks.emptyHint')}</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {draft.map((fallback, index) => {
+                    const key = `${fallback.provider_id}\u0000${fallback.model_id}`;
+                    const definition = availableByKey.get(key);
+                    const isPrimary = primary?.provider_id === fallback.provider_id
+                      && primary.model_id === fallback.model_id;
+                    const available = Boolean(definition) && !isPrimary;
+                    return (
+                      <div key={`${key}-${index}`} className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gray-100 text-xs font-semibold text-gray-500">
+                          {index + 1}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-sm font-medium text-gray-800">
+                              {definition?.name || fallback.model_id}
+                            </span>
+                            {!available && (
+                              <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                                {t('fallbacks.unavailable')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="truncate text-xs text-gray-400">
+                            {providerNames.get(fallback.provider_id) || fallback.provider_id} / {fallback.model_id}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => move(index, -1)}
+                            disabled={index === 0 || saving}
+                            title={t('fallbacks.moveUp')}
+                            aria-label={t('fallbacks.moveUp')}
+                            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <ArrowUp className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => move(index, 1)}
+                            disabled={index === draft.length - 1 || saving}
+                            title={t('fallbacks.moveDown')}
+                            aria-label={t('fallbacks.moveDown')}
+                            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <ArrowDown className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDraft(previous => previous.filter((_, itemIndex) => itemIndex !== index))}
+                            disabled={saving}
+                            title={t('fallbacks.remove')}
+                            aria-label={t('fallbacks.remove')}
+                            className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {hasInvalidDraft && (
+                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {t('fallbacks.removeInvalidHint')}
+                </p>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setAdding(value => !value)}
+                disabled={saving || selectableGroups.length === 0}
+                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                {selectableGroups.length === 0 ? t('fallbacks.noModelsToAdd') : t('fallbacks.add')}
+                {selectableGroups.length > 0 && <ChevronDown className={`h-4 w-4 transition-transform ${adding ? 'rotate-180' : ''}`} />}
+              </button>
+
+              {adding && selectableGroups.length > 0 && (
+                <div className="overflow-hidden rounded-lg border border-gray-200">
+                  {selectableGroups.map(group => (
+                    <div key={group.providerId}>
+                      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                        {group.providerName}
+                      </div>
+                      {group.models.map(model => (
+                        <button
+                          key={`${model.provider_id}/${model.id}`}
+                          type="button"
+                          onClick={() => {
+                            setDraft(previous => [...previous, {
+                              provider_id: model.provider_id,
+                              model_id: model.id,
+                            }]);
+                            setAdding(false);
+                          }}
+                          className="flex w-full items-center justify-between border-b border-gray-100 px-3 py-2.5 text-left text-sm text-gray-700 transition-colors last:border-0 hover:bg-gray-50"
+                        >
+                          <span className="truncate">{model.name || model.id}</span>
+                          <span className="ml-3 shrink-0 text-xs text-gray-400">{model.id}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {t('fallbacks.cancel')}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={!dirty || saving || loading || hasInvalidDraft}
+            className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+            {t('fallbacks.save')}
+          </button>
         </div>
       </div>
     </div>

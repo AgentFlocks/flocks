@@ -94,6 +94,13 @@ class SessionInfo(BaseModel):
             "Unpinned sessions follow the normal default-model resolution chain."
         ),
     )
+    model_auto: bool = Field(
+        False,
+        description=(
+            "Whether WebUI Auto runtime failover was explicitly selected for "
+            "this session. Other session entry points ignore this flag."
+        ),
+    )
     
     # Session hierarchy
     parent_id: Optional[str] = Field(None, alias="parentID", description="Parent session for branching")
@@ -198,6 +205,7 @@ class Session:
             "provider": provider_id,
             "model": model_id,
             "model_pinned": True,
+            "model_auto": False,
         }
 
     @classmethod
@@ -605,6 +613,13 @@ class Session:
         # Soft delete
         await cls.update(project_id, session_id, status="deleted")
         cls._id_index.pop(session_id, None)
+
+        # Auto failover cooldowns are process-local session state. Clear them
+        # here (rather than only in the HTTP route) so recursive child deletes
+        # and non-HTTP deletion paths cannot retain stale entries indefinitely.
+        from flocks.session.session_loop import SessionLoop
+
+        SessionLoop.clear_auto_failover_state(session_id)
         
         # Clear messages
         await Message.clear(session_id)

@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   refetch: vi.fn(),
   getSummary: vi.fn(),
   getResolved: vi.fn(),
+  getFallbacks: vi.fn(),
+  setFallbacks: vi.fn(),
   listDefinitions: vi.fn(),
   catalogList: vi.fn(),
   createProvider: vi.fn(),
@@ -30,6 +32,9 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
       if (key === 'status.models') return `${params?.count ?? 0} models`;
+      if (key === 'dashboard.fallbackAvailability') {
+        return `${params?.available ?? 0} / ${params?.total ?? 0} available`;
+      }
       const translations: Record<string, string> = {
         pageTitle: 'Models',
         pageDescription: 'Manage providers',
@@ -138,6 +143,8 @@ vi.mock('@/api/provider', () => ({
   },
   defaultModelAPI: {
     getResolved: mocks.getResolved,
+    getFallbacks: mocks.getFallbacks,
+    setFallbacks: mocks.setFallbacks,
     delete: vi.fn(),
     set: vi.fn(),
   },
@@ -156,6 +163,8 @@ describe('ModelPage add provider dialog', () => {
     });
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models: [] } });
     mocks.catalogList.mockResolvedValue({
       data: {
@@ -264,6 +273,8 @@ describe('ModelPage configure provider dialog', () => {
     });
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models: [model], total: 1 } });
     mocks.catalogList.mockResolvedValue({
       data: {
@@ -366,5 +377,164 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
       api_key: 'sk-replacement-secret',
     }));
+  });
+});
+
+describe('ModelPage fallback model editor', () => {
+  const providers = [
+    {
+      id: 'openai',
+      name: 'OpenAI',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+    {
+      id: 'minimax',
+      name: 'MiniMax',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+  ];
+  const models = [
+    {
+      id: 'gpt-4o',
+      name: 'GPT-4o',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'minimax-m3',
+      name: 'MiniMax M3',
+      provider_id: 'minimax',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockResolvedValue({ data: { success: true, latency_ms: 10 } });
+  });
+
+  it('adds and explicitly saves an ordered fallback list', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    await user.click(await screen.findByRole('button', { name: 'fallbacks.add' }));
+    const matchingModels = await screen.findAllByRole('button', { name: /MiniMax M3/i });
+    await user.click(matchingModels[matchingModels.length - 1]);
+    await user.click(screen.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
+  });
+
+  it('requires invalid entries to be removed before saving', async () => {
+    const user = userEvent.setup();
+    mocks.getFallbacks.mockResolvedValue({
+      data: {
+        fallback_providers: [
+          { provider_id: 'missing', model_id: 'retired-model' },
+          { provider_id: 'minimax', model_id: 'minimax-m3' },
+        ],
+      },
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    expect(await screen.findByText('fallbacks.unavailable')).toBeInTheDocument();
+    expect(screen.getByText('fallbacks.removeInvalidHint')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+
+    await user.click(screen.getAllByRole('button', { name: 'fallbacks.remove' })[0]);
+    expect(screen.getByRole('button', { name: 'fallbacks.save' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
+  });
+
+  it('does not count a fallback from an unconfigured provider as available', async () => {
+    const user = userEvent.setup();
+    mocks.useProviders.mockReturnValue({
+      providers: [providers[0], { ...providers[1], configured: false }],
+      connectedIds: ['openai'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getFallbacks.mockResolvedValue({
+      data: {
+        fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }],
+      },
+    });
+    renderWithRouter(<ModelPage />);
+
+    expect(await screen.findByText('0 / 1 available')).toBeInTheDocument();
+    await user.click(screen.getByTitle('dashboard.editFallbackModels'));
+    expect(await screen.findByText('fallbacks.unavailable')).toBeInTheDocument();
+  });
+
+  it('allows an unconfigured provider model to be saved for later repair', async () => {
+    const user = userEvent.setup();
+    mocks.useProviders.mockReturnValue({
+      providers: [providers[0], { ...providers[1], configured: false }],
+      connectedIds: ['openai'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    await user.click(await screen.findByRole('button', { name: 'fallbacks.add' }));
+    const matchingModels = await screen.findAllByRole('button', { name: /MiniMax M3/i });
+    await user.click(matchingModels[matchingModels.length - 1]);
+    expect(screen.getByText('fallbacks.unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'fallbacks.save' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
   });
 });
