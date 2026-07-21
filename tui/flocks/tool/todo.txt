@@ -1,0 +1,28 @@
+Use this tool to read or manage a structured task list for your current SecOps session. This helps track progress, organize complex tasks, and keep the user informed.
+
+Use action="read" to inspect the current todo list.
+
+Use action="write" with a full structured todos array to replace the current todo list.
+
+When to use:
+1. Complex multi-step tasks with 3 or more distinct steps
+2. Non-trivial tasks requiring careful planning
+3. User explicitly requests a todo list
+4. User provides multiple tasks
+
+When not to use:
+1. Single, straightforward tasks
+2. Trivial tasks with no organizational benefit
+3. Purely conversational or informational requests
+
+Task states:
+- pending: Not yet started
+- in_progress: Currently working on this task
+- completed: Finished successfully
+- cancelled: No longer needed
+
+Guidelines:
+- Create specific, actionable items
+- Update status in real time as you work
+- Mark tasks completed immediately after finishing
+- Only keep one task in_progress at a time

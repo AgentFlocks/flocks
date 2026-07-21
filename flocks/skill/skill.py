@@ -6,6 +6,7 @@ access to skill information. Mirrors original Flocks Skill namespace.
 """
 
 import json
+import asyncio
 import os
 import glob
 import re
@@ -154,6 +155,7 @@ class SkillMetadata(BaseModel):
     os: Optional[List[str]] = None
     homepage: Optional[str] = None
     emoji: Optional[str] = None
+    ui_hidden: Optional[bool] = None
 
 
 class SkillInfo(BaseModel):
@@ -163,6 +165,7 @@ class SkillInfo(BaseModel):
     location: str = Field(..., description="Path to SKILL.md file")
     source: Optional[str] = Field(default=None, description="Discovery source")
     category: Optional[str] = Field(default=None, description="Skill category (e.g. 'system')")
+    ui_hidden: bool = Field(default=False, description="Whether the skill should be omitted from skill management UI")
     native: bool = Field(default=False, description=(
         "True only for project-installed skills (<cwd>/.flocks/plugins/skills/). "
         "All other locations (.flocks/skills/, ~/.flocks/plugins/skills/, .claude/) "
@@ -202,6 +205,45 @@ class Skill:
     """
 
     _cache: Optional[Dict[str, SkillInfo]] = None
+    _cache_lock = threading.Lock()
+    _cache_generation = 0
+    _cache_loads: Dict[int, threading.Event] = {}
+
+    @classmethod
+    def _all_sync(cls) -> List[SkillInfo]:
+        """Discover skills once per cache generation without stale refills."""
+        while True:
+            with cls._cache_lock:
+                if cls._cache is not None:
+                    return list(cls._cache.values())
+                generation = cls._cache_generation
+                completion = cls._cache_loads.get(generation)
+                should_discover = completion is None
+                if completion is None:
+                    completion = threading.Event()
+                    cls._cache_loads[generation] = completion
+
+            if not should_discover:
+                completion.wait()
+                continue
+
+            try:
+                discovered = cls._discover()
+            except BaseException:
+                with cls._cache_lock:
+                    cls._cache_loads.pop(generation, None)
+                    completion.set()
+                raise
+
+            with cls._cache_lock:
+                if generation == cls._cache_generation and cls._cache is None:
+                    cls._cache = discovered
+                cls._cache_loads.pop(generation, None)
+                completion.set()
+                if generation == cls._cache_generation and cls._cache is not None:
+                    return list(cls._cache.values())
+            # The cache was invalidated while discovery was running. Repeat
+            # against the new generation instead of publishing stale data.
 
     @classmethod
     def _parse_skill_md(cls, filepath: str, source: Optional[str] = None) -> Optional[SkillInfo]:
@@ -225,6 +267,7 @@ class Skill:
             name = (data.get("name") or "").strip()
             description = (data.get("description") or "").strip()
             category = (data.get("category") or "").strip().lower() or None
+            ui_hidden = cls._as_bool(data.get("ui_hidden"))
 
             if not cls._is_valid_name(name) or not cls._is_valid_description(description):
                 return None
@@ -242,6 +285,7 @@ class Skill:
                         skill_metadata = SkillMetadata.model_validate(raw_flocks)
                         install_specs = skill_metadata.install or None
                         requires = skill_metadata.requires or None
+                        ui_hidden = ui_hidden or bool(skill_metadata.ui_hidden)
                     except Exception as exc:
                         log.warn("skill.metadata.parse.error", {
                             "filepath": filepath,
@@ -258,6 +302,7 @@ class Skill:
                 location=filepath,
                 source=source,
                 category=category,
+                ui_hidden=ui_hidden,
                 native=is_native,
                 metadata=skill_metadata,
                 install_specs=install_specs,
@@ -311,6 +356,14 @@ class Skill:
     @staticmethod
     def _is_valid_description(description: str) -> bool:
         return 1 <= len(description) <= 1024
+
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     @classmethod
     def _scan_directory(
@@ -447,10 +500,7 @@ class Skill:
         Returns:
             List of all discovered skills
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        return list(cls._cache.values())
+        return await asyncio.to_thread(cls._all_sync)
 
     @classmethod
     async def list_enabled(cls) -> List[SkillInfo]:
@@ -482,10 +532,8 @@ class Skill:
         Returns:
             SkillInfo or None if not found
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        skill = cls._cache.get(name)
+        skills = await cls.all()
+        skill = next((item for item in skills if item.name == name), None)
         if not skill:
             return None
         return skill
@@ -493,7 +541,9 @@ class Skill:
     @classmethod
     def clear_cache(cls) -> None:
         """Clear the skill cache (for testing or forced refresh)"""
-        cls._cache = None
+        with cls._cache_lock:
+            cls._cache = None
+            cls._cache_generation += 1
         log.info("skill.cache.cleared")
 
     @classmethod

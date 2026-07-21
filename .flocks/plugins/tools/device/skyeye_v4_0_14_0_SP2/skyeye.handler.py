@@ -1,11 +1,12 @@
 import base64
+import gzip
 import hashlib
 import json
 import random
 import re
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -30,6 +31,20 @@ def _get_custom_setting(raw_service: dict[str, Any], key: str, default: Any = No
     if not isinstance(custom_settings, dict):
         return default
     return custom_settings.get(key, default)
+
+
+def _ensure_skyeye_base_path(base_url: str) -> str:
+    cleaned = base_url.strip().rstrip("/")
+    if not cleaned:
+        return ""
+
+    parts = urlsplit(cleaned)
+    path = parts.path.rstrip("/")
+    if path.lower() == "/skyeye" or path.lower().endswith("/skyeye"):
+        return urlunsplit(parts._replace(path=path))
+
+    next_path = f"{path}/skyeye" if path else "/skyeye"
+    return urlunsplit(parts._replace(path=next_path))
 
 
 def _resolve_login_key(raw_service: dict[str, Any]) -> str:
@@ -59,15 +74,15 @@ def _resolve_base_url(raw_service: dict[str, Any]) -> str:
     if base_url:
         resolved = security.resolve_value(base_url)
         if isinstance(resolved, str) and resolved.strip():
-            return resolved.rstrip("/")
+            return _ensure_skyeye_base_path(resolved)
 
     secret_manager = security.get_secret_manager()
     host = secret_manager.get("skyeye_host") or security.resolve_value("{env:SKYEYE_HOST}")
     if isinstance(host, str) and host.strip():
         host = host.strip().rstrip("/")
         if host.startswith("http://") or host.startswith("https://"):
-            return host
-        return f"https://{host}:443"
+            return _ensure_skyeye_base_path(host)
+        return _ensure_skyeye_base_path(f"https://{host}:443")
 
     return ""
 
@@ -173,6 +188,12 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
             continue
         cleaned[key] = value
     return cleaned
+
+
+def _encode_ip_param(value: str | None) -> str | None:
+    if value is None or not value.strip() or value.startswith("H4sI"):
+        return value
+    return base64.b64encode(gzip.compress(value.encode("utf-8"))).decode("ascii")
 
 
 def _payload_error(payload: Any) -> str | None:
@@ -484,8 +505,8 @@ async def alarm_list(
             "status": status,
             "serial_num": serial_num,
             "data_source": data_source,
-            "alarm_sip": alarm_sip,
-            "attack_sip": attack_sip,
+            "alarm_sip": _encode_ip_param(alarm_sip),
+            "attack_sip": _encode_ip_param(attack_sip),
             "ioc": ioc,
             "threat_name": threat_name,
             "host": host,

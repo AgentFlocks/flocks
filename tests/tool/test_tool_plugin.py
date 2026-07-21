@@ -874,11 +874,34 @@ class TestPluginPyRegistration:
                     handler=lambda ctx, **kwargs: None,
                 ))
 
-            with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+            with patch(
+                "flocks.plugin.PluginLoader.load_extension",
+                side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+            ):
                 ToolRegistry._load_plugin_tools()
 
             assert ToolRegistry._plugin_tool_names == ["base64_encode"]
             assert ToolRegistry._tools["base64_encode"].info.source == "plugin_py"
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_loads_legacy_package_entry_points(self):
+        from flocks.tool.registry import ToolRegistry
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("flocks.plugin.PluginLoader.load_extension") as load_extension:
+                ToolRegistry._load_plugin_tools()
+
+            load_extension.assert_called_once_with("TOOLS", load_entry_points=True)
         finally:
             ToolRegistry._tools = old_tools
             ToolRegistry._plugin_tool_names = old_plugin_names
@@ -906,7 +929,10 @@ class TestPluginPyRegistration:
                     handler=lambda ctx, **kwargs: None,
                 ))
 
-            with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+            with patch(
+                "flocks.plugin.PluginLoader.load_extension",
+                side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+            ):
                 with patch(
                     "flocks.tool.tool_loader.discover_python_tool_sources",
                     return_value={"project_tool": project_tool_path},
@@ -944,7 +970,10 @@ class TestPluginPyRegistration:
                 ))
 
             with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
-                with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+                with patch(
+                    "flocks.plugin.PluginLoader.load_extension",
+                    side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+                ):
                     with patch(
                         "flocks.tool.tool_loader.discover_python_tool_sources",
                         return_value={"user_tool": user_tool_path},
@@ -981,7 +1010,7 @@ class TestPluginPyRegistration:
             ToolRegistry._plugin_tool_names = []
             ToolRegistry._enabled_defaults = {}
 
-            with patch("flocks.plugin.PluginLoader.load_all", return_value=None):
+            with patch("flocks.plugin.PluginLoader.load_extension", return_value=None):
                 with patch(
                     "flocks.tool.tool_loader.discover_python_tool_sources",
                     return_value={"webfetch": colliding_tool_path},
@@ -1021,7 +1050,7 @@ class TestPluginPyRegistration:
             ToolRegistry._enabled_defaults = {}
 
             with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
-                with patch("flocks.plugin.PluginLoader.load_all", return_value=None):
+                with patch("flocks.plugin.PluginLoader.load_extension", return_value=None):
                     with patch(
                         "flocks.tool.tool_loader.discover_python_tool_sources",
                         return_value={"calculator": user_tool_path},

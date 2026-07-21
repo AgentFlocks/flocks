@@ -17,10 +17,13 @@ covered by a separate route-level test that exercises the bind failure path.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from flocks.ingest.syslog import manager as syslog_manager
+from flocks.workflow import execution_store
+from flocks.workflow.triggers.models import TriggerDefinition
 
 
 @pytest.mark.asyncio
@@ -35,13 +38,16 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
 
     manager = syslog_manager.SyslogManager()
     pool_size = syslog_manager._MAX_CONCURRENT_EXECUTIONS
+    trigger = TriggerDefinition.model_validate(
+        {"id": "syslog-default", "type": "syslog", "mapping": {"syslog_message": "$.body"}}
+    )
 
     in_flight = 0
     max_in_flight = 0
     completed = 0
     lock = asyncio.Lock()
 
-    async def _fake_trigger(workflow_id, workflow_json, msg, input_key):  # noqa: ANN001
+    async def _fake_trigger(workflow_id, workflow_json, msg, input_key, **kwargs):  # noqa: ANN001
         nonlocal in_flight, max_in_flight, completed
         async with lock:
             in_flight += 1
@@ -66,7 +72,7 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
     manager._abort_events[workflow_id] = abort
     workers = [
         asyncio.create_task(
-            manager._worker_loop(workflow_id, {}, "syslog_message", queue, abort),
+            manager._worker_loop(workflow_id, {}, trigger, queue, abort),
             name=f"test-worker-{i}",
         )
         for i in range(pool_size)
@@ -125,6 +131,9 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
     workflow_id = "test-wf-stop"
     queue: asyncio.Queue = asyncio.Queue(maxsize=8)
     abort = asyncio.Event()
+    trigger = TriggerDefinition.model_validate(
+        {"id": "syslog-default", "type": "syslog", "mapping": {"syslog_message": "$.body"}}
+    )
     manager._queues[workflow_id] = queue
     manager._abort_events[workflow_id] = abort
     manager._listener_status[workflow_id] = {"state": "listening", "error": None}
@@ -136,7 +145,7 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
 
     workers = [
         asyncio.create_task(
-            manager._worker_loop(workflow_id, {}, "syslog_message", queue, abort),
+            manager._worker_loop(workflow_id, {}, trigger, queue, abort),
             name=f"stop-worker-{i}",
         )
         for i in range(3)
@@ -153,3 +162,100 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
     assert workflow_id not in manager._worker_pools
     assert workflow_id not in manager._queues
     assert manager._listener_status[workflow_id]["state"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_applies_mapping_and_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = syslog_manager.SyslogManager()
+    captured_run_kwargs: dict = {}
+    recorded_exec_data: dict = {}
+    recorded_steps: list[tuple[str, int, dict]] = []
+
+    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
+        return {"id": "exec-syslog", "workflowId": workflow_id, "inputParams": input_params}
+
+    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+        recorded_exec_data.update(exec_data)
+
+    async def _fake_record_execution_step(exec_id, step_index, step):  # noqa: ANN001
+        recorded_steps.append((exec_id, step_index, step))
+        return step
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        captured_run_kwargs.update(kwargs)
+        kwargs["on_step_complete"](
+            SimpleNamespace(
+                model_dump=lambda mode="json": {
+                    "node_id": "receive_alert",
+                    "node_type": "python",
+                    "inputs": {"message": "demo"},
+                    "outputs": {"ok": True},
+                }
+            )
+        )
+        return type(
+            "RunResult",
+            (),
+            {
+                "status": "SUCCEEDED",
+                "error": None,
+                "outputs": {"ok": True},
+                "history": [],
+                "last_node_id": "done",
+                "steps": 1,
+            },
+        )()
+
+    monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
+    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
+
+    trigger = TriggerDefinition.model_validate(
+        {
+            "id": "syslog-alerts",
+            "type": "syslog",
+            "mapping": {
+                "message": "$.body.message",
+                "hostname": "$.body.hostname",
+            },
+            "inputs": {"pipeline": "syslog"},
+            "filter": {"expr": "body.hostname == 'router-a'"},
+        }
+    )
+
+    await manager._trigger_workflow(
+        "wf-syslog",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"message": "demo", "hostname": "router-a"},
+        "syslog_message",
+        trigger=trigger,
+        source="udp://0.0.0.0:5514",
+    )
+
+    assert captured_run_kwargs["inputs"]["message"] == "demo"
+    assert captured_run_kwargs["inputs"]["hostname"] == "router-a"
+    assert captured_run_kwargs["inputs"]["pipeline"] == "syslog"
+    assert captured_run_kwargs["run_id"] == "exec-syslog"
+    assert captured_run_kwargs["execution_profile"] == "high_frequency"
+    assert callable(captured_run_kwargs["on_step_complete"])
+    assert recorded_steps[0][0] == "exec-syslog"
+    assert recorded_steps[0][1] == 1
+    assert recorded_steps[0][2]["node_id"] == "receive_alert"
+    assert recorded_exec_data["triggerId"] == "syslog-alerts"
+    assert recorded_exec_data["triggerSource"] == "udp://0.0.0.0:5514"
+    assert recorded_exec_data["executionLog"] == []
+    assert recorded_exec_data["stepCount"] == 1
+
+    captured_run_kwargs.clear()
+    await manager._trigger_workflow(
+        "wf-syslog",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"message": "demo", "hostname": "router-b"},
+        "syslog_message",
+        trigger=trigger,
+        source="udp://0.0.0.0:5514",
+    )
+    assert captured_run_kwargs == {}

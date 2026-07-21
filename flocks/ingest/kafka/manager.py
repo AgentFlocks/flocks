@@ -23,23 +23,34 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     DEFAULT_LARGE_LIST_KEYS,
     compact_history_for_storage,
     compact_outputs_for_storage,
     create_execution_record,
+    ExecutionStepRecorder,
     record_execution_result,
     resolve_execution_outcome,
 )
+from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
+from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
+from flocks.workflow.store import WorkflowStore
 
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
+from flocks.workflow.triggers.compat import legacy_kafka_trigger_from_config
+from flocks.workflow.triggers.dispatcher import EventDispatcher, TriggerDispatchError, build_trigger_event
+from flocks.workflow.triggers.models import (
+    TriggerDefinition,
+    workflow_json_declares_triggers,
+    workflow_trigger_definitions_from_json,
+)
 
 log = Log.create(service="kafka.manager")
 
@@ -171,20 +182,23 @@ def _compact_for_kafka_storage(outputs: Any) -> Dict[str, Any]:
         size_threshold=0,
     )
     for key, value in list(compacted.items()):
-        if key == "kafka_output" or (
-            isinstance(value, str) and len(value) > _STORAGE_PREVIEW_CHARS
-        ):
+        if key == "kafka_output" or (isinstance(value, str) and len(value) > _STORAGE_PREVIEW_CHARS):
             compacted[key] = _summarize_large_value(value)
     return compacted
 
 
-def _compact_history_for_kafka_storage(history: Any, *, input_key: str) -> List[Any]:
+def _compact_history_for_kafka_storage(
+    history: Any,
+    *,
+    input_key: str,
+    input_keys: Iterable[str] | None = None,
+) -> List[Any]:
     compacted = compact_history_for_storage(
         history,
         keys=_KAFKA_STORAGE_LIST_KEYS,
         size_threshold=0,
     )
-    raw_input_keys = _KAFKA_RAW_INPUT_KEYS | frozenset({input_key})
+    raw_input_keys = _KAFKA_RAW_INPUT_KEYS | frozenset(input_keys or {input_key})
     for step in compacted:
         if not isinstance(step, dict):
             continue
@@ -193,11 +207,27 @@ def _compact_history_for_kafka_storage(history: Any, *, input_key: str) -> List[
             if not isinstance(payload, dict):
                 continue
             for key, value in list(payload.items()):
-                if key in raw_input_keys or key == "kafka_output" or (
-                    isinstance(value, str) and len(value) > _STORAGE_PREVIEW_CHARS
+                if (
+                    key in raw_input_keys
+                    or key == "kafka_output"
+                    or (isinstance(value, str) and len(value) > _STORAGE_PREVIEW_CHARS)
                 ):
                     payload[key] = _summarize_large_value(value)
     return compacted
+
+
+def _compact_step_for_kafka_storage(
+    step: Any,
+    *,
+    input_key: str,
+    input_keys: Iterable[str] | None = None,
+) -> Dict[str, Any]:
+    compacted = _compact_history_for_kafka_storage(
+        [step],
+        input_key=input_key,
+        input_keys=input_keys,
+    )
+    return compacted[0] if compacted and isinstance(compacted[0], dict) else {}
 
 
 class KafkaManager:
@@ -216,28 +246,55 @@ class KafkaManager:
         # Per-workflow event signalled once the consumer has either connected
         # successfully or failed; used by ``restart_workflow``.
         self._ready: dict[str, asyncio.Event] = {}
+        self._dispatcher = EventDispatcher()
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
         return f"{WORKFLOW_KAFKA_CONFIG_PREFIX}{workflow_id}"
 
+    @staticmethod
+    def _default_trigger_from_config(data: Dict[str, Any]) -> TriggerDefinition:
+        trigger = legacy_kafka_trigger_from_config(data)
+        if trigger is None:
+            return TriggerDefinition.model_validate(
+                {
+                    "id": "kafka-default",
+                    "type": "kafka",
+                    "enabled": bool(data.get("enabled")),
+                    "source": {
+                        "inputBroker": data.get("inputBroker") or "",
+                        "inputTopic": data.get("inputTopic") or "",
+                        "inputGroupId": data.get("inputGroupId") or "",
+                        "autoOffsetReset": data.get("autoOffsetReset") or "latest",
+                    },
+                    "mapping": {
+                        str(data.get("inputKey") or "kafka_message"): "$.body",
+                    },
+                    "inputs": _strip_execution_only_comments(
+                        data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
+                    ),
+                    "updatedAt": data.get("updatedAt"),
+                }
+            )
+        return trigger
+
+    def _resolve_active_trigger(self, workflow_json: Dict[str, Any], data: Dict[str, Any]) -> TriggerDefinition:
+        if workflow_json_declares_triggers(workflow_json):
+            triggers = workflow_trigger_definitions_from_json(workflow_json)
+            trigger = next((item for item in triggers if item.type == "kafka"), None)
+            if trigger is not None:
+                return trigger
+        return self._default_trigger_from_config(data)
+
     async def start_all(self) -> None:
         try:
-            keys = await Storage.list_keys(WORKFLOW_KAFKA_CONFIG_PREFIX)
+            configs = await WorkflowStore.list_configs(kind="workflow_kafka_config")
         except Exception as exc:
-            log.warning("kafka.list_keys_failed", {"error": str(exc)})
+            log.warning("kafka.list_configs_failed", {"error": str(exc)})
             return
 
-        for key in keys:
-            if not key.startswith(WORKFLOW_KAFKA_CONFIG_PREFIX):
-                continue
-            workflow_id = key[len(WORKFLOW_KAFKA_CONFIG_PREFIX):]
+        for workflow_id, data in configs:
             if not workflow_id:
-                continue
-            try:
-                data = await Storage.read(key)
-            except Exception as exc:
-                log.warning("kafka.config_read_failed", {"key": key, "error": str(exc)})
                 continue
             if isinstance(data, dict) and data.get("enabled"):
                 await self.restart_workflow(workflow_id)
@@ -311,9 +368,8 @@ class KafkaManager:
         surface connection errors to the user.
         """
         await self.stop_workflow(workflow_id)
-        key = self._config_key(workflow_id)
         try:
-            data = await Storage.read(key)
+            data = await WorkflowStore.get_config(workflow_id, kind="workflow_kafka_config")
         except Exception as exc:
             log.warning("kafka.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"state": "failed", "error": str(exc)}
@@ -343,11 +399,16 @@ class KafkaManager:
             log.warning("kafka.workflow_json_missing_on_start", {"workflow_id": workflow_id})
             return {"state": "failed", "error": err}
 
+        trigger = self._resolve_active_trigger(workflow_json, data)
+        try:
+            workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
+        except Exception as exc:
+            err = f"workflow_plan_failed: {exc}"
+            self._status[workflow_id] = {"state": "failed", "error": err}
+            log.warning("kafka.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
+            return self.get_consumer_status(workflow_id)
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
-        input_key = str(data.get("inputKey") or "kafka_message")
-        configured_inputs = _strip_execution_only_comments(
-            data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
-        )
+        configured_inputs = _strip_execution_only_comments(trigger.inputs if isinstance(trigger.inputs, dict) else {})
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
@@ -373,7 +434,13 @@ class KafkaManager:
             workers.append(
                 asyncio.create_task(
                     self._worker_loop(
-                        workflow_id, workflow_json, input_key, configured_inputs, queue, abort,
+                        workflow_id,
+                        workflow_plan,
+                        trigger,
+                        configured_inputs,
+                        queue,
+                        abort,
+                        input_topic,
                     ),
                     name=f"kafka-worker-{workflow_id}-{i}",
                 )
@@ -382,9 +449,14 @@ class KafkaManager:
 
         task = asyncio.create_task(
             self._consumer_loop(
-                workflow_id, input_broker, input_topic, group_id,
+                workflow_id,
+                input_broker,
+                input_topic,
+                group_id,
                 str(data.get("autoOffsetReset") or "latest"),
-                queue, abort, ready,
+                queue,
+                abort,
+                ready,
             ),
             name=f"kafka-{workflow_id}",
         )
@@ -533,11 +605,12 @@ class KafkaManager:
     async def _worker_loop(
         self,
         workflow_id: str,
-        workflow_json: Any,
-        input_key: str,
+        workflow_plan: Any,
+        trigger: TriggerDefinition,
         configured_inputs: Dict[str, Any],
         queue: asyncio.Queue,
         abort: asyncio.Event,
+        source: str,
     ) -> None:
         while not abort.is_set():
             try:
@@ -550,7 +623,13 @@ class KafkaManager:
                 if isinstance(msg, _QueuedKafkaMessage):
                     msg = _decode_message(msg.raw_value)
                 await self._trigger_workflow(
-                    workflow_id, workflow_json, msg, input_key, configured_inputs,
+                    workflow_id,
+                    workflow_plan,
+                    msg,
+                    next(iter(trigger.mapping or {}), "kafka_message"),
+                    configured_inputs,
+                    trigger=trigger,
+                    source=source,
                 )
             except asyncio.CancelledError:
                 return
@@ -563,71 +642,135 @@ class KafkaManager:
     async def _trigger_workflow(
         self,
         workflow_id: str,
-        workflow_json: Any,
+        workflow_plan: Any,
         message: Any,
         input_key: str,
         configured_inputs: Optional[Dict[str, Any]] = None,
+        *,
+        trigger: Optional[TriggerDefinition] = None,
+        source: Optional[str] = None,
     ) -> None:
+        trigger = trigger or TriggerDefinition.model_validate(
+            {
+                "id": "kafka-default",
+                "type": "kafka",
+                "enabled": True,
+                "mapping": {input_key: "$.body"},
+                "inputs": _strip_execution_only_comments(
+                    configured_inputs if isinstance(configured_inputs, dict) else {}
+                ),
+            }
+        )
         configured_inputs = _strip_execution_only_comments(
             configured_inputs if isinstance(configured_inputs, dict) else {}
         )
-        inputs = {**configured_inputs, input_key: message}
-        input_params = {"_trigger": "kafka", input_key: _summarize_large_value(message)}
-        for key, value in configured_inputs.items():
-            if key == input_key:
-                continue
-            input_params[key] = _summarize_large_value(value)
-
-        exec_data = await create_execution_record(
-            workflow_id,
-            input_params=input_params,
+        event = build_trigger_event(
+            workflow_id=workflow_id,
+            trigger=trigger,
+            body=message,
+            raw=message,
+            source=source or str((trigger.source or {}).get("inputTopic") or "kafka"),
+            delivery_id=f"kafka-{uuid.uuid4().hex}",
         )
-        exec_id = exec_data["id"]
-        start_time = time.time()
 
-        result = None
-        try:
-            result = await asyncio.to_thread(
-                run_workflow,
-                workflow=workflow_json,
-                inputs=inputs,
-                trace=False,
-                history_mode="summary",
+        async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
+            summarized_inputs = {"_trigger": trigger.type}
+            for key, value in mapped_inputs.items():
+                summarized_inputs[key] = _summarize_large_value(value)
+
+            exec_data = await create_execution_record(
+                workflow_id,
+                input_params=summarized_inputs,
             )
-            status, error_msg = resolve_execution_outcome(result)
-            duration = time.time() - start_time
-            exec_data.update({
-                "status": status,
-                "outputResults": _compact_for_kafka_storage(result.outputs),
-                "finishedAt": int(time.time() * 1000),
-                "duration": duration,
-                "errorMessage": error_msg,
-                "executionLog": _compact_history_for_kafka_storage(
-                    result.history,
+            exec_id = exec_data["id"]
+            loop = asyncio.get_running_loop()
+            start_time = time.time()
+            trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
+            trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
+            step_recorder = ExecutionStepRecorder(
+                exec_id=exec_id,
+                loop=loop,
+                logger=log,
+                log_event="kafka.execution_step.write_failed",
+                step_compactor=lambda step: _compact_step_for_kafka_storage(
+                    step,
                     input_key=input_key,
+                    input_keys=trigger_input_keys,
                 ),
-                "currentNodeId": result.last_node_id,
-                "currentPhase": status,
-                "currentStepIndex": result.steps,
-            })
-        except Exception as exc:
-            duration = time.time() - start_time
-            log.error(
-                "kafka.workflow_run_failed",
-                {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
             )
-            exec_data.update({
-                "status": "error",
-                "errorMessage": str(exc),
-                "finishedAt": int(time.time() * 1000),
-                "duration": duration,
-                "currentPhase": "error",
-            })
-        finally:
             try:
-                await record_execution_result(workflow_id, exec_id, exec_data)
+                result = await asyncio.to_thread(
+                    run_workflow,
+                    workflow=workflow_plan,
+                    inputs=mapped_inputs,
+                    run_id=exec_id,
+                    trace=False,
+                    execution_profile="high_frequency",
+                    on_step_complete=step_recorder.on_step_complete,
+                )
+                status, error_msg = resolve_execution_outcome(result)
+                duration = time.time() - start_time
+                step_count = step_recorder.step_count or result.steps
+                exec_data.update(step_recorder.summary)
+                exec_data.update(
+                    {
+                        "status": status,
+                        "outputResults": _compact_for_kafka_storage(result.outputs),
+                        "finishedAt": int(time.time() * 1000),
+                        "duration": duration,
+                        "errorMessage": error_msg,
+                        "executionLog": [],
+                        "stepCount": step_count,
+                        "currentNodeId": result.last_node_id,
+                        "currentPhase": status,
+                        "currentStepIndex": step_count,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": trigger_meta.get("deliveryId"),
+                        "attempt": trigger_meta.get("attempt"),
+                        "triggerSource": trigger_meta.get("source"),
+                    }
+                )
             except Exception as exc:
-                log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+                duration = time.time() - start_time
+                log.error(
+                    "kafka.workflow_run_failed",
+                    {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+                )
+                exec_data.update(step_recorder.summary)
+                exec_data.update(
+                    {
+                        "status": "error",
+                        "errorMessage": str(exc),
+                        "finishedAt": int(time.time() * 1000),
+                        "duration": duration,
+                        "executionLog": [],
+                        "currentPhase": "error",
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": trigger_meta.get("deliveryId"),
+                        "attempt": trigger_meta.get("attempt"),
+                        "triggerSource": trigger_meta.get("source"),
+                    }
+                )
+            finally:
+                try:
+                    await record_execution_result(workflow_id, exec_id, exec_data)
+                except Exception as exc:
+                    log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+            return exec_data
+
+        try:
+            await self._dispatcher.dispatch(
+                trigger=trigger,
+                event=event,
+                executor=_executor,
+            )
+        except TriggerDispatchError as exc:
+            log.warning(
+                "kafka.trigger_dispatch_failed",
+                {"workflow_id": workflow_id, "trigger_id": trigger.id, "error": str(exc)},
+            )
 
 
 default_manager = KafkaManager()

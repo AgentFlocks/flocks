@@ -9,7 +9,6 @@ from httpx import AsyncClient, ASGITransport
 from fastapi import status
 
 from flocks.server.app import app
-from flocks.task.manager import TaskManager
 from flocks.task.store import TaskStore
 from flocks.task.models import (
     DeliveryStatus,
@@ -54,12 +53,28 @@ async def test_health_check(client):
     assert data["status"] == "healthy"
     assert isinstance(data["version"], str) and data["version"]
     assert "timestamp" in data
-    assert "task_manager_started" in data
-    assert "task_scheduler_running" in data
-    assert "task_scheduler_available" in data
-    assert "task_queue_running" in data
-    assert "task_queue_queued" in data
-    assert "task_stale_running" in data
+    assert "config_dir" not in data
+    assert "data_dir" not in data
+    assert "task_manager_started" not in data
+    assert "task_scheduler_running" not in data
+    assert "task_scheduler_available" not in data
+    assert "task_manager_error" not in data
+    assert "task_queue_paused" not in data
+    assert "task_queue_running" not in data
+    assert "task_queue_queued" not in data
+    assert "task_stale_running" not in data
+    assert "task_oldest_running_seconds" not in data
+
+
+@pytest.mark.asyncio
+async def test_security_headers_present(client):
+    """Baseline browser security headers should be present on HTTP responses."""
+    response = await client.get("/api/health")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["content-security-policy"] == "frame-ancestors 'self'"
+    assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
 
 
 @pytest.mark.asyncio
@@ -551,5 +566,3 @@ async def test_question_pending_route_lists_session_requests(client):
     finally:
         clear_request_state(req1["id"])
         clear_request_state(req2["id"])
-
-

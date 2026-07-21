@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from flocks.command.command import Command
 from flocks.command.handler import handle_slash_command
@@ -20,7 +20,10 @@ class DispatchResult:
     handled: bool = True
 
 
-def parse_slash_command(text: str) -> Optional[ParsedCommand]:
+def parse_slash_command(
+    text: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[ParsedCommand]:
     """Parse slash text into a command and registry metadata."""
     stripped = (text or "").strip()
     if not stripped.startswith("/"):
@@ -38,6 +41,7 @@ def parse_slash_command(text: str) -> Optional[ParsedCommand]:
         command_name=command_name.lower(),
         canonical_name=canonical_name,
         args=raw_args.strip(),
+        args_json=metadata.get("commandArgumentsJson") if isinstance(metadata, dict) else None,
         command_def=command_def,
     )
 
@@ -48,7 +52,7 @@ def _has_non_text_parts(event: UserInputEvent) -> bool:
 
 async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> DispatchResult:
     """Route a normalized user input through direct / llm / session-control paths."""
-    parsed = parse_slash_command(event.text)
+    parsed = parse_slash_command(event.text, event.metadata)
     if parsed is None:
         await sink.run_llm(event, event.text, event.display_text)
         return DispatchResult(action="llm", handled=False)
@@ -112,14 +116,18 @@ async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> Dispat
         clear_history_cb = getattr(sink, "_clear_history", None)
         handled = await handle_slash_command(
             parsed.raw_text,
+            parsed_command=parsed,
             send_text=_collect_text,
             send_prompt=_collect_prompt,
             clear_screen=clear_cb,
             clear_history=clear_history_cb,
             surface=sink.surface,
+            session_id=event.session_id,
         )
         if handled:
             if llm_prompts:
+                if direct_texts:
+                    await sink.publish_direct_response(event, "\n".join(direct_texts))
                 await sink.run_llm(
                     event,
                     llm_prompts[0],

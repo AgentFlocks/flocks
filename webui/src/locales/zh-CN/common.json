@@ -54,7 +54,9 @@
   "error": {
     "backendUnavailable": "无法连接到后端服务",
     "backendError": "后端服务异常",
-    "backendErrorHint": "请确保 Flocks 后端服务正在运行",
+    "backendErrorHint": "请确保后端服务正在运行",
+    "chunkLoadFailed": "页面资源加载失败",
+    "chunkLoadHint": "应用可能已经更新，请刷新后重试。",
     "processingFailed": "处理失败",
     "deleteFailed": "删除失败",
     "saveFailed": "保存失败"
@@ -64,6 +66,7 @@
   },
   "workflowStatus": {
     "running": "运行中",
+    "cancelling": "取消中",
     "publishing": "发布中",
     "success": "成功",
     "SUCCEEDED": "成功",
@@ -112,7 +115,7 @@
     "defaultCreate": "创建",
     "defaultSave": "保存",
     "tabDetails": "详情",
-    "tabAIEdit": "AI 编辑",
+    "tabAIEdit": "工作台",
     "tabTest": "测试",
     "rexThinking": "Agent 正在思考中...",
     "editAndSend": "编辑下方内容，发送给 Agent 查看效果",
@@ -126,7 +129,10 @@
     "cancelButton": "取消",
     "extracting": "提取中...",
     "extractFromRex": "从 Rex 提取配置",
+    "extractFromRexGuideDesc": "将 Rex 输出的配置摘要提取到表单。",
     "switchToForm": "切换到表单",
+    "guideCollapse": "收起创建引导",
+    "guideExpand": "展开创建引导",
     "testStartFailed": "测试启动失败",
     "extractFailed": "提取失败，请重试",
     "rexAssist": "Rex 协助",
@@ -144,6 +150,7 @@
     "yes": "✓ 是",
     "no": "✗ 否",
     "needsAnswer": "需要你的回答",
+    "customAnswer": "自定义 / 补充说明",
     "confirm": "确认",
     "skip": "跳过"
   },
@@ -241,7 +248,7 @@
       "thirdPartySubtitle": "选择一个其他模型厂商，填写其 key，并指定默认模型。",
       "thirdPartyKeyPlaceholder": "粘贴第三方模型 API Key",
       "thirdPartyBaseUrlPlaceholder": "填写模型服务 Base URL（如需要）",
-      "thirdPartyModelIdPlaceholder": "输入模型 ID（例如 gpt-4o、deepseek-chat）",
+      "thirdPartyModelIdPlaceholder": "输入模型 ID（例如 gpt-4o、deepseek-v4-flash）",
       "thirdPartyModelHint": "保存后会验证并设为默认模型：{{model}}",
       "thirdPartyAdvancedHint": "如需 OpenAI Compatible 等高级自定义接入，请前往 Models 页面配置。",
       "validateAndApply": "验证并应用",
@@ -265,7 +272,7 @@
       "securityApis": { "title": "配置安全工具 API", "tags": ["ThreatBook", "VirusTotal", "FOFA", "URLScan", "Shodan"] },
       "channels": { "title": "接入 IM 渠道", "tags": ["飞书", "企微", "钉钉", "Discord", "Telegram"] },
       "devices": { "title": "接入 NDR 设备", "tags": ["天眼", "TDP"] },
-      "scenes": { "title": "启用运营场景", "tags": ["每日情报", "告警研判", "钓鱼检测"] }
+      "scenes": { "title": "启用运营场景", "tags": ["每日情报", "告警运营", "钓鱼检测"] }
     }
   },
   "hookStatus": {

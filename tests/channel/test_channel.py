@@ -130,8 +130,11 @@ class TestChannelPluginStatus:
     def test_mark_connected(self):
         ch = _StubChannel()
         ch.reset_status("feishu")
+        ch.mark_disconnected(error="timeout")
         ch.mark_connected()
         assert ch.status.connected is True
+        assert ch.status.last_error is None
+        assert ch.status.error_count == 1
 
     def test_mark_disconnected_without_error(self):
         ch = _StubChannel()
@@ -839,6 +842,55 @@ class TestFeishuNativeCommands:
         assert stored_part.mime == "image/png"
         assert stored_part.url == "file:///tmp/diagram.png"
 
+    @pytest.mark.asyncio
+    async def test_append_user_message_accepts_windows_file_uri(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.config.config import ChannelConfig
+
+        created_message = SimpleNamespace(id="message_user_1")
+        store_part = AsyncMock()
+        paths_checked: list[str] = []
+
+        def fake_isfile(path: str) -> bool:
+            paths_checked.append(path)
+            return path == "C:/Users/demo/Pictures/channel image.png"
+
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.parts",
+            AsyncMock(return_value=[]),
+        )
+        monkeypatch.setattr("os.path.isfile", fake_isfile)
+
+        await InboundDispatcher._append_user_message(
+            "session_1",
+            "[图片消息]",
+            InboundMessage(
+                channel_id="weixin",
+                account_id="default",
+                message_id="msg_1",
+                sender_id="user_1",
+                chat_type=ChatType.DIRECT,
+                media_url="file:///C:/Users/demo/Pictures/channel%20image.png",
+                media_mime="image/png",
+            ),
+            ChannelConfig(enabled=True),
+        )
+
+        assert paths_checked == ["C:/Users/demo/Pictures/channel image.png"]
+        store_part.assert_awaited_once()
+        stored_part = store_part.await_args.args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "channel image.png"
+        assert stored_part.mime == "image/png"
+
 
 class TestMultimodalInput:
     @pytest.mark.asyncio
@@ -1010,10 +1062,10 @@ class TestMultimodalInput:
 # =====================================================================
 
 class TestCheckAllowlist:
-    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1"):
+    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1", channel_id="test", raw=None):
         return InboundMessage(
-            channel_id="test", account_id="acc", message_id="m1",
-            sender_id=sender_id, chat_type=chat_type,
+            channel_id=channel_id, account_id="acc", message_id="m1",
+            sender_id=sender_id, chat_type=chat_type, raw=raw,
         )
 
     def test_dm_open_allows_all(self):
@@ -1046,6 +1098,28 @@ class TestCheckAllowlist:
         from flocks.channel.inbound.dispatcher import _check_allowlist
         cfg = ChannelConfig()
         msg = self._make_msg(chat_type=ChatType.GROUP)
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_lid_alias(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["25482795991095@lid"])
+        msg = self._make_msg(channel_id="whatsapp", sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_group_allowlist_matches_lid_alias(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["25482795991095@lid"])
+        msg = self._make_msg(channel_id="whatsapp", chat_type=ChatType.GROUP, sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_sender_aliases(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["8618803405095"])
+        msg = self._make_msg(
+            channel_id="whatsapp",
+            sender_id="25482795991095",
+            raw={"senderAliases": ["25482795991095@lid", "8618803405095@s.whatsapp.net"]},
+        )
         assert _check_allowlist(msg, cfg) is True
 
 
@@ -1248,6 +1322,17 @@ class TestChannelRegistry:
         reg.register(plugin)
         assert reg.get("test_ch") is plugin
 
+    def test_register_keeps_existing_channel_instance(self):
+        from flocks.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        first = _StubChannel("test_ch", "First")
+        replacement = _StubChannel("test_ch", "Replacement")
+
+        reg.register(first)
+        reg.register(replacement)
+
+        assert reg.get("test_ch") is first
+
     def test_get_by_alias(self):
         from flocks.channel.registry import ChannelRegistry
         reg = ChannelRegistry()
@@ -1352,3 +1437,284 @@ class TestGatewayManagerHelpers:
 
         assert cancelled.is_set()
         assert task.done()
+
+
+class TestMediaFilenameHelpers:
+    def test_sanitize_filename_preserves_unicode_names(self):
+        from flocks.channel.media_filename import sanitize_filename
+
+        assert sanitize_filename("报告 2026.pdf") == "报告 2026.pdf"
+
+    def test_sanitize_filename_removes_path_separators(self):
+        from flocks.channel.media_filename import sanitize_filename
+
+        assert sanitize_filename("../report.bin") == "report.bin"
+
+
+# ------------------------------------------------------------------
+# Per-channel inbound media downloader routing
+# ------------------------------------------------------------------
+
+class TestDownloadChannelMediaRouting:
+    """The dispatcher's per-channel media hook must resolve to the
+    correct downloader and propagate ``config`` through.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_wecom_downloader(self, monkeypatch):
+        from flocks.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_wecom(msg, config):
+            captured["msg"] = msg
+            captured["config"] = config
+            return SimpleNamespace(
+                filename="x.pdf", mime="application/pdf",
+                url="file:///tmp/x.pdf", source={"channel": "wecom"},
+            )
+
+        async def fail(msg, config):
+            raise AssertionError("wrong downloader invoked")
+
+        # The dispatcher uses dynamic lookup via __import__, so the
+        # test-level patch is on the inbound_media module attribute.
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media.download_inbound_media",
+            fake_wecom,
+        )
+        # In case the dynamic import resolves to a different attribute
+        # (e.g. cached), also patch the inner module binding.
+        import flocks.channel.builtin.wecom.inbound_media as wecom_inb
+        monkeypatch.setattr(wecom_inb, "download_inbound_media", fake_wecom)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="wecom", account_id="a", message_id="m1",
+                sender_id="u", media_url="https://example.com/x",
+            ),
+            {"botId": "b"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "wecom"
+        assert captured["config"] == {"botId": "b"}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_dingtalk_downloader(self, monkeypatch):
+        from flocks.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_dingtalk(msg, config):
+            captured["msg"] = msg
+            return SimpleNamespace(
+                filename="y.png", mime="image/png",
+                url="file:///tmp/y.png", source={"channel": "dingtalk"},
+            )
+
+        import flocks.channel.builtin.dingtalk.inbound_media as dt_inb
+        monkeypatch.setattr(dt_inb, "download_inbound_media", fake_dingtalk)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="dingtalk", account_id="a", message_id="m",
+                sender_id="u", media_url="CODE",
+            ),
+            {},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "dingtalk"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_telegram_downloader(self, monkeypatch):
+        from flocks.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_telegram(msg, config):
+            captured["msg"] = msg
+            return SimpleNamespace(
+                filename="z.jpg", mime="image/jpeg",
+                url="file:///tmp/z.jpg", source={"channel": "telegram"},
+            )
+
+        import flocks.channel.builtin.telegram.inbound_media as tg_inb
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_telegram)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="telegram", account_id="a", message_id="m",
+                sender_id="u", media_url="telegram://photo/ABC",
+            ),
+            {"botToken": "tok"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_unknown_channel_returns_none(self):
+        from flocks.channel.inbound import dispatcher as dispatch_mod
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="unknown", account_id="a", message_id="m",
+                sender_id="u", media_url="https://x/y",
+            ),
+            {},
+        )
+        assert result is None
+
+
+# ------------------------------------------------------------------
+# _is_placeholder_text
+# ------------------------------------------------------------------
+
+class TestIsPlaceholderText:
+    def test_recognises_channel_placeholders(self):
+        from flocks.channel.inbound.dispatcher import _is_placeholder_text
+        assert _is_placeholder_text("[图片消息]") is True
+        assert _is_placeholder_text("[文件消息]") is True
+        assert _is_placeholder_text("[文件消息: report.pdf]") is True
+        assert _is_placeholder_text("[Image]") is True
+        assert _is_placeholder_text("[Attachment]") is True
+        assert _is_placeholder_text("[图片]") is True
+        assert _is_placeholder_text("[文件]") is True
+
+    def test_does_not_match_normal_text(self):
+        from flocks.channel.inbound.dispatcher import _is_placeholder_text
+        assert _is_placeholder_text("hello") is False
+        assert _is_placeholder_text("看这个") is False
+        assert _is_placeholder_text("") is False
+        # Suffix beyond the placeholder is fine — the text starts with a
+        # placeholder token, so the dispatcher will still rewrite it.
+        assert _is_placeholder_text("[文件消息: x] extra text") is True
+        assert _is_placeholder_text("not a placeholder [文件消息: x]") is False
+
+
+# ------------------------------------------------------------------
+# Full pipeline: synthetic inbound → dispatcher → FilePart (per channel)
+# ------------------------------------------------------------------
+
+class TestAppendUserMessagePerChannel:
+    @pytest.mark.asyncio
+    async def test_wecom_pipeline_stores_file_part(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.config.config import ChannelConfig
+
+        created_message = SimpleNamespace(id="m1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+
+        import flocks.channel.builtin.wecom.inbound_media as wecom_inb
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="report.pdf", mime="application/pdf",
+                url="file:///tmp/report.pdf",
+                source={"channel": "wecom"},
+            )
+        monkeypatch.setattr(wecom_inb, "download_inbound_media", fake_download)
+
+        await InboundDispatcher._append_user_message(
+            "s1",
+            "[文件消息: report.pdf]",
+            InboundMessage(
+                channel_id="wecom", account_id="a", message_id="m1",
+                sender_id="u", media_url="https://example.com/report.pdf",
+            ),
+            ChannelConfig(enabled=True, botId="b", secret="s"),
+        )
+
+        assert store_part.await_count >= 1
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "report.pdf"
+        assert stored_part.mime == "application/pdf"
+        assert stored_part.url == "file:///tmp/report.pdf"
+
+    @pytest.mark.asyncio
+    async def test_dingtalk_pipeline_stores_file_part(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+
+        created_message = SimpleNamespace(id="m1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+
+        import flocks.channel.builtin.dingtalk.inbound_media as dt_inb
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="image.png", mime="image/png",
+                url="file:///tmp/image.png",
+                source={"channel": "dingtalk"},
+            )
+        monkeypatch.setattr(dt_inb, "download_inbound_media", fake_download)
+
+        await InboundDispatcher._append_user_message(
+            "s1",
+            "[图片消息]",
+            InboundMessage(
+                channel_id="dingtalk", account_id="a", message_id="m1",
+                sender_id="u", media_url="CODE_123",
+            ),
+            None,
+        )
+
+        assert store_part.await_count >= 1
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "image.png"
+
+    @pytest.mark.asyncio
+    async def test_telegram_pipeline_stores_file_part(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+
+        created_message = SimpleNamespace(id="m1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+
+        import flocks.channel.builtin.telegram.inbound_media as tg_inb
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="photo.jpg", mime="image/jpeg",
+                url="file:///tmp/photo.jpg",
+                source={"channel": "telegram"},
+            )
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_download)
+
+        await InboundDispatcher._append_user_message(
+            "s1",
+            "[图片]",
+            InboundMessage(
+                channel_id="telegram", account_id="a", message_id="m1",
+                sender_id="u", media_url="telegram://photo/ABC",
+            ),
+            None,
+        )
+
+        assert store_part.await_count >= 1
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "photo.jpg"

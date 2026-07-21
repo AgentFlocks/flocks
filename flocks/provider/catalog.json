@@ -52,11 +52,39 @@
       "THREATBOOK_CN_LLM_API_KEY"
     ],
     "models": {
+      "kimi-k2.7-code": {
+        "name": "kimi-k2.7-code",
+        "family": "kimi-k2.7-code",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 256000,
+          "max_input_tokens": 224000,
+          "max_output_tokens": 16000
+        },
+        "pricing": {
+          "input": 6.5,
+          "output": 27.0,
+          "cache_read": 1.3,
+          "currency": "CNY"
+        }
+      },
       "minimax-m3": {
         "name": "minimax-m3",
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_details",
@@ -261,6 +289,33 @@
       "THREATBOOK_IO_LLM_API_KEY"
     ],
     "models": {
+      "kimi-k2.7-code": {
+        "name": "kimi-k2.7-code",
+        "family": "kimi-k2.7-code",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 256000,
+          "max_input_tokens": 224000,
+          "max_output_tokens": 16000
+        },
+        "pricing": {
+          "input": 6.5,
+          "output": 27.0,
+          "cache_read": 1.3,
+          "currency": "CNY"
+        }
+      },
       "minimax-m3": {
         "name": "minimax-m3",
         "family": "minimax",
@@ -1015,26 +1070,9 @@
       "DEEPSEEK_API_KEY"
     ],
     "models": {
-      "deepseek-chat": {
-        "name": "DeepSeek Chat",
-        "family": "deepseek-v3",
-        "capabilities": {
-          "supports_tools": true,
-          "supports_streaming": true
-        },
-        "limits": {
-          "context_window": 128000,
-          "max_output_tokens": 128000
-        },
-        "pricing": {
-          "input": 2.0,
-          "output": 3.0,
-          "currency": "CNY"
-        }
-      },
-      "deepseek-reasoner": {
-        "name": "DeepSeek Reasoner",
-        "family": "deepseek-r1",
+      "deepseek-v4-flash": {
+        "name": "DeepSeek V4 Flash",
+        "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
@@ -1047,12 +1085,36 @@
           "supports_streaming": true
         },
         "limits": {
-          "context_window": 128000,
-          "max_output_tokens": 128000
+          "context_window": 1000000,
+          "max_output_tokens": 384000
         },
         "pricing": {
-          "input": 4.0,
-          "output": 16.0,
+          "input": 1.0,
+          "output": 2.0,
+          "currency": "CNY"
+        }
+      },
+      "deepseek-v4-pro": {
+        "name": "DeepSeek V4 Pro",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 3.0,
+          "output": 9.0,
           "currency": "CNY"
         }
       }

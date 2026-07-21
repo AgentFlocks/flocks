@@ -38,6 +38,8 @@
   },
   "form": {
     "name": "Name",
+    "nameCn": "Chinese Name",
+    "nameCnPlaceholder": "Chinese display name",
     "description": "Description (English)",
     "descriptionHint": "Used for delegation and model context; English by convention",
     "descriptionPlaceholder": "Short English description for delegation",
@@ -75,6 +77,133 @@
   },
   "sheet": {
     "done": "Done"
+  },
+  "create": {
+    "emptyStateTitle": "No creation conversation yet",
+    "guidePanelTitle": "Rex Assisted Creation",
+    "guidePanelDesc": "Choose a guide or case. Rex will load the agent-builder skill first, confirm name, role, boundaries, and strategy, then generate files.",
+    "guideSectionTitle": "Creation Guides",
+    "caseSectionTitle": "Creation Cases",
+    "guideActions": [
+      {
+        "label": "How to Create",
+        "description": "Start from name, role, boundaries, strategy, and tool allowlist.",
+        "prompt": "Please follow the .flocks/plugins/skills/agent-builder skill to guide me through creating a Flocks sub-agent. Do not write files yet. Use the question tool to ask one most important question at a time and help me clarify agent name, role description, capability boundaries, execution strategy, tool allowlist, output format, and avoid cases. After I confirm, generate ~/.flocks/plugins/agents/<name>/agent.yaml and prompt.md, and show a plan before writing."
+      },
+      {
+        "label": "Clarify Boundaries",
+        "description": "Turn a fuzzy need into delegatable agent description and triggers.",
+        "prompt": "Please help me clarify the sub-agent's responsibility boundaries so the agent-builder skill can create it. Ask one question at a time to confirm: what task it solves, when Rex should delegate to it, what it must not do, required tools, whether it is read-only, output format, and acceptance checks."
+      },
+      {
+        "label": "Choose Strategy",
+        "description": "Choose among read_only, react, plan_and_execute, and explore.",
+        "prompt": "Please use the agent-builder skill to help me choose an execution strategy for this sub-agent. First confirm task risk, whether it needs file writes, command execution, codebase exploration, or web lookup, then recommend read_only, react, plan_and_execute, or explore with an appropriate tool allowlist."
+      },
+      {
+        "label": "Design Prompt",
+        "description": "Create a reusable system prompt with output format and constraints.",
+        "prompt": "Please help me design the sub-agent prompt.md. First confirm role, mission, capability list, output format, constraints, and example invocation scenarios. Do not write files until I confirm. After confirmation, draft prompt.md using the agent-builder skill template."
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "Threat Intel Agent",
+        "description": "Look up IOC reputation, correlate context, and produce an assessment report.",
+        "prompt": "I want to create a threat intelligence sub-agent for IP, domain, URL, and hash analysis. It should call existing intelligence tools in this project and output a structured assessment report. Please follow the agent-builder skill to guide me through name, tool allowlist, read-only boundaries, output format, and applicable scenarios."
+      },
+      {
+        "label": "Code Review Agent",
+        "description": "Read-only review of code risks, regressions, and missing tests.",
+        "prompt": "I want to create a code review sub-agent for read-only review of bugs, regression risks, security risks, and test gaps in code changes. Please follow the agent-builder skill to guide me through responsibility, read_only strategy, tool allowlist, and output format."
+      },
+      {
+        "label": "Log Analysis Agent",
+        "description": "Analyze security logs, extract key events, anomalies, and response suggestions.",
+        "prompt": "I want to create a log analysis sub-agent that reads security logs, identifies anomalous patterns, summarizes key events, and provides response recommendations. Please follow the agent-builder skill to guide me through input format, tool permissions, analysis steps, and final output structure."
+      }
+    ]
+  },
+  "edit": {
+    "emptyStateTitle": "No editing conversation yet",
+    "guidePanelTitle": "Rex Assisted Editing",
+    "guidePanelDesc": "Choose an editing entry. Rex will use the current Agent configuration to guide prompt, responsibility, permission, and parameter changes.",
+    "nativeGuidePanelDesc": "This is a built-in Agent. Only model and temperature can be saved, so Rex will guide model choice, temperature strategy, and validation.",
+    "guideSectionTitle": "Editing Guides",
+    "caseSectionTitle": "Editing Cases",
+    "guideActions": [
+      {
+        "label": "Improve Current Agent",
+        "description": "Review the current configuration, then clarify the change goal and boundaries.",
+        "prompt": "Please help me edit the current Agent \"{{name}}\". Start with a short diagnosis based on the current configuration and do not write files directly. Then use the question tool to ask one most important question at a time to clarify responsibility, prompt, tool permissions, output format, and acceptance checks. After confirmation, output a JSON configuration summary that can be extracted into the form."
+      },
+      {
+        "label": "Adjust Boundaries",
+        "description": "Clarify what it should do, when it should be delegated to, and what it must not do.",
+        "prompt": "Please help me refine the responsibility boundaries of the current Agent \"{{name}}\". Compare its existing description and System Prompt, point out anything too broad, too narrow, or unclear, then gradually confirm applicable scenarios, delegation triggers, avoid cases, required tools, and output structure."
+      },
+      {
+        "label": "Tighten Permissions",
+        "description": "Check whether Tools / Skills are excessive and reselect with least privilege.",
+        "prompt": "Please review the Tools and Skills configuration of the current Agent \"{{name}}\". The goal is least privilege: explain whether each capability is relevant to the responsibility, then recommend what to keep, remove, or add with reasons. Do not output the final configuration until I confirm."
+      },
+      {
+        "label": "Rewrite Prompt",
+        "description": "Improve role, constraints, steps, output format, and failure handling.",
+        "prompt": "Please help me rewrite the System Prompt of the current Agent \"{{name}}\". First point out whether its role, task steps, boundaries, output format, error handling, and example invocation are clear, then propose edits. After I confirm, output the complete Prompt and JSON configuration summary."
+      },
+      {
+        "label": "Validate Behavior",
+        "description": "Design test inputs, expected outputs, and failure criteria for post-save validation.",
+        "prompt": "Please help me validate the behavior of the current Agent \"{{name}}\". Based on its responsibility, design 2-3 test inputs and describe the expected output, pass criteria, and failure criteria for each. If the Prompt or tool permissions may affect the result, point out which fields should be adjusted. After confirmation, summarize the suggested configuration changes so they can be extracted into the form."
+      }
+    ],
+    "nativeGuideActions": [
+      {
+        "label": "Check Model Strategy",
+        "description": "Decide whether the current model fits this built-in Agent's task profile.",
+        "prompt": "Please review the model configuration of the built-in Agent \"{{name}}\". This is a built-in Agent: only model and temperature can be saved, so do not suggest changing Prompt, Tools, or Skills. First describe the model capabilities this task needs, then recommend whether to switch models and include the providerID and modelID if applicable."
+      },
+      {
+        "label": "Tune Temperature",
+        "description": "Choose temperature based on stability, creativity, and safety.",
+        "prompt": "Please help me tune the temperature of the built-in Agent \"{{name}}\". This is a built-in Agent: only model and temperature can be saved. Explain how lower or higher temperature affects this responsibility, then recommend a temperature value with reasoning and summarize it as extractable JSON."
+      },
+      {
+        "label": "Validate Behavior",
+        "description": "Design test inputs, expected outputs, and failure criteria for post-save validation.",
+        "prompt": "Please help me validate the model and temperature behavior of the built-in Agent \"{{name}}\". Design 2-3 test inputs with expected output, pass criteria, and failure criteria. If anything should change, only recommend model or temperature changes and summarize them as extractable JSON."
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "Make It Safer",
+        "description": "Reduce hallucination and over-permission risk for security analysis or review.",
+        "prompt": "I want the current Agent \"{{name}}\" to be more conservative and reliable. Please adjust its Prompt, temperature recommendation, and permission boundaries so it asks clarifying questions or states uncertainty when information is insufficient, without guessing, while keeping output clear and verifiable."
+      },
+      {
+        "label": "Better Delegation",
+        "description": "Help the primary Agent decide when to call it and how to consume its result.",
+        "prompt": "I want the current Agent \"{{name}}\" to work better as a delegated sub-agent. Please improve its English description, responsibility triggers, input requirements, and output format, and check whether the tool allowlist matches."
+      },
+      {
+        "label": "Add Output Format",
+        "description": "Stabilize the result shape so the primary Agent or workflow can continue processing.",
+        "prompt": "Please help me add a stable output format for the current Agent \"{{name}}\". First confirm the main usage scenario, then design fields, nesting, a short example, and behavior for abnormal cases. After I confirm, turn it into Prompt edits."
+      }
+    ],
+    "nativeCaseActions": [
+      {
+        "label": "Make It Safer",
+        "description": "Reduce randomness for security analysis, audit, or review tasks.",
+        "prompt": "I want the built-in Agent \"{{name}}\" to be more conservative and reliable. Only suggest model and temperature changes; do not modify Prompt, Tools, or Skills. Focus on the recommended temperature, required model capabilities, and how to validate after saving."
+      },
+      {
+        "label": "Improve Responsiveness",
+        "description": "Choose a more suitable model and temperature without changing built-in configuration.",
+        "prompt": "I want the built-in Agent \"{{name}}\" to respond faster and more consistently. Only evaluate model and temperature, explain whether a lighter model is suitable, recommend a temperature, and propose test inputs to validate the result."
+      }
+    ]
   },
   "chat": {
     "createTitle": "Create Sub-Agent",

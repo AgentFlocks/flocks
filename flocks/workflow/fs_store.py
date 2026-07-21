@@ -14,6 +14,68 @@ from .center import resolve_global_workflow_roots, resolve_project_workflow_root
 log = Log.create(service="workflow.fs-store")
 
 _workspace_root: Optional[Path] = None
+_EMPTY_DRAFT_WORKFLOW_JSON: Dict[str, Any] = {
+    "start": "",
+    "nodes": [],
+    "edges": [],
+}
+
+
+def _markdown_title(markdown_content: Optional[str], fallback: str) -> str:
+    if not markdown_content:
+        return fallback
+    for line in markdown_content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            title = stripped[2:].strip()
+            if title:
+                return title
+    return fallback
+
+
+def _coerce_localized_names(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    names: Dict[str, str] = {}
+    for key, item in value.items():
+        locale = str(key).strip()
+        name = str(item).strip() if item is not None else ""
+        if locale and name:
+            names[locale] = name
+    return names
+
+
+def _localized_names_from_mapping(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    names: Dict[str, str] = {}
+    for key in ("nameI18n", "names", "localizedNames", "displayNames"):
+        names.update(_coerce_localized_names(value.get(key)))
+
+    direct_aliases = {
+        "zh-CN": ("nameZh", "nameCn", "zhName", "cnName"),
+        "en-US": ("nameEn", "enName"),
+    }
+    for locale, aliases in direct_aliases.items():
+        for alias in aliases:
+            direct = value.get(alias)
+            if isinstance(direct, str) and direct.strip():
+                names.setdefault(locale, direct.strip())
+                break
+    return names
+
+
+def _workflow_name_i18n(workflow_json: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, str]:
+    metadata = workflow_json.get("metadata")
+    names: Dict[str, str] = {}
+    for source in (
+        workflow_json,
+        metadata if isinstance(metadata, dict) else None,
+        meta,
+    ):
+        names.update(_localized_names_from_mapping(source))
+    return names
 
 
 def _is_cached_workspace_root_valid(current: Path, cached_root: Path) -> bool:
@@ -57,33 +119,48 @@ def read_workflow_dir(
 ) -> Optional[Dict[str, Any]]:
     """Read a single workflow directory and return metadata plus JSON."""
     json_file = wf_dir / "workflow.json"
-    if not json_file.is_file():
+    md_file = wf_dir / "workflow.md"
+    legacy_edit_md_file = wf_dir / "workflow.edit.md"
+    has_markdown = md_file.is_file() or legacy_edit_md_file.is_file()
+    if not json_file.is_file() and not has_markdown:
         return None
 
     try:
-        workflow_json = json.loads(json_file.read_text(encoding="utf-8"))
-        json_mtime_ms = int(json_file.stat().st_mtime * 1000)
-
-        meta_file = wf_dir / "meta.json"
-        if meta_file.is_file():
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        if json_file.is_file():
+            workflow_json = json.loads(json_file.read_text(encoding="utf-8"))
+            json_mtime_ms = int(json_file.stat().st_mtime * 1000)
         else:
-            meta = {
-                "name": workflow_json.get("name", workflow_id),
-                "description": workflow_json.get("description"),
-                "category": workflow_json.get("category", "default"),
-                "status": "active",
-                "createdBy": None,
-                "createdAt": json_mtime_ms,
-                "updatedAt": json_mtime_ms,
-            }
+            workflow_json = dict(_EMPTY_DRAFT_WORKFLOW_JSON)
+            json_mtime_ms = 0
 
-        md_file = wf_dir / "workflow.md"
         markdown_content: Optional[str] = None
         updated_candidates = [json_mtime_ms]
         if md_file.is_file():
             markdown_content = md_file.read_text(encoding="utf-8")
             updated_candidates.append(int(md_file.stat().st_mtime * 1000))
+        elif legacy_edit_md_file.is_file():
+            markdown_content = legacy_edit_md_file.read_text(encoding="utf-8")
+            updated_candidates.append(int(legacy_edit_md_file.stat().st_mtime * 1000))
+
+        meta_file = wf_dir / "meta.json"
+        if meta_file.is_file():
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        else:
+            fallback_updated = max(updated_candidates)
+            meta = {
+                "name": workflow_json.get("name") or _markdown_title(markdown_content, workflow_id),
+                "description": workflow_json.get("description"),
+                "category": workflow_json.get("category", "default"),
+                "status": "active" if json_file.is_file() else "draft",
+                "createdBy": None,
+                "createdAt": fallback_updated,
+                "updatedAt": fallback_updated,
+            }
+
+        name_i18n = _workflow_name_i18n(workflow_json, meta)
+        if name_i18n:
+            meta["nameI18n"] = name_i18n
+
         if meta_file.is_file():
             updated_candidates.append(int(meta_file.stat().st_mtime * 1000))
             updated_candidates.append(int(meta.get("updatedAt") or 0))
@@ -95,6 +172,7 @@ def read_workflow_dir(
             "source": source,
             "workflowJson": workflow_json,
             "markdownContent": markdown_content,
+            "editMarkdownContent": markdown_content,
         }
     except Exception as exc:
         log.warning(
@@ -154,7 +232,7 @@ def resolve_workflow_id_from_source(workflow: Any) -> Optional[str]:
         except ValueError:
             continue
         parts = relative.parts
-        if len(parts) == 2 and parts[1] == "workflow.json":
+        if len(parts) == 2 and parts[1] in {"workflow.json", "workflow.md", "workflow.edit.md"}:
             workflow_id = parts[0]
             if read_workflow_from_fs(workflow_id) is not None:
                 return workflow_id

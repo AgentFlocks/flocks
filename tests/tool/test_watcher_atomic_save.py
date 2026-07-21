@@ -13,7 +13,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from flocks.tool.registry import _tool_event_should_reload
+from flocks.tool.registry import (
+    ToolFileWatcher,
+    ToolRegistry,
+    _tool_event_should_reload,
+    _tool_event_touches_device_plugin,
+)
 from flocks.agent.registry import _agent_event_should_reload
 from flocks.skill.skill import _skill_event_should_reload
 
@@ -58,6 +63,58 @@ def test_tool_watcher_rejects_irrelevant_paths() -> None:
 def test_tool_watcher_accepts_direct_modify_on_yaml() -> None:
     evt = _modify_event("/repo/.flocks/plugins/tools/api/foo/tool.yaml")
     assert _tool_event_should_reload(evt) is True
+
+
+def test_tool_watcher_includes_device_plugin_directory() -> None:
+    assert "device" in ToolFileWatcher._WATCH_SUBDIRS
+
+
+def test_tool_watcher_detects_device_plugin_events() -> None:
+    evt = _modify_event("/repo/.flocks/plugins/tools/device/tdp/tdp.yaml")
+    assert _tool_event_should_reload(evt) is True
+    assert _tool_event_touches_device_plugin(evt) is True
+
+
+def test_tool_watcher_rejects_unwatched_tool_subdirs() -> None:
+    evt = _modify_event("/repo/.flocks/plugins/tools/mcp/demo/server.yaml")
+    assert _tool_event_should_reload(evt) is False
+
+
+def test_tool_watcher_watches_plugin_root_to_catch_new_tool_dirs(monkeypatch, tmp_path) -> None:
+    from flocks.plugin import loader
+
+    user_plugin_root = tmp_path / "home" / ".flocks" / "plugins"
+    user_plugin_root.mkdir(parents=True)
+    project_root = tmp_path / "missing-project"
+    project_root.mkdir()
+    monkeypatch.setattr(loader, "DEFAULT_PLUGIN_ROOT", user_plugin_root)
+    monkeypatch.chdir(project_root)
+
+    assert ToolFileWatcher()._collect_watch_dirs() == {str(user_plugin_root)}
+
+
+def test_tool_watcher_refresh_clears_device_caches(monkeypatch) -> None:
+    from flocks.config import api_versioning
+    from flocks.tool.device import plugin_index
+
+    calls: list[str] = []
+    monkeypatch.setattr(plugin_index, "clear_device_template_cache", lambda: calls.append("templates"))
+    monkeypatch.setattr(
+        api_versioning,
+        "discover_api_service_descriptors",
+        lambda *, refresh=False: calls.append(f"descriptors:{refresh}") or [],
+    )
+    monkeypatch.setattr(
+        ToolRegistry,
+        "refresh_plugin_tools",
+        classmethod(lambda cls: calls.append("tools") or []),
+    )
+
+    watcher = ToolFileWatcher()
+    watcher._device_changed = True
+    watcher._run_refresh()
+
+    assert calls == ["templates", "descriptors:True", "tools"]
 
 
 # ---------------------------------------------------------------------------

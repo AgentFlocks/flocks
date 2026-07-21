@@ -41,7 +41,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useAgents } from '@/hooks/useAgents';
 import { agentAPI, Agent } from '@/api/agent';
-import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
 import AgentSheet from './AgentSheet';
 
 // ============================================================================
@@ -110,7 +110,7 @@ export default function AgentPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -504,6 +504,7 @@ function AgentCard({
   onToggleDelegatable,
 }: AgentCardProps) {
   const { t } = useTranslation('agent');
+  const displayName = getAgentDisplayName(agent, displayLang);
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
   const color = resolveAgentColor(agent);
   const showDelegatableToggle = agent.mode === 'subagent';
@@ -537,7 +538,7 @@ function AgentCard({
 
           <div className="min-w-0 flex-1">
             <span className="block text-sm font-semibold text-gray-900 truncate leading-snug">
-              {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
+              {displayName}
             </span>
             {/* Badges row: source badge (always shown) + delegatable */}
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">

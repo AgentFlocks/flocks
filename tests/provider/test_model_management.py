@@ -252,6 +252,33 @@ class TestBaseProviderExtensions:
         assert defs[0].limits.context_window == 100000
         assert defs[0].limits.max_output_tokens == 8000
 
+    def test_config_override_false_removes_reasoning_feature(self):
+        from flocks.provider.provider import BaseProvider, ModelInfo, ModelCapabilities
+
+        catalog_def = ModelDefinition(
+            id="dummy-model",
+            name="Dummy Model",
+            provider_id="dummy",
+            fetch_from=FetchFrom.PREDEFINED,
+            capabilities=ModelCapabilitiesV2(
+                features=[ModelFeature.REASONING],
+                supports_reasoning=True,
+            ),
+        )
+        model = ModelInfo(
+            id="dummy-model",
+            name="Dummy Model",
+            provider_id="dummy",
+            capabilities=ModelCapabilities(supports_reasoning=False),
+        )
+        model._explicit_keys = {"supports_reasoning"}
+
+        p = BaseProvider("dummy", "Dummy")
+        overridden = p._apply_config_overrides(catalog_def, model)
+
+        assert overridden.capabilities.supports_reasoning is False
+        assert ModelFeature.REASONING not in overridden.capabilities.features
+
     def test_configure_from_credential(self):
         from flocks.provider.provider import BaseProvider
 

@@ -92,6 +92,136 @@ Question format:
 The user's answers will be returned for you to continue with."""
 
 
+_OPTION_LABEL_KEYS = ("label", "text", "title", "name", "value", "id", "key")
+_OPTION_DESCRIPTION_KEYS = ("description", "desc", "subtitle", "detail", "details")
+
+
+def _first_non_empty_string(data: Dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def normalize_question_option(opt: Any) -> Optional[Dict[str, str]]:
+    """Normalize LLM-produced choice options into the UI's label/description shape."""
+    if isinstance(opt, str):
+        label = opt.strip()
+        return {"label": label, "description": ""} if label else None
+
+    if not isinstance(opt, dict):
+        label = str(opt).strip() if opt is not None else ""
+        return {"label": label, "description": ""} if label else None
+
+    label = _first_non_empty_string(opt, _OPTION_LABEL_KEYS)
+    description = _first_non_empty_string(opt, _OPTION_DESCRIPTION_KEYS)
+    if not label and description:
+        label, description = description, ""
+    if not label:
+        return None
+    return {"label": label, "description": description}
+
+
+def _format_channel_question_text(questions: List[Dict[str, Any]]) -> str:
+    """Render normalized questions as plain text for IM channels."""
+    blocks: list[str] = []
+    for idx, q in enumerate(questions, start=1):
+        header = str(q.get("header") or "").strip()
+        question = str(q.get("question") or "").strip()
+        qtype = str(q.get("type") or "choice")
+        options = q.get("options") or []
+
+        lines: list[str] = []
+        if header:
+            lines.append(header)
+        prefix = f"{idx}. " if len(questions) > 1 else ""
+        lines.append(f"{prefix}{question}")
+
+        if qtype in {"choice", "confirm"} and options:
+            for opt_idx, opt in enumerate(options, start=1):
+                label = str(opt.get("label", "")).strip()
+                description = str(opt.get("description", "") or "").strip()
+                if description:
+                    lines.append(f"{opt_idx}. {label} - {description}")
+                else:
+                    lines.append(f"{opt_idx}. {label}")
+            lines.append("请回复选项序号、选项文本，或直接补充你的答案。")
+        else:
+            lines.append("请直接回复你的答案。")
+
+        blocks.append("\n".join(line for line in lines if line))
+
+    return "\n\n".join(blocks)
+
+
+async def _send_channel_question_if_applicable(
+    ctx: ToolContext,
+    questions: List[Dict[str, Any]],
+) -> ToolResult | None:
+    """Send the question as a plain text IM message for channel sessions.
+
+    Channel sessions do not have the Web UI question-answer transport. Sending
+    a text prompt and returning immediately avoids waiting until timeout.
+    """
+    try:
+        from flocks.channel.inbound.session_binding import SessionBindingService
+        from flocks.channel.outbound.deliver import OutboundDelivery
+        from flocks.channel.base import OutboundContext
+
+        svc = SessionBindingService()
+        bindings = await svc.get_bindings_by_session(ctx.session_id)
+        if not bindings:
+            return None
+
+        text = _format_channel_question_text(questions)
+        for binding in bindings:
+            await OutboundDelivery.deliver(
+                OutboundContext(
+                    channel_id=binding.channel_id,
+                    account_id=binding.account_id,
+                    to=binding.chat_id,
+                    text=text,
+                    thread_id=binding.thread_id,
+                ),
+                session_id=binding.session_id,
+            )
+
+        return ToolResult(
+            success=True,
+            output=(
+                "Question sent to the IM channel as plain text. "
+                "Do not continue the dependent action until the user replies in a new message."
+            ),
+            title="Question sent to channel",
+            metadata={
+                "deferred": True,
+                "channel_session": True,
+                "bindings": [
+                    {
+                        "channel_id": b.channel_id,
+                        "chat_type": b.chat_type.value if b.chat_type else None,
+                        "chat_id": b.chat_id,
+                        "session_id": b.session_id,
+                    }
+                    for b in bindings
+                ],
+            },
+        )
+    except Exception as e:
+        log.warning("question.channel_send_failed", {
+            "session_id": ctx.session_id,
+            "error": str(e),
+        })
+        return ToolResult(
+            success=False,
+            error=f"Failed to send question to channel: {e}",
+        )
+
+
 async def default_question_handler(
     session_id: str,
     questions: List[Dict[str, Any]]
@@ -177,6 +307,13 @@ async def default_question_handler(
                             "type": "boolean",
                             "description": "For 'choice' type: allow selecting multiple options",
                         },
+                        "custom": {
+                            "type": "boolean",
+                            "description": (
+                                "For 'choice' type: allow a custom Other answer option. "
+                                "Defaults to true."
+                            ),
+                        },
                         "placeholder": {
                             "type": "string",
                             "description": "Placeholder/hint text for text, number, password, file inputs",
@@ -241,6 +378,7 @@ async def question_tool(
             "type": q.get("type", "choice"),
             "options": [],
             "multiple": q.get("multiple", False),
+            "custom": q.get("custom", True),
             "placeholder": q.get("placeholder", ""),
             "multiline": q.get("multiline", False),
         }
@@ -256,16 +394,12 @@ async def question_tool(
 
         options = q.get("options", [])
         for opt in options:
-            if isinstance(opt, dict):
-                normalized["options"].append({
-                    "label": str(opt.get("label", "")),
-                    "description": opt.get("description", "")
-                })
-            elif isinstance(opt, str):
-                normalized["options"].append({
-                    "label": opt,
-                    "description": ""
-                })
+            option = normalize_question_option(opt)
+            if option is not None:
+                normalized["options"].append(option)
+
+        if normalized["type"] == "choice" and not normalized["options"]:
+            normalized["type"] = "text"
         
         normalized_questions.append(normalized)
     
@@ -274,6 +408,10 @@ async def question_tool(
             success=False,
             error="No valid questions provided"
         )
+
+    channel_result = await _send_channel_question_if_applicable(ctx, normalized_questions)
+    if channel_result is not None:
+        return channel_result
     
     # Get handler
     handler = _question_handler or default_question_handler
@@ -298,6 +436,21 @@ async def question_tool(
         ])
         
         output = f"User has answered your questions: {formatted}. You can now continue with the user's answers in mind."
+        try:
+            from flocks.session.goal import GoalManager
+
+            await GoalManager.record_initial_clarification(
+                ctx.session_id,
+                normalized_questions,
+                answers,
+                message_id=ctx.message_id,
+                call_id=ctx.call_id,
+            )
+        except Exception as e:
+            log.warn("question.goal_clarification_record_failed", {
+                "session_id": ctx.session_id,
+                "error": str(e),
+            })
         
         return ToolResult(
             success=True,

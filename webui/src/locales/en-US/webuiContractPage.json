@@ -1,0 +1,36 @@
+{
+  "host": {
+    "missingPageId": "Page ID is missing",
+    "loading": "Loading custom page...",
+    "unavailableTitle": "Page unavailable",
+    "notBuilt": "This page has not been built yet",
+    "loadFailed": "Failed to load page",
+    "buildFailed": "Page build failed",
+    "retry": "Retry",
+    "emptyComponent": "Page component is empty",
+    "renderFailedTitle": "Custom page failed to run",
+    "renderFailed": "Page render failed",
+    "bundleMissingExport": "Page bundle does not export a default component"
+  },
+  "nav": {
+    "fetchFailed": "Failed to load custom page navigation"
+  },
+  "workspace": {
+    "missingWorkspaceId": "Workspace ID is missing",
+    "loading": "Loading workspace...",
+    "unavailableTitle": "Workspace unavailable",
+    "loadFailed": "Failed to load workspace",
+    "notFound": "Workspace not found",
+    "empty": "No pages in this workspace",
+    "selectPage": "Select a page from the workspace menu",
+    "pageNotFound": "Page not found",
+    "sectionNavigation": "Workspace page sections",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
+    "customPage": "Custom Page",
+    "customPageSessionTitle": "{{workspace}} Custom Page",
+    "customPageCreateError": "Failed to create a custom page session. Please try again later.",
+    "socCustomPageDisplayLabel": "Create SOC Custom Page",
+    "socCustomPageInitialMessage": "I want to create a new custom page in {{workspaceTitle}}. Strictly limit this to adding pages for the SOC workspace only: the workspace ID is `{{workspaceId}}`, the workspace route is `{{workspaceRoute}}`, the page directory should be created under `~/.flocks/plugins/contracts/webui/{{workspaceId}}/<page_dir>/`, and the new page should be added to the appropriate section in `~/.flocks/plugins/contracts/webui/{{workspaceId}}/workspace.json`. Do not create a global home navigation page, do not write to the `~/.flocks/plugins/contracts/webui/` root, and do not write to `~/.flocks/plugins/user_defined_pages/`. First guide me to confirm the page ID, title, target section (Posture, Alert Operations, or a new sibling section), data contract, and display content. Then create the page scaffold, implement the React page, build it, and explain how to preview it from the SOC workspace sidebar."
+  }
+}

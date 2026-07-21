@@ -11,13 +11,15 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, AsyncGenerator, Callable, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from flocks.utils.log import Log, LogLevel
 from flocks.config.config import Config
@@ -26,6 +28,7 @@ from flocks.utils.langfuse import initialize as init_observability, shutdown as 
 from flocks.auth.service import AuthService
 from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.server.static_webui import maybe_serve_static_webui
 
 # Load .env file at startup
 try:
@@ -182,6 +185,31 @@ async def lifespan(app: FastAPI):
     await _run_startup_phase(log, "storage.init", Storage.init)
     log.info("storage.initialized")
 
+    async def _recover_orphan_tool_parts() -> None:
+        from flocks.session.orphan_tools import abort_all_orphan_running_parts
+
+        repaired = await abort_all_orphan_running_parts()
+        if repaired:
+            log.info("session.orphan_tools.recovered", {"count": repaired})
+
+    _schedule_startup_phase(
+        app,
+        log,
+        "session.recover_orphan_tools",
+        _recover_orphan_tool_parts,
+    )
+
+    try:
+        from flocks.console.scheduler import ConsoleSyncScheduler
+
+        async def _start_console_sync_phase() -> None:
+            await ConsoleSyncScheduler.send_startup_heartbeat()
+            await ConsoleSyncScheduler.start()
+
+        _schedule_startup_phase(app, log, "console.sync.start", _start_console_sync_phase)
+    except Exception as e:
+        log.warning("console.sync.start_failed", {"error": str(e)})
+
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
     try:
@@ -308,11 +336,16 @@ async def lifespan(app: FastAPI):
 
     # Sync workflows from .flocks/workflow/ filesystem into Storage
     try:
-        from flocks.server.routes.workflow import sync_workflows_from_filesystem
+        from flocks.server.routes.workflow import (
+            reconcile_published_workflow_api_services,
+            sync_workflows_from_filesystem,
+        )
 
         async def _sync_workflows_phase() -> None:
             imported = await sync_workflows_from_filesystem()
             log.info("workflow.sync.done", {"imported": imported})
+            api_services = await reconcile_published_workflow_api_services()
+            log.info("workflow.api_services.reconciled", api_services)
 
         _schedule_startup_phase(app, log, "workflow.sync_filesystem", _sync_workflows_phase)
     except Exception as e:
@@ -369,17 +402,47 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("agent.watcher.init_failed", {"error": str(e)})
 
-    # Start Tool file watcher (auto-reload plugin tools on file changes)
+    # Warm ToolRegistry in the background so the first Tool page load usually
+    # hits a hot in-memory registry instead of doing plugin discovery.
     try:
         from flocks.tool.registry import ToolRegistry
 
+        def _init_tool_registry() -> None:
+            ToolRegistry.init()
+            log.info("tool.registry.initialized")
+
+        _schedule_startup_phase(app, log, "tool.registry.init", lambda: asyncio.to_thread(_init_tool_registry))
+
+        # Start Tool file watcher (auto-reload plugin tools on file changes)
         def _start_tool_watcher() -> None:
             ToolRegistry.start_watcher()
             log.info("tool.watcher.initialized")
 
         _schedule_startup_phase(app, log, "tool.watcher.start", _start_tool_watcher)
     except Exception as e:
-        log.warning("tool.watcher.init_failed", {"error": str(e)})
+        log.warning("tool.registry.init_failed", {"error": str(e)})
+
+    # Start WebUI page watcher (auto-build user custom pages)
+    try:
+        from flocks.contracts.webui.bootstrap import reconcile_webui_pages
+        from flocks.contracts.webui.watcher import set_event_loop, start_watcher
+
+        set_event_loop(asyncio.get_running_loop())
+
+        _schedule_startup_phase(
+            app,
+            log,
+            "webui_pages.bootstrap",
+            reconcile_webui_pages,
+        )
+
+        def _start_webui_pages_watcher() -> None:
+            start_watcher()
+            log.info("webui_pages.watcher.initialized")
+
+        _schedule_startup_phase(app, log, "webui_pages.watcher.start", _start_webui_pages_watcher)
+    except Exception as e:
+        log.warning("webui_pages.watcher.init_failed", {"error": str(e)})
 
     # Start Channel Gateway (connect enabled IM channels)
     try:
@@ -393,74 +456,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
-    # Start syslog listeners for workflows with syslog enabled.
-    # Use a background task with a short delay so the main startup path is not
-    # blocked and to break the crash-restart loop where an immediate syslog
-    # flood would bring the server back down before it is fully ready.
+    # Start the unified workflow trigger runtime after the server is ready.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        async def _delayed_syslog_start() -> None:
-            # Wait for storage and tool registry to be fully initialised before
-            # resuming syslog listeners.
+        async def _delayed_trigger_runtime_start() -> None:
             await asyncio.sleep(3)
             try:
-                await default_syslog_manager.start_all()
-                log.info("syslog.manager.started")
+                await default_trigger_runtime.start_all()
+                log.info("workflow.trigger_runtime.started")
             except Exception as exc:
-                log.warning("syslog.manager.start_failed", {"error": str(exc)})
+                log.warning("workflow.trigger_runtime.start_failed", {"error": str(exc)})
 
-        _schedule_startup_phase(app, log, "syslog.manager.start", _delayed_syslog_start)
+        _schedule_startup_phase(app, log, "workflow.trigger_runtime.start", _delayed_trigger_runtime_start)
     except Exception as e:
-        log.warning("syslog.manager.start_failed", {"error": str(e)})
-
-    # Start Kafka consumers for workflows with kafka input enabled.
-    # Mirrors the syslog startup: a short delayed background task keeps the main
-    # startup path unblocked and avoids a crash-restart loop if a broker is down.
-    try:
-        from flocks.ingest.kafka.manager import default_manager as default_kafka_manager
-
-        async def _delayed_kafka_start() -> None:
-            await asyncio.sleep(3)
-            try:
-                await default_kafka_manager.start_all()
-                log.info("kafka.manager.started")
-            except Exception as exc:
-                log.warning("kafka.manager.start_failed", {"error": str(exc)})
-
-        _schedule_startup_phase(app, log, "kafka.manager.start", _delayed_kafka_start)
-    except Exception as e:
-        log.warning("kafka.manager.start_failed", {"error": str(e)})
-
-    # Start workflow pollers for workflows with poller enabled.
-    # Mirrors Kafka/syslog startup so persistent slow-path workflows resume
-    # automatically without delaying server readiness.
-    try:
-        from flocks.workflow.poller_manager import default_manager as default_poller_manager
-
-        async def _delayed_poller_start() -> None:
-            await asyncio.sleep(3)
-            try:
-                await default_poller_manager.start_all()
-                log.info("workflow.poller.started")
-            except Exception as exc:
-                log.warning("workflow.poller.start_failed", {"error": str(exc)})
-
-        _schedule_startup_phase(app, log, "workflow.poller.start", _delayed_poller_start)
-    except Exception as e:
-        log.warning("workflow.poller.start_failed", {"error": str(e)})
-
-    try:
-        from flocks.updater.updater import recover_upgrade_state
-
-        await _run_startup_phase(
-            log,
-            "updater.recover_upgrade_state",
-            lambda: asyncio.to_thread(recover_upgrade_state),
-        )
-        log.info("updater.recovery.checked")
-    except Exception as e:
-        log.warning("updater.recovery.failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
@@ -476,6 +486,13 @@ async def lifespan(app: FastAPI):
             task.cancel()
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
+
+    try:
+        from flocks.console.scheduler import ConsoleSyncScheduler
+
+        await ConsoleSyncScheduler.stop()
+    except Exception as exc:
+        log.warning("console.sync.stop_failed", {"error": str(exc)})
 
     # Notify SSE clients before stopping sessions, MCP transports, and other
     # long-lived runtime services so browser listeners see the shutdown event.
@@ -513,23 +530,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.stop_failed", {"error": str(e)})
 
-    # Stop syslog listeners
+    # Stop the unified workflow trigger runtime.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        await default_syslog_manager.stop_all()
-        log.info("syslog.manager.stopped")
+        await default_trigger_runtime.stop_all()
+        log.info("workflow.trigger_runtime.stopped")
     except Exception as e:
-        log.warning("syslog.manager.stop_failed", {"error": str(e)})
-
-    # Stop Kafka consumers
-    try:
-        from flocks.ingest.kafka.manager import default_manager as default_kafka_manager
-
-        await default_kafka_manager.stop_all()
-        log.info("kafka.manager.stopped")
-    except Exception as e:
-        log.warning("kafka.manager.stop_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.stop_failed", {"error": str(e)})
 
     # Stop Task Center
     try:
@@ -547,6 +555,13 @@ async def lifespan(app: FastAPI):
         Skill.stop_watcher()
     except Exception as e:
         log.warning("skill.watcher.stop_failed", {"error": str(e)})
+
+    # Stop WebUI page watcher
+    try:
+        from flocks.contracts.webui.watcher import stop_watcher
+        stop_watcher()
+    except Exception as e:
+        log.warning("webui_pages.watcher.stop_failed", {"error": str(e)})
 
     # Shutdown MCP connections
     try:
@@ -661,6 +676,13 @@ _REQUEST_LOG_SKIP_EXACT = frozenset({
     "/api/session/status",
 })
 
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "frame-ancestors 'self'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
 
 def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
@@ -683,7 +705,7 @@ def _should_log_request(path: str, status_code: int) -> bool:
 # CORS Configuration
 #
 # Priority order:
-#   1. Runtime env vars exported by ``start_backend()`` → add the concrete
+#   1. Runtime env vars exported by the supervised backend launcher → add the concrete
 #      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.
@@ -782,115 +804,279 @@ class _DeferredCORSMiddleware:
         await self._inner(scope, receive, send)
 
 
-# Instance Context Middleware
-@app.middleware("http")
-async def instance_context_middleware(request: Request, call_next):
-    """
-    Provide Instance context for all requests (except global routes)
-    
-    Middleware that wraps all routes with Instance.provide().
-    Gets directory from:
-    1. Query parameter 'directory'
-    2. Header 'x-flocks-directory'
-    3. Falls back to current working directory
-    """
-    import os
-    from urllib.parse import unquote
-    from flocks.project.instance import Instance
-    from flocks.project.bootstrap import instance_bootstrap
-    
-    # Skip instance context for global routes, static files, and simple endpoints
-    skip_prefixes = {
-        "/global", "/docs", "/redoc", "/openapi.json", "/health",
-        "/path", "/permission", "/question", "/tui",
-    }
-    
-    if any(request.url.path.startswith(prefix) for prefix in skip_prefixes):
-        return await call_next(request)
-    
-    # Get directory from query param, header, or use cwd
-    # Support both x-flocks-directory (native) and x-flocks-directory (TUI compatibility)
-    directory = request.query_params.get("directory")
-    if not directory:
-        directory = request.headers.get("x-flocks-directory")
-    if not directory:
-        directory = request.headers.get("x-flocks-directory")
-    if not directory:
-        directory = os.getcwd()
-    
-    # Decode URL-encoded directory
-    try:
-        directory = unquote(directory)
-    except Exception:
-        pass  # Use original value if decode fails
-    
-    # Provide instance context for the request
-    async def handle_request():
-        return await call_next(request)
-    
-    return await Instance.provide(
-        directory=directory,
-        init=instance_bootstrap,
-        fn=handle_request
+class _SecurityHeadersMiddleware:
+    """Attach baseline browser security headers without spawning request tasks."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS.items():
+                    headers.setdefault(name, value)
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
+
+
+class _InstanceContextMiddleware:
+    """Provide the project instance context without buffering the response body."""
+
+    _SKIP_PREFIXES = (
+        "/global",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/health",
+        "/path",
+        "/permission",
+        "/question",
+        "/tui",
     )
 
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-# Request Logging Middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log one completion line for useful requests; suppress successful polling noise."""
-    path = request.url.path
-    started_at = time.monotonic()
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        duration_ms = int((time.monotonic() - started_at) * 1000)
-        log.error("request.error", {
-            "method": request.method,
-            "path": path,
-            "duration": duration_ms,
-            "error": str(exc),
-        })
-        raise
+        path = scope.get("path", "")
+        if path.startswith(self._SKIP_PREFIXES):
+            await self.app(scope, receive, send)
+            return
 
-    if _should_log_request(path, response.status_code):
-        duration_ms = int((time.monotonic() - started_at) * 1000)
-        log.info("request.complete", {
-            "method": request.method,
-            "path": path,
-            "status": response.status_code,
-            "duration": duration_ms,
-        })
+        from urllib.parse import unquote
+        from flocks.project.instance import Instance
+        from flocks.project.bootstrap import instance_bootstrap
 
-    return response
+        request = Request(scope, receive=receive)
+        directory = request.query_params.get("directory")
+        if not directory:
+            directory = request.headers.get("x-flocks-directory")
+        if not directory:
+            from flocks.project.project import Project
 
+            directory = Project.default_worktree_candidate()
 
-@app.middleware("http")
-async def auth_guard_middleware(request: Request, call_next):
-    """Guard requests with local account auth, except public endpoints."""
-    try:
-        await _run_http_middleware_hooks(request, {"stage": "before_auth"})
-        _blocked, token, _user = await apply_auth_for_request(request)
-    except StarletteHTTPException as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": "AuthError", "message": exc.detail},
-        )
-    except Exception as exc:
-        log.error("auth.middleware.unexpected", {
-            "path": request.url.path,
-            "error": repr(exc),
-        })
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+        try:
+            directory = unquote(directory)
+        except Exception:
+            pass
+
+        async def handle_request() -> None:
+            await self.app(scope, receive, send)
+
+        await Instance.provide(
+            directory=directory,
+            init=instance_bootstrap,
+            fn=handle_request,
         )
 
-    try:
-        return await call_next(request)
-    finally:
-        clear_auth_context(token)
+
+app.add_middleware(_InstanceContextMiddleware)
+
+
+class _RequestLoggingMiddleware:
+    """Log response start without retaining an extra task for streaming bodies."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+        started_at = time.monotonic()
+        response_started = False
+
+        async def send_with_request_log(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start" and not response_started:
+                response_started = True
+                status_code = int(message["status"])
+                if _should_log_request(path, status_code):
+                    duration_ms = int((time.monotonic() - started_at) * 1000)
+                    log.info(
+                        "request.complete",
+                        {
+                            "method": method,
+                            "path": path,
+                            "status": status_code,
+                            "duration": duration_ms,
+                        },
+                    )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_log)
+        except Exception as exc:
+            if not response_started:
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                log.error(
+                    "request.error",
+                    {
+                        "method": method,
+                        "path": path,
+                        "duration": duration_ms,
+                        "error": str(exc),
+                    },
+                )
+            raise
+
+
+app.add_middleware(_RequestLoggingMiddleware)
+
+
+class _HookRequest(Request):
+    """Preserve request-receive semantics while auth hooks inspect the body.
+
+    A body read is replayed once to the endpoint, a fully consumed stream is
+    replayed as an empty request, and a partially consumed stream continues
+    from upstream. Once a disconnect is observed, downstream reads keep seeing
+    the disconnect instead of polling upstream again.
+    """
+
+    def __init__(self, scope: Scope, receive: Receive) -> None:
+        self._flocks_upstream_receive = receive
+        self._flocks_request_complete = False
+        self._flocks_disconnected = False
+        self._flocks_cached_body: Optional[bytes] = None
+        self._flocks_stream_consumed = False
+        super().__init__(scope, receive=self._receive_for_hook)
+
+    async def _receive_for_hook(self) -> Message:
+        message = await self._flocks_upstream_receive()
+        if message["type"] == "http.request":
+            if not message.get("more_body", False):
+                self._flocks_request_complete = True
+        elif message["type"] == "http.disconnect":
+            self._flocks_disconnected = True
+        return message
+
+    async def body(self) -> bytes:
+        body = await super().body()
+        self._flocks_cached_body = body
+        return body
+
+    async def stream(self) -> AsyncGenerator[bytes, None]:
+        async for chunk in super().stream():
+            if self._flocks_request_complete:
+                self._flocks_stream_consumed = True
+            yield chunk
+        self._flocks_stream_consumed = True
+
+    def downstream_receive(self) -> Receive:
+        """Return the receive callable that preserves the hook's body reads."""
+        has_replay = self._flocks_cached_body is not None or self._flocks_stream_consumed
+        if not has_replay and not self._flocks_disconnected:
+            return self._flocks_upstream_receive
+
+        replay_pending = has_replay
+        replay_body = self._flocks_cached_body if self._flocks_cached_body is not None else b""
+
+        async def receive_for_downstream() -> Message:
+            nonlocal replay_pending
+            if replay_pending:
+                replay_pending = False
+                return {
+                    "type": "http.request",
+                    "body": replay_body,
+                    "more_body": False,
+                }
+            if self._flocks_disconnected:
+                return {"type": "http.disconnect"}
+
+            message = await self._flocks_upstream_receive()
+            if message["type"] == "http.disconnect":
+                self._flocks_disconnected = True
+                return message
+            if has_replay:
+                raise RuntimeError(f"Unexpected message received: {message['type']}")
+            return message
+
+        return receive_for_downstream
+
+
+class _AuthGuardMiddleware:
+    """Bind request auth context in the same ASGI task as the endpoint."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = _HookRequest(scope, receive)
+        try:
+            await _run_http_middleware_hooks(request, {"stage": "before_auth"})
+            _blocked, token, _user = await apply_auth_for_request(request)
+        except StarletteHTTPException as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"error": "AuthError", "message": exc.detail},
+            )
+            await response(scope, receive, send)
+            return
+        except Exception as exc:
+            log.error(
+                "auth.middleware.unexpected",
+                {
+                    "path": request.url.path,
+                    "error": repr(exc),
+                },
+            )
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+            )
+            await response(scope, receive, send)
+            return
+
+        try:
+            await self.app(scope, request.downstream_receive(), send)
+        finally:
+            clear_auth_context(token)
+
+
+app.add_middleware(_AuthGuardMiddleware)
+
+
+class _StaticWebUIMiddleware:
+    """Serve the SPA shell before auth without a BaseHTTPMiddleware task."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        static_response = await maybe_serve_static_webui(request)
+        if static_response is not None:
+            await static_response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_StaticWebUIMiddleware)
 
 
 # Error Handlers
@@ -986,7 +1172,7 @@ from flocks.server.routes.question import router as question_router
 # P3: TUI control routes for remote TUI control
 from flocks.server.routes.tui import router as tui_router
 # WebUI: Workflow routes
-from flocks.server.routes.workflow import router as workflow_router
+from flocks.server.routes.workflow import router as workflow_router, webhook_router as workflow_webhook_router
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
@@ -1010,11 +1196,16 @@ from flocks.server.routes.workspace import router as workspace_router
 from flocks.server.routes.update import router as update_router
 # Log viewing
 from flocks.server.routes.logs import router as logs_router
+from flocks.server.routes.monitoring import router as monitoring_router
+from flocks.server.routes.stats import router as stats_router
 from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
 from flocks.server.routes.console_upgrade import router as console_upgrade_router
+from flocks.server.routes.flockspro_license import router as flockspro_license_router
+from flocks.server.routes.webui import router as webui_pages_router
+from flocks.server.routes.contracts import router as contracts_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -1036,6 +1227,7 @@ app.include_router(lsp_router, prefix="/api/lsp", tags=["LSP"])
 app.include_router(mcp_router, prefix="/api/mcp", tags=["MCP"])
 # WebUI: Workflow routes
 app.include_router(workflow_router, prefix="/api", tags=["Workflow"])
+app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 # WebUI: Skill & Command routes
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
@@ -1067,12 +1259,16 @@ app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"]
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
+app.include_router(stats_router, prefix="/api/stats", tags=["Stats"])
+app.include_router(monitoring_router, prefix="/api/monitoring", tags=["Monitoring"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
+app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
+app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -1127,6 +1323,7 @@ app.include_router(misc_router, tags=["Misc"])
 
 # Permission routes (/permission)
 app.include_router(permission_router, prefix="/permission", tags=["Permission"])
+app.include_router(permission_router, prefix="/api/permission", tags=["Permission"])
 
 # Question routes (/question)
 app.include_router(question_router, prefix="/question", tags=["Question"])
@@ -1148,7 +1345,32 @@ def _load_installed_package_plugins() -> None:
         log.warning("plugins.installed.load_failed", {"error": str(e)})
 
 
+def _route_registered(path: str, method: str) -> bool:
+    target_method = method.upper()
+    for route in app.routes:
+        if getattr(route, "path", None) != path:
+            continue
+        methods = getattr(route, "methods", None) or set()
+        if target_method in methods:
+            return True
+    return False
+
+
+def _install_flockspro_license_fallback() -> None:
+    status_registered = _route_registered("/api/flockspro/license/status", "GET")
+    refresh_registered = _route_registered("/api/flockspro/license/refresh", "POST")
+    if status_registered and refresh_registered:
+        log.info("flockspro.license.fallback.skipped", {
+            "status_registered": status_registered,
+            "refresh_registered": refresh_registered,
+        })
+        return
+    app.include_router(flockspro_license_router, prefix="/api/flockspro/license", tags=["FlocksProLicense"])
+    log.info("flockspro.license.fallback.installed")
+
+
 _load_installed_package_plugins()
+_install_flockspro_license_fallback()
 
 
 @app.get("/", tags=["Root"])

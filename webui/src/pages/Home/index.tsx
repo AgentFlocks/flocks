@@ -13,12 +13,18 @@ import {
   Wrench,
   BookOpen,
   Cpu,
+  LayoutDashboard,
+  Loader2,
 } from 'lucide-react';
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useStats } from '@/hooks/useStats';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { sessionApi } from '@/api/session';
+import { useToast } from '@/components/common/Toast';
+import { useAuth } from '@/contexts/AuthContext';
+import { useProductName } from '@/contexts/ProductNameContext';
 
 const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
 const GITEE_URL = 'https://gitee.com/flocks/flocks';
@@ -27,7 +33,28 @@ const GITEE_LOGO_URL = `${import.meta.env.BASE_URL}gitee-logo.png`;
 export default function Home() {
   const { stats, loading, error } = useStats();
   const { t } = useTranslation('home');
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { user } = useAuth();
+  const { productName } = useProductName();
+  const canCreateWebUIContractPage = user?.role === 'admin';
   const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
+  const [creatingWebUIContractPageSession, setCreatingWebUIContractPageSession] = useState(false);
+
+  const handleCreateWebUIContractPage = useCallback(async () => {
+    if (creatingWebUIContractPageSession) return;
+    setCreatingWebUIContractPageSession(true);
+    try {
+      const session = await sessionApi.create({ title: t('createWebUIContractPageSessionTitle') });
+      const message = t('createWebUIContractPageInitialMessage');
+      navigate(`/sessions?session=${session.id}&message=${encodeURIComponent(message)}`);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : t('createWebUIContractPageError');
+      toast.error(t('createWebUIContractPageError'), detail);
+    } finally {
+      setCreatingWebUIContractPageSession(false);
+    }
+  }, [creatingWebUIContractPageSession, navigate, t, toast]);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -45,7 +72,7 @@ export default function Home() {
             </div>
 
             <h1 className="text-2xl font-extrabold mb-3 tracking-tight">
-              <span className="text-red-500">Flocks</span>
+              <span className="text-red-500">{productName}</span>
             </h1>
 
             <p className="text-sm text-white font-semibold mb-2">
@@ -65,6 +92,22 @@ export default function Home() {
               {t('getStarted')}
               <ChevronRight className="ml-1.5 w-4 h-4" />
             </button>
+
+            {canCreateWebUIContractPage ? (
+              <button
+                type="button"
+                onClick={() => void handleCreateWebUIContractPage()}
+                disabled={creatingWebUIContractPageSession}
+                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-100 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-red-500/40 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {creatingWebUIContractPageSession ? (
+                  <Loader2 className="mr-2 w-4 h-4 animate-spin" />
+                ) : (
+                  <LayoutDashboard className="mr-2 w-4 h-4 text-red-300" />
+                )}
+                {t('createWebUIContractPage')}
+              </button>
+            ) : null}
 
             <div className="relative">
               <button
@@ -108,6 +151,7 @@ export default function Home() {
       <div className="grid md:grid-cols-3 gap-4 mb-10">
         <Link
           to="/sessions"
+          state={{ skipLastSelectedSessionRestore: true }}
           className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-sky-200 hover:shadow-md hover:shadow-sky-50 transition-all duration-200"
         >
           <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-sky-100 transition-colors">
@@ -152,7 +196,7 @@ export default function Home() {
       {/* Stats */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
-          <LoadingSpinner size="lg" />
+          <LoadingSpinner size="lg" delayMs={180} />
         </div>
       ) : (
         <>
@@ -161,7 +205,7 @@ export default function Home() {
               <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <div>
                 <span className="text-sm font-medium text-red-900">{t('stats.abnormal')}</span>
-                <span className="text-sm text-red-600 ml-2">Please ensure the Flocks backend is running</span>
+                <span className="text-sm text-red-600 ml-2">Please ensure the {productName} backend is running</span>
               </div>
             </div>
           )}

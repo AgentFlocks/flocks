@@ -25,6 +25,15 @@ from flocks.utils.log import Log
 log = Log.create(service="tool-registry")
 
 
+class ToolRefreshError(RuntimeError):
+    """A refresh stage failed and the previous registry state was restored."""
+
+    def __init__(self, stage: str, errors: List[str]):
+        self.stage = stage
+        self.errors = list(errors)
+        super().__init__(f"{stage}: {'; '.join(self.errors)}")
+
+
 class ToolCategory(str, Enum):
     """Tool categories"""
     FILE = "file"
@@ -172,7 +181,7 @@ class ToolInfo(BaseModel):
             properties["device_id"] = {
                 "type": "string",
                 "description": (
-                    "目标设备实例的唯一 ID（UUID），来自 device_context 工具返回的"
+                    "目标设备实例的唯一 ID（UUID），来自 device_manage(action='list') 返回的"
                     " `device_id` 字段。当系统中接入了多台同类型设备（例如多台 TDP）"
                     "时必须传入；只有单台时也建议显式传入以避免歧义。"
                 ),
@@ -598,9 +607,15 @@ class ToolRegistry:
     _dynamic_modules: Dict[str, str] = {}
     _dynamic_tools_by_module: Dict[str, List[str]] = {}
     _plugin_tool_names: List[str] = []
+    # Source-level plugin failures observed by the last load. They remain
+    # diagnostic only because the plugin loader already isolates each source.
+    _plugin_load_errors: List[str] = []
     _revision: int = 0
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
+    _init_lock = threading.Lock()
+    _refresh_lock = threading.RLock()
+    _initializing_thread_id: Optional[int] = None
 
     # Snapshot of every tool's factory-default ``enabled`` flag — captured
     # in :meth:`register` at the moment the tool object is handed to the
@@ -644,8 +659,9 @@ class ToolRegistry:
         # ``refresh_plugin_tools`` cycle — must refresh the snapshot so
         # ``enabled_default`` / ``reset`` reflect the current source of
         # truth instead of the first value ever observed.
-        cls._enabled_defaults[tool.info.name] = bool(tool.info.enabled)
-        cls._tools[tool.info.name] = tool
+        with cls._refresh_lock:
+            cls._enabled_defaults[tool.info.name] = bool(tool.info.enabled)
+            cls._tools[tool.info.name] = tool
         log.debug("tool.registered", {
             "name": tool.info.name,
             "category": tool.info.category.value,
@@ -658,7 +674,8 @@ class ToolRegistry:
         The revision is bumped when plugin or dynamic tools are reloaded so
         long-lived session caches can detect toolset changes.
         """
-        return cls._revision
+        with cls._refresh_lock:
+            return cls._revision
 
     @classmethod
     def _bump_revision(cls, reason: str) -> None:
@@ -680,7 +697,7 @@ class ToolRegistry:
         category: ToolCategory = ToolCategory.CUSTOM,
         parameters: Optional[List[ToolParameter]] = None,
         requires_confirmation: bool = False,
-        native: bool = False,
+        native: Optional[bool] = None,
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
         enabled: bool = True,
@@ -688,11 +705,11 @@ class ToolRegistry:
         """
         Decorator to register a function as a tool.
 
-        ``native`` defaults to False (safe default).  Built-in tools get
-        ``native=True`` in bulk by ``_register_builtin_tools()`` after all
-        built-in modules are imported, so callers don't need to pass it
-        explicitly.  User plugin Python files that use this decorator will
-        correctly stay ``native=False``.
+        ``native=None`` means the loading context decides. Built-in tools get
+        ``native=True`` in bulk by ``_register_builtin_tools()`` only when the
+        decorator did not explicitly pass ``native``. User plugin Python files
+        that use this decorator still default to ``native=False`` unless their
+        loading path marks them project-level.
 
         Usage:
             @ToolRegistry.register_function(
@@ -704,18 +721,20 @@ class ToolRegistry:
                 ...
         """
         def decorator(func: ToolHandler) -> ToolHandler:
-            info = ToolInfo(
-                name=name,
-                description=description,
-                description_cn=description_cn,
-                category=category,
-                parameters=parameters or [],
-                requires_confirmation=requires_confirmation,
-                native=native,
-                always_load=always_load,
-                tags=list(tags or []),
-                enabled=enabled,
-            )
+            info_kwargs: Dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "description_cn": description_cn,
+                "category": category,
+                "parameters": parameters or [],
+                "requires_confirmation": requires_confirmation,
+                "always_load": always_load,
+                "tags": list(tags or []),
+                "enabled": enabled,
+            }
+            if native is not None:
+                info_kwargs["native"] = native
+            info = ToolInfo(**info_kwargs)
             tool = Tool(info=info, handler=func)
             cls.register(tool)
             return func
@@ -724,7 +743,8 @@ class ToolRegistry:
     @classmethod
     def unregister(cls, name: str) -> bool:
         """Unregister a tool by name. Returns True if the tool was found and removed."""
-        removed = cls._tools.pop(name, None)
+        with cls._refresh_lock:
+            removed = cls._tools.pop(name, None)
         if removed:
             log.debug("tool.unregistered", {"name": name})
         return removed is not None
@@ -732,25 +752,25 @@ class ToolRegistry:
     @classmethod
     def _ensure_initialized(cls) -> None:
         """Initialize the registry on first public access."""
-        if not cls._initialized:
+        if not cls._initialized and cls._initializing_thread_id != threading.get_ident():
             cls.init()
 
     @classmethod
     def get(cls, name: str) -> Optional[Tool]:
         """Get a tool by name"""
         cls._ensure_initialized()
-        return cls._tools.get(name)
+        with cls._refresh_lock:
+            return cls._tools.get(name)
 
     @classmethod
     def list_tools(cls, category: Optional[ToolCategory] = None) -> List[ToolInfo]:
         """List all registered tools, optionally filtered by category"""
         cls._ensure_initialized()
-        tools = list(cls._tools.values())
-
-        if category:
-            tools = [t for t in tools if t.info.category == category]
-
-        return [t.info for t in tools]
+        with cls._refresh_lock:
+            tools = list(cls._tools.values())
+            if category:
+                tools = [t for t in tools if t.info.category == category]
+            return [t.info for t in tools]
 
     @classmethod
     def get_schema(cls, name: str) -> Optional[ToolSchema]:
@@ -775,12 +795,6 @@ class ToolRegistry:
                 error=f"Tool not found: {tool_name}"
             )
 
-        if not tool.info.enabled:
-            return ToolResult(
-                success=False,
-                error=f"Tool is disabled: {tool_name}"
-            )
-
         # Create default context if not provided
         if ctx is None:
             ctx = ToolContext(
@@ -793,34 +807,46 @@ class ToolRegistry:
             "params": list(kwargs.keys()),
         })
 
-        device_id = kwargs.pop("device_id", None)
+        device_id = None
+        per_device_enabled = None
 
         if tool.info.source == "device" and tool.info.provider:
+            requested_device_id = kwargs.pop("device_id", None)
             try:
                 resolved_device_id, resolution_error = await cls._resolve_device_target(
                     storage_key=tool.info.provider,
-                    requested_device_id=str(device_id).strip() if device_id else None,
+                    requested_device_id=str(requested_device_id).strip() if requested_device_id else None,
                 )
             except Exception as exc:
                 log.warn("tool.device.target_resolve_failed", {
                     "tool": tool_name,
                     "provider": tool.info.provider,
-                    "device_id": device_id,
+                    "device_id": requested_device_id,
                     "error": str(exc),
                 })
                 resolved_device_id = None
-                resolution_error = "设备目标解析失败，请通过 device_context 工具确认设备后重试。"
+                resolution_error = "设备目标解析失败，请通过 device_manage(action='list') 确认设备后重试。"
 
             if resolution_error:
                 return ToolResult(success=False, error=resolution_error)
             device_id = resolved_device_id
+        elif not tool.info.enabled:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
+
+        if not tool.info.enabled:
+            return ToolResult(
+                success=False,
+                error=f"Tool is disabled: {tool_name}"
+            )
 
         if device_id:
-            # Per-device tool enable gate: an individual device instance may
-            # have its own enabled=False override independent of the shared
-            # global tool_settings.  This prevents toggling a tool "for
-            # Device A" from affecting Device B when both share the same
-            # storage_key (same plugin version, different names).
+            # Per-device tool enable gate: a device instance may carry a
+            # disabled override independent of the shared global tool state.
+            # A stored enabled=True row is legacy data and is treated the same
+            # as no override; it must not bypass the global disabled state.
             try:
                 from flocks.tool.device.store import get_device_tool_enabled
                 per_device_enabled = await get_device_tool_enabled(device_id, tool_name)
@@ -837,12 +863,13 @@ class ToolRegistry:
                     "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
                 })
 
+        if device_id:
             from flocks.tool.credential_context import activate_device_credentials
             async with activate_device_credentials(device_id) as activated:
                 if not activated:
                     return ToolResult(
                         success=False,
-                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。",
+                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
                 result = await tool.execute(ctx, **kwargs)
         else:
@@ -851,7 +878,11 @@ class ToolRegistry:
         if result.success:
             cls._reset_failure_state(tool_name)
         else:
-            disabled = cls._record_failure(tool, kwargs, result.error)
+            if await cls._failure_auto_disable_enabled():
+                disabled = cls._record_failure(tool, kwargs, result.error)
+            else:
+                cls._reset_failure_state(tool_name)
+                disabled = False
             if disabled:
                 result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
                 suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"
@@ -913,11 +944,11 @@ class ToolRegistry:
             requested = next((device for device in devices if device.id == requested_device_id), None)
             if requested is None or not requested.enabled:
                 return None, (
-                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。"
+                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。"
                 )
             if requested.storage_key != storage_key:
                 return None, (
-                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_context 工具确认目标设备。"
+                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_manage(action='list') 确认目标设备。"
                 )
             return requested.id, None
 
@@ -930,11 +961,11 @@ class ToolRegistry:
             return resolved, None
 
         if not enabled_candidates:
-            return None, "当前没有可用的目标设备，请通过 device_context 工具确认设备状态。"
+            return None, "当前没有可用的目标设备，请通过 device_manage(action='list') 确认设备状态。"
 
         return None, (
             "当前存在多台同类型设备，调用前必须显式传入 `device_id`。"
-            "请先调用 device_context 工具确认目标设备。"
+            "请先调用 device_manage(action='list') 确认目标设备。"
         )
 
     @classmethod
@@ -972,13 +1003,25 @@ class ToolRegistry:
     def all_tool_ids(cls) -> List[str]:
         """Get all registered tool IDs"""
         cls._ensure_initialized()
-        return list(cls._tools.keys())
+        with cls._refresh_lock:
+            return list(cls._tools.keys())
+
+    @classmethod
+    def snapshot_identity(cls) -> tuple[int, tuple[str, ...]]:
+        """Return a revision/tool-id identity from one consistent registry state."""
+        cls._ensure_initialized()
+        with cls._refresh_lock:
+            return cls._revision, tuple(cls._tools.keys())
 
     @classmethod
     def get_dynamic_tools_by_module(cls) -> Dict[str, List[str]]:
         """Return a copy of the dynamic-module → tool-names mapping."""
         cls._ensure_initialized()
-        return dict(cls._dynamic_tools_by_module)
+        with cls._refresh_lock:
+            return {
+                module_name: list(tool_names)
+                for module_name, tool_names in cls._dynamic_tools_by_module.items()
+            }
 
     @classmethod
     def get_api_service_ids(cls) -> set:
@@ -1006,21 +1049,33 @@ class ToolRegistry:
         if cls._initialized:
             return
 
-        # Import and register built-in tools
-        cls._register_builtin_tools()
-        cls._register_dynamic_tools()
-        cls._register_plugin_extension_point()
-        cls._load_plugin_tools()
-        cls._initialized = True
-        log.debug("tool_registry.initialized", {"count": len(cls._tools)})
+        with cls._init_lock:
+            if cls._initialized:
+                return
+
+            cls._initializing_thread_id = threading.get_ident()
+            try:
+                # Import and register built-in tools
+                cls._register_builtin_tools()
+                cls._register_dynamic_tools()
+                cls._register_plugin_extension_point()
+                cls._plugin_load_errors = cls._load_plugin_tools()
+                cls._initialized = True
+                log.debug("tool_registry.initialized", {"count": len(cls._tools)})
+            finally:
+                cls._initializing_thread_id = None
 
     @classmethod
-    def _load_plugin_tools(cls) -> None:
+    async def init_async(cls) -> None:
+        """Initialize the registry without blocking the event loop."""
+        await asyncio.to_thread(cls.init)
+
+    @classmethod
+    def _load_plugin_tools(cls, errors: Optional[List[str]] = None) -> List[str]:
         """Load plugin tools from both user-level and project-level plugin dirs on init.
 
-        Without this, YAML/Python plugin tools only appear after
-        ``PluginLoader.load_all()`` is triggered by Agent initialization
-        or an explicit ``POST /api/tools/refresh``.
+        Without this, YAML/Python plugin tools only appear after an explicit
+        ``POST /api/tools/refresh`` or a tool registry initialization pass.
 
         Scans both:
         - ``~/.flocks/plugins/tools/`` (user-level)
@@ -1029,13 +1084,23 @@ class ToolRegistry:
         Tracks which tool names were added so that
         ``refresh_plugin_tools`` can accurately unregister stale entries
         (regardless of the ``ToolInfo.source`` value).
+
+        Returns every source-level load error for diagnostics and scoped Hub
+        refresh decisions.
         """
         before = set(cls._tools.keys())
+        load_errors: List[str] = []
         try:
             from flocks.plugin import PluginLoader
-            PluginLoader.load_all()
+
+            reported_errors = PluginLoader.load_extension("TOOLS", load_entry_points=True)
+            if reported_errors:
+                load_errors.extend(reported_errors)
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
+            load_errors.append(f"plugin loader: {e}")
+        if errors is not None:
+            errors.extend(load_errors)
         after = set(cls._tools.keys())
         new_plugin_tools = sorted(after - before)
         python_tool_sources: Dict[str, Path] = {}
@@ -1078,6 +1143,14 @@ class ToolRegistry:
             except ValueError:
                 tool.info.native = True
         cls._plugin_tool_names = sorted(set(new_plugin_tools) | python_plugin_names)
+        if errors is not None and load_errors:
+            return load_errors
+        cls._finalize_plugin_tools_load()
+        return load_errors
+
+    @classmethod
+    def _finalize_plugin_tools_load(cls) -> None:
+        """Apply configuration overlays after an accepted plugin load."""
         cls._bootstrap_user_api_services()
         # Defence-in-depth: ``register()`` is the canonical writer for
         # ``_enabled_defaults`` but this catches any tool that landed in
@@ -1241,7 +1314,8 @@ class ToolRegistry:
         (e.g. dynamic tools registered after init).  Callers should fall
         back to the live ``ToolInfo.enabled`` in that case.
         """
-        return cls._enabled_defaults.get(name)
+        with cls._refresh_lock:
+            return cls._enabled_defaults.get(name)
 
     @classmethod
     def _apply_tool_settings(cls) -> None:
@@ -1327,8 +1401,9 @@ class ToolRegistry:
             except ValueError:
                 return True   # Under <cwd>/.flocks/plugins/ or elsewhere → project-level → native
 
-        def _consume_tools(items: list, source: str) -> None:
+        def _consume_tools(items: list, source: str) -> Optional[List[str]]:
             is_native = _is_native_source(source)
+            errors: List[str] = []
             for spec in items:
                 # YAML factory produces Tool instances directly
                 if isinstance(spec, Tool):
@@ -1356,6 +1431,7 @@ class ToolRegistry:
 
                 if not isinstance(spec, dict):
                     log.warn("plugin.tool.invalid_spec", {"source": source})
+                    errors.append("tool definition must be a Tool or mapping")
                     continue
                 name = spec.get("name")
                 handler = spec.get("handler")
@@ -1364,6 +1440,7 @@ class ToolRegistry:
                         "source": source,
                         "spec_keys": list(spec.keys()),
                     })
+                    errors.append("tool definition requires name and handler")
                     continue
                 existing = cls._tools.get(name)
                 if existing is not None:
@@ -1387,7 +1464,18 @@ class ToolRegistry:
                         log.warn("plugin.tool.handler_not_found", {
                             "source": source, "handler": spec.get("handler"),
                         })
+                        errors.append(
+                            f"tool {name}: handler {spec.get('handler')!r} not found"
+                        )
                         continue
+
+                if not callable(handler):
+                    log.warn("plugin.tool.handler_not_callable", {
+                        "source": source,
+                        "name": name,
+                    })
+                    errors.append(f"tool {name}: handler must be callable")
+                    continue
 
                 params = [
                     ToolParameter(**p) if isinstance(p, dict) else p
@@ -1405,6 +1493,7 @@ class ToolRegistry:
                     native=is_native,
                 )
                 cls.register(Tool(info=info, handler=handler))
+            return errors
 
         def _dedup_key(item: Any) -> str:
             if isinstance(item, Tool):
@@ -1447,17 +1536,23 @@ class ToolRegistry:
             # agent/ — agent delegation/coordination
             ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", [
+                "schedule_task_center",
+                "todo",
+                "run_workflow",
+                "run_workflow_node",
+                "workflow_config_manage",
+            ]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # system/ — questions, model config, memory, MCP management, session management, slash commands
+            ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
-            # device/ — security device asset context
-            ("flocks.tool.device", ["device_context_tool"]),
+            # device/ — security device asset context and status probes
+            ("flocks.tool.device", ["manage_tool"]),
             # channel/ — IM platform messaging
-            ("flocks.tool.channel", ["channel_message"]),
+            ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
             ("flocks.tool.wecom", ["wecom_mcp"]),
         ]
@@ -1468,17 +1563,18 @@ class ToolRegistry:
                 except ImportError as e:
                     log.warn("builtin_tools.import_failed", {"module": f"{package}.{mod_name}", "error": str(e)})
 
-        # Mark every tool registered during this call as native=True, except
-        # for built-in modules that should remain non-native by policy.
-        # This is done in bulk here so individual @register_function call
-        # sites don't need to pass native=True, and user plugin files using
-        # the same decorator won't be misclassified.
-        builtin_native_exceptions = {"lsp", "task"}
+        # Mark built-in tools native=True only when the decorator did not
+        # explicitly declare native. This keeps the default convenient for
+        # built-ins while preserving native=False for management tools that
+        # should be discovered through tool_search.
         for name in set(cls._tools.keys()) - before:
-            if name in builtin_native_exceptions:
-                cls._tools[name].info.native = False
+            tool = cls._tools[name]
+            fields_set = getattr(tool.info, "model_fields_set", None)
+            if fields_set is None:
+                fields_set = getattr(tool.info, "__fields_set__", set())
+            if "native" in fields_set:
                 continue
-            cls._tools[name].info.native = True
+            tool.info.native = True
 
         # Sample tools for testing (only register if not already registered)
         if "get_time" not in cls._tools:
@@ -1534,25 +1630,116 @@ class ToolRegistry:
         cls._watcher.start()
 
     @classmethod
-    def refresh_plugin_tools(cls) -> List[str]:
+    def refresh_plugin_tools(cls, changed_path: Optional[Path] = None) -> List[str]:
         """Reload plugin tools (YAML + Python) from disk.
 
         Unregisters stale plugin tools first so that deleted files are
-        correctly removed from the registry.
+        correctly removed from the registry. When a Hub operation supplies
+        ``changed_path``, source failures outside that path are isolated and
+        do not block the operation; failures inside it still roll back.
         """
         cls._ensure_initialized()
-        cls._unregister_plugin_tools()
-        cls._load_plugin_tools()
-        cls._bump_revision("plugin_refresh")
-        return cls.all_tool_ids()
+        with cls._refresh_lock:
+            tools_before = cls._tools.copy()
+            defaults_before = cls._enabled_defaults.copy()
+            plugin_names_before = list(cls._plugin_tool_names)
+            plugin_errors_before = list(cls._plugin_load_errors)
+            enabled_before = {
+                name: tool.info.enabled
+                for name, tool in tools_before.items()
+            }
+            revision_before = cls._revision
+            load_errors: List[str] = []
+
+            def _restore_snapshot() -> None:
+                for name, enabled in enabled_before.items():
+                    tool = tools_before.get(name)
+                    if tool is not None:
+                        tool.info.enabled = enabled
+                cls._tools.clear()
+                cls._tools.update(tools_before)
+                cls._enabled_defaults.clear()
+                cls._enabled_defaults.update(defaults_before)
+                cls._plugin_tool_names = plugin_names_before
+                cls._plugin_load_errors = plugin_errors_before
+                cls._revision = revision_before
+
+            try:
+                cls._unregister_plugin_tools()
+                cls._load_plugin_tools(load_errors)
+                changed_root = changed_path.resolve() if changed_path is not None else None
+                fatal_errors: List[str] = []
+                for error in load_errors:
+                    if changed_root is None or error.startswith(
+                        (
+                            "plugin loader:",
+                            "extension point not found:",
+                            "entry point scan:",
+                        )
+                    ):
+                        fatal_errors.append(error)
+                        continue
+                    if error.startswith("entry point "):
+                        continue
+                    source_text, separator, _detail = error.partition(": ")
+                    if not separator:
+                        fatal_errors.append(error)
+                        continue
+                    source_path = Path(source_text)
+                    if not source_path.is_absolute():
+                        fatal_errors.append(error)
+                        continue
+                    source_path = source_path.resolve()
+                    if source_path == changed_root or changed_root in source_path.parents:
+                        fatal_errors.append(error)
+                if fatal_errors:
+                    raise ToolRefreshError("plugin", fatal_errors)
+
+                if load_errors:
+                    cls._finalize_plugin_tools_load()
+
+                cls._plugin_load_errors = load_errors
+                cls._bump_revision("plugin_refresh")
+                return cls.all_tool_ids()
+            except Exception:
+                _restore_snapshot()
+                raise
 
     @classmethod
     def refresh_dynamic_tools(cls) -> List[str]:
         """Reload dynamically generated tools and return tool ids."""
         cls._ensure_initialized()
-        cls._register_dynamic_tools()
-        cls._bump_revision("dynamic_refresh")
-        return cls.all_tool_ids()
+        with cls._refresh_lock:
+            tools_before = cls._tools.copy()
+            defaults_before = cls._enabled_defaults.copy()
+            dynamic_modules_before = cls._dynamic_modules.copy()
+            dynamic_tools_before = {
+                name: list(tool_names)
+                for name, tool_names in cls._dynamic_tools_by_module.items()
+            }
+            load_errors: List[str] = []
+
+            try:
+                cls._register_dynamic_tools(load_errors)
+            except Exception:
+                cls._tools.clear()
+                cls._tools.update(tools_before)
+                cls._enabled_defaults.clear()
+                cls._enabled_defaults.update(defaults_before)
+                cls._dynamic_modules = dynamic_modules_before
+                cls._dynamic_tools_by_module = dynamic_tools_before
+                raise
+            if load_errors:
+                cls._tools.clear()
+                cls._tools.update(tools_before)
+                cls._enabled_defaults.clear()
+                cls._enabled_defaults.update(defaults_before)
+                cls._dynamic_modules = dynamic_modules_before
+                cls._dynamic_tools_by_module = dynamic_tools_before
+                raise ToolRefreshError("dynamic", load_errors)
+
+            cls._bump_revision("dynamic_refresh")
+            return cls.all_tool_ids()
 
     @classmethod
     def _reset_failure_state(cls, tool_name: str) -> None:
@@ -1561,9 +1748,31 @@ class ToolRegistry:
             cls._failure_state.pop(tool_name, None)
 
     @classmethod
+    async def _failure_auto_disable_enabled(cls) -> bool:
+        """Return the configured repeated-failure behavior, defaulting on."""
+        try:
+            from flocks.config.config import Config
+
+            config = await Config.get()
+            if config.tool_failure is not None:
+                return config.tool_failure.disable_on_repeated_failure
+        except Exception:
+            pass
+        return True
+
+    @classmethod
     def _should_track_failure(cls, tool: Tool) -> bool:
-        """Track failures only for custom tools to avoid disabling core tools."""
-        return tool.info.category == ToolCategory.CUSTOM and tool.info.name != "invalid"
+        """Track failures only for standalone custom tools.
+
+        Device-backed tools have per-device switches; repeated upstream/API
+        failures should not mutate the shared in-memory switch for every
+        device instance.
+        """
+        return (
+            tool.info.category == ToolCategory.CUSTOM
+            and tool.info.name != "invalid"
+            and tool.info.source != "device"
+        )
 
     @classmethod
     def _is_countable_error(cls, error: Optional[str]) -> bool:
@@ -1677,7 +1886,7 @@ class ToolRegistry:
         })
 
     @classmethod
-    def _register_dynamic_tools(cls) -> None:
+    def _register_dynamic_tools(cls, errors: Optional[List[str]] = None) -> None:
         """Register dynamically generated tools by importing modules."""
         modules = cls._discover_dynamic_modules()
 
@@ -1703,6 +1912,8 @@ class ToolRegistry:
                     "module": module_name,
                     "error": str(e),
                 })
+                if errors is not None:
+                    errors.append(f"{path}: {e}")
                 continue
 
             after = set(cls._tools.keys())
@@ -1721,6 +1932,32 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 
+_TOOL_WATCH_SUBDIRS = ("api", "device", "python")
+
+
+def _tool_event_paths(event: object) -> List[str]:
+    candidate_paths: List[str] = []
+    src = getattr(event, "src_path", "") or ""
+    if src:
+        candidate_paths.append(src)
+    dest = getattr(event, "dest_path", "") or ""
+    if dest:
+        candidate_paths.append(dest)
+    return candidate_paths
+
+
+def _tool_path_matches_watch_scope(path: str, subdir: str | None = None) -> bool:
+    """Return whether ``path`` is under ``plugins/tools/<type>/``."""
+    parts = Path(path).parts
+    allowed = {subdir} if subdir else set(_TOOL_WATCH_SUBDIRS)
+    for idx, part in enumerate(parts):
+        if part != "tools":
+            continue
+        if idx + 1 < len(parts) and parts[idx + 1] in allowed:
+            return True
+    return False
+
+
 def _tool_event_should_reload(event: object) -> bool:
     """Return True if a watchdog filesystem event should trigger a plugin reload.
 
@@ -1735,17 +1972,13 @@ def _tool_event_should_reload(event: object) -> bool:
     Exposed at module scope so it can be unit-tested without spinning up
     ``watchdog.observers.Observer`` against a temp directory.
     """
-    candidate_paths: List[str] = []
-    src = getattr(event, "src_path", "") or ""
-    if src:
-        candidate_paths.append(src)
-    dest = getattr(event, "dest_path", "") or ""
-    if dest:
-        candidate_paths.append(dest)
+    candidate_paths = _tool_event_paths(event)
     if not candidate_paths:
         return False
 
     for path in candidate_paths:
+        if not _tool_path_matches_watch_scope(path):
+            continue
         if not (path.endswith(".yaml") or path.endswith(".py")):
             continue
         fname = os.path.basename(path)
@@ -1757,10 +1990,15 @@ def _tool_event_should_reload(event: object) -> bool:
     return False
 
 
+def _tool_event_touches_device_plugin(event: object) -> bool:
+    """Return True when a reload event targets ``tools/device``."""
+    return any(_tool_path_matches_watch_scope(path, "device") for path in _tool_event_paths(event))
+
+
 class ToolFileWatcher:
     """Watch plugin tool directories and auto-reload plugin tools on change.
 
-    Monitors the ``api/`` and ``python/`` subdirectories under:
+    Monitors the ``api/``, ``device/``, and ``python/`` subdirectories under:
     - ``~/.flocks/plugins/tools/``       (user-level)
     - ``<cwd>/.flocks/plugins/tools/``   (project-level)
 
@@ -1770,7 +2008,7 @@ class ToolFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 1.0
-    _WATCH_SUBDIRS = ("api", "python")
+    _WATCH_SUBDIRS = _TOOL_WATCH_SUBDIRS
 
     def __init__(self) -> None:
         self._observer: Optional[object] = None
@@ -1824,7 +2062,7 @@ class ToolFileWatcher:
                     return
                 if not _tool_event_should_reload(event):
                     return
-                watcher._schedule_refresh()
+                watcher._schedule_refresh(device_changed=_tool_event_touches_device_plugin(event))
 
         handler = _Handler()
         observer = Observer()
@@ -1856,11 +2094,12 @@ class ToolFileWatcher:
 
     # ---- internal ----
 
-    def _schedule_refresh(self) -> None:
+    def _schedule_refresh(self, *, device_changed: bool = False) -> None:
         """Debounced plugin tool reload."""
         with self._lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
+            self._device_changed = getattr(self, "_device_changed", False) or device_changed
             self._debounce_timer = threading.Timer(
                 self._DEBOUNCE_SECONDS, self._do_refresh
             )
@@ -1877,31 +2116,38 @@ class ToolFileWatcher:
 
     def _run_refresh(self) -> None:
         try:
+            if getattr(self, "_device_changed", False):
+                try:
+                    from flocks.config.api_versioning import discover_api_service_descriptors
+                    from flocks.tool.device.plugin_index import clear_device_template_cache
+
+                    clear_device_template_cache()
+                    discover_api_service_descriptors(refresh=True)
+                except Exception as exc:
+                    log.debug("tool.watcher.device_cache_clear_failed", {"error": str(exc)})
+                finally:
+                    self._device_changed = False
             ToolRegistry.refresh_plugin_tools()
             log.debug("tool.watcher.reloaded", {"reason": "plugin tool file changed on disk"})
         except Exception as e:
             log.warn("tool.watcher.reload_failed", {"error": str(e)})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Return the api/ and python/ subdirectories that exist and should be watched."""
+        """Return plugin roots that exist and should be watched."""
         dirs: Set[str] = set()
         try:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-            tools_root = DEFAULT_PLUGIN_ROOT / "tools"
+            user_plugin_root = DEFAULT_PLUGIN_ROOT
         except Exception:
-            tools_root = Path.home() / ".flocks" / "plugins" / "tools"
+            user_plugin_root = Path.home() / ".flocks" / "plugins"
 
-        for subdir in self._WATCH_SUBDIRS:
-            d = str(tools_root / subdir)
-            if os.path.isdir(d):
-                dirs.add(d)
+        if os.path.isdir(user_plugin_root):
+            dirs.add(str(user_plugin_root))
 
         try:
-            project_tools_root = Path.cwd() / ".flocks" / "plugins" / "tools"
-            for subdir in self._WATCH_SUBDIRS:
-                d = str(project_tools_root / subdir)
-                if d not in dirs and os.path.isdir(d):
-                    dirs.add(d)
+            project_plugin_root = Path.cwd() / ".flocks" / "plugins"
+            if os.path.isdir(project_plugin_root):
+                dirs.add(str(project_plugin_root))
         except Exception:
             pass
 

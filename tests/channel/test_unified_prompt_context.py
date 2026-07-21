@@ -37,6 +37,7 @@ from flocks.channel.inbound.dispatcher import (
 from flocks.channel.inbound.session_binding import (
     SessionBindingService,
     _resolve_session_directory,
+    resolve_channel_session_owner_kwargs,
 )
 from flocks.config.config import ChannelConfig
 
@@ -226,6 +227,75 @@ class TestSessionBindingDirectoryPropagation:
             )
 
         assert captured["directory"] == "/instance/dir"
+
+
+class TestChannelSessionOwnerPropagation:
+    @pytest.mark.asyncio
+    async def test_create_session_assigns_local_admin_owner(self):
+        captured = {}
+
+        class _StubSession:
+            id = "ses_admin_owned"
+
+        async def _fake_create(**kwargs):
+            captured.update(kwargs)
+            return _StubSession()
+
+        admin = SimpleNamespace(id="usr_admin", username="admin", role="admin")
+
+        with patch("flocks.session.session.Session.create", new=_fake_create), \
+             patch("flocks.auth.service.AuthService.has_users", new=AsyncMock(return_value=True)), \
+             patch("flocks.auth.service.AuthService.list_users", new=AsyncMock(return_value=[admin])):
+            sid = await SessionBindingService._create_session(
+                _msg(),
+                default_agent="rex",
+                directory="/explicit/dir",
+            )
+
+        assert sid == "ses_admin_owned"
+        assert captured["owner_user_id"] == "usr_admin"
+        assert captured["owner_username"] == "admin"
+
+    @pytest.mark.asyncio
+    async def test_create_session_stays_ownerless_without_local_accounts(self):
+        captured = {}
+
+        class _StubSession:
+            id = "ses_ownerless"
+
+        async def _fake_create(**kwargs):
+            captured.update(kwargs)
+            return _StubSession()
+
+        with patch("flocks.session.session.Session.create", new=_fake_create), \
+             patch("flocks.auth.service.AuthService.has_users", new=AsyncMock(return_value=False)), \
+             patch("flocks.auth.service.AuthService.list_users", new=AsyncMock()) as list_users:
+            sid = await SessionBindingService._create_session(
+                _msg(),
+                default_agent="rex",
+                directory="/explicit/dir",
+            )
+
+        assert sid == "ses_ownerless"
+        assert "owner_user_id" not in captured
+        assert "owner_username" not in captured
+        list_users.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_owner_kwargs_preserve_existing_session_owner(self):
+        existing = SimpleNamespace(
+            owner_user_id="usr_existing",
+            owner_username="existing",
+        )
+
+        with patch("flocks.auth.service.AuthService.has_users", new=AsyncMock()) as has_users:
+            owner_kwargs = await resolve_channel_session_owner_kwargs(existing)
+
+        assert owner_kwargs == {
+            "owner_user_id": "usr_existing",
+            "owner_username": "existing",
+        }
+        has_users.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,12 @@
+{
+  "id": "soc-alerts",
+  "title": "告警调查",
+  "titleEn": "Alert Investigation",
+  "route": "/contracts/webui/soc-alerts",
+  "icon": "AlertTriangle",
+  "order": 20,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1782797817110
+}

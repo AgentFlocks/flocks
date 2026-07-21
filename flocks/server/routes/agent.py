@@ -61,6 +61,7 @@ class AgentResponse(BaseModel):
     Includes required 'permission' and 'options' fields.
     """
     name: str
+    nameCn: Optional[str] = None
     description: Optional[str] = None
     descriptionCn: Optional[str] = None
     mode: str = "primary"
@@ -114,6 +115,7 @@ def agent_to_response(
 
     return AgentResponse(
         name=agent.name,
+        nameCn=agent.name_cn,
         description=agent.description,
         descriptionCn=agent.description_cn,
         mode=agent.mode,
@@ -146,6 +148,7 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         delegatable = mode != "primary"
     return AgentInfoModel(
         name=agent_data["name"],
+        name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description") or "",
         description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
         prompt=agent_data.get("prompt") or "",
@@ -172,6 +175,7 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
         delegatable = mode != "primary"
     return AgentResponse(
         name=agent_data["name"],
+        nameCn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description"),
         descriptionCn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
         prompt=agent_data.get("prompt"),
@@ -224,6 +228,14 @@ def _get_all_tool_names() -> List[str]:
     """Return all registered tool names, initialising ToolRegistry if needed."""
     from flocks.tool.registry import ToolRegistry
     ToolRegistry.init()
+    return [t.name for t in ToolRegistry.list_tools()]
+
+
+async def _get_all_tool_names_async() -> List[str]:
+    """Return all registered tool names without blocking the event loop."""
+    from flocks.tool.registry import ToolRegistry
+
+    await ToolRegistry.init_async()
     return [t.name for t in ToolRegistry.list_tools()]
 
 
@@ -286,7 +298,7 @@ async def list_agents():
         agents = await Agent.list()
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
-        all_tool_names = _get_all_tool_names()
+        all_tool_names = await _get_all_tool_names_async()
         result = []
         for agent in agents:
             if agent.hidden:
@@ -307,7 +319,7 @@ async def get_agent(name: str):
             raise HTTPException(status_code=404, detail=f"Agent {name} not found")
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
-        all_tool_names = _get_all_tool_names()
+        all_tool_names = await _get_all_tool_names_async()
         return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
     except HTTPException:
         raise
@@ -338,6 +350,7 @@ async def get_agent_prompt(name: str):
 class AgentCreateRequest(BaseModel):
     """Request to create a custom agent"""
     name: str = Field(..., description="Agent name")
+    nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
     prompt: str = Field(..., description="System prompt")
@@ -352,6 +365,7 @@ class AgentCreateRequest(BaseModel):
 
 class AgentUpdateRequest(BaseModel):
     """Request to update a custom agent"""
+    nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
     prompt: Optional[str] = Field(None, description="System prompt")
@@ -390,6 +404,7 @@ async def create_agent(req: AgentCreateRequest):
 
         agent_data: Dict[str, Any] = {
             "name": req.name,
+            "name_cn": req.nameCn,
             "description": req.description,
             "description_cn": req.descriptionCn,
             "prompt": req.prompt,
@@ -436,6 +451,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         # YAML agents may also have an overlay entry (skills/tools only) which
         # lacks the "name" key; those should fall through to the YAML path.
         if agent_data is not None and agent_data.get("name"):
+            if req.nameCn is not None:
+                agent_data["name_cn"] = req.nameCn
             if req.description is not None:
                 agent_data["description"] = req.description
             if req.descriptionCn is not None:
@@ -468,6 +485,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         # --- Fall back to YAML plugin agent ---
         if find_yaml_agent(name) is not None:
             updates: Dict[str, Any] = {}
+            if req.nameCn is not None:
+                updates["name_cn"] = req.nameCn
             if req.description is not None:
                 updates["description"] = req.description
             if req.descriptionCn is not None:
@@ -500,6 +519,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
             if agent:
+                if req.nameCn is not None:
+                    agent.name_cn = req.nameCn
                 if req.description is not None:
                     agent.description = req.description
                 if req.descriptionCn is not None:
@@ -519,7 +540,7 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     agent.delegatable = req.delegatable
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
-                all_tool_names = _get_all_tool_names()
+                all_tool_names = await _get_all_tool_names_async()
                 return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
             yaml_data = read_yaml_agent(name) or {}
             return _custom_agent_data_to_response(yaml_data)
@@ -570,7 +591,7 @@ async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest
 
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()
-        all_tool_names = _get_all_tool_names()
+        all_tool_names = await _get_all_tool_names_async()
 
         log.info("agent.delegatable.updated", {"name": name, "source": "override", "delegatable": req.delegatable})
         return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
@@ -715,7 +736,7 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
                 log.info("agent.model.updated", {"name": name, "source": "yaml"})
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
-                all_tool_names = _get_all_tool_names()
+                all_tool_names = await _get_all_tool_names_async()
                 return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
 
             raise HTTPException(status_code=404, detail=f"Custom agent {name} not found")
@@ -805,7 +826,7 @@ async def test_agent(name: str, req: AgentTestRequest = AgentTestRequest()):
 
         # --- 4. init provider / tools ---
         Provider._ensure_initialized()
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
 
         # --- 5. run agent loop in background (publishes to global SSE bus) ---
         from flocks.session.session_loop import SessionLoop, LoopCallbacks

@@ -123,3 +123,55 @@ def test_service_runtime_invoke_builds_real_tool_context(
     )
     run_workflow_mock.assert_called_once()
     assert run_workflow_mock.call_args.kwargs["tool_context"] is tool_context
+
+
+def test_service_runtime_requires_api_key_when_configured(
+    monkeypatch,
+) -> None:
+    init_mock = AsyncMock()
+    shutdown_mock = AsyncMock()
+    manager = SimpleNamespace(shutdown=shutdown_mock)
+    tool_context = ToolContext(session_id="session-1", message_id="message-1", agent="rex")
+    build_context_mock = AsyncMock(return_value=tool_context)
+    run_workflow_mock = Mock(
+        return_value=SimpleNamespace(
+            status="SUCCEEDED",
+            run_id="run-1",
+            outputs={"ok": True},
+            error=None,
+        )
+    )
+
+    monkeypatch.setattr(service_runtime.MCP, "init", init_mock)
+    monkeypatch.setattr(service_runtime, "get_manager", lambda: manager)
+    monkeypatch.setattr(service_runtime, "build_workflow_tool_context", build_context_mock)
+    monkeypatch.setattr(service_runtime, "run_workflow", run_workflow_mock)
+
+    app = service_runtime.create_service_app(
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        workflow_id="wf-1",
+        release_id="rel-1",
+        api_key="secret-key",
+    )
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        missing = client.post("/invoke", json={"inputs": {"ip": "8.8.8.8"}})
+        wrong = client.post(
+            "/invoke",
+            json={"inputs": {"ip": "8.8.8.8"}},
+            headers={"x-api-key": "wrong-key"},
+        )
+        allowed = client.post(
+            "/invoke",
+            json={"inputs": {"ip": "8.8.8.8"}},
+            headers={"x-api-key": "secret-key"},
+        )
+
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+    assert missing.json()["detail"] == "Invalid API key"
+    assert wrong.json()["detail"] == "Invalid API key"
+    assert allowed.status_code == 200
+    assert allowed.json()["status"] == "SUCCEEDED"
+    build_context_mock.assert_awaited_once()
+    run_workflow_mock.assert_called_once()

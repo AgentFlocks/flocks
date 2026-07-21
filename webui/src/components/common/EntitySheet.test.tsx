@@ -1,22 +1,52 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import SessionChat from '@/components/common/SessionChat';
 import EntitySheet from '@/components/common/EntitySheet';
+
+const { mockClientGet, mockClientPost, mockConversationHasMessages, mockUseSessionChat } = vi.hoisted(() => ({
+  mockClientGet: vi.fn(),
+  mockClientPost: vi.fn(),
+  mockConversationHasMessages: { current: true },
+  mockUseSessionChat: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
 
 vi.mock('@/hooks/useSessionChat', () => ({
-  useSessionChat: vi.fn(() => ({
-    sessionId: null,
-    loading: false,
-    error: null,
-    create: vi.fn().mockResolvedValue(undefined),
-    retry: vi.fn().mockResolvedValue(undefined),
-    reset: vi.fn(),
-  })),
+  useSessionChat: mockUseSessionChat,
 }));
+
+vi.mock('@/components/common/SessionChat', async () => {
+  const React = await import('react');
+  return {
+    default: vi.fn((props: any) => {
+      const bottomSlot = typeof props.conversationBottomSlot === 'function'
+        ? props.conversationBottomSlot({
+            sendPrompt: vi.fn(),
+            setInput: vi.fn(),
+            focusInput: vi.fn(),
+            sending: false,
+            streaming: false,
+            sessionId: props.sessionId,
+            hasMessages: mockConversationHasMessages.current,
+          })
+        : props.conversationBottomSlot;
+
+      return React.createElement(
+        'div',
+        {
+          'data-testid': 'session-chat',
+          'data-display': JSON.stringify(props.display ?? null),
+        },
+        bottomSlot ? React.createElement('div', { 'data-testid': 'conversation-bottom-slot' }, bottomSlot) : null,
+      );
+    }),
+    buildInstructionDisplayText: (label: string) => `@@flocks-instruction:${label}`,
+  };
+});
 
 // Provide a t() that returns actual Chinese text so the test assertions match
 // what users see in the browser (mirror of zh-CN/common.json entity section).
@@ -27,7 +57,7 @@ const entityTranslations: Record<string, string> = {
   'entity.defaultCreate': '创建',
   'entity.defaultSave': '保存',
   'entity.tabDetails': '详情',
-  'entity.tabAIEdit': 'AI 编辑',
+  'entity.tabAIEdit': '工作台',
   'entity.tabTest': '测试',
   'entity.rexThinking': 'Agent 正在思考中...',
   'entity.editAndSend': '编辑下方内容，发送给 Agent 查看效果',
@@ -41,6 +71,7 @@ const entityTranslations: Record<string, string> = {
   'entity.cancelButton': '取消',
   'entity.extracting': '提取中...',
   'entity.extractFromRex': '从 Rex 提取配置',
+  'entity.extractFromRexGuideDesc': '将 Rex 输出的配置摘要提取到表单。',
   'entity.switchToForm': '切换到表单',
   'entity.testStartFailed': '测试启动失败',
   'entity.extractFailed': '提取失败，请重试',
@@ -65,12 +96,12 @@ vi.mock('react-i18next', () => ({
 
 vi.mock('@/api/client', () => ({
   default: {
-    post: vi.fn(),
-    get: vi.fn(),
+    post: mockClientPost,
+    get: mockClientGet,
     interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
   },
   apiClient: {
-    get: vi.fn(),
+    get: mockClientGet,
     interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
   },
   getApiBase: () => '',
@@ -95,6 +126,19 @@ describe('EntitySheet', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
+    mockClientGet.mockResolvedValue({ data: {} });
+    mockClientPost.mockResolvedValue({ data: {} });
+    mockConversationHasMessages.current = true;
+    mockUseSessionChat.mockReturnValue({
+      sessionId: null,
+      loading: false,
+      error: null,
+      create: vi.fn().mockResolvedValue(undefined),
+      createAndSend: vi.fn().mockResolvedValue(undefined),
+      retry: vi.fn().mockResolvedValue(undefined),
+      reset: vi.fn(),
+    });
   });
 
   describe('Tab navigation', () => {
@@ -105,7 +149,9 @@ describe('EntitySheet', () => {
         </EntitySheet>,
       );
 
-      expect(screen.getByText('AI 编辑')).toBeInTheDocument();
+      expect(screen.getByText('工作台')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '详情' })).toHaveClass('flex-1');
+      expect(screen.getByRole('button', { name: '工作台' })).toHaveClass('flex-1');
     });
 
     it('should default to Form tab in edit mode', () => {
@@ -130,6 +176,187 @@ describe('EntitySheet', () => {
       await user.click(formTab);
 
       expect(screen.getByText('Form content')).toBeInTheDocument();
+    });
+
+    it('defaults Rex workbench process details collapsed like workflow workbenches', async () => {
+      render(
+        <EntitySheet {...defaultProps} initialTab="rex">
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      expect(await screen.findByTestId('session-chat')).toHaveAttribute(
+        'data-display',
+        JSON.stringify({ collapseIntermediateSteps: true, processGroupsDefaultOpen: false }),
+      );
+      expect(vi.mocked(SessionChat)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          display: {
+            collapseIntermediateSteps: true,
+            processGroupsDefaultOpen: false,
+          },
+        }),
+        undefined,
+      );
+    });
+
+    it('renders extract from Rex as a guide action instead of a standalone footer action', async () => {
+      const user = userEvent.setup();
+      const onExtractFromRex = vi.fn().mockResolvedValue(undefined);
+
+      mockUseSessionChat.mockReturnValue({
+        sessionId: 'rex-session-1',
+        loading: false,
+        error: null,
+        create: vi.fn().mockResolvedValue(undefined),
+        createAndSend: vi.fn().mockResolvedValue(undefined),
+        retry: vi.fn().mockResolvedValue(undefined),
+        reset: vi.fn(),
+      });
+
+      render(
+        <EntitySheet
+          {...defaultProps}
+          initialTab="rex"
+          onExtractFromRex={onExtractFromRex}
+          rexGuideGroups={[{
+            title: '编辑引导',
+            actions: [{
+              label: '检查模型策略',
+              description: '检查当前模型是否合适',
+              prompt: '检查模型策略',
+            }],
+          }]}
+        >
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      expect(screen.getByTestId('conversation-bottom-slot')).toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: '从 Rex 提取配置' })).toHaveLength(1);
+
+      const sessionChatProps = vi.mocked(SessionChat).mock.calls.at(-1)?.[0] as any;
+      expect(sessionChatProps.sessionId).toBe('rex-session-1');
+      expect(sessionChatProps.welcomeContent).toBeTruthy();
+      expect(sessionChatProps.welcomeContent.props.groups[0].actions.map((action: any) => action.label)).toEqual([
+        '从 Rex 提取配置',
+        '检查模型策略',
+      ]);
+
+      await user.click(screen.getByRole('button', { name: '从 Rex 提取配置' }));
+
+      await waitFor(() => {
+        expect(onExtractFromRex).toHaveBeenCalledWith('rex-session-1');
+      });
+    });
+
+    it('hides the bottom guide dock when the Rex conversation has no messages', () => {
+      mockConversationHasMessages.current = false;
+      const onExtractFromRex = vi.fn().mockResolvedValue(undefined);
+
+      mockUseSessionChat.mockReturnValue({
+        sessionId: 'rex-session-1',
+        loading: false,
+        error: null,
+        create: vi.fn().mockResolvedValue(undefined),
+        createAndSend: vi.fn().mockResolvedValue(undefined),
+        retry: vi.fn().mockResolvedValue(undefined),
+        reset: vi.fn(),
+      });
+
+      render(
+        <EntitySheet
+          {...defaultProps}
+          initialTab="rex"
+          onExtractFromRex={onExtractFromRex}
+          rexGuideGroups={[{
+            title: '编辑引导',
+            actions: [{
+              label: '检查模型策略',
+              description: '检查当前模型是否合适',
+              prompt: '检查模型策略',
+            }],
+          }]}
+        >
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      const sessionChatProps = vi.mocked(SessionChat).mock.calls.at(-1)?.[0] as any;
+      expect(sessionChatProps.sessionId).toBe('rex-session-1');
+      expect(sessionChatProps.welcomeContent).toBeTruthy();
+      expect(screen.queryByTestId('conversation-bottom-slot')).not.toBeInTheDocument();
+    });
+
+    it('resumes and stores Rex sessions when a storage key is provided', async () => {
+      window.localStorage.setItem(
+        'flocks:entity-sheet:rex-session:v1:agent-edit:audit-agent',
+        'persisted-session-1',
+      );
+      mockUseSessionChat.mockReturnValue({
+        sessionId: 'persisted-session-1',
+        loading: false,
+        error: null,
+        create: vi.fn().mockResolvedValue(undefined),
+        createAndSend: vi.fn().mockResolvedValue(undefined),
+        retry: vi.fn().mockResolvedValue(undefined),
+        reset: vi.fn(),
+      });
+
+      render(
+        <EntitySheet
+          {...defaultProps}
+          initialTab="rex"
+          rexSessionStorageKey="agent-edit:audit-agent"
+        >
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      await waitFor(() => {
+        expect(mockClientGet).toHaveBeenCalledWith('/api/session/persisted-session-1');
+        expect(mockUseSessionChat).toHaveBeenCalledWith(expect.objectContaining({
+          initialSessionId: 'persisted-session-1',
+        }));
+      });
+
+      await waitFor(() => {
+        expect(window.localStorage.getItem(
+          'flocks:entity-sheet:rex-session:v1:agent-edit:audit-agent',
+        )).toBe('persisted-session-1');
+      });
+    });
+
+    it('clears a stored Rex session when validation reports it missing', async () => {
+      window.localStorage.setItem(
+        'flocks:entity-sheet:rex-session:v1:agent-edit:audit-agent',
+        'missing-session-1',
+      );
+      mockClientGet.mockRejectedValueOnce({ response: { status: 404 } });
+
+      render(
+        <EntitySheet
+          {...defaultProps}
+          initialTab="rex"
+          rexSessionStorageKey="agent-edit:audit-agent"
+        >
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      await waitFor(() => {
+        expect(mockClientGet).toHaveBeenCalledWith('/api/session/missing-session-1');
+        expect(window.localStorage.getItem(
+          'flocks:entity-sheet:rex-session:v1:agent-edit:audit-agent',
+        )).toBeNull();
+      });
+
+      const latestSessionChatProps = vi.mocked(SessionChat).mock.calls.at(-1)?.[0] as any;
+      expect(latestSessionChatProps.sessionId).toBeNull();
+      expect(latestSessionChatProps.welcomeContent).toBeTruthy();
+      expect(mockUseSessionChat).not.toHaveBeenCalledWith(expect.objectContaining({
+        initialSessionId: 'missing-session-1',
+      }));
     });
   });
 

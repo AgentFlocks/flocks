@@ -163,9 +163,13 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
         desc_cn = raw.get("description_cn")
         if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
             desc_cn = raw.get("descriptionCn")
+        name_cn = raw.get("name_cn")
+        if name_cn is None and isinstance(raw.get("nameCn"), str):
+            name_cn = raw.get("nameCn")
 
         return AgentInfo(
             name=name,
+            name_cn=name_cn,
             description=raw.get("description"),
             description_cn=desc_cn,
             mode=raw.get("mode", "subagent"),
@@ -393,9 +397,13 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
     desc_cn = raw.get("description_cn")
     if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
         desc_cn = raw.get("descriptionCn")
+    name_cn = raw.get("name_cn")
+    if name_cn is None and isinstance(raw.get("nameCn"), str):
+        name_cn = raw.get("nameCn")
 
     return AgentInfo(
         name=name,
+        name_cn=name_cn,
         description=raw.get("description"),
         description_cn=desc_cn,
         mode=raw.get("mode", "subagent"),

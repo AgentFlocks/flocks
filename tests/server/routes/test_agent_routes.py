@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import status
@@ -56,6 +57,25 @@ def _isolated_delegatable_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # ===========================================================================
 
 class TestAgentList:
+    @pytest.mark.asyncio
+    async def test_tool_name_lookup_uses_async_registry_init(self, monkeypatch: pytest.MonkeyPatch):
+        from flocks.server.routes import agent as agent_routes
+        from flocks.tool.registry import ToolRegistry
+
+        calls: list[str] = []
+
+        async def fake_init_async(cls):
+            calls.append("init_async")
+
+        monkeypatch.setattr(ToolRegistry, "init_async", classmethod(fake_init_async))
+        monkeypatch.setattr(
+            ToolRegistry,
+            "list_tools",
+            classmethod(lambda cls: [SimpleNamespace(name="demo_tool")]),
+        )
+
+        assert await agent_routes._get_all_tool_names_async() == ["demo_tool"]
+        assert calls == ["init_async"]
 
     @pytest.mark.asyncio
     async def test_list_agents_returns_array(self, client: AsyncClient):

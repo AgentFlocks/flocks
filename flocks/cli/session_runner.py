@@ -12,6 +12,7 @@ Core logic is in session/runner.py
 import asyncio
 import json
 import os
+from functools import cache
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -54,8 +55,7 @@ def _get_cli_callbacks() -> Optional['RunnerCallbacks']:
 
 # Tool display styles
 TOOL_STYLES: Dict[str, tuple] = {
-    "todowrite": ("Todo", "yellow bold"),
-    "todoread": ("Todo", "yellow bold"),
+    "todo": ("Todo", "yellow bold"),
     "bash": ("Bash", "red bold"),
     "edit": ("Edit", "green bold"),
     "write": ("Write", "green bold"),
@@ -254,9 +254,18 @@ class CLISessionRunner:
         continue_session: bool = False,
     ) -> SessionInfo:
         """Get or create session."""
+        resolve_worktree = cache(Project.worktree_for_directory)
+        current_worktree = resolve_worktree(str(self.directory))
+
+        def belongs_to_current_worktree(session: SessionInfo) -> bool:
+            return bool(
+                session.directory
+                and resolve_worktree(session.directory) == current_worktree
+            )
+
         if session_id:
             session = await Session.get(project_id, session_id)
-            if session:
+            if session and belongs_to_current_worktree(session):
                 return session
             self.console.print(f"[yellow]Session {session_id} not found, creating new[/yellow]")
         
@@ -264,7 +273,7 @@ class CLISessionRunner:
             sessions = await Session.list(project_id)
             if sessions:
                 for s in sessions:
-                    if not s.parent_id:
+                    if not s.parent_id and belongs_to_current_worktree(s):
                         return s
         
         return await Session.create(

@@ -8,8 +8,8 @@ Device B.
 Fix: store per-device tool overrides in the ``device_tool_settings`` SQLite
 table (ON DELETE CASCADE cleans up automatically on device removal).  The
 override is checked at ToolRegistry.execute() time, AFTER the shared global
-tool_settings have been applied.  The in-memory ToolInfo.enabled remains a
-global/shared concept; per-device gates live exclusively in the execution path.
+tool_settings have been applied.  A per-device ``enabled=False`` row disables
+only that device; switch-on removes the row and follows global state.
 """
 
 from __future__ import annotations
@@ -319,15 +319,11 @@ class TestDeviceToolIsolationExecution:
         )
 
         # Apply per-device DB setting.
-        from flocks.tool.device.store import (
-            delete_device_tool_setting,
-            set_device_tool_enabled,
-        )
+        from flocks.tool.device.store import set_device_tool_enabled
+
         await _insert_stub_device(device_id, storage_key)
-        if per_device_enabled is False:
-            await set_device_tool_enabled(device_id, tool_name, False)
-        elif per_device_enabled is True:
-            await delete_device_tool_setting(device_id, tool_name)
+        if per_device_enabled is not None:
+            await set_device_tool_enabled(device_id, tool_name, per_device_enabled)
 
         return await ToolRegistry.execute(tool_name, device_id=device_id)
 
@@ -378,15 +374,43 @@ class TestDeviceToolIsolationExecution:
             "share the same storage_key (same plugin version)."
         )
 
-    async def test_global_disable_still_blocks_all_devices(
+    async def test_global_disable_still_blocks_without_per_device_enable(
         self, monkeypatch, db_env, isolated_registry
     ):
-        """Global tool_settings (enabled=False in registry) must still block ALL devices."""
-        tool = _device_tool("sangfor_af_login", "sangfor_af_v8_0_106", enabled=False)
-        monkeypatch.setattr(
-            "flocks.tool.registry.ToolRegistry.get", lambda _name: tool
+        """Global disabled state still blocks when the device has no override."""
+        result = await self._run_tool(
+            monkeypatch,
+            db_env,
+            storage_key="sangfor_af_v8_0_106",
+            device_id=str(uuid.uuid4()),
+            enabled_in_registry=False,
+            per_device_enabled=None,
         )
-
-        result = await ToolRegistry.execute("sangfor_af_login", device_id=str(uuid.uuid4()))
         assert result.success is False
         assert "disabled" in (result.error or "").lower()
+
+    async def test_legacy_per_device_enable_does_not_override_disabled_registry_tool(
+        self, monkeypatch, db_env, isolated_registry
+    ):
+        """Historical enabled=True rows must not bypass global disabled state."""
+        result = await self._run_tool(
+            monkeypatch,
+            db_env,
+            storage_key="sangfor_af_v8_0_106",
+            device_id=str(uuid.uuid4()),
+            enabled_in_registry=False,
+            per_device_enabled=True,
+        )
+        assert result.success is False
+        assert "disabled" in (result.error or "").lower()
+
+    async def test_device_tool_failures_do_not_disable_shared_tool(self):
+        tool = _device_tool("sangfor_af_login", "sangfor_af_v8_0_106", enabled=True)
+
+        for _ in range(ToolRegistry._failure_disable_threshold):
+            disabled = ToolRegistry._record_failure(
+                tool, {"device_id": "dev-a"}, "Request failed: 502 Bad Gateway"
+            )
+
+        assert disabled is False
+        assert tool.info.enabled is True

@@ -1,0 +1,51 @@
+name: "360_fw"
+vendor: "360"
+service_id: "360_fw"
+version: "5.5"
+integration_type: device
+description: >
+  360 FW v5.5 device integration. This plugin adapts the A-series FW RESTful API
+  to Flocks device tools, including system status, objects, policies, network,
+  VPN/BGP, authentication, observability, and documented raw REST calls.
+description_cn: >
+  360 FW v5.5 防火墙设备接入。按 A 系列 FW RESTful API 文档适配，支持系统状态、
+  对象、策略、网络、VPN/BGP、认证、安全对象、监控观测以及官方 REST 接口调用。
+auth:
+  type: custom
+  flow: login_then_authorization_header
+  login_path: /API/login
+credential_fields:
+  - key: base_url
+    label: 设备 API 地址
+    storage: config
+    config_key: base_url
+    input_type: url
+    default: "https://YOUR_360_FW_HOST/API"
+    required: true
+  - key: username
+    label: 用户名
+    storage: secret
+    config_key: username
+    secret_id: 360_fw_v5_5_username
+    input_type: text
+    required: true
+  - key: password
+    label: 密码
+    storage: secret
+    config_key: password
+    secret_id: 360_fw_v5_5_password
+    input_type: password
+    required: true
+defaults:
+  base_url: "https://YOUR_360_FW_HOST/API"
+  timeout: 30
+  category: custom
+  product_version: "5.5"
+  fw_software_version: "V5.5"
+  version_software: "V5.5R605P000B20240625"
+  verify_ssl: false
+notes: |
+  登录使用 POST /API/login，请求体字段为 user/pwd。成功后将响应顶层
+  authorization 字段作为后续请求的 Authorization header 原样传入，不能添加
+  Bearer 前缀。变更类工具通过 Flocks 官方 requires_confirmation 机制触发确认；
+  分析文档明确跳过的高风险接口由 handler 本地拒绝。

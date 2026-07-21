@@ -258,6 +258,16 @@ class SystemPrompt:
     ) -> List[str]:
         """Build stable workspace metadata that should stay cache-friendly."""
         working_dir = directory or os.getcwd()
+        source_code_dir = str(
+            Path(
+                os.getenv(
+                    "FLOCKS_REPO_ROOT",
+                    str(Path(__file__).resolve().parents[2]),
+                )
+            )
+            .expanduser()
+            .resolve()
+        )
         is_git = vcs == "git"
 
         from flocks.workspace.manager import WorkspaceManager
@@ -267,7 +277,8 @@ class SystemPrompt:
         env_info = [
             "Here is some useful information about the environment you are running in:",
             "<env>",
-            f"  Source code directory: {working_dir}",
+            f"  flocks source code directory: {source_code_dir}",
+            f"  current working directory: {working_dir}",
             f"  Workspace outputs directory: {outputs_dir}",
             f"  Is directory a git repo: {'yes' if is_git else 'no'}",
             f"  Platform: {platform.system().lower()}",
@@ -993,6 +1004,70 @@ class SessionPrompt:
         print("=== end system_prompt ===\n", file=sys.stderr)
 
     @classmethod
+    def _build_minimal_environment(cls, session_directory: Optional[str]) -> str:
+        """Build the small runtime environment block used by system subagents."""
+        working_dir = session_directory or os.getcwd()
+        today = datetime.now().strftime("%A %b %d, %Y")
+        return "\n".join([
+            "## Environment",
+            f"Current working directory: {working_dir}",
+            f"Platform: {platform.system().lower()}",
+            f"Today's date: {today}",
+        ])
+
+    @classmethod
+    async def _is_builtin_system_subagent_session(
+        cls,
+        *,
+        session_id: str,
+        agent_name: str,
+    ) -> bool:
+        """Return true for built-in system subagents running as child sessions."""
+        try:
+            from flocks.agent.registry import Agent
+            from flocks.session.session import Session
+
+            agent = await Agent.get(agent_name)
+            if not agent:
+                return False
+            if agent.mode != "subagent" or "system" not in (agent.tags or []):
+                return False
+
+            builtin_agents_dir = Path(__file__).resolve().parents[1] / "agent" / "agents"
+            name_candidates = {
+                agent.name,
+                agent.name.replace("-", "_"),
+                agent_name,
+                agent_name.replace("-", "_"),
+            }
+            if not any((builtin_agents_dir / name / "agent.yaml").exists() for name in name_candidates):
+                return False
+
+            session = await Session.get_by_id(session_id)
+            return bool(session and session.parent_id)
+        except Exception as exc:
+            log.debug("prompt.subagent_minimal_check_failed", {
+                "session_id": session_id,
+                "agent_name": agent_name,
+                "error": str(exc),
+            })
+            return False
+
+    @classmethod
+    async def _build_subagent_minimal_prompts(
+        cls,
+        *,
+        session_directory: Optional[str],
+        agent_prompt: Optional[str],
+    ) -> List[str]:
+        """Build minimal system prompts for built-in system subagents."""
+        prompts = [
+            cls._normalize_prompt_text(agent_prompt),
+            cls._build_minimal_environment(session_directory),
+        ]
+        return [prompt for prompt in prompts if prompt]
+
+    @classmethod
     async def build_system_prompts(
         cls,
         *,
@@ -1021,8 +1096,25 @@ class SessionPrompt:
         construction below so this method reads as an ordered list of prompt
         layers.
         """
-        normalized_tool_names = tuple(sorted(prompt_tool_names))
         vcs = "git" if session_directory else None
+        if await cls._is_builtin_system_subagent_session(
+            session_id=session_id,
+            agent_name=agent_name,
+        ):
+            prompts = await cls._build_subagent_minimal_prompts(
+                session_directory=session_directory,
+                agent_prompt=agent_prompt,
+            )
+            cls._print_system_prompts_for_debug(
+                session_id=session_id,
+                agent_name=agent_name,
+                provider_id=provider_id,
+                model_id=model_id,
+                prompts=prompts,
+            )
+            return prompts
+
+        normalized_tool_names = tuple(sorted(prompt_tool_names))
         runtime_day = datetime.now().strftime("%Y-%m-%d")
         custom_signature = SystemPrompt.custom_signature(directory=session_directory)
         memory_guidance = cls._build_memory_guidance_prompt(

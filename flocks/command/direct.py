@@ -6,12 +6,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from flocks.agent.agent import AvailableAgent
 from flocks.agent.registry import Agent
 from flocks.command.command import Command, CommandInfo, CommandSurface
 from flocks.command.help import format_help
+from flocks.session.goal import GoalManager
 from flocks.skill.skill import Skill
 from flocks.tool.registry import ToolRegistry
 
@@ -132,7 +133,9 @@ async def run_direct_command(
     name: str,
     *,
     args: str = "",
+    args_json: Optional[Any] = None,
     surface: Optional[CommandSurface] = None,
+    session_id: Optional[str] = None,
 ) -> DirectCommandResult:
     """Execute a direct command and return its result."""
     resolved = Command.resolve(name)
@@ -141,12 +144,34 @@ async def run_direct_command(
 
     name = resolved.name
     args = (args or "").strip()
+    _ = args_json
 
     if name == "help":
         return DirectCommandResult(handled=True, text=format_help(surface=surface))
 
     if name == "clear":
         return DirectCommandResult(handled=True, clear_history=True)
+
+    if name == "goal":
+        if not session_id:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /goal requires an active session.",
+            )
+
+        try:
+            state = await GoalManager.set_goal(session_id, args)
+        except ValueError:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /goal <objective>",
+            )
+        return DirectCommandResult(
+            handled=True,
+            prompt=GoalManager.goal_prompt(state.objective),
+        )
 
     if name == "tools":
         if not args or args == "list":

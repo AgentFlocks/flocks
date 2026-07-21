@@ -92,6 +92,132 @@
     "testDetail": "Test / Details"
   },
 
+  "create": {
+    "mcp": {
+      "emptyStateTitle": "No setup conversation yet",
+      "guidePanelTitle": "Rex Assisted Setup",
+      "guidePanelDesc": "Choose a guide or case. Rex will confirm service type, transport, credentials, and start command before generating a testable MCP config.",
+      "guideSectionTitle": "Setup Guides",
+      "caseSectionTitle": "Setup Cases",
+      "guideActions": [
+        {
+          "label": "How to Add MCP",
+          "description": "Start from service name, stdio/SSE, command args, auth, and connectivity test.",
+          "prompt": "Please guide me through adding an MCP service. Do not write config yet. Use the question tool to ask one most important question at a time and help me confirm service name, transport (stdio or remote HTTP/SSE), start command or URL, auth method, credential storage, exposed tools, and connectivity test steps. After I confirm, generate the config and test it."
+        },
+        {
+          "label": "Local Stdio Service",
+          "description": "For MCP servers started by npx, uvx, python, or other local commands.",
+          "prompt": "Please help me add a local stdio MCP service. First confirm service name, start command, each command argument, required environment variables or secrets, working directory, and test method. Do not write config until I confirm."
+        },
+        {
+          "label": "Remote SSE/HTTP",
+          "description": "For deployed remote MCP services; confirm URL, transport, and auth.",
+          "prompt": "Please help me add a remote MCP service. First confirm service URL, transport (auto/SSE/Streamable HTTP), auth method, headers or token, whether secret management is needed, and health-check method. Do not write config until I confirm."
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "GitHub MCP",
+          "description": "Add GitHub repository, issue, and pull request tools.",
+          "prompt": "I want to add a GitHub MCP service for repository, issue, and pull request operations. Please guide me through service name, start command, GITHUB_TOKEN secret storage, permission scope, and test steps."
+        },
+        {
+          "label": "Filesystem MCP",
+          "description": "Add file access for one restricted directory.",
+          "prompt": "I want to add a Filesystem MCP service that only accesses a specified directory. Please guide me through directory scope, read/write permissions, start arguments, safety limits, and test steps."
+        },
+        {
+          "label": "Remote Business MCP",
+          "description": "Add an internally deployed remote MCP service.",
+          "prompt": "I want to add an internal remote MCP service. Please guide me through URL, auth method, credential management, network reachability, tool-list inspection, and pre-production validation."
+        }
+      ]
+    },
+    "api": {
+      "emptyStateTitle": "No setup conversation yet",
+      "guidePanelTitle": "Rex Assisted Setup",
+      "guidePanelDesc": "Choose a guide or case. Rex will load the tool-builder skill, confirm API docs, auth, and output shape, then generate a YAML tool.",
+      "guideSectionTitle": "Setup Guides",
+      "caseSectionTitle": "Setup Cases",
+      "guideActions": [
+        {
+          "label": "How to Add API",
+          "description": "Start from Base URL, auth, endpoints, inputs, outputs, and test sample.",
+          "prompt": "Please follow the .flocks/plugins/skills/tool-builder skill to guide me through adding an external API as Flocks tools. Do not write files yet. Use the question tool to ask one most important question at a time and confirm API name, Base URL, auth method, core endpoints, input parameters, output fields, error handling, secret storage, and smoke test. After I confirm, generate YAML tools under ~/.flocks/plugins/tools/api/."
+        },
+        {
+          "label": "Parse API Docs",
+          "description": "Turn docs, sample requests, and responses into a tool definition draft.",
+          "prompt": "Please help me parse the API documentation into tool creation requirements. First ask for the docs URL or content, then extract endpoint paths, methods, auth, request parameters, response fields, pagination/rate limits, error codes, and test samples. Do not write files until I confirm."
+        },
+        {
+          "label": "Auth & Secrets",
+          "description": "Confirm API Key, Bearer, Header, Query, and credential storage.",
+          "prompt": "Please help me design auth and secret management for the API tool. First confirm auth type, secret name, whether {secret:...} is supported, whether default environment variables are needed, failure messages, and test method. Do not hardcode real credentials in code or config."
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "Threat Intel API",
+          "description": "Add IOC lookup, reputation scoring, or intelligence summary endpoints.",
+          "prompt": "I want to add a threat intelligence API for IP, domain, URL, or hash reputation lookup. Please follow the tool-builder skill to guide me through API docs, auth method, input/output fields, error handling, and smoke test."
+        },
+        {
+          "label": "Alert Platform API",
+          "description": "Add alert query, detail lookup, or status update endpoints.",
+          "prompt": "I want to add an alert platform API for listing alerts, fetching details, or updating handling status. Please follow the tool-builder skill to guide me through endpoint scope, pagination, auth, output structure, and test data."
+        },
+        {
+          "label": "Asset Query API",
+          "description": "Add asset, host, vulnerability, or tag query endpoints.",
+          "prompt": "I want to add an asset query API for looking up assets by IP, hostname, or tags. Please follow the tool-builder skill to guide me through API docs, parameters, response fields, secret management, and validation."
+        }
+      ]
+    },
+    "local": {
+      "emptyStateTitle": "No creation conversation yet",
+      "guidePanelTitle": "Rex Assisted Creation",
+      "guidePanelDesc": "Choose a guide or case. Rex will load the tool-builder skill, confirm inputs, outputs, implementation, and smoke tests, then generate a local Python tool.",
+      "guideSectionTitle": "Creation Guides",
+      "caseSectionTitle": "Creation Cases",
+      "guideActions": [
+        {
+          "label": "How to Create Tool",
+          "description": "Start from tool name, parameter schema, return format, permissions, and test sample.",
+          "prompt": "Please follow the .flocks/plugins/skills/tool-builder skill to guide me through creating a Flocks local Python tool. Do not write files yet. Use the question tool to ask one most important question at a time and confirm tool name, function, input parameter schema, return format, whether it needs file/command/network access, error handling, and smoke test. After I confirm, generate the tool under ~/.flocks/plugins/tools/python/."
+        },
+        {
+          "label": "Design IO",
+          "description": "Turn a natural-language need into clear parameters, types, and return JSON.",
+          "prompt": "Please help me design the local tool input and output. First confirm user, input fields, field types, required fields, defaults, return JSON structure, error object, and one minimal test sample. Do not write files until I confirm."
+        },
+        {
+          "label": "Plan Tests",
+          "description": "Generate minimal, boundary, and failure samples.",
+          "prompt": "Please use the tool-builder skill to help me plan test samples for the local tool. First confirm normal input, boundary input, invalid input, expected output, and execution method. Show a test plan before writing files."
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "Text Parser Tool",
+          "description": "Extract structured fields from logs, alerts, or reports.",
+          "prompt": "I want to create a local text parser tool that extracts structured fields from logs, alert text, or reports. Please follow the tool-builder skill to guide me through input format, field schema, parsing rules, and test samples."
+        },
+        {
+          "label": "JSON Transform Tool",
+          "description": "Clean, rename, or merge JSON fields.",
+          "prompt": "I want to create a local JSON transformation tool for cleaning, renaming, merging, or normalizing JSON fields. Please follow the tool-builder skill to guide me through input/output schema, transformation rules, and test samples."
+        },
+        {
+          "label": "Report Builder Tool",
+          "description": "Generate Markdown or summary reports from structured data.",
+          "prompt": "I want to create a local report builder tool that converts structured analysis results into a Markdown summary report. Please follow the tool-builder skill to guide me through input fields, report template, output format, and smoke test."
+        }
+      ]
+    }
+  },
+
   "addMCP": {
     "title": "Add MCP Service",
     "subtitle": "Configure and add an MCP service via form or chat",
@@ -436,6 +562,9 @@
 
   "alert": {
     "refreshFailed": "Refresh failed: {{error}}",
+    "refreshFailedTitle": "Tool refresh failed",
+    "refreshPartialTitle": "Tool refresh completed with warnings",
+    "refreshPartialDefault": "Some refresh stages reported errors. Available tools were updated.",
     "mcpAddSuccess": "MCP service added successfully",
     "addFailed": "Add failed: {{error}}",
     "mcpNameRequired": "Please enter MCP service name",
@@ -447,6 +576,7 @@
     "confirmDeleteCred": "Are you sure you want to delete credentials?",
     "credDeleted": "Credentials deleted",
     "deleteFailed": "Delete failed: {{error}}",
+    "deletePartialTitle": "Tool deleted with cleanup warnings",
     "unknownError": "Unknown error",
     "fillAllRequired": "Please fill in all required fields",
     "configFailed": "Configuration failed: {{error}}",
@@ -494,9 +624,9 @@
     "toolCountLabel": "Tools",
     "resourceCountLabel": "Resources",
     "generateIntro": "Generate tools via AI conversation",
-    "generateDesc": "Switch to the \"AI Edit\" tab, describe the tool you need, Rex will auto-generate Python tool code and complete integration.",
+    "generateDesc": "Switch to the \"Workbench\" tab, describe the tool you need, Rex will auto-generate Python tool code and complete integration.",
     "doneLabel": "Done",
-    "mcpHintDesc": "Switch to the \"AI Edit\" tab, tell Rex what MCP service you want to connect, and it will automatically complete the configuration.",
+    "mcpHintDesc": "Switch to the \"Workbench\" tab, tell Rex what MCP service you want to connect, and it will automatically complete the configuration.",
     "connSuccess": "Connected",
     "connFailed": "Connection Failed",
     "addFailedTitle": "Add Failed"

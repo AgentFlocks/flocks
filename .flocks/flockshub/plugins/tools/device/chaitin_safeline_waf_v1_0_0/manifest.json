@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "chaitin_safeline_waf_v1_0_0",
+  "type": "device",
+  "name": "Chaitin SafeLine WAF",
+  "description": "Chaitin SafeLine WAF OpenAPI integration.",
+  "descriptionCn": "长亭雷池 WAF OpenAPI 接入。",
+  "version": "1.0.1",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "category": "integration",
+  "tags": [
+    "waf",
+    "web-security",
+    "integration"
+  ],
+  "useCases": [
+    "integration",
+    "threat-detection",
+    "log-analysis"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "device-integration",
+    "rest-api"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/tools/device/chaitin_safeline_waf_v1_0_0"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": true,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "_provider.yaml",
+    "_test.yaml",
+    "chaitin_safeline_waf.handler.py",
+    "chaitin_safeline_waf_api_catalog.json",
+    "chaitin_safeline_waf_system.yaml",
+    "chaitin_safeline_waf_policy.yaml",
+    "chaitin_safeline_waf_site.yaml",
+    "chaitin_safeline_waf_logs.yaml",
+    "chaitin_safeline_waf_api_readonly.yaml",
+    "chaitin_safeline_waf_api_mutation.yaml"
+  ],
+  "checksums": {}
+}

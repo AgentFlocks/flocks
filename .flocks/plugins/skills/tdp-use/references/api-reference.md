@@ -9,10 +9,11 @@
 | 看安全态势、趋势、TOP 统计 | `tdp_dashboard_status` | `status` / `security` / `threat_event` / `alert_level_trend` | 通常可空参；列表类 action 可补 `machine_type`、`severity`、分页参数 |
 | 查原始告警日志 | `tdp_log_search` | `search` | `time_from`、`time_to`、`sql` |
 | 查字段聚合统计 | `tdp_log_search` | `terms` | `time_from`、`time_to`、`term` |
-| 查威胁事件列表 | `tdp_incident_list` | `search` | `time_from`、`time_to`；可补 `severity`、`phase`、`result`、`keyword`、分页参数 |
-| 看事件时间线 / 结果分布 / 攻击者明细 | `tdp_incident_list` | `timeline` / `result_distribution` / `attacker_ip_detail` | 通常先要 `incident_id` |
-| 查外部攻击严重性分布 | `tdp_threat_inbound_attack` | 默认 | `time_from`、`time_to`；可补 `severity`、`result_list`、`keyword` |
-| 查告警主机汇总 / 主机下事件 | `tdp_host_threat_list` | `summary` / `events` | `summary` 可补 `severity`、`direction`、`threat_type`、`keyword`；`events` 至少要 `asset_machine` |
+| 查智能聚合事件 / 聚合攻击事件 | `tdp_threat_intelligent_aggregation` | `incident_search` | `time_from`、`time_to`；可补 `severity`、`phase`、`result`、`keyword`、分页参数 |
+| 查威胁事件列表 / 威胁实时监控列表 | `tdp_threat_monitor_list` | 默认 | 时间范围不超过 24 小时；可补 `sql`、`net_data_type`、`assets_group`、分页参数 |
+| 看事件时间线 / 结果分布 / 攻击者明细 | `tdp_threat_intelligent_aggregation` | `attack_timeline` / `attack_result_distribution` / `attacker_ip_detail` | 通常先要 `incident_id` |
+| 查外部攻击严重性分布 | `tdp_threat_external_attack` | 默认 | `time_from`、`time_to`；可补 `severity`、`result_list`、`keyword` |
+| 查告警主机列表 / 指定主机威胁列表 | `tdp_threat_alert_host` | `alert_host_list` / `host_threat_list` | `alert_host_list` 可补 `severity`、`direction`、`threat_type`、`keyword`；`host_threat_list` 至少要 `asset_machine` |
 | 查脆弱性 | `tdp_vulnerability_list` | 默认 | 常见补 `time_from`、`time_to`、`severity`、`status`、`keyword`、分页参数 |
 | 查弱口令 | `tdp_login_weakpwd_list` | 默认 | 常见补 `time_from`、`time_to`、`data`、`result`、`app_class`、`keyword` |
 | 查服务 / 主机 / 框架资产 | `tdp_machine_asset_list` | `service_list` / `host_asset_list` / `web_app_framework_list` | 可空参；常见补 `service`、`service_class`、`is_public`、`keyword` |
@@ -24,7 +25,7 @@
 | 查 MDR 研判列表 / 指标 | `tdp_mdr_alert_list` | `list` / `indicator` | 常见补时间范围、`section_list`、`threat_severity`、`judge_result_status`、`keyword` |
 | 查系统状态 | `tdp_system_status` | `all` / `core` / `database` 等 | 通常空参 |
 | 下载 PCAP / 恶意文件 | `tdp_pcap_download` / `tdp_file_download` | 默认 | `alert_id + occ_time` 或 `hash` |
-| 管理平台配置 / 策略 | `tdp_platform_config` / `tdp_policy_settings` | 多 action | 写操作，必须先获用户确认 |
+| 管理平台配置 / 自定义规则 / 策略 | `tdp_platform_config` / `tdp_policy_settings` | 多 action | 写操作，必须先获用户确认 |
 
 ## 时间参数注意事项（重点）
 
@@ -89,8 +90,8 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 | `tdp_log_search` | `size` | `page_size`、`cur_page` | `/api/v1/log/searchBySql` 只支持返回数量控制，不支持分页参数 |
 | `tdp_log_search.sql` | 过滤表达式 | `SELECT * FROM alert` | TDP 只接受类似 WHERE 条件的表达式，不接受完整 SQL 查询 |
 | `tdp_log_search(action="terms")` | 可只传 `term` | 强制补 `sql` | `/api/v1/log/terms` 的 `sql` 是可选过滤条件 |
-| `tdp_threat_inbound_attack` | `result_list` | `result` | API 文档字段为 `condition.result_list` |
-| `tdp_incident_list` | `result` | `result_list` | 事件搜索 API 文档字段为 `condition.result` |
+| `tdp_threat_external_attack` | `result_list` | `result` | API 文档字段为 `condition.result_list` |
+| `tdp_threat_intelligent_aggregation` | `result` | `result_list` | 事件搜索 API 文档字段为 `condition.result` |
 
 
 示例：
@@ -108,17 +109,21 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 
 | 用户实际要查什么 | 推荐 tool | 说明 |
 |---|---|---|
-| 威胁事件 / 攻击事件 / 事件总览 | `tdp_incident_list` / `tdp_threat_inbound_attack` | 事件维度，平台已聚合 |
+| 智能聚合事件 / 聚合攻击事件 / 攻击过程 | `tdp_threat_intelligent_aggregation` | 智能聚合维度，一条事件可关联多条告警 |
+| 外部攻击严重性分布 | `tdp_threat_external_attack` | 外部攻击统计维度 |
+| 威胁事件列表 / 实时监控 / 威胁监控列表 | `tdp_threat_monitor_list` | 威胁实时监控列表，单次时间范围不得超过 24 小时 |
 | 告警 / 告警日志 / 原始检测记录 | `tdp_log_search` | 告警维度，一条就是一条原始记录 |
-| 告警主机 / 受害主机 / 主机下事件 | `tdp_host_threat_list` | 主机维度，按主机聚合 |
+| 告警主机 / 受害主机 / 主机下事件 | `tdp_threat_alert_host` | 主机维度，按主机聚合 |
 | 漏洞、弱口令、登录入口、API 风险等 | 对应资产或风险类 tool | 资产/风险维度，不要混进日志查询 |
 
 建议按下面的用词来路由：
 
 - 提到“告警”“最近一小时告警”“查某 IP 的告警”时，默认优先 `tdp_log_search`
-- 提到“威胁事件”“攻击事件”“看下最近有什么事件”时，优先 `tdp_incident_list`
-- 提到“哪些主机被打了”“告警主机”“受害主机”时，优先 `tdp_host_threat_list`
-- 用户没说清时，默认把“明细”理解为告警日志，把“总览/聚合”理解为事件
+- 明确提到“智能聚合”“聚合攻击事件”“智能聚合事件”“攻击过程”时，优先 `tdp_threat_intelligent_aggregation`
+- 提到“外部攻击”“外部攻击严重性分布”时，优先 `tdp_threat_external_attack`
+- 提到“威胁事件列表”“实时监控”“威胁实时监控列表”“威胁监控列表”时，优先 `tdp_threat_monitor_list`
+- 提到“哪些主机被打了”“告警主机”“受害主机”时，优先 `tdp_threat_alert_host`
+- 用户没说清时，默认把“事件列表/实时监控”理解为威胁监控列表，把“总览/聚合”理解为智能聚合事件
 
 ## 高频场景
 
@@ -276,18 +281,18 @@ machine = '192.168.1.100'
 - 统计某时间段内最多的威胁名称
 - 聚合源 IP、目的 IP、URL、威胁类型
 
-### 4. 威胁事件列表
+### 4. 智能聚合事件查询
 
 推荐：
 
-- `tdp_incident_list`
-- `action=search`
+- `tdp_threat_intelligent_aggregation`
+- `action=incident_search`
 
 最小可运行参数集：
 
 ```json
 {
-  "action": "search",
+  "action": "incident_search",
   "time_from": 1741536000,
   "time_to": 1741622400,
   "severity": [3, 4],
@@ -305,12 +310,12 @@ machine = '192.168.1.100'
 
 高频 action：
 
-- `search`: 事件列表
+- `incident_search`: 查询智能聚合后的攻击事件列表；不是“威胁-实时监控”中的威胁事件列表
 - `top_attacked_entity`: 受攻击实体
-- `result`: 事件研判结果
-- `timeline`: 时间线
-- `alert_search`: 事件下告警列表
-- `result_distribution`: 结果分布
+- `attack_success`: 攻击成功统计
+- `attack_timeline`: 攻击过程时间线
+- `attack_alert_list`: 攻击过程告警详情
+- `attack_result_distribution`: 成功、失败、尝试的数量分布
 - `attacker_ip_list`: 攻击者 IP 列表
 - `attacker_ip_detail`: 攻击者 IP 详情
 
@@ -318,14 +323,14 @@ machine = '192.168.1.100'
 
 ```json
 {
-  "action": "timeline",
+  "action": "attack_timeline",
   "incident_id": "b62899499fec914d6246137eed3b6ec4-1777334454",
   "time_from": 1777305600,
   "time_to": 1777391999
 }
 ```
 
-`timeline` 会默认传 `show_attack=true`。如果 TDP 仍返回 `show_attack is false`，说明该事件当前不支持攻击过程展开，改用 `result`、`alert_search` 或回退浏览器查看事件详情。
+`attack_timeline` 会默认传 `show_attack=true`。如果 TDP 仍返回 `show_attack is false`，说明该事件当前不支持攻击过程展开，改用 `attack_success`、`attack_alert_list` 或回退浏览器查看事件详情。
 
 返回结果重点关注：
 
@@ -354,13 +359,13 @@ machine = '192.168.1.100'
 }
 ```
 
-注意：这里的攻击结果字段是 `result_list`，来自 API 文档的 `condition.result_list`；不要使用事件列表里的 `result` 参数名。
+注意：这里的攻击结果字段是 `result_list`，来自 API 文档的 `condition.result_list`；不要使用智能聚合事件查询里的 `result` 参数名。
 
 告警主机汇总：
 
 ```json
 {
-  "action": "summary",
+  "action": "alert_host_list",
   "time_from": 1741536000,
   "time_to": 1741622400,
   "severity": [3, 4],
@@ -371,13 +376,13 @@ machine = '192.168.1.100'
 }
 ```
 
-`summary` 默认覆盖全部常见威胁类型，且 `threat_characters` 默认不限制。用户明确要“失陷主机”时再传 `threat_characters=["is_compromised"]`。
+`alert_host_list` 默认覆盖全部常见威胁类型，且 `threat_characters` 默认不限制。用户明确要“失陷主机”时再传 `threat_characters=["is_compromised"]`。
 
 某主机下事件：
 
 ```json
 {
-  "action": "events",
+  "action": "host_threat_list",
   "asset_machine": "asset-123",
   "time_from": 1741536000,
   "time_to": 1741622400
@@ -647,6 +652,22 @@ PCAP 下载：
 ```
 
 处置日志可直接走 `tdp_platform_config(action="disposal_log_list")`；handler 会补默认时间范围、分页和 `cts` 倒序。
+
+查询自定义规则：
+
+```json
+{
+  "action": "custom_rule_list",
+  "custom_rule_status": [1],
+  "custom_rule_keyword": "SQL",
+  "cur_page": 1,
+  "page_size": 20
+}
+```
+
+新增、编辑、删除自定义规则分别使用 `custom_rule_add`、`custom_rule_update`、
+`custom_rule_delete`。这些动作会修改检测策略，必须先获得用户明确授权；新增和编辑通过
+`custom_rule` 传完整规则对象，删除通过 `custom_rule_ids` 传规则 `suuid` 列表。
 
 ## 高风险与低风险
 

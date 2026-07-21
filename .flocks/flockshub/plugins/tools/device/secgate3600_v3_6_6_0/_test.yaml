@@ -1,0 +1,65 @@
+schema_version: 1
+provider: secgate3600_api
+
+connectivity:
+  tool: secgate3600_system
+  params:
+    action: check_login
+
+fixtures:
+  secgate3600_system:
+    - label: Check login
+      tags: [smoke, auth]
+      params:
+        action: check_login
+      assert:
+        success: true
+    - label: Get system resource
+      tags: [smoke, system]
+      params:
+        action: system_resource
+      assert:
+        success: true
+  secgate3600_dashboard:
+    - label: Get last-day notice count
+      tags: [smoke, dashboard]
+      params:
+        action: notice_num_day
+      assert:
+        success: true
+  secgate3600_network:
+    - label: List physical interfaces
+      tags: [smoke, network]
+      params:
+        action: interface_list
+      assert:
+        success: true
+  secgate3600_policy:
+    - label: List security policies
+      tags: [smoke, policy]
+      params:
+        action: security_policy_list
+      assert:
+        success: true
+  secgate3600_api_readonly:
+    - label: Show API catalog
+      tags: [smoke, api]
+      params:
+        action: api_catalog
+      assert:
+        success: true
+    - label: Raw readonly system resource
+      tags: [api]
+      params:
+        action: rest_call_readonly
+        module: dashboard
+        function: get_system_resource
+      assert:
+        success: true
+  secgate3600_api_mutation:
+    - label: Show API catalog before confirmed mutation
+      tags: [api, mutation]
+      params:
+        action: api_catalog
+      assert:
+        success: true

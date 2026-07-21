@@ -8,10 +8,13 @@ from pydantic import BaseModel
 from flocks.updater.deploy import DeployMode
 
 UpdateStage = Literal[
+    "checking",
+    "reporting",
     "fetching",
     "backing_up",
     "applying",
     "syncing",
+    "downgrading",
     "restarting",
     "done",
     "error",
@@ -21,6 +24,12 @@ UpdateStage = Literal[
 class VersionInfo(BaseModel):
     current_version: str
     latest_version: str | None = None
+    current_core_version: str | None = None
+    latest_core_version: str | None = None
+    current_bundle_version: str | None = None
+    latest_bundle_version: str | None = None
+    current_pro_component_version: str | None = None
+    latest_pro_component_version: str | None = None
     edition: Literal["flocks", "flockspro"] = "flocks"
     has_update: bool = False
     release_notes: str | None = None

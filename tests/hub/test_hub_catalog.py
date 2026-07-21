@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,8 @@ from fastapi.testclient import TestClient
 from flocks.hub import local
 from flocks.hub.catalog import list_catalog, load_manifest, load_taxonomy
 from flocks.hub.files import file_tree, read_file_content
-from flocks.hub.installer import install_plugin, uninstall_plugin
+from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
+from flocks.plugin.loader import PluginLoader
 
 
 @pytest.fixture()
@@ -33,8 +35,35 @@ def isolated_hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     Config._global_config = None
     Config._cached_config = None
     Skill.clear_cache()
-    yield {"home": home, "config_dir": config_dir, "data_dir": data_dir}
+    yield {"home": home, "config_dir": config_dir, "data_dir": data_dir, "project_dir": project_dir}
     Skill.clear_cache()
+
+
+def _patch_webui_bundle_build(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from flocks.contracts.webui.models import WebUIPageBuildMeta
+
+    built_pages: list[str] = []
+
+    def fake_build(self, page_id: str):
+        page_dir = self._store.writable_page_dir(page_id)
+        bundle_path = page_dir / "dist" / "page.js"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text(f"// built during hub install: {page_id}\n", encoding="utf-8")
+        meta = WebUIPageBuildMeta(
+            hash=f"fake-{page_id}",
+            builtAt=1,
+            status="ready",
+            error=None,
+            runtime="webui_page",
+            runtimeVersion=1,
+            sdkImport="@flocks/webui-contract-sdk",
+        )
+        self._store.write_build_meta(page_id, meta)
+        built_pages.append(page_id)
+        return meta
+
+    monkeypatch.setattr("flocks.contracts.webui.builder.WebUIPageBuilder.build", fake_build)
+    return built_pages
 
 
 def test_bundled_hub_catalog_loads():
@@ -43,7 +72,202 @@ def test_bundled_hub_catalog_loads():
     # ``device`` is a first-class Hub type alongside skill/agent/tool/workflow:
     # entries with ``integration_type: device`` in ``_provider.yaml`` surface
     # under ``type=device`` instead of ``type=tool``.
-    assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "device", "workflow"}
+    assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "device", "workflow", "webui", "component"}
+
+
+def test_hub_catalog_snapshot_reuses_manifest_parse_for_counts(monkeypatch: pytest.MonkeyPatch):
+    from flocks.hub import catalog as catalog_module
+
+    catalog_module.clear_catalog_caches()
+    original_read_yaml = catalog_module._read_yaml
+    calls = 0
+
+    def counted_read_yaml(path: Path):
+        nonlocal calls
+        calls += 1
+        return original_read_yaml(path)
+
+    monkeypatch.setattr(catalog_module, "_read_yaml", counted_read_yaml)
+
+    assert catalog_module.list_catalog()
+    initial_calls = calls
+    assert initial_calls > 0
+
+    catalog_module.category_counts()
+    catalog_module.list_catalog(plugin_type="device")
+
+    assert calls == initial_calls
+
+
+def test_workflow_catalog_exposes_chinese_names():
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="workflow")}
+
+    assert entries["stream_alert_denoise"].nameCn == "流式HTTP降噪工作流"
+    assert entries["stream_alert_triage"].nameCn == "HTTP研判工作流"
+    assert entries["loop_host_forensics_fast"].nameCn == "批量主机快速巡检工作流"
+    assert entries["tdp_alert_triage"].nameCn == "TDP 告警调查工作流"
+
+
+def test_soc_workspace_component_exposes_chinese_name():
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="component")}
+
+    assert entries["soc-workspace"].nameCn == "SOC 工作区场景套件"
+
+
+async def test_chaitin_safeline_repair_release_replaces_broken_handler(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    plugin_id = "chaitin_safeline_waf_v1_0_0"
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "device"
+        / plugin_id
+    )
+    install_dir.mkdir(parents=True)
+    legacy_handler = install_dir / "chaitin_leichi_waf.handler.py"
+    legacy_handler.write_text("def broken(:\n", encoding="utf-8")
+
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="device")}
+    assert entries[plugin_id].state == "updateAvailable"
+    assert entries[plugin_id].version == "1.0.1"
+    assert entries[plugin_id].installedVersion is None
+
+    record = await update_plugin("device", plugin_id)
+
+    repaired_handler = install_dir / "chaitin_safeline_waf.handler.py"
+    assert record.version == "1.0.1"
+    assert local.get_record("device", plugin_id) == record
+    assert not legacy_handler.exists()
+    compile(repaired_handler.read_text(encoding="utf-8"), str(repaired_handler), "exec")
+
+
+async def test_hub_install_runtime_failure_rolls_back_new_plugin(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_refresh(_plugin_type, _changed_path=None):
+        raise RuntimeError("import failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_refresh)
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "python"
+        / "soc_workspace_query"
+    )
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        await install_plugin("tool", "soc_workspace_query")
+
+    assert not install_dir.exists()
+    assert local.get_record("tool", "soc_workspace_query") is None
+
+
+async def test_hub_update_runtime_failure_restores_previous_plugin(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    install_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "python"
+        / "soc_workspace_query"
+    )
+    install_dir.mkdir(parents=True)
+    old_handler = install_dir / "old_tool.py"
+    old_handler.write_text("OLD = True\n", encoding="utf-8")
+    previous_record = local.make_record(
+        plugin_type="tool",
+        plugin_id="soc_workspace_query",
+        version="0.9.0",
+        source="bundled:old",
+        install_path=install_dir,
+        scope="global",
+    )
+    local.save_installed_record(previous_record)
+    refresh_calls = 0
+
+    async def fail_then_recover(_plugin_type, _changed_path=None):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("import failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_then_recover)
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        await update_plugin("tool", "soc_workspace_query")
+
+    assert refresh_calls == 2
+    assert old_handler.read_text(encoding="utf-8") == "OLD = True\n"
+    assert not (install_dir / "soc_workspace_query.py").exists()
+    assert local.get_record("tool", "soc_workspace_query") == previous_record
+
+
+async def test_hub_webui_runtime_failure_rolls_back_package_and_access_contracts(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_refresh(_plugin_type, _changed_path=None):
+        raise RuntimeError("reconcile failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        await install_plugin("webui", "soc_ui")
+
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert local.get_record("webui", "soc_ui") is None
+
+
+def test_catalog_ignores_stale_record_when_legacy_install_is_inferred(
+    isolated_hub_env,
+):
+    plugin_id = "chaitin_safeline_waf_v1_0_0"
+    legacy_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "tools"
+        / "device"
+        / plugin_id
+    )
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy.yaml").write_text(
+        "name: legacy\nhandler:\n  type: http\n",
+        encoding="utf-8",
+    )
+    stale_record = local.make_record(
+        plugin_type="device",
+        plugin_id=plugin_id,
+        version="1.0.1",
+        source="bundled:stale",
+        install_path=isolated_hub_env["home"] / "missing",
+        scope="global",
+    )
+    local.save_installed_record(stale_record)
+
+    entries = {entry.id: entry for entry in list_catalog(plugin_type="device")}
+
+    assert entries[plugin_id].state == "updateAvailable"
+    assert entries[plugin_id].installedVersion is None
+    assert entries[plugin_id].installPath == str(legacy_dir)
+    assert local.get_record("device", plugin_id) is None
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():
@@ -145,6 +369,392 @@ async def test_hub_installs_pentest_subagent(isolated_hub_env):
     assert not agent_dir.exists()
 
 
+async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    built_pages = _patch_webui_bundle_build(monkeypatch)
+
+    record = await install_plugin("webui", "soc_ui")
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
+    access_dir = home_plugins / "contracts" / "access" / "soc_ui"
+    dashboard_manifest = json.loads((webui_dir / "soc_dashboard" / "manifest.json").read_text(encoding="utf-8"))
+
+    assert (webui_dir / "workspace.json").is_file()
+    assert (webui_dir / "soc_alerts" / "dist" / "page.js").is_file()
+    assert (webui_dir / "soc_alerts" / "dist" / "page.js").read_text(encoding="utf-8") == (
+        "// built during hub install: soc-alerts\n"
+    )
+    assert (access_dir / "soc_alerts_operations.py").is_file()
+    assert set(built_pages) == {"soc-alerts", "soc-dashboard", "soc-overview"}
+    assert dashboard_manifest["id"] == "soc-dashboard"
+    assert record.installPath == str(webui_dir)
+
+    removed = await uninstall_plugin("webui", "soc_ui")
+    assert removed is True
+    assert not webui_dir.exists()
+    assert not access_dir.exists()
+
+
+async def test_hub_webui_install_fails_when_bundle_build_fails(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    def fail_build(_self, _page_id: str):
+        raise RuntimeError("esbuild is not available; install webui dependencies first")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    monkeypatch.setattr("flocks.contracts.webui.builder.WebUIPageBuilder.build", fail_build)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+
+    with pytest.raises(RuntimeError, match="Failed to build WebUI page bundle for soc_ui/"):
+        await install_plugin("webui", "soc_ui")
+
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert local.get_record("webui", "soc_ui") is None
+
+
+async def test_hub_installed_soc_webui_registers_alert_access_contract(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    await install_plugin("webui", "soc_ui")
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    monkeypatch.setattr(PluginLoader, "_plugin_root", home_plugins)
+    monkeypatch.setattr(PluginLoader, "_extension_points", dict(PluginLoader._extension_points))
+    PluginLoader.clear_extension_points()
+
+    from flocks.contracts.access.discovery import discover_contract_plugins
+
+    plugins = discover_contract_plugins(project_dir=isolated_hub_env["project_dir"])
+
+    assert any(
+        contract.contract_id == "soc.alerts.operations" and contract.page_id == "soc-alerts"
+        for plugin in plugins
+        for contract in plugin.contracts
+    )
+
+
+async def test_hub_installed_soc_webui_serves_alert_access_operation(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    db_path = isolated_hub_env["data_dir"] / "soc.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "id": "alert-1",
+        "time": 1782888542,
+        "direction": "in",
+        "sip": "192.0.2.10",
+        "dip": "198.51.100.20",
+        "sport": 43123,
+        "dport": 80,
+        "net_type": "http",
+        "req_host": "example.test",
+        "req_http_url": "/login?id=1",
+        "rsp_status_code": 404,
+        "threat_rule_id": "D1181087257",
+        "threat_name": "SQL injection",
+        "threat_msg": "Detected SQL injection attempt.",
+        "threat_phase": "exploit",
+        "threat_type": "exploit",
+        "threat_result": "failed",
+        "_source_type": "tdp",
+        "is_duplicate": False,
+    }
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_records (
+                row_id TEXT PRIMARY KEY,
+                record_id TEXT,
+                asset_date TEXT NOT NULL,
+                source_file TEXT NOT NULL,
+                line_number INTEGER NOT NULL,
+                event_time INTEGER,
+                source_type TEXT,
+                threat_name TEXT,
+                is_duplicate INTEGER NOT NULL DEFAULT 0,
+                record_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO alert_records (
+                row_id, record_id, asset_date, source_file, line_number,
+                event_time, source_type, threat_name, is_duplicate, record_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "row-1",
+                "alert-1",
+                "2026-07-01",
+                "sample.jsonl",
+                1,
+                1782888542,
+                "tdp",
+                "SQL injection",
+                0,
+                json.dumps(record),
+            ),
+        )
+
+    monkeypatch.setenv("FLOCKS_SOC_ALERTS_SQLITE_DB", str(db_path))
+    await install_plugin("webui", "soc_ui")
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    monkeypatch.setattr(PluginLoader, "_plugin_root", home_plugins)
+    monkeypatch.setattr(PluginLoader, "_extension_points", dict(PluginLoader._extension_points))
+    PluginLoader.clear_extension_points()
+
+    from flocks.auth.context import AuthUser
+    from flocks.contracts.access.discovery import discover_contract_plugins
+    from flocks.contracts.access.runtime import OperationRuntime
+
+    runtime = OperationRuntime(plugins=discover_contract_plugins(project_dir=isolated_hub_env["project_dir"]))
+    response = runtime.execute(
+        page_id="soc-alerts",
+        contract_id="soc.alerts.operations",
+        operation_name="list",
+        payload={"params": {"limit": 10}},
+        principal=AuthUser(id="u1", username="admin", role="admin"),
+    )
+
+    assert response.status_code == 200
+    assert response.body["summary"]["totalRaw"] == 1
+    assert response.body["summary"]["attackFailed"] == 1
+    assert response.body["incidents"][0]["id"] == "alert-1"
+    assert response.body["incidents"][0]["tableCells"]["_source_type"]["value"] == "tdp"
+
+
+async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    built_pages = _patch_webui_bundle_build(monkeypatch)
+
+    record = await install_plugin("component", "soc-workspace")
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+
+    assert (home_plugins / "components" / "soc-workspace" / "component.json").is_file()
+    assert (home_plugins / "contracts" / "webui" / "soc_ui" / "workspace.json").is_file()
+    assert (home_plugins / "contracts" / "access" / "soc_ui" / "soc_alerts_operations.py").is_file()
+    assert "soc-alerts" in built_pages
+    assert (home_plugins / "tools" / "python" / "soc_workspace_query" / "soc_workspace_query.py").is_file()
+    assert (home_plugins / "workflows" / "stream_alert_denoise" / "guide.md").is_file()
+    assert (home_plugins / "workflows" / "stream_alert_triage" / "config.json").is_file()
+    assert record.id == "soc-workspace"
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+    assert removed is True
+    assert not (home_plugins / "components" / "soc-workspace").exists()
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert not (home_plugins / "tools" / "python" / "soc_workspace_query").exists()
+    assert not (home_plugins / "workflows" / "stream_alert_denoise").exists()
+    assert not (home_plugins / "workflows" / "stream_alert_triage").exists()
+
+
+async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
+    triage_dir = home_plugins / "workflows" / "stream_alert_triage"
+
+    await install_plugin("webui", "soc_ui")
+    assert (webui_dir / "workspace.json").is_file()
+    assert local.get_record("webui", "soc_ui").installedBy is None
+
+    await install_plugin("component", "soc-workspace")
+    assert (home_plugins / "components" / "soc-workspace" / "component.json").is_file()
+    assert (triage_dir / "config.json").is_file()
+    assert local.get_record("workflow", "stream_alert_triage").installedBy == "component:soc-workspace"
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+    assert removed is True
+    assert not (home_plugins / "components" / "soc-workspace").exists()
+    assert (webui_dir / "workspace.json").is_file()
+    assert not triage_dir.exists()
+
+
+async def test_hub_component_adopts_existing_soc_workspace_tool(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    tool_dir = home_plugins / "tools" / "python" / "soc_workspace_query"
+
+    await install_plugin("tool", "soc_workspace_query")
+    assert (tool_dir / "soc_workspace_query.py").is_file()
+    assert local.get_record("tool", "soc_workspace_query").installedBy is None
+
+    await install_plugin("component", "soc-workspace")
+
+    assert local.get_record("tool", "soc_workspace_query").installedBy == "component:soc-workspace"
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert local.get_record("tool", "soc_workspace_query") is None
+    assert not tool_dir.exists()
+
+
+async def test_hub_component_uninstall_cleans_adoptable_legacy_tool_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    await install_plugin("component", "soc-workspace")
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    tool_dir = home_plugins / "tools" / "python" / "soc_workspace_query"
+    tool_record = local.get_record("tool", "soc_workspace_query")
+    assert tool_record is not None
+    assert tool_record.installedBy == "component:soc-workspace"
+    local.save_installed_record(tool_record.model_copy(update={"installedBy": None}))
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert local.get_record("tool", "soc_workspace_query") is None
+    assert not tool_dir.exists()
+
+
+async def test_hub_component_uninstall_cleans_legacy_unrecorded_webui(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
+    webui_access_dir = home_plugins / "contracts" / "access" / "soc_ui"
+
+    await install_plugin("webui", "soc_ui")
+    local.remove_installed_record("webui", "soc_ui")
+    assert (webui_dir / "workspace.json").is_file()
+    assert local.get_record("webui", "soc_ui") is None
+
+    await install_plugin("component", "soc-workspace")
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert not (home_plugins / "components" / "soc-workspace").exists()
+    assert not webui_dir.exists()
+    assert not webui_access_dir.exists()
+
+
+async def test_hub_component_install_failure_rolls_back_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def fail_tool_refresh(plugin_type, _changed_path=None):
+        if plugin_type == "tool":
+            raise RuntimeError("tool refresh failed")
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_tool_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
+    webui_access_dir = home_plugins / "contracts" / "access" / "soc_ui"
+    tool_dir = home_plugins / "tools" / "python" / "soc_workspace_query"
+    component_dir = home_plugins / "components" / "soc-workspace"
+
+    with pytest.raises(RuntimeError, match="tool refresh failed"):
+        await install_plugin("component", "soc-workspace")
+
+    assert not component_dir.exists()
+    assert not webui_dir.exists()
+    assert not webui_access_dir.exists()
+    assert not tool_dir.exists()
+    assert local.get_record("component", "soc-workspace") is None
+    assert local.get_record("webui", "soc_ui") is None
+    assert local.get_record("tool", "soc_workspace_query") is None
+
+
+async def test_hub_component_uninstall_cleans_orphan_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    component_key = "component:soc-workspace"
+    await install_plugin("webui", "soc_ui", installed_by=component_key)
+    await install_plugin("tool", "soc_workspace_query", installed_by=component_key)
+    await install_plugin("workflow", "stream_alert_denoise", installed_by=component_key)
+    await install_plugin("workflow", "stream_alert_triage", installed_by=component_key)
+
+    home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
+    component_dir = home_plugins / "components" / "soc-workspace"
+
+    assert not component_dir.exists()
+    assert local.get_record("component", "soc-workspace") is None
+    assert local.get_record("webui", "soc_ui").installedBy == component_key
+
+    removed = await uninstall_plugin("component", "soc-workspace")
+
+    assert removed is True
+    assert local.get_record("webui", "soc_ui") is None
+    assert local.get_record("tool", "soc_workspace_query") is None
+    assert local.get_record("workflow", "stream_alert_denoise") is None
+    assert local.get_record("workflow", "stream_alert_triage") is None
+    assert not (home_plugins / "contracts" / "webui" / "soc_ui").exists()
+    assert not (home_plugins / "contracts" / "access" / "soc_ui").exists()
+    assert not (home_plugins / "tools" / "python" / "soc_workspace_query").exists()
+    assert not (home_plugins / "workflows" / "stream_alert_denoise").exists()
+    assert not (home_plugins / "workflows" / "stream_alert_triage").exists()
+
+
+async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+
+    record = await install_plugin("tool", "soc_workspace_query")
+    tool_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "tools" / "python" / "soc_workspace_query"
+
+    assert record.installPath == str(tool_dir)
+    assert (tool_dir / "soc_workspace_query.py").is_file()
+    local.remove_installed_record("tool", "soc_workspace_query")
+
+    removed = await uninstall_plugin("tool", "soc_workspace_query")
+    assert removed is True
+    assert not tool_dir.exists()
+
+
 async def test_catalog_clears_stale_skill_record_after_external_delete(isolated_hub_env):
     await install_plugin("skill", "ndr-alert-analysis")
     skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "ndr-alert-analysis"
@@ -160,14 +770,35 @@ async def test_catalog_clears_stale_skill_record_after_external_delete(isolated_
 
 
 def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
+    from flocks.auth.context import AuthUser
+    from flocks.server.auth import require_admin
     from flocks.server.routes.hub import router
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="hub-test-admin",
+        username="hub-test-admin",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api")
     client = TestClient(app, raise_server_exceptions=True)
 
     catalog = client.get("/api/hub/catalog").json()
     assert any(item["id"] == "ndr-alert-analysis" for item in catalog)
+
+    catalog_page = client.get("/api/hub/catalog", params={"limit": 1, "offset": 0}).json()
+    assert isinstance(catalog_page, dict)
+    assert len(catalog_page["items"]) == 1
+    assert catalog_page["total"] == len(catalog)
+    assert catalog_page["limit"] == 1
+    assert catalog_page["facets"]["type"]
+    assert catalog_page["facets"]["state"]
+
+    taxonomy = client.get("/api/hub/categories", params={"include_counts": False}).json()
+    assert taxonomy["tags"]
+    assert "counts" not in taxonomy
 
     detail = client.get("/api/hub/plugins/skill/ndr-alert-analysis").json()
     assert detail["id"] == "ndr-alert-analysis"
@@ -199,6 +830,133 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     assert removed.status_code == 200
     available_catalog = client.get("/api/hub/catalog", params={"state": "available"}).json()
     assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
+
+
+def test_hub_paginated_facets_exclude_their_own_filter():
+    from flocks.hub.models import HubCatalogEntry
+    from flocks.server.routes import hub as hub_routes
+
+    entries = [
+        HubCatalogEntry(
+            id="skill-installed",
+            type="skill",
+            name="Installed skill",
+            category="security",
+            tags=["triage"],
+            useCases=["incident-response"],
+            trust="official",
+            riskLevel="low",
+            state="installed",
+            manifestPath="skills/installed.json",
+        ),
+        HubCatalogEntry(
+            id="agent-installed",
+            type="agent",
+            name="Installed agent",
+            category="security",
+            tags=["triage"],
+            useCases=["incident-response"],
+            trust="official",
+            riskLevel="low",
+            state="installed",
+            manifestPath="agents/installed.json",
+        ),
+        HubCatalogEntry(
+            id="skill-available",
+            type="skill",
+            name="Available skill",
+            category="productivity",
+            tags=["automation"],
+            useCases=["operations"],
+            trust="community",
+            riskLevel="medium",
+            state="available",
+            manifestPath="skills/available.json",
+        ),
+    ]
+
+    facets = hub_routes._build_hub_catalog_facets_for_filters(
+        entries,
+        {
+            "plugin_type": "skill",
+            "category": None,
+            "tags": None,
+            "use_cases": None,
+            "state": ["installed"],
+            "trust": None,
+            "risk": None,
+            "q": None,
+        },
+    )
+
+    assert facets.type == {"skill": 1, "agent": 1}
+    assert facets.state == {"installed": 1, "available": 1}
+    assert facets.category == {"security": 1}
+
+
+def test_hub_refresh_clears_catalog_and_device_template_caches(monkeypatch):
+    from flocks.server.routes import hub as hub_routes
+
+    calls: list[str] = []
+    monkeypatch.setattr(hub_routes, "clear_catalog_caches", lambda: calls.append("catalog"))
+    monkeypatch.setattr(
+        "flocks.tool.device.plugin_index.clear_device_template_cache",
+        lambda: calls.append("device"),
+    )
+
+    hub_routes._clear_hub_runtime_caches()
+
+    assert calls == ["catalog", "device"]
+
+
+def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
+    from flocks.auth.context import AuthUser
+    from flocks.server.auth import require_admin
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="hub-test-admin",
+        username="hub-test-admin",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
+    app.include_router(router, prefix="/api")
+    client = TestClient(app, raise_server_exceptions=True)
+
+    response = client.post("/api/hub/plugins/component/soc-workspace/install/stream", json={"scope": "global"})
+
+    assert response.status_code == 200
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["event"] == "start"
+    assert frames[0]["type"] == "component"
+    assert frames[0]["id"] == "soc-workspace"
+    assert [item["status"] for item in frames[0]["items"]] == ["pending", "pending", "pending", "pending"]
+
+    installed_children = {
+        (frame["item"]["type"], frame["item"]["id"])
+        for frame in frames
+        if frame["event"] == "item" and frame["item"]["status"] == "installed"
+    }
+    assert installed_children == {
+        ("webui", "soc_ui"),
+        ("tool", "soc_workspace_query"),
+        ("workflow", "stream_alert_denoise"),
+        ("workflow", "stream_alert_triage"),
+    }
+    assert frames[-1]["event"] == "complete"
+    assert frames[-1]["record"]["id"] == "soc-workspace"
 
 
 def test_hub_routes_legacy_removed_plugins_return_gone(isolated_hub_env):

@@ -1,47 +1,69 @@
 import { Suspense, lazy } from 'react';
-import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
+import type { ComponentType, ReactNode } from 'react';
+import { Routes as RouterRoutes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
+import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import AuthLayout from '@/components/layout/AuthLayout';
 import Home from '@/pages/Home';
 import { useAuth } from '@/contexts/AuthContext';
+import { preloadI18nNamespaces } from '@/i18nResources';
+import { installVitePreloadErrorRecovery, recoverLazyLoad } from '@/utils/chunkLoadRecovery';
+
+installVitePreloadErrorRecovery();
 
 // All non-Home pages are code-split. Home stays eager because it's the very
 // first frame after auth and we don't want a Suspense flash on initial paint.
 // In particular, Session/Agent and the auth screens are kept lazy so heavy
 // transitive deps (SessionChat ~2.7k LOC + react-markdown + rehype/remark +
 // highlight.js) are not pulled into the main entry chunk.
-const SessionPage = lazy(() => import('@/pages/Session'));
-const AgentPage = lazy(() => import('@/pages/Agent'));
-const LoginPage = lazy(() => import('@/pages/Login'));
-const SetupAdminPage = lazy(() => import('@/pages/SetupAdmin'));
-const ForceChangePasswordPage = lazy(() => import('@/pages/ForceChangePassword'));
-const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
-const WorkflowCreate = lazy(() => import('@/pages/WorkflowCreate'));
-const WorkflowEditor = lazy(() => import('@/pages/WorkflowEditor'));
-const WorkflowDetail = lazy(() => import('@/pages/WorkflowDetail'));
-const TaskPage = lazy(() => import('@/pages/Task'));
-const ToolPage = lazy(() => import('@/pages/Tool'));
-const HubPage = lazy(() => import('@/pages/Hub'));
-const ModelPage = lazy(() => import('@/pages/Model'));
-const SkillPage = lazy(() => import('@/pages/Skill'));
-const ConfigPage = lazy(() => import('@/pages/Config'));
-const ChannelPage = lazy(() => import('@/pages/Channel'));
-const PermissionPage = lazy(() => import('@/pages/Permission'));
-const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
-const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
-const WorkspacePage = lazy(() => import('@/pages/Workspace'));
-const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
-const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
-const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
-const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
+type LazyPageModule = { default: ComponentType<any> };
 
-function LazyRoute({ children }: { children: React.ReactNode }) {
+function lazyPage<T extends LazyPageModule>(
+  loader: () => Promise<T>,
+  namespaces: readonly string[] = [],
+) {
+  return lazy(() => recoverLazyLoad(
+    Promise.all([
+      loader(),
+      preloadI18nNamespaces(namespaces),
+    ]).then(([module]) => module),
+  ));
+}
+
+const SessionPage = lazyPage(() => import('@/pages/Session'), ['session']);
+const AgentPage = lazyPage(() => import('@/pages/Agent'), ['agent']);
+const LoginPage = lazyPage(() => import('@/pages/Login'));
+const SetupAdminPage = lazyPage(() => import('@/pages/SetupAdmin'));
+const ForceChangePasswordPage = lazyPage(() => import('@/pages/ForceChangePassword'));
+const WorkflowListPage = lazyPage(() => import('@/pages/Workflow'), ['workflow']);
+const WorkflowCreate = lazyPage(() => import('@/pages/WorkflowCreate'), ['workflow']);
+const WorkflowEditor = lazyPage(() => import('@/pages/WorkflowEditor'), ['workflow']);
+const WorkflowDetail = lazyPage(() => import('@/pages/WorkflowDetail'), ['workflow']);
+const TaskPage = lazyPage(() => import('@/pages/Task'), ['task']);
+const ToolPage = lazyPage(() => import('@/pages/Tool'), ['tool']);
+const HubPage = lazyPage(() => import('@/pages/Hub'));
+const SkillPage = lazyPage(() => import('@/pages/Skill'), ['skill']);
+const ModelPage = lazyPage(() => import('@/pages/Model'), ['model']);
+const ChannelPage = lazyPage(() => import('@/pages/Channel'), ['channel']);
+const PermissionPage = lazyPage(() => import('@/pages/Permission'), ['permission']);
+const MonitoringPage = lazyPage(() => import('@/pages/Monitoring'), ['monitoring']);
+const WorkspacePage = lazyPage(() => import('@/pages/Workspace'), ['workspace']);
+const DeviceIntegrationPage = lazyPage(() => import('@/pages/DeviceIntegration'), ['device']);
+const FlocksproUpgradeCallbackPage = lazyPage(() => import('@/pages/FlocksproUpgrade/Callback'), ['flockspro']);
+const SettingsPage = lazyPage(() => import('@/pages/Settings'));
+const WebUIContractPageHost = lazyPage(() => import('@/pages/WebUIContractPageHost'));
+const WebUIContractWorkspaceHost = lazyPage(() => import('@/pages/WebUIContractWorkspaceHost'));
+const ROUTE_FALLBACK_DELAY_MS = 180;
+
+function LazyRoute({ children }: { children: ReactNode }) {
   return (
-    <Suspense fallback={<RoutePageSkeleton />}>
-      {children}
-    </Suspense>
+    <LazyLoadErrorBoundary>
+      <Suspense fallback={<RoutePageSkeleton delayMs={ROUTE_FALLBACK_DELAY_MS} />}>
+        {children}
+      </Suspense>
+    </LazyLoadErrorBoundary>
   );
 }
 
@@ -51,6 +73,20 @@ function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/" replace />;
   }
   return <>{children}</>;
+}
+
+export function LegacyWebUIContractPageRedirect() {
+  const params = useParams();
+  const location = useLocation();
+  const pageId = params.pageId;
+  const rest = params['*'];
+  if (!pageId) return <Navigate to="/" replace />;
+  return (
+    <Navigate
+      to={`/contracts/webui/${pageId}${rest ? `/${rest}` : ''}${location.search}${location.hash}`}
+      replace
+    />
+  );
 }
 
 export function Routes() {
@@ -64,15 +100,15 @@ export function Routes() {
   if (error) {
     return (
       <AuthLayout>
-        <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4">
+        <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4 dark:border-[#4a5563] dark:bg-[#303842] dark:shadow-xl dark:shadow-black/20">
           <div>
-            <h1 className="text-xl font-semibold text-gray-900">{t('error.systemUnknownTitle')}</h1>
-            <p className="text-sm text-gray-500 mt-1">{error}</p>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-[#d7dee8]">{t('error.systemUnknownTitle')}</h1>
+            <p className="text-sm text-gray-500 mt-1 dark:text-[#b8c2cc]">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => void refresh()}
-            className="bg-slate-900 text-white rounded-lg px-4 py-2 font-medium hover:bg-slate-800"
+            className="bg-slate-900 text-white rounded-lg px-4 py-2 font-medium hover:bg-slate-800 dark:bg-[#46515e] dark:hover:bg-[#5a6573]"
           >
             {t('error.retry')}
           </button>
@@ -83,31 +119,37 @@ export function Routes() {
 
   if (!bootstrapped) {
     return (
-      <Suspense fallback={<RoutePageSkeleton />}>
-        <RouterRoutes>
-          <Route path="/setup-admin" element={<SetupAdminPage />} />
-          <Route path="*" element={<Navigate to="/setup-admin" replace />} />
-        </RouterRoutes>
-      </Suspense>
+      <LazyLoadErrorBoundary>
+        <Suspense fallback={<RoutePageSkeleton />}>
+          <RouterRoutes>
+            <Route path="/setup-admin" element={<SetupAdminPage />} />
+            <Route path="*" element={<Navigate to="/setup-admin" replace />} />
+          </RouterRoutes>
+        </Suspense>
+      </LazyLoadErrorBoundary>
     );
   }
 
   if (!user) {
     return (
-      <Suspense fallback={<RoutePageSkeleton />}>
-        <RouterRoutes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        </RouterRoutes>
-      </Suspense>
+      <LazyLoadErrorBoundary>
+        <Suspense fallback={<RoutePageSkeleton />}>
+          <RouterRoutes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="*" element={<Navigate to="/login" replace />} />
+          </RouterRoutes>
+        </Suspense>
+      </LazyLoadErrorBoundary>
     );
   }
 
   if (user.must_reset_password) {
     return (
-      <Suspense fallback={<RoutePageSkeleton />}>
-        <ForceChangePasswordPage />
-      </Suspense>
+      <LazyLoadErrorBoundary>
+        <Suspense fallback={<RoutePageSkeleton />}>
+          <ForceChangePasswordPage />
+        </Suspense>
+      </LazyLoadErrorBoundary>
     );
   }
 
@@ -115,8 +157,12 @@ export function Routes() {
     <RouterRoutes>
       <Route path="/login" element={<Navigate to="/" replace />} />
       <Route path="/setup-admin" element={<Navigate to="/" replace />} />
+      <Route path="/settings/:sectionId?" element={<LazyRoute><SettingsPage /></LazyRoute>} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
+        <Route path="contracts/webui/workspaces/:workspaceId/:pageId?" element={<LazyRoute><WebUIContractWorkspaceHost /></LazyRoute>} />
+        <Route path="contracts/webui/:pageId/*" element={<LazyRoute><WebUIContractPageHost /></LazyRoute>} />
+        <Route path="user-defined-pages/:pageId/*" element={<LegacyWebUIContractPageRedirect />} />
 
         {/* AI 工作台 */}
         <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
@@ -139,18 +185,17 @@ export function Routes() {
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
 
-        {/* 系统中心 */}
-        <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />
-        <Route path="config/*" element={<Navigate to="/config" replace />} />
-        <Route path="system-logs" element={<LazyRoute><SystemLogPage /></LazyRoute>} />
+        <Route path="config" element={<Navigate to="/settings/account" replace />} />
+        <Route path="config/*" element={<Navigate to="/settings/account" replace />} />
+        <Route path="system-logs" element={<Navigate to="/settings/system-logs" replace />} />
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
-        <Route path="audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
-        <Route path="admin/users" element={<Navigate to="/config" replace />} />
+        <Route path="audit-logs" element={<Navigate to="/settings/audit-logs" replace />} />
+        <Route path="admin/users" element={<Navigate to="/settings/account" replace />} />
         <Route
           path="flockspro-upgrade"
-          element={<AdminOnlyRoute><LazyRoute><FlocksproUpgradePage /></LazyRoute></AdminOnlyRoute>}
+          element={<AdminOnlyRoute><Navigate to="/settings/flockspro" replace /></AdminOnlyRoute>}
         />
         <Route
           path="flockspro-upgrade/callback"

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import re
+from itertools import islice
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from flocks.session.recorder import Recorder
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult
+from flocks.workflow.store import WorkflowStore
 
 log = Log.create(service="workflow.execution_store")
 
@@ -34,6 +34,105 @@ DEFAULT_LARGE_LIST_KEYS: frozenset[str] = frozenset(
 # protects against accidentally stripping small metadata lists that happen
 # to share a name with a known large-list key.
 DEFAULT_COMPACT_SIZE_THRESHOLD: int = 100
+DEFAULT_GENERIC_SEQUENCE_THRESHOLD: int = 1_000
+DEFAULT_MAX_INLINE_STRING_CHARS: int = 20_000
+DEFAULT_MAX_INLINE_DICT_KEYS: int = 200
+DEFAULT_PREVIEW_ITEMS: int = 3
+DEFAULT_PREVIEW_CHARS: int = 500
+
+
+def _sequence_preview(value: Any, *, limit: int = DEFAULT_PREVIEW_ITEMS) -> list[Any]:
+    if isinstance(value, (list, tuple)):
+        items = value[:limit]
+    else:
+        items = islice(value, limit)
+    return [_summarize_large_value(item, depth=1) for item in items]
+
+
+def _summarize_large_value(value: Any, *, depth: int = 0) -> Dict[str, Any]:
+    if isinstance(value, str):
+        return {
+            "_type": "string",
+            "chars": len(value),
+            "preview": value[:DEFAULT_PREVIEW_CHARS],
+        }
+    if isinstance(value, dict):
+        return {
+            "_type": "dict",
+            "key_count": len(value),
+            "keys": list(islice(value.keys(), DEFAULT_PREVIEW_ITEMS * 10)),
+        }
+    if isinstance(value, (list, tuple, set)):
+        summary: Dict[str, Any] = {
+            "_type": type(value).__name__,
+            "count": len(value),
+        }
+        if depth == 0:
+            summary["preview"] = _sequence_preview(value)
+        return summary
+    return {
+        "_type": type(value).__name__,
+        "preview": str(value)[:DEFAULT_PREVIEW_CHARS],
+    }
+
+
+def _compact_value_for_storage(
+    value: Any,
+    *,
+    key: Optional[str],
+    known_large_keys: frozenset[str],
+    size_threshold: int,
+    generic_sequence_threshold: int,
+    max_inline_string_chars: int,
+    max_inline_dict_keys: int,
+    depth: int = 0,
+) -> Any:
+    if (
+        key in known_large_keys
+        and isinstance(value, (list, tuple))
+        and len(value) > size_threshold
+    ):
+        return {f"_{key}_count": len(value)}
+
+    if isinstance(value, str):
+        if len(value) > max_inline_string_chars:
+            return _summarize_large_value(value)
+        return value
+
+    if isinstance(value, (list, tuple, set)):
+        if len(value) > generic_sequence_threshold:
+            return _summarize_large_value(value)
+        return value
+
+    if isinstance(value, dict):
+        if len(value) > max_inline_dict_keys:
+            return _summarize_large_value(value)
+        if depth >= 2:
+            return value
+        compacted: Dict[str, Any] = {}
+        changed = False
+        for child_key, child_value in value.items():
+            child_compacted = _compact_value_for_storage(
+                child_value,
+                key=str(child_key),
+                known_large_keys=known_large_keys,
+                size_threshold=size_threshold,
+                generic_sequence_threshold=generic_sequence_threshold,
+                max_inline_string_chars=max_inline_string_chars,
+                max_inline_dict_keys=max_inline_dict_keys,
+                depth=depth + 1,
+            )
+            if isinstance(child_compacted, dict) and len(child_compacted) == 1:
+                marker_key = next(iter(child_compacted))
+                if marker_key.startswith("_") and marker_key.endswith("_count"):
+                    compacted[marker_key] = child_compacted[marker_key]
+                    changed = True
+                    continue
+            compacted[child_key] = child_compacted
+            changed = changed or child_compacted is not child_value
+        return compacted if changed else value
+
+    return value
 
 
 def compact_outputs_for_storage(
@@ -41,37 +140,37 @@ def compact_outputs_for_storage(
     *,
     keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
     size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+    generic_sequence_threshold: int = DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
+    max_inline_string_chars: int = DEFAULT_MAX_INLINE_STRING_CHARS,
+    max_inline_dict_keys: int = DEFAULT_MAX_INLINE_DICT_KEYS,
 ) -> Dict[str, Any]:
-    """Return a copy of *outputs* with large alert lists replaced by counts.
+    """Return a bounded copy of *outputs* safe for execution records.
 
-    Only **list or tuple** values whose key is in *keys* AND whose length
-    exceeds *size_threshold* are compacted to ``_<key>_count``; everything
-    else is passed through unchanged.  This prevents megabytes of alert data
-    from being serialised into the ``workflow_execution`` SQLite row on every
-    invocation, while still keeping small sequences (e.g. error details, short
-    configuration arrays) fully inspectable in the execution-history UI.
-
-    **Keys that are compacted by default** (see ``DEFAULT_LARGE_LIST_KEYS``):
-    ``enriched_alerts``, ``unique_alerts``, ``raw_alerts``,
-    ``normalized_alerts``, ``filtered_alerts``.  Keys outside this set — such
-    as a generic ``alerts`` parameter — are *not* compacted unless the caller
-    passes a custom *keys* argument.  Callers who depend on inspecting the
-    full list contents of compacted keys must read the data from the JSONL
-    files written by the workflow itself.
+    Known large-list keys keep the historical ``_<key>_count`` shape. Other
+    oversized strings, sequences, and dictionaries are replaced with bounded
+    summaries so unknown workflow payload names cannot inflate SQLite rows or
+    tool metadata.
     """
     if not isinstance(outputs, dict):
         return {}
-    key_set = frozenset(keys)
+    known_large_keys = frozenset(keys)
     compacted: Dict[str, Any] = {}
     for k, v in outputs.items():
-        if (
-            k in key_set
-            and isinstance(v, (list, tuple))
-            and len(v) > size_threshold
-        ):
-            compacted[f"_{k}_count"] = len(v)
-        else:
-            compacted[k] = v
+        value = _compact_value_for_storage(
+            v,
+            key=str(k),
+            known_large_keys=known_large_keys,
+            size_threshold=size_threshold,
+            generic_sequence_threshold=generic_sequence_threshold,
+            max_inline_string_chars=max_inline_string_chars,
+            max_inline_dict_keys=max_inline_dict_keys,
+        )
+        if isinstance(value, dict) and len(value) == 1:
+            marker_key = next(iter(value))
+            if marker_key == f"_{k}_count":
+                compacted[marker_key] = value[marker_key]
+                continue
+        compacted[k] = value
     return compacted
 
 
@@ -82,15 +181,15 @@ def compact_step_for_storage(
     size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
 ) -> Any:
     """Return a copy of one history step with large ``inputs``/``outputs`` compacted."""
+    if not isinstance(step, dict) and hasattr(step, "model_dump"):
+        step = step.model_dump(mode="json")
     if not isinstance(step, dict):
         return step
     step_copy = dict(step)
     for field in ("inputs", "outputs"):
         raw_value = step_copy.get(field)
         if isinstance(raw_value, dict):
-            step_copy[field] = compact_outputs_for_storage(
-                raw_value, keys=keys, size_threshold=size_threshold
-            )
+            step_copy[field] = compact_outputs_for_storage(raw_value, keys=keys, size_threshold=size_threshold)
     return step_copy
 
 
@@ -108,25 +207,105 @@ def compact_history_for_storage(
     """
     if not history:
         return []
-    return [
-        compact_step_for_storage(step, keys=keys, size_threshold=size_threshold)
-        for step in history
-    ]
+    return [compact_step_for_storage(step, keys=keys, size_threshold=size_threshold) for step in history]
+
+
+def _first_value(data: Dict[str, Any], keys: Iterable[str]) -> Any:
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _as_positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, float) and value > 0 and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def derive_loop_progress(
+    *,
+    node_id: Optional[str],
+    global_step_index: int,
+    inputs: Optional[Dict[str, Any]] = None,
+    outputs: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Infer loop progress metadata from common workflow counter fields.
+
+    Workflows often carry their global loop state in normal inputs/outputs
+    (for example ``iteration``/``total_iterations``/``current_item``).  The
+    engine currently exposes only node-level callbacks, so this helper derives
+    a best-effort loop snapshot without changing the runtime data flow.
+    """
+    merged: Dict[str, Any] = {}
+    if isinstance(inputs, dict):
+        merged.update(inputs)
+    if isinstance(outputs, dict):
+        merged.update(outputs)
+
+    iteration = _as_positive_int(
+        _first_value(
+            merged,
+            ("iteration", "loop_index", "current_index", "item_idx", "item_index", "host_idx"),
+        )
+    )
+    total = _as_positive_int(
+        _first_value(
+            merged,
+            (
+                "total_iterations",
+                "total_items",
+                "item_count",
+                "items_count",
+                "total_hosts",
+                "host_count",
+                "hosts_count",
+                "hosts_total",
+            ),
+        )
+    )
+    if total is None:
+        hosts = merged.get("hosts")
+        if isinstance(hosts, list):
+            total = len(hosts)
+
+    current_item = _first_value(
+        merged,
+        ("current_item", "item", "current_host", "last_host", "host", "ssh_target", "last_ssh_target"),
+    )
+
+    if iteration is None and total is None and current_item is None:
+        return None
+
+    return {
+        "loop_node_id": merged.get("loop_node_id") or merged.get("loop_id"),
+        "iteration": iteration,
+        "total_iterations": total,
+        "current_item": current_item,
+        "current_inner_node_id": node_id,
+        "global_step_index": global_step_index,
+    }
+
 
 # Maximum number of execution history records retained per workflow.
 # Keep this intentionally small so high-frequency workflows do not keep
 # inflating the SQLite row set and matching JSONL audit files indefinitely.
 _MAX_EXECUTION_HISTORY_PER_WORKFLOW = 30
-# Trim is an O(N) scan over all workflow_execution rows; only run it every Nth
-# call per workflow to amortise the cost under high syslog throughput.
-_TRIM_CHECK_INTERVAL = 5
-_trim_counters: Dict[str, int] = {}
-# Workflows with an in-flight trim task.  Because trims run as fire-and-forget
-# ``asyncio.create_task`` background jobs, a slow trim under high syslog load
-# could otherwise spawn many overlapping scans that each materialise table
-# state simultaneously — the exact pattern that drove RSS to 20 GB.  This
-# guard ensures at most one trim per workflow is ever running.
-_trim_in_flight: Set[str] = set()
+# Per-workflow trim lock.  Trims are awaited by the writer so the retention cap
+# is enforced before ``record_execution_result`` returns, while concurrent runs
+# for the same workflow serialize instead of skipping cleanup.
+_trim_locks: Dict[str, asyncio.Lock] = {}
 
 # Per-workflow lock to serialize read-modify-write of stats. Concurrent
 # executions of the same workflow (e.g. syslog-triggered runs with
@@ -145,6 +324,14 @@ def _get_stats_lock(workflow_id: str) -> asyncio.Lock:
 
 def _workflow_stats_key(workflow_id: str) -> str:
     return f"workflow/{workflow_id}/stats"
+
+
+def _get_trim_lock(workflow_id: str) -> asyncio.Lock:
+    lock = _trim_locks.get(workflow_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _trim_locks[workflow_id] = lock
+    return lock
 
 
 _DEFAULT_STATS: Dict[str, Any] = {
@@ -167,31 +354,172 @@ async def _update_workflow_stats(workflow_id: str, success: bool, duration: floa
     lock = _get_stats_lock(workflow_id)
     async with lock:
         try:
-            key = _workflow_stats_key(workflow_id)
-            try:
-                stats: Dict[str, Any] = await Storage.read(key) or dict(_DEFAULT_STATS)
-            except Exception:
-                stats = dict(_DEFAULT_STATS)
-            stats["callCount"] = stats.get("callCount", 0) + 1
-            if success:
-                stats["successCount"] = stats.get("successCount", 0) + 1
-            else:
-                stats["errorCount"] = stats.get("errorCount", 0) + 1
-            total = stats.get("totalRuntime", 0.0) + duration
-            stats["totalRuntime"] = total
-            call_count = stats["callCount"]
-            stats["avgRuntime"] = (total / call_count) if call_count > 0 else 0.0
-            await Storage.write(key, stats)
+            await WorkflowStore.increment_stats(workflow_id, success=success, duration=duration)
         except Exception as exc:
-            log.warning("workflow.stats.update_failed", {
-                "workflow_id": workflow_id,
-                "error": str(exc),
-            })
+            log.warning(
+                "workflow.stats.update_failed",
+                {
+                    "workflow_id": workflow_id,
+                    "error": str(exc),
+                },
+            )
 
 
 def workflow_execution_key(exec_id: str) -> str:
     """Return the storage key for one workflow execution."""
     return f"workflow_execution/{exec_id}"
+
+
+def workflow_execution_index_prefix(workflow_id: str) -> str:
+    """Return the storage prefix for one workflow's execution index."""
+    return f"workflow_execution_index/{workflow_id}/"
+
+
+def workflow_execution_index_key(
+    workflow_id: str,
+    started_at: int,
+    exec_id: str,
+) -> str:
+    """Return the index key used to trim one workflow without full-table scans."""
+    return f"{workflow_execution_index_prefix(workflow_id)}{started_at:020d}/{exec_id}"
+
+
+def workflow_execution_step_key(exec_id: str, step_index: int) -> str:
+    """Return the storage key for one workflow execution step."""
+    return f"workflow_execution_step/{exec_id}/{step_index:08d}"
+
+
+def workflow_execution_step_prefix(exec_id: str) -> str:
+    """Return the storage key prefix for all steps of one execution."""
+    return f"workflow_execution_step/{exec_id}/"
+
+
+def compact_execution_summary(exec_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an execution record safe to keep in the hot summary row.
+
+    Step details are stored separately under ``workflow_execution_step`` keys.
+    Keeping ``executionLog`` out of the summary row avoids rewriting an
+    ever-growing JSON blob on every progress update.
+    """
+    summary = dict(exec_data)
+    summary["executionLog"] = []
+    return summary
+
+
+async def record_execution_step(
+    exec_id: str,
+    step_index: int,
+    step: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist one compacted execution step and return the stored payload."""
+    step_payload = compact_step_for_storage(step)
+    await WorkflowStore.record_step(exec_id, step_index, step_payload)
+    return step_payload
+
+
+class ExecutionStepRecorder:
+    """Bridge synchronous workflow step callbacks to append-only step rows."""
+
+    def __init__(
+        self,
+        *,
+        exec_id: str,
+        loop: asyncio.AbstractEventLoop,
+        logger: Any = None,
+        log_event: str = "workflow.execution_step.write_failed",
+        step_compactor: Callable[[Any], Dict[str, Any]] = compact_step_for_storage,
+        write_timeout_s: float = 5.0,
+    ) -> None:
+        self.exec_id = exec_id
+        self.loop = loop
+        self.logger = logger or log
+        self.log_event = log_event
+        self.step_compactor = step_compactor
+        self.write_timeout_s = write_timeout_s
+        self.step_count = 0
+        self.summary: Dict[str, Any] = {}
+
+    def on_step_complete(self, step_result: Any) -> None:
+        raw_step = step_result.model_dump(mode="json") if hasattr(step_result, "model_dump") else step_result
+        step_dict = self.step_compactor(raw_step)
+        if not isinstance(step_dict, dict):
+            return
+
+        self.step_count += 1
+        loop_progress = derive_loop_progress(
+            node_id=step_dict.get("node_id"),
+            global_step_index=self.step_count,
+            inputs=step_dict.get("inputs"),
+            outputs=step_dict.get("outputs"),
+        )
+        self.summary.update(
+            {
+                "stepCount": self.step_count,
+                "currentNodeId": step_dict.get("node_id"),
+                "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+                "currentPhase": "running",
+                "currentStepIndex": self.step_count,
+                "loopProgress": loop_progress,
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(
+                record_execution_step(self.exec_id, self.step_count, step_dict),
+                self.loop,
+            ).result(timeout=self.write_timeout_s)
+        except Exception as exc:
+            self.logger.warning(
+                self.log_event,
+                {
+                    "exec_id": self.exec_id,
+                    "step_index": self.step_count,
+                    "error": str(exc),
+                },
+            )
+
+
+async def _backfill_execution_steps(
+    exec_id: str,
+    execution_log: Any,
+) -> int:
+    """Persist legacy inline executionLog entries as append-only step rows."""
+    if not isinstance(execution_log, list):
+        return 0
+
+    written = 0
+    for step_index, step in enumerate(execution_log, start=1):
+        step_payload = compact_step_for_storage(step)
+        if not isinstance(step_payload, dict):
+            continue
+        try:
+            await WorkflowStore.record_step(exec_id, step_index, step_payload)
+            written += 1
+        except Exception as exc:
+            log.warning(
+                "workflow.execution_step.backfill_failed",
+                {
+                    "exec_id": exec_id,
+                    "step_index": step_index,
+                    "error": str(exc),
+                },
+            )
+    return written
+
+
+async def load_execution_steps(
+    exec_id: str,
+    *,
+    offset: int = 0,
+    limit: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Load persisted step logs for an execution, sorted by step key."""
+    page_limit = 500 if limit is None else max(limit, 0)
+    return await WorkflowStore.list_steps(
+        exec_id,
+        offset=max(offset, 0),
+        limit=page_limit,
+    )
 
 
 def normalize_execution_status(status: str) -> str:
@@ -228,9 +556,7 @@ def resolve_execution_outcome(result: RunWorkflowResult) -> tuple[str, Optional[
     if result.outputs.get("workflow_success") is False:
         return (
             "error",
-            error_message
-            or _extract_business_failure_message(result.outputs)
-            or "Workflow reported business failure.",
+            error_message or _extract_business_failure_message(result.outputs) or "Workflow reported business failure.",
         )
 
     return status_value, error_message
@@ -276,7 +602,7 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    await Storage.write(workflow_execution_key(exec_data["id"]), exec_data)
+    await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
     return exec_data
 
 
@@ -286,16 +612,22 @@ async def record_execution_result(
     exec_data: Dict[str, Any],
 ) -> None:
     """Persist the final execution record, audit trail, and workflow stats."""
-    await Storage.write(workflow_execution_key(exec_id), exec_data)
+    summary_data = dict(exec_data)
+    backfilled_steps = await _backfill_execution_steps(exec_id, summary_data.get("executionLog"))
+    existing_step_count = _as_positive_int(summary_data.get("stepCount"))
+    if backfilled_steps and (existing_step_count is None or existing_step_count < backfilled_steps):
+        summary_data["stepCount"] = backfilled_steps
+
+    await WorkflowStore.upsert_execution(compact_execution_summary(summary_data))
 
     # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
     # are reflected in the UI stats panel.
-    status = exec_data.get("status", "error")
+    status = summary_data.get("status", "error")
     success = status == "success"
-    duration = exec_data.get("duration")
+    duration = summary_data.get("duration")
     if not isinstance(duration, (int, float)):
-        started_at = exec_data.get("startedAt", 0)
-        finished_at = exec_data.get("finishedAt", int(time.time() * 1000))
+        started_at = summary_data.get("startedAt", 0)
+        finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
     await _update_workflow_stats(workflow_id, success, float(duration))
 
@@ -303,6 +635,7 @@ async def record_execution_result(
     # Run it as a background task so the syslog/HTTP dispatcher can release the
     # concurrency slot immediately instead of waiting on session-history I/O.
     try:
+
         async def _record_audit() -> None:
             try:
                 await Recorder.record_workflow_execution(
@@ -311,10 +644,13 @@ async def record_execution_result(
                     run_result=exec_data,
                 )
             except Exception as exc:
-                log.debug("workflow.audit.record_failed", {
-                    "exec_id": exec_id,
-                    "error": str(exc),
-                })
+                log.debug(
+                    "workflow.audit.record_failed",
+                    {
+                        "exec_id": exec_id,
+                        "error": str(exc),
+                    },
+                )
 
         asyncio.create_task(_record_audit(), name=f"audit-{exec_id}")
     except RuntimeError:
@@ -329,75 +665,74 @@ async def record_execution_result(
             pass
 
     # Prune old execution records when the per-workflow limit is exceeded.
-    # Throttled by a per-workflow counter to amortise the O(N) storage scan.
+    # This is awaited so a successful completion does not silently leave the
+    # workflow above its retention cap.
     try:
-        counter = _trim_counters.get(workflow_id, 0) + 1
-        _trim_counters[workflow_id] = counter
-        if counter >= _TRIM_CHECK_INTERVAL:
-            _trim_counters[workflow_id] = 0
-            # Run trim in the background as well; it scans all execution rows
-            # and we don't want to delay the caller.
-            try:
-                asyncio.create_task(
-                    _trim_execution_history(workflow_id),
-                    name=f"trim-{workflow_id}",
-                )
-            except RuntimeError:
-                await _trim_execution_history(workflow_id)
-    except Exception:
-        pass
+        await _trim_execution_history(workflow_id)
+    except Exception as exc:
+        log.error(
+            "workflow.history.trim_failed",
+            {
+                "workflow_id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(exc),
+            },
+        )
 
 
-# Regex patterns to extract scalar fields from raw JSON strings without
-# calling json.loads.  workflowId/startedAt are always serialised near the
-# start of the record (set in build_initial_execution_record), so we only
-# scan a small prefix of each value string — O(prefix) instead of O(value).
-_RE_WORKFLOW_ID = re.compile(r'"workflowId"\s*:\s*"([^"]+)"')
-_RE_STARTED_AT = re.compile(r'"startedAt"\s*:\s*(\d+)')
+async def _delete_execution_history_record(
+    execution_key: str,
+    *,
+    index_key: Optional[str] = None,
+) -> None:
+    exec_id = execution_key.rsplit("/", 1)[-1]
+    deleted_steps = await WorkflowStore.clear_steps(exec_id)
+    removed_execution = await WorkflowStore.delete_execution(exec_id)
+    record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
+    await asyncio.to_thread(record_path.unlink, missing_ok=True)
+    log.debug(
+        "workflow.history.trim_deleted",
+        {
+            "exec_id": exec_id,
+            "execution_key": execution_key,
+            "steps": deleted_steps,
+            "removed_execution": removed_execution,
+        },
+    )
 
 
 async def _trim_execution_history(workflow_id: str) -> None:
     """Delete the oldest execution records once the per-workflow cap is exceeded.
 
-    Uses ``Storage.list_raw`` + regex instead of ``list_entries`` + ``json.loads``
-    so that scanning the execution-history table never materialises large JSON
-    blobs as Python objects.  The previous approach caused 100% single-core CPU
-    usage (``json.raw_decode``) and drove RSS to 20 GB under syslog load.
+    New records carry a per-workflow ``workflow_execution_index`` key, so hot
+    trims avoid scanning unrelated workflows.  This path is intentionally
+    index-only: if an old execution has no index key, it is outside the hot
+    retention path and should be handled by a separate migration/GC task.
 
-    Also guards against overlapping trim tasks via ``_trim_in_flight``: because
-    trims run as fire-and-forget background tasks, without the guard a slow trim
-    would spawn multiple concurrent scans that each load the full table
-    simultaneously, multiplying the memory spike.
+    A per-workflow lock serializes concurrent trims.  Cleanup is awaited by
+    ``record_execution_result`` so the retention cap is enforced synchronously
+    instead of being an opportunistic background task.
     """
-    # Coalesce overlapping trims: only one scan per workflow at a time.
-    if workflow_id in _trim_in_flight:
-        return
-    _trim_in_flight.add(workflow_id)
-    try:
-        raw_rows = await Storage.list_raw("workflow_execution/")
-        wf_entries: List[tuple] = []
-        for key, value_str in raw_rows:
-            # Scan only the first 400 chars — enough for workflowId + startedAt.
-            head = value_str[:400]
-            m_wf = _RE_WORKFLOW_ID.search(head)
-            if not m_wf or m_wf.group(1) != workflow_id:
-                continue
-            m_ts = _RE_STARTED_AT.search(head)
-            started_at = int(m_ts.group(1)) if m_ts else 0
-            wf_entries.append((key, started_at))
-
-        if len(wf_entries) <= _MAX_EXECUTION_HISTORY_PER_WORKFLOW:
-            return
-        # Sort ascending by startedAt and remove the oldest excess records.
-        wf_entries.sort(key=lambda kd: kd[1])
-        excess = len(wf_entries) - _MAX_EXECUTION_HISTORY_PER_WORKFLOW
-        for key, _ in wf_entries[:excess]:
+    lock = _get_trim_lock(workflow_id)
+    async with lock:
+        failures: List[str] = []
+        for exec_id in await WorkflowStore.trim_executions(
+            workflow_id,
+            keep=_MAX_EXECUTION_HISTORY_PER_WORKFLOW,
+        ):
             try:
-                exec_id = key.rsplit("/", 1)[-1]
-                await Storage.remove(key)
                 record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
                 await asyncio.to_thread(record_path.unlink, missing_ok=True)
-            except Exception:
-                pass
-    finally:
-        _trim_in_flight.discard(workflow_id)
+            except Exception as exc:
+                failures.append(f"{exec_id}: {exc}")
+                log.warning(
+                    "workflow.history.trim_delete_failed",
+                    {
+                        "workflow_id": workflow_id,
+                        "exec_id": exec_id,
+                        "error": str(exc),
+                    },
+                )
+
+        if failures:
+            raise RuntimeError("Failed to trim workflow execution history: " + "; ".join(failures[:3]))

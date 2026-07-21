@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import ThemeToggle from '@/components/common/ThemeToggle';
 
 const LANGUAGES = [
   { code: 'en-US', label: 'EN' },
@@ -16,14 +17,14 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
   const currentLang = i18n.language;
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
+    <div className="min-h-screen bg-gray-50 flex flex-col dark:bg-[#252c35]">
       <div className="flex justify-end px-4 pt-4">
         <div
-          className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 shadow-sm"
+          className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 shadow-sm dark:border-[#4a5563] dark:bg-[#303842]"
           role="group"
           aria-label={t('switchLanguage')}
         >
-          <Globe className="mx-1 h-3.5 w-3.5 text-gray-400" aria-hidden />
+          <Globe className="mx-1 h-3.5 w-3.5 text-gray-400 dark:text-[#9aa7b4]" aria-hidden />
           {LANGUAGES.map(({ code, label }) => (
             <button
               key={code}
@@ -31,13 +32,15 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
               onClick={() => i18n.changeLanguage(code)}
               className={`px-2.5 py-1 text-xs font-medium rounded-full transition-colors ${
                 currentLang === code
-                  ? 'bg-slate-900 text-white'
-                  : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+                  ? 'bg-slate-900 text-white dark:bg-[#46515e] dark:text-white'
+                  : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-[#b8c2cc] dark:hover:bg-[#3a434e] dark:hover:text-white'
               }`}
             >
               {label}
             </button>
           ))}
+          <div className="ml-1 h-5 w-px bg-gray-200 dark:bg-[#4a5563]" />
+          <ThemeToggle />
         </div>
       </div>
       <div className="flex-1 flex items-center justify-center p-6">

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
@@ -18,17 +20,29 @@ from flocks.auth.context import get_current_auth_user, set_current_auth_user, re
 from flocks.server.routes._timing import log_route_timing
 from flocks.audit import emit_audit_event
 from flocks.license import assert_license_active
+from flocks.session.context_usage import (
+    ContextUsageSnapshot,
+    build_context_usage_snapshot,
+    token_usage_to_dict,
+)
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
-from flocks.server.auth import require_user
+from flocks.utils.monitor import get_monitor
+from flocks.server.auth import API_TOKEN_SERVICE_USER_ID, require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
 
 # Default agent name constant
 DEFAULT_AGENT = "rex"
+DEFAULT_MESSAGE_PAGE_LIMIT = 50
+_DESCENDANT_ABORT_SCAN_LIMIT = 3
+_CONTEXT_USAGE_CACHE_TTL_SECONDS = 5.0
+_context_usage_cache: Dict[Tuple[str, int], Tuple[float, ContextUsageSnapshot]] = {}
+_context_usage_inflight: Dict[Tuple[str, int], asyncio.Task[ContextUsageSnapshot]] = {}
+_context_usage_cache_lock = asyncio.Lock()
 
 # File extensions that are safe to persist when materialising data-URL uploads.
 # Intentionally narrow: any extension outside this set is rejected to prevent
@@ -37,9 +51,58 @@ DEFAULT_AGENT = "rex"
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
 
-# Import monitor for metrics endpoint
-from flocks.utils.monitor import get_monitor
 
+def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[str, int]:
+    return session_id, int(getattr(session.time, "updated", 0) or 0)
+
+
+async def _build_context_usage_for_cache(
+    key: Tuple[str, int],
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    current_task = asyncio.current_task()
+    try:
+        snapshot = await build_context_usage_snapshot(session_id, session=session)
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is not current_task:
+                return snapshot
+            for cache_key in [item for item in _context_usage_cache if item[0] == session_id and item[1] < key[1]]:
+                _context_usage_cache.pop(cache_key, None)
+            has_newer_cache = any(item[0] == session_id and item[1] > key[1] for item in _context_usage_cache)
+            if not has_newer_cache:
+                _context_usage_cache[key] = (
+                    time.monotonic() + _CONTEXT_USAGE_CACHE_TTL_SECONDS,
+                    snapshot.model_copy(deep=True),
+                )
+        return snapshot
+    finally:
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is current_task:
+                _context_usage_inflight.pop(key, None)
+
+
+async def _cached_context_usage_snapshot(
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    key = _context_usage_cache_key(session_id, session)
+    now = time.monotonic()
+
+    async with _context_usage_cache_lock:
+        cached = _context_usage_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
+        task = _context_usage_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(_build_context_usage_for_cache(key, session_id, session=session))
+            _context_usage_inflight[key] = task
+
+    snapshot = await asyncio.shield(task)
+    return snapshot.model_copy(deep=True)
 
 # =============================================================================
 # Request/Response Models - API Compatible (camelCase)
@@ -68,6 +131,7 @@ class SessionCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     
     parentID: Optional[str] = Field(None, alias="parent_id", description="Parent session ID")
+    projectID: Optional[str] = Field(None, alias="project_id", description="Project ID")
     title: Optional[str] = Field(None, description="Session title")
     permission: Optional[List[PermissionRule]] = Field(None, description="Permission rules")
     category: Optional[str] = Field(None, description="Session category (e.g. 'user', 'workflow')")
@@ -94,18 +158,27 @@ class SessionTime(BaseModel):
     archived: Optional[int] = Field(None, description="Archive timestamp (ms)")
 
 
+class SessionGoalResponse(BaseModel):
+    """Persisted goal state shown by the WebUI composer banner."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: Literal["active", "paused", "completed", "blocked"] = Field(..., description="Goal status")
+    objective: str = Field(..., description="Goal objective")
+    reason: Optional[str] = Field(None, description="Last goal judge reason")
+
+
 class SessionResponse(BaseModel):
     """
     Session response - Flocks compatible
     
-    Matches Flocks Session.Info format exactly.
-    No agent/model/provider at top level - these come from messages.
+    Matches Flocks Session.Info format.
     """
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
     
     id: str = Field(..., description="Session ID")
     slug: str = Field("", description="Session slug")
     projectID: str = Field(..., description="Project ID")
+    effectiveProjectID: str = Field(..., description="Project used for session manager grouping")
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
@@ -115,29 +188,62 @@ class SessionResponse(BaseModel):
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
+    provider: Optional[str] = Field(None, description="Pinned provider ID")
+    model: Optional[str] = Field(None, description="Pinned model ID")
+    model_pinned: bool = Field(False, description="Whether provider/model are pinned for this session")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
     ownerUsername: Optional[str] = Field(None, description="Session owner username")
     canWrite: bool = Field(False, description="Whether current user can continue this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
     isShared: bool = Field(False, description="Whether this session is locally shared")
+    goal: Optional[SessionGoalResponse] = Field(None, description="Persisted session goal state")
 
 
-def _session_to_response(session: SessionModel) -> SessionResponse:
+class SessionListItem(BaseModel):
+    """Lightweight session row for the session manager sidebar."""
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    id: str
+    projectID: str
+    effectiveProjectID: str
+    directory: str
+    title: str
+    time: SessionTime
+    category: str = "user"
+    parentID: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    model_pinned: bool = False
+    canWrite: bool = False
+    canDelete: bool = False
+    isShared: bool = False
+
+
+def _session_to_response(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
-    
-    Note: agent/model/provider are NOT included at session level.
-    They are retrieved from the latest user message in the session.
     """
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_local_shared(session)
+    is_shared = SessionPolicy.is_shared(session, shared_project_ids)
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
 
     return SessionResponse(
         id=session.id,
         slug=session.slug,
         projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
         directory=session.directory,
         title=session.title,
         version=session.version,
@@ -152,12 +258,76 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
+        provider=session.provider,
+        model=session.model,
+        model_pinned=session.model_pinned,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
         canWrite=can_write,
         canDelete=can_delete,
         isShared=is_shared,
     )
+
+
+def _session_to_list_item(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionListItem:
+    """Convert a session to the lightweight manager-list response shape."""
+    current_user = get_current_auth_user()
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
+    return SessionListItem(
+        id=session.id,
+        projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
+        directory=session.directory,
+        title=session.title,
+        time=SessionTime(
+            created=session.time.created,
+            updated=session.time.updated,
+            compacting=session.time.compacting,
+            archived=session.time.archived,
+        ),
+        category=session.category,
+        parentID=session.parent_id,
+        provider=session.provider,
+        model=session.model,
+        model_pinned=session.model_pinned,
+        canWrite=SessionPolicy.can_write(session, current_user),
+        canDelete=SessionPolicy.can_delete(session, current_user),
+        isShared=SessionPolicy.is_shared(session, shared_project_ids),
+    )
+
+
+async def _session_to_response_with_goal(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
+    """Convert SessionModel to SessionResponse and attach persisted goal state."""
+    response = _session_to_response(session, effective_project_id, shared_project_ids)
+    try:
+        from flocks.session.goal import GoalManager
+
+        goal_state = await GoalManager.get(session.id)
+    except Exception as exc:
+        log.warn("session.goal.response_error", {"sessionID": session.id, "error": str(exc)})
+        goal_state = None
+
+    if goal_state is not None:
+        response.goal = SessionGoalResponse(
+            status=goal_state.status,
+            objective=goal_state.objective,
+            reason=goal_state.last_reason or goal_state.paused_reason,
+        )
+    return response
 
 
 def _require_session_read_access(session: SessionModel, user) -> None:
@@ -168,6 +338,39 @@ def _require_session_read_access(session: SessionModel, user) -> None:
 def _require_session_write_access(session: SessionModel, user) -> None:
     if not SessionPolicy.can_write(session, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
+
+
+async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
+    """Validate an explicitly requested chat agent.
+
+    The Agent page "enabled" toggle is stored as ``delegatable`` for backward
+    compatibility, but product semantics treat disabled subagents as unusable
+    from both delegation and direct chat selection.
+    """
+    if not agent_name:
+        return
+
+    from flocks.agent.registry import Agent
+
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available',
+        )
+
+    tags = getattr(agent, "tags", None) or []
+    if getattr(agent, "hidden", False) or "system" in tags:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available for chat',
+        )
+
+    if getattr(agent, "mode", None) != "primary" and getattr(agent, "delegatable", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is disabled',
+        )
 
 
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
@@ -195,6 +398,87 @@ async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionMode
         return await Session.get_by_id(session_id)
     finally:
         reset_current_auth_user(token)
+
+
+async def _resolve_session_working_directory(session: SessionModel) -> str:
+    """Keep a valid historical cwd, otherwise use the user's default project."""
+
+    if session.directory:
+        directory = Path(session.directory).expanduser()
+        if directory.is_dir() and os.access(directory, os.R_OK | os.X_OK):
+            return str(directory.resolve())
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+
+    current_user = get_current_auth_user()
+    owner_id = current_user.id if current_user else API_TOKEN_SERVICE_USER_ID
+    default_project = await Project.get(
+        DEFAULT_PROJECT_ID,
+        owner_id=owner_id,
+        default_worktree=Project.default_worktree_candidate(),
+    )
+    if default_project is None or default_project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The session directory and default project directory are unavailable",
+        )
+    log.warn(
+        "session.directory.fallback",
+        {
+            "sessionID": session.id,
+            "stored_directory": session.directory,
+            "fallback_directory": default_project.worktree,
+        },
+    )
+    try:
+        from flocks.server.routes.event import publish_event
+
+        await publish_event(
+            "session.notice",
+            {
+                "sessionID": session.id,
+                "kind": "directory-fallback",
+                "storedDirectory": session.directory,
+                "fallbackDirectory": default_project.worktree,
+            },
+        )
+    except Exception as exc:
+        log.debug(
+            "session.directory.fallback_notice_failed",
+            {"sessionID": session.id, "error": str(exc)},
+        )
+    return default_project.worktree
+
+
+async def _publish_context_usage_update(
+    event_publish_callback,
+    session_id: str,
+    *,
+    session: Optional[SessionModel] = None,
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
+) -> None:
+    """Best-effort SSE update for the composer context-usage meter."""
+    if event_publish_callback is None:
+        return
+    try:
+        if session is None:
+            session = await _get_session_by_id_unfiltered(session_id)
+        snapshot = await build_context_usage_snapshot(
+            session_id,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        await event_publish_callback(
+            "context.usage.updated",
+            snapshot.model_dump(by_alias=True),
+        )
+    except Exception as exc:
+        log.debug("session.context_usage.publish_failed", {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
 
 
 # =============================================================================
@@ -234,57 +518,120 @@ async def get_session_status() -> Dict[str, Any]:
 
 @router.get(
     "",
-    response_model=List[SessionResponse],
+    response_model=List[Union[SessionResponse, SessionListItem]],
     summary="List sessions",
     description="Get a list of all sessions, sorted by most recently updated",
 )
 async def list_sessions(
     request: Request,
+    view: Optional[Literal["list"]] = Query(None, description="Use lightweight list rows"),
+    manager: Optional[bool] = Query(None, description="Apply session-manager visibility filters"),
     directory: Optional[str] = Query(None, description="Filter by project directory"),
+    projectID: Optional[str] = Query(None, description="Filter by effective project ID"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
     search: Optional[str] = Query(None, description="Filter by title (case-insensitive)"),
     limit: Optional[int] = Query(None, ge=1, description="Maximum sessions to return"),
+    offset: Optional[int] = Query(None, ge=0, description="Number of filtered sessions to skip"),
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
-) -> List[SessionResponse]:
+) -> List[Union[SessionResponse, SessionListItem]]:
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
-    _current_user = require_user(request)
-    all_sessions = await Session.list_all()
+    current_user = require_user(request)
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+    list_started_at = time.perf_counter()
+    all_sessions = await Session.list_all_unfiltered()
+    list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
     
     filtered = []
+    effective_project_ids: Dict[str, str] = {}
     term = search.lower() if search else None
+    manager_categories = {"user", "workflow", "entity-config"}
+    skip_remaining = offset or 0
     
     for session in all_sessions:
+        if not SessionPolicy.can_read(
+            session,
+            current_user,
+            shared_project_ids=shared_project_ids,
+        ):
+            continue
         if _is_hidden_from_session_manager(session):
             continue
         if directory is not None and session.directory != directory:
             continue
-        if roots and session.parent_id:
+        effective_project_id = (
+            session.project_id
+            if session.project_id in visible_project_ids
+            else DEFAULT_PROJECT_ID
+        )
+        if projectID is not None and effective_project_id != projectID:
+            continue
+        if (roots or manager) and session.parent_id:
             continue
         if start is not None and session.time.updated < start:
             continue
         if term is not None and term not in session.title.lower():
             continue
-        if category is not None:
+        if manager:
+            if session.category not in manager_categories:
+                continue
+        elif category is not None:
             if session.category != category:
                 continue
         elif session.category == "test":
             # exclude test sessions from the default listing
             continue
+
+        if skip_remaining > 0:
+            skip_remaining -= 1
+            continue
         
         filtered.append(session)
+        effective_project_ids[session.id] = effective_project_id
         
         if limit is not None and len(filtered) >= limit:
             break
-    
-    response = [_session_to_response(s) for s in filtered]
+
+    if view == "list":
+        response = [
+            _session_to_list_item(s, effective_project_ids[s.id], shared_project_ids)
+            for s in filtered
+        ]
+        log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
+            "total": len(all_sessions),
+            "count": len(response),
+            "roots": roots,
+            "manager": manager,
+            "limit": limit,
+            "offset": offset,
+            "search": bool(search),
+            "category": category,
+            "projectID": projectID,
+            "list_ms": round(list_elapsed_ms, 2),
+        })
+        return response
+
+    response = [
+        await _session_to_response_with_goal(
+            s,
+            effective_project_ids[s.id],
+            shared_project_ids,
+        )
+        for s in filtered
+    ]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
+        "manager": manager,
         "limit": limit,
+        "offset": offset,
         "search": bool(search),
         "category": category,
+        "projectID": projectID,
+        "list_ms": round(list_elapsed_ms, 2),
     })
     return response
 
@@ -300,19 +647,28 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     """Create a new session"""
     current_user = require_user(http_request)
     await assert_license_active(feature="session_create")
-    import os
-    
     if request is None:
         request = SessionCreateRequest()
-    
-    # Use Instance context if available, otherwise use cwd
-    from flocks.project.instance import Instance
-    try:
-        directory = Instance.directory
-        project_id = Instance.project.id if hasattr(Instance, 'project') else "default"
-    except Exception:
-        directory = os.getcwd()
-        project_id = "default"
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+
+    project_id = request.projectID or DEFAULT_PROJECT_ID
+    project = await Project.get(
+        project_id,
+        owner_id=current_user.id,
+        default_worktree=Project.default_worktree_candidate(),
+    )
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {project_id} not found",
+        )
+    if project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project directory is {project.path_status}",
+        )
+    directory = project.worktree
     
     # Trigger command:new hook if creating from parent (like /new command)
     if request.parentID:
@@ -355,6 +711,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             )
             for p in request.permission
         ]
+
+    is_api_token_client = current_user.id == API_TOKEN_SERVICE_USER_ID
     
     session = await Session.create(
         project_id=project_id,
@@ -362,9 +720,11 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         title=request.title,
         parent_id=request.parentID,
         permission=permission,
-        owner_user_id=current_user.id,
+        owner_user_id=None if is_api_token_client else current_user.id,
+        owner_username=None if is_api_token_client else current_user.username,
         **({"category": request.category} if request.category else {}),
     )
+    Project.invalidate_session_stats()
 
     log.info("session.created", {"session_id": session.id})
     try:
@@ -377,13 +737,13 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 "user_name": current_user.username,
                 "username": current_user.username,
                 "session_id": session.id,
-                "owner_user_id": current_user.id,
+                "owner_user_id": session.owner_user_id,
                 "project_id": session.project_id,
             },
         )
     except Exception:
         pass
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 
@@ -405,7 +765,34 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     _require_session_read_access(session, _current_user)
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
+
+
+@router.get(
+    "/{sessionID}/context-usage",
+    response_model=ContextUsageSnapshot,
+    summary="Get session context usage",
+    description="Get the current context usage snapshot for the composer meter",
+)
+async def get_session_context_usage(sessionID: str, request: Request) -> ContextUsageSnapshot:
+    """Return current prompt/context usage for a session."""
+    started_at = time.perf_counter()
+    current_user = require_user(request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_read_access(session, current_user)
+    snapshot = await _cached_context_usage_snapshot(sessionID, session=session)
+    log_route_timing(log, "session.context_usage.complete", started_at=started_at, extra={
+        "sessionID": sessionID,
+        "source": snapshot.source,
+        "used_tokens": snapshot.used_tokens,
+        "segments": len(snapshot.segments),
+    })
+    return snapshot
 
 
 @router.get(
@@ -425,7 +812,7 @@ async def get_session_children(sessionID: str, request: Request) -> List[Session
         )
     _require_session_read_access(session, current_user)
     children = await Session.children(session.project_id, sessionID)
-    return [_session_to_response(s) for s in children if SessionPolicy.can_read(s, current_user)]
+    return [await _session_to_response_with_goal(s) for s in children if SessionPolicy.can_read(s, current_user)]
 
 
 class TodoInfo(BaseModel):
@@ -434,6 +821,7 @@ class TodoInfo(BaseModel):
     
     id: str = Field(..., description="Todo ID")
     content: str = Field(..., description="Task description")
+    activeForm: Optional[str] = Field(None, description="Active/progressive task description")
     status: str = Field(..., description="Status: pending, in_progress, completed, cancelled")
     priority: str = Field("medium", description="Priority: high, medium, low")
 
@@ -446,7 +834,7 @@ class TodoInfo(BaseModel):
 )
 async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
     """Get session todos"""
-    from flocks.storage.storage import Storage
+    from flocks.session.features.todo import Todo
     _current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -456,10 +844,8 @@ async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
         )
     _require_session_read_access(session, _current_user)
     try:
-        todos = await Storage.read(["todo", sessionID])
-        if todos is None:
-            return []
-        return [TodoInfo(**todo) for todo in todos]
+        todos = await Todo.get(sessionID)
+        return [TodoInfo(**todo.model_dump(exclude_none=True)) for todo in todos]
     except Exception as e:
         log.warn("session.todo.read_error", {"sessionID": sessionID, "error": str(e)})
         return []
@@ -473,8 +859,7 @@ async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
 )
 async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: Request) -> List[TodoInfo]:
     """Update session todos"""
-    from flocks.storage.storage import Storage
-    from flocks.server.routes.event import publish_event
+    from flocks.session.features.todo import Todo, TodoInfo as SessionTodoInfo
     _current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -484,13 +869,10 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
         )
     _require_session_write_access(session, _current_user)
     try:
-        await Storage.write(["todo", sessionID], [t.model_dump() for t in todos])
-        
-        await publish_event("todo.updated", {
-            "sessionID": sessionID,
-            "todos": [t.model_dump() for t in todos],
-        })
-        
+        await Todo.update(
+            sessionID,
+            [SessionTodoInfo(**t.model_dump(exclude_none=True)) for t in todos],
+        )
         return todos
     except Exception as e:
         log.error("session.todo.write_error", {"sessionID": sessionID, "error": str(e)})
@@ -517,7 +899,18 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     if not SessionPolicy.can_delete(session, current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可删除会话")
 
+    from flocks.session.goal import GoalManager
+    from flocks.session.interaction_queue import InteractionQueue
+
+    await _abort_session_processing(sessionID)
+    await InteractionQueue.clear(sessionID)
+    await GoalManager.clear(sessionID)
+    await _wait_for_sessions_idle([sessionID])
+    await _abort_and_wait_descendant_sessions(session.project_id, sessionID)
     await Session.delete(session.project_id, sessionID)
+    from flocks.project.project import Project
+
+    Project.invalidate_session_stats()
 
     # Best-effort cleanup of any image/file uploads materialised for this
     # session via ``_materialize_data_url_to_disk`` (see prompt_async).
@@ -563,12 +956,65 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     return True
 
 
+async def _collect_descendant_session_ids(project_id: str, session_id: str) -> List[str]:
+    """Return child session IDs in the same order Session.delete will recurse."""
+    sessions = await Session.list(project_id)
+    children_by_parent: Dict[str, List[str]] = {}
+    for child in sessions:
+        if child.parent_id is None:
+            continue
+        children_by_parent.setdefault(child.parent_id, []).append(child.id)
+
+    descendants: List[str] = []
+    seen: set[str] = set()
+
+    def visit(parent_id: str) -> None:
+        for child_id in children_by_parent.get(parent_id, []):
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            descendants.append(child_id)
+            visit(child_id)
+
+    visit(session_id)
+    return descendants
+
+
+async def _abort_and_wait_descendant_sessions(project_id: str, session_id: str) -> None:
+    """Abort descendants that exist after the parent stops and wait as a batch."""
+    known: set[str] = set()
+    latest: List[str] = []
+
+    for _ in range(_DESCENDANT_ABORT_SCAN_LIMIT):
+        latest = await _collect_descendant_session_ids(project_id, session_id)
+        new_ids = [sid for sid in latest if sid not in known]
+        for descendant_id in new_ids:
+            await _abort_session_processing(descendant_id)
+        known.update(new_ids)
+
+        if latest:
+            await _wait_for_sessions_idle(latest)
+
+        refreshed = await _collect_descendant_session_ids(project_id, session_id)
+        if set(refreshed).issubset(known):
+            return
+        latest = refreshed
+
+    log.warn("session.delete.descendants_unstable", {
+        "session_id": session_id,
+        "descendants": latest,
+    })
+
+
 class SessionUpdateRequest(BaseModel):
     """Request to update session"""
     model_config = ConfigDict(populate_by_name=True)
     
     title: Optional[str] = Field(None, description="New title")
     time: Optional[Dict[str, Any]] = Field(None, description="Time updates (archived)")
+    provider: Optional[str] = Field(None, description="Pinned provider ID")
+    model: Optional[str] = Field(None, description="Pinned model ID")
+    model_pinned: Optional[bool] = Field(None, description="Whether provider/model are pinned for this session")
 
 
 @router.patch(
@@ -598,6 +1044,12 @@ async def update_session(
         updates["title"] = request.title
     if request.time and request.time.get("archived") is not None:
         updates["archived"] = request.time["archived"]
+    if request.provider is not None:
+        updates["provider"] = request.provider
+    if request.model is not None:
+        updates["model"] = request.model
+    if request.model_pinned is not None:
+        updates["model_pinned"] = request.model_pinned
     
     session = await Session.update(
         project_id=existing.project_id,
@@ -612,7 +1064,7 @@ async def update_session(
         )
     
     log.info("session.updated", {"session_id": sessionID})
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 @router.post(
@@ -623,11 +1075,7 @@ async def update_session(
 )
 async def share_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -635,17 +1083,21 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=True, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 @router.post(
@@ -656,11 +1108,7 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
 )
 async def unshare_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -668,17 +1116,21 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=False, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    return _session_to_response(session)
+    return await _session_to_response_with_goal(session)
 
 
 # =============================================================================
@@ -828,7 +1280,7 @@ async def fork_session(sessionID: str, http_request: Request, request: Optional[
     forked = await Session.fork(session.project_id, sessionID, message_id)
     
     log.info("session.forked", {"from": sessionID, "to": forked.id})
-    return _session_to_response(forked)
+    return await _session_to_response_with_goal(forked)
 
 
 @router.get(
@@ -898,11 +1350,13 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
         if msg.role == MessageRole.USER:
             current_agent = msg.agent or DEFAULT_AGENT
             break
+
+    working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
         try:
             await Instance.provide(
-                directory=session.directory,
+                directory=working_directory,
                 init=instance_bootstrap,
                 fn=lambda: _run_session_compaction(
                     sessionID,
@@ -911,6 +1365,7 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
                     explicit_model_id=request.modelID,
                     auto=request.auto,
                     event_publish_callback=publish_event,
+                    working_directory=working_directory,
                 ),
             )
         except Exception as e:
@@ -966,7 +1421,7 @@ async def revert_session(sessionID: str, request: RevertRequest, http_request: R
     )
     
     log.info("session.reverted", {"session_id": sessionID, "message_id": request.messageID})
-    return _session_to_response(updated)
+    return await _session_to_response_with_goal(updated)
 
 
 @router.post(
@@ -991,7 +1446,7 @@ async def unrevert_session(sessionID: str, http_request: Request) -> SessionResp
     updated = await SessionRevert.unrevert(session_id=sessionID)
     
     log.info("session.unreverted", {"session_id": sessionID})
-    return _session_to_response(updated)
+    return await _session_to_response_with_goal(updated)
 
 
 # =============================================================================
@@ -1048,6 +1503,7 @@ class PromptRequest(BaseModel):
     model: Optional[ModelInfo] = Field(None, description="Model selection")
     messageID: Optional[str] = Field(None, description="Message ID")
     agent: Optional[str] = Field(None, description="Agent name")
+    display_text: Optional[str] = Field(None, alias="displayText", description="User-visible message text")
     noReply: Optional[bool] = Field(None, description="Skip AI response")
     mockReply: Optional[str] = Field(None, description="Inject a mock assistant message after noReply user message")
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool settings (deprecated)")
@@ -1155,6 +1611,14 @@ class MessageWithParts(BaseModel):
     parts: List[MessagePartInfo] = []
 
 
+class MessagePage(BaseModel):
+    """Paged message response used by the WebUI session page."""
+    sessionID: str
+    items: List[MessageWithParts] = []
+    hasMore: bool = False
+    nextBefore: Optional[str] = None
+
+
 class MessageEditRequest(BaseModel):
     """Request to edit message text."""
 
@@ -1162,9 +1626,138 @@ class MessageEditRequest(BaseModel):
     partID: Optional[str] = Field(None, description="Specific text part ID to edit")
 
 
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+
+
+def _part_to_response_info(
+    part: Any,
+    *,
+    session_id: str,
+    message_id: str,
+    index: int = 0,
+) -> MessagePartInfo:
+    text_value = getattr(part, "text", None) if part.type in ("text", "reasoning", "thinking") else None
+
+    url_value = getattr(part, "url", None) if part.type == "file" else None
+
+    state_value = None
+    if part.type == "tool":
+        raw_state = getattr(part, "state", None)
+        if raw_state is not None:
+            if hasattr(raw_state, "model_dump"):
+                state_value = raw_state.model_dump()
+            elif isinstance(raw_state, dict):
+                state_value = raw_state
+
+    return MessagePartInfo(
+        id=part.id if hasattr(part, "id") else f"{message_id}_part_{index}",
+        messageID=message_id,
+        sessionID=session_id,
+        type=part.type,
+        text=text_value,
+        synthetic=getattr(part, "synthetic", None),
+        tool=getattr(part, "tool", None) if part.type == "tool" else None,
+        state=state_value,
+        callID=getattr(part, "callID", None) if part.type == "tool" else None,
+        metadata=getattr(part, "metadata", None),
+        url=url_value,
+        mime=getattr(part, "mime", None) if part.type == "file" else None,
+        filename=getattr(part, "filename", None) if part.type == "file" else None,
+    )
+
+
+async def _message_to_response_info(msg: Any, *, cwd: str) -> MessageInfo:
+    if msg.role == "user":
+        model_dict = getattr(msg, "model", None)
+        if model_dict and isinstance(model_dict, dict):
+            model_info = model_dict
+        else:
+            try:
+                from flocks.agent.registry import Agent
+
+                default_agent = await Agent.default_agent()
+                agent_obj = await Agent.get(default_agent)
+                if agent_obj and hasattr(agent_obj, "model") and agent_obj.model:
+                    model_info = agent_obj.model
+                else:
+                    model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
+            except Exception:
+                model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
+
+        return UserMessageInfo(
+            id=msg.id,
+            sessionID=msg.sessionID,
+            role="user",
+            time=msg.time,
+            agent=getattr(msg, "agent", None) or DEFAULT_AGENT,
+            model=model_info,
+            compacted=getattr(msg, "compacted", None),
+        )
+
+    tokens_raw = getattr(msg, "tokens", None)
+    if tokens_raw is not None and hasattr(tokens_raw, "model_dump"):
+        tokens_dict = tokens_raw.model_dump()
+    elif isinstance(tokens_raw, dict):
+        tokens_dict = tokens_raw
+    else:
+        tokens_dict = {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {"read": 0, "write": 0},
+        }
+
+    path_raw = getattr(msg, "path", None)
+    if path_raw is not None and hasattr(path_raw, "model_dump"):
+        path_dict = path_raw.model_dump()
+    elif isinstance(path_raw, dict):
+        path_dict = path_raw
+    else:
+        path_dict = {"cwd": cwd, "root": cwd}
+
+    return AssistantMessageInfo(
+        id=msg.id,
+        sessionID=msg.sessionID,
+        role="assistant",
+        time=msg.time,
+        parentID=getattr(msg, "parentID", None),
+        modelID=getattr(msg, "modelID", None) or "claude-sonnet-4-5-20250929",
+        providerID=getattr(msg, "providerID", None) or "anthropic",
+        mode=getattr(msg, "agent", None) or DEFAULT_AGENT,
+        agent=getattr(msg, "agent", None) or DEFAULT_AGENT,
+        path=path_dict,
+        cost=getattr(msg, "cost", 0.0) or 0.0,
+        tokens=tokens_dict,
+        error=getattr(msg, "error", None),
+        finish=getattr(msg, "finish", None),
+        compacted=getattr(msg, "compacted", None),
+    )
+
+
+async def _message_with_parts_to_response(
+    msg_with_parts: Any,
+    *,
+    session_id: str,
+    cwd: str,
+) -> MessageWithParts:
+    msg = msg_with_parts.info
+    info = await _message_to_response_info(msg, cwd=cwd)
+    parts = [
+        _part_to_response_info(
+            part,
+            session_id=session_id,
+            message_id=msg.id,
+            index=i,
+        )
+        for i, part in enumerate(msg_with_parts.parts)
+    ]
+    return MessageWithParts(info=info, parts=parts)
+
+
 @router.get(
     "/{sessionID}/message",
-    response_model=List[MessageWithParts],
+    response_model=Union[List[MessageWithParts], MessagePage],
     summary="Get session messages",
     description="Get all messages in a session",
 )
@@ -1172,11 +1765,15 @@ async def get_session_messages(
     sessionID: str,
     http_request: Request,
     limit: Optional[int] = Query(None, ge=1, description="Maximum messages to return"),
-) -> List[MessageWithParts]:
+    before: Optional[str] = Query(None, description="Load messages before this message id"),
+    page: bool = Query(False, description="Return paged response metadata"),
+    include_archived: bool = Query(True, description="Include compacted/archived messages"),
+) -> Union[List[MessageWithParts], MessagePage]:
     """Get session messages"""
     from flocks.session.message import Message
     import os
 
+    started_at = time.perf_counter()
     current_user = require_user(http_request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -1187,119 +1784,63 @@ async def get_session_messages(
     _require_session_read_access(session, current_user)
 
     try:
-        messages_with_parts = await Message.list_with_parts(sessionID, include_archived=True)
-        if limit:
-            messages_with_parts = messages_with_parts[-limit:]
-        
-        result = []
-        cwd = os.getcwd()
-        
-        for msg_with_parts in messages_with_parts:
-            msg = msg_with_parts.info
-            
-            # Create appropriate message info based on role
-            if msg.role == "user":
-                # Extract model from msg.model dict (UserMessageInfo has model as dict)
-                model_dict = getattr(msg, 'model', None)
-                if model_dict and isinstance(model_dict, dict):
-                    model_info = model_dict
-                else:
-                    # Fallback: try to get from Agent.default_agent's model
-                    try:
-                        from flocks.agent.registry import Agent
-                        default_agent = await Agent.default_agent()
-                        agent_obj = await Agent.get(default_agent)
-                        if agent_obj and hasattr(agent_obj, 'model') and agent_obj.model:
-                            model_info = agent_obj.model
-                        else:
-                            model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
-                    except Exception:
-                        model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
-                
-                info = UserMessageInfo(
-                    id=msg.id,
-                    sessionID=msg.sessionID,
-                    role="user",
-                    time=msg.time,
-                    agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                    model=model_info,
-                    compacted=getattr(msg, 'compacted', None),
-                )
-            else:
-                # Convert tokens to dict if it's a TokenUsage object
-                tokens_raw = getattr(msg, 'tokens', None)
-                if tokens_raw is not None and hasattr(tokens_raw, 'model_dump'):
-                    tokens_dict = tokens_raw.model_dump()
-                elif isinstance(tokens_raw, dict):
-                    tokens_dict = tokens_raw
-                else:
-                    tokens_dict = {
-                        "input": 0,
-                        "output": 0,
-                        "reasoning": 0,
-                        "cache": {"read": 0, "write": 0}
-                    }
-                
-                # Convert path to dict if it's a MessagePath object
-                path_raw = getattr(msg, 'path', None)
-                if path_raw is not None and hasattr(path_raw, 'model_dump'):
-                    path_dict = path_raw.model_dump()
-                elif isinstance(path_raw, dict):
-                    path_dict = path_raw
-                else:
-                    path_dict = {"cwd": cwd, "root": cwd}
-                
-                info = AssistantMessageInfo(
-                    id=msg.id,
-                    sessionID=msg.sessionID,
-                    role="assistant",
-                    time=msg.time,
-                    parentID=getattr(msg, 'parentID', None),
-                    modelID=getattr(msg, 'modelID', None) or "claude-sonnet-4-5-20250929",
-                    providerID=getattr(msg, 'providerID', None) or "anthropic",
-                    mode=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                    agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                    path=path_dict,
-                    cost=getattr(msg, 'cost', 0.0) or 0.0,
-                    tokens=tokens_dict,
-                    error=getattr(msg, 'error', None),
-                    finish=getattr(msg, 'finish', None),
-                    compacted=getattr(msg, 'compacted', None),
-                )
-            
-            parts = []
-            for i, part in enumerate(msg_with_parts.parts):
-                # Convert state to dict if it's a Pydantic model
-                state_value = None
-                if part.type == "tool":
-                    raw_state = getattr(part, 'state', None)
-                    if raw_state is not None:
-                        if hasattr(raw_state, 'model_dump'):
-                            state_value = raw_state.model_dump()
-                        elif isinstance(raw_state, dict):
-                            state_value = raw_state
+        from flocks.session.orphan_tools import abort_orphan_running_parts_in_messages
+        from flocks.session.core.status import SessionStatus
 
-                part_info = MessagePartInfo(
-                    id=part.id if hasattr(part, 'id') else f"{msg.id}_part_{i}",
-                    messageID=msg.id,
-                    sessionID=sessionID,
-                    type=part.type,
-                    text=getattr(part, 'text', None) if part.type in ("text", "reasoning") else None,
-                    synthetic=getattr(part, 'synthetic', None),
-                    tool=getattr(part, 'tool', None) if part.type == "tool" else None,
-                    state=state_value,
-                    callID=getattr(part, 'callID', None) if part.type == "tool" else None,
-                    metadata=getattr(part, 'metadata', None),
-                    url=getattr(part, 'url', None) if part.type == "file" else None,
-                    mime=getattr(part, 'mime', None) if part.type == "file" else None,
-                    filename=getattr(part, 'filename', None) if part.type == "file" else None,
-                )
-                parts.append(part_info)
-            result.append(MessageWithParts(info=info, parts=parts))
-        
+        paged = page or before is not None
+        if paged or limit:
+            page_limit = limit or DEFAULT_MESSAGE_PAGE_LIMIT
+            messages_with_parts, has_more, next_before = await Message.list_recent_with_parts(
+                sessionID,
+                limit=page_limit,
+                before=before,
+                include_archived=include_archived,
+            )
+        else:
+            messages_with_parts = await Message.list_with_parts(
+                sessionID,
+                include_archived=include_archived,
+            )
+            has_more = False
+            next_before = None
+
+        if sessionID not in SessionStatus.get_busy_session_ids():
+            await abort_orphan_running_parts_in_messages(sessionID, messages_with_parts)
+
+        cwd = os.getcwd()
+        result = [
+            await _message_with_parts_to_response(
+                msg_with_parts,
+                session_id=sessionID,
+                cwd=cwd,
+            )
+            for msg_with_parts in messages_with_parts
+        ]
+
+        payload_bytes = len(_json_bytes([item.model_dump() for item in result]))
+        log_route_timing(log, "session.messages.page.complete", started_at=started_at, extra={
+            "sessionID": sessionID,
+            "count": len(result),
+            "parts": sum(len(message.parts) for message in result),
+            "paged": paged,
+            "limit": limit,
+            "before": bool(before),
+            "has_more": has_more,
+            "payload_bytes": payload_bytes,
+        })
+
+        if paged:
+            return MessagePage(
+                sessionID=sessionID,
+                items=result,
+                hasMore=has_more,
+                nextBefore=next_before,
+            )
         return result
     except Exception as e:
         log.error("session.messages.error", {"error": str(e), "sessionID": sessionID})
+        if page or before is not None:
+            return MessagePage(sessionID=sessionID, items=[], hasMore=False, nextBefore=None)
         return []
 
 
@@ -1323,82 +1864,13 @@ async def get_message(sessionID: str, messageID: str, http_request: Request) -> 
         )
     _require_session_read_access(session, current_user)
 
-    msg_with_parts = await Message.get_with_parts(sessionID, messageID)
+    msg_with_parts = await Message.get_with_parts_lazy(sessionID, messageID)
     if msg_with_parts:
-        msg = msg_with_parts.info
-        cwd = os.getcwd()
-        
-        # Create appropriate message info based on role
-        if msg.role == "user":
-            info = UserMessageInfo(
-                id=msg.id,
-                sessionID=msg.sessionID,
-                role="user",
-                time=msg.time,
-                agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                model={
-                    "providerID": getattr(msg, 'providerID', None) or "anthropic",
-                    "modelID": getattr(msg, 'modelID', None) or "claude-sonnet-4-5-20250929",
-                },
-            )
-        else:
-            # Convert tokens to dict if it's a TokenUsage object
-            tokens_raw = getattr(msg, 'tokens', None)
-            if tokens_raw is not None and hasattr(tokens_raw, 'model_dump'):
-                tokens_dict = tokens_raw.model_dump()
-            elif isinstance(tokens_raw, dict):
-                tokens_dict = tokens_raw
-            else:
-                tokens_dict = {
-                    "input": 0,
-                    "output": 0,
-                    "reasoning": 0,
-                    "cache": {"read": 0, "write": 0}
-                }
-            
-            # Convert path to dict if it's a MessagePath object
-            path_raw = getattr(msg, 'path', None)
-            if path_raw is not None and hasattr(path_raw, 'model_dump'):
-                path_dict = path_raw.model_dump()
-            elif isinstance(path_raw, dict):
-                path_dict = path_raw
-            else:
-                path_dict = {"cwd": cwd, "root": cwd}
-            
-            info = AssistantMessageInfo(
-                id=msg.id,
-                sessionID=msg.sessionID,
-                role="assistant",
-                time=msg.time,
-                parentID=getattr(msg, 'parentID', None),
-                modelID=getattr(msg, 'modelID', None) or "claude-sonnet-4-5-20250929",
-                providerID=getattr(msg, 'providerID', None) or "anthropic",
-                mode=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                agent=getattr(msg, 'agent', None) or DEFAULT_AGENT,
-                path=path_dict,
-                cost=getattr(msg, 'cost', 0.0) or 0.0,
-                tokens=tokens_dict,
-            )
-        
-        parts = []
-        for i, part in enumerate(msg_with_parts.parts):
-            part_info = MessagePartInfo(
-                id=part.id if hasattr(part, 'id') else f"{msg.id}_part_{i}",
-                messageID=msg.id,
-                sessionID=sessionID,
-                type=part.type,
-                text=getattr(part, 'text', None) if part.type in ("text", "reasoning") else None,
-                synthetic=getattr(part, 'synthetic', None),
-                tool=getattr(part, 'tool', None) if part.type == "tool" else None,
-                state=getattr(part, 'state', None) if part.type == "tool" else None,
-                callID=getattr(part, 'callID', None) if part.type == "tool" else None,
-                metadata=getattr(part, 'metadata', None),
-                url=getattr(part, 'url', None) if part.type == "file" else None,
-                mime=getattr(part, 'mime', None) if part.type == "file" else None,
-                filename=getattr(part, 'filename', None) if part.type == "file" else None,
-            )
-            parts.append(part_info)
-        return MessageWithParts(info=info, parts=parts)
+        return await _message_with_parts_to_response(
+            msg_with_parts,
+            session_id=sessionID,
+            cwd=os.getcwd(),
+        )
     
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -1666,6 +2138,7 @@ async def _run_existing_user_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     if result.action == "queued":
@@ -1684,10 +2157,12 @@ async def _run_existing_user_message(
     final_content = ""
     assistant_message_id = None
     created_ms = end_ms
+    final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
 
     if result.last_message:
         assistant_message_id = result.last_message.id
         final_content = await Message.get_text_content(result.last_message)
+        final_tokens = token_usage_to_dict(getattr(result.last_message, "tokens", None))
         finish = getattr(result.last_message, "finish", None)
         if finish:
             finish_reason = finish
@@ -1716,10 +2191,17 @@ async def _run_existing_user_message(
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
             "cost": 0,
-            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "tokens": final_tokens,
             "finish": finish_reason,
         }
     })
+    await _publish_context_usage_update(
+        publish_event,
+        session_id,
+        session=session,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
 
     log.info("session.message.replay.completed", {
         "sessionID": session_id,
@@ -1786,7 +2268,7 @@ async def resend_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
@@ -1881,7 +2363,7 @@ async def regenerate_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
@@ -1946,7 +2428,7 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
     current_user = require_user(http_request)
     _require_session_write_access(session, current_user)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     
     log.info("session.message.send.processing", {
         "sessionID": sessionID,
@@ -2130,6 +2612,7 @@ async def _run_session_compaction(
     auto: bool = False,
     event_publish_callback=None,
     focus_instruction: Optional[str] = None,
+    working_directory: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Execute session compaction directly without routing through the LLM loop.
 
@@ -2147,6 +2630,8 @@ async def _run_session_compaction(
     session = await Session.get_by_id(session_id)
     if not session:
         raise ValueError(f"Session {session_id} not found")
+    if working_directory:
+        session = session.model_copy(update={"directory": working_directory})
 
     await SessionRevert.cleanup(session)
     agent_name, provider_id, model_id = await _resolve_compaction_context(
@@ -2183,27 +2668,42 @@ async def _run_session_compaction(
                 "data": data,
             })
 
-    result = await run_compaction(
-        session_id,
-        parent_message_id=parent_message_id,
-        messages=messages,
-        provider_id=provider_id,
-        model_id=model_id,
-        auto=auto,
-        event_publish_callback=event_publish_callback,
-        status_after="idle",
-        focus_instruction=focus_instruction,
-        progress_callback=progress_callback,
-    )
+    async def publish_current_context_usage() -> None:
+        await _publish_context_usage_update(
+            event_publish_callback,
+            session_id,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
+    try:
+        result = await run_compaction(
+            session_id,
+            parent_message_id=parent_message_id,
+            messages=messages,
+            provider_id=provider_id,
+            model_id=model_id,
+            auto=auto,
+            event_publish_callback=event_publish_callback,
+            status_after="idle",
+            focus_instruction=focus_instruction,
+            progress_callback=progress_callback,
+        )
+    except Exception:
+        await publish_current_context_usage()
+        raise
     if result == "stop":
         # ``SessionCompaction.process`` swallows the underlying provider
         # exception (so the loop path stays simple) but stashes the
         # user-facing message via ``_record_compaction_error``.  Surface
         # it verbatim here so the SSE ``session.error`` payload — and
-        # therefore the front-end toast — shows e.g. "Error code: 529
-        # — 模型服务暂时不可用" instead of an opaque "Compaction failed".
+        # therefore the front-end toast — shows the provider's original
+        # error text instead of an opaque "Compaction failed".
+        await publish_current_context_usage()
         detail = pop_last_compaction_error(session_id) or "Compaction failed"
         raise RuntimeError(detail)
+    await publish_current_context_usage()
     return agent_name, provider_id, model_id
 
 
@@ -2214,16 +2714,16 @@ _repair_json_string = repair_truncated_json
 
 def _check_session_aborted(sessionID: str, checkpoint: str, step: int, **extra_context) -> bool:
     """
-    检查 session 是否被 abort
+    Check whether the session has been aborted.
     
     Args:
         sessionID: Session ID
-        checkpoint: 检查点名称（如 "before_step", "in_stream", "skip_tool_processing"）
-        step: 当前 step 数
-        **extra_context: 额外的日志上下文信息
+        checkpoint: Checkpoint name, such as "before_step", "in_stream", or "skip_tool_processing".
+        step: Current step number.
+        **extra_context: Additional log context.
     
     Returns:
-        True 表示 session 已被 abort，应该停止执行
+        True when the session has been aborted and execution should stop.
     """
     from flocks.session.core.status import SessionStatus
     
@@ -2294,6 +2794,7 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
+    await _require_agent_usable_for_chat(request.agent)
     agent_name = request.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
@@ -2342,22 +2843,23 @@ async def _process_session_message(
     user_message_id = request.messageID or Identifier.create("message")
     user_part_id = Identifier.create("part")
 
-    # display_text (optional) is the user-visible text shown in the chat bubble.
-    # It differs from text_content when a command generates a derived LLM prompt
-    # (e.g. "/tools create foo" stores the slash command text, not the full skill
-    # prompt that is sent to the LLM).
-    display_text = getattr(request, "display_text", None) or text_content
+    # display_text (optional) is UI-only. The stored text part must stay as the
+    # real prompt so SessionLoop, hooks, title generation, and queued prompts keep
+    # seeing the same content the model receives.
+    display_text = getattr(request, "display_text", None)
+    display_metadata = {"displayText": display_text} if display_text else None
 
     _is_no_reply = bool(request.noReply)
     user_message = await Message.create(
         session_id=sessionID,
         role=MessageRole.USER,
-        content=display_text,
+        content=text_content,
         id=user_message_id,
         time={"created": now_ms},
         agent=agent_name,
         model={"providerID": provider_id, "modelID": model_id},
         part_id=user_part_id,
+        part_metadata=display_metadata,
         synthetic=True if _is_no_reply else None,
     )
     user_message_id = user_message.id
@@ -2377,9 +2879,11 @@ async def _process_session_message(
         "messageID": user_message_id,
         "sessionID": sessionID,
         "type": "text",
-        "text": display_text,
+        "text": text_content,
         "time": {"start": now_ms},
     }
+    if display_metadata:
+        _part_event["metadata"] = display_metadata
     if _is_no_reply:
         _part_event["synthetic"] = True
     await publish_event("message.part.updated", {"part": _part_event})
@@ -2435,7 +2939,7 @@ async def _process_session_message(
             unique_name = f"{Identifier.create('part')}{ext}"
             target = uploads_root / unique_name
             target.write_bytes(raw_bytes)
-            return f"file://{target.resolve()}"
+            return target.resolve().as_uri()
         except Exception as exc:
             log.warn("session.message.file_part.materialize_failed", {
                 "sessionID": sessionID,
@@ -2525,6 +3029,14 @@ async def _process_session_message(
                 },
             })
 
+        await _publish_context_usage_update(
+            publish_event,
+            sessionID,
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+
         return {
             "id": user_message_id,
             "sessionID": sessionID,
@@ -2553,6 +3065,7 @@ async def _process_session_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     # ------------------------------------------------------------------
@@ -2581,10 +3094,12 @@ async def _process_session_message(
     finish_reason = "stop"
     final_content = ""
     assistant_message_id = None
+    final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
     
     if result.last_message:
         assistant_message_id = result.last_message.id
         final_content = await Message.get_text_content(result.last_message)
+        final_tokens = token_usage_to_dict(getattr(result.last_message, "tokens", None))
         finish = getattr(result.last_message, 'finish', None)
         if finish:
             finish_reason = finish
@@ -2611,10 +3126,17 @@ async def _process_session_message(
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
             "cost": 0,
-            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "tokens": final_tokens,
             "finish": finish_reason,
         }
     })
+    await _publish_context_usage_update(
+        publish_event,
+        sessionID,
+        session=session,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
     
     # Collect parts for the response
     all_parts = []
@@ -2795,13 +3317,21 @@ def _extract_text_from_parts(parts: List[Dict[str, Any]]) -> str:
     return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
 
 
-def _replace_text_parts(parts: Optional[List[Dict[str, Any]]], text: str) -> List[Dict[str, Any]]:
+def _replace_text_parts(
+    parts: Optional[List[Dict[str, Any]]],
+    text: str,
+    text_metadata: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     updated_parts: List[Dict[str, Any]] = []
     replaced = False
     for part in parts or []:
         if part.get("type") == "text" and not replaced:
             next_part = dict(part)
             next_part["text"] = text
+            if text_metadata:
+                merged_metadata = dict(next_part.get("metadata") or {})
+                merged_metadata.update(text_metadata)
+                next_part["metadata"] = merged_metadata
             updated_parts.append(next_part)
             replaced = True
             continue
@@ -2810,7 +3340,10 @@ def _replace_text_parts(parts: Optional[List[Dict[str, Any]]], text: str) -> Lis
         updated_parts.append(dict(part))
 
     if not replaced:
-        updated_parts.insert(0, {"type": "text", "text": text})
+        next_part: Dict[str, Any] = {"type": "text", "text": text}
+        if text_metadata:
+            next_part["metadata"] = dict(text_metadata)
+        updated_parts.insert(0, next_part)
     return updated_parts
 
 
@@ -2918,7 +3451,7 @@ def _materialize_data_url_part(
                 ext = "." + tail.lower()
         target = uploads_root / f"{Identifier.create('part')}{ext}"
         target.write_bytes(raw_bytes)
-        return f"file://{target.resolve()}"
+        return target.resolve().as_uri()
     except Exception as exc:
         log.warn("session.prompt_queue.materialize_failed", {
             "sessionID": session_id,
@@ -2938,7 +3471,7 @@ def _event_from_queued_prompt(item, working_directory: str):
         agent=item.agent,
         model=item.model,
         variant=item.variant,
-        display_text=None,
+        display_text=item.display_text,
         messageID=item.messageID,
         noReply=item.noReply,
         mockReply=item.mockReply,
@@ -3040,18 +3573,37 @@ async def _schedule_prompt_queue_drain(session_id: str, working_directory: str) 
 
 
 async def _wait_for_session_idle(session_id: str, timeout_s: float = 5.0) -> None:
+    await _wait_for_sessions_idle([session_id], timeout_s=timeout_s)
+
+
+async def _wait_for_sessions_idle(session_ids: List[str], timeout_s: float = 5.0) -> None:
     from flocks.session.session_loop import SessionLoop
 
+    pending = set(session_ids)
+    if not pending:
+        return
+
     deadline = time.time() + timeout_s
-    while SessionLoop.is_running(session_id) and time.time() < deadline:
-        await asyncio.sleep(0.05)
+    while pending:
+        running = {sid for sid in pending if SessionLoop.is_running(sid)}
+        if not running:
+            return
+        now = time.time()
+        if now >= deadline:
+            log.warn("session.wait_idle.timeout", {
+                "session_ids": sorted(running),
+                "timeout_s": timeout_s,
+            })
+            return
+        pending = running
+        await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
 
 
 def _build_prompt_request_from_event(event, prompt_text: str, display_text: Optional[str] = None):
     import types
 
     return types.SimpleNamespace(
-        parts=_replace_text_parts(event.parts, prompt_text),
+        parts=_replace_text_parts(event.parts, prompt_text, event.metadata or None),
         display_text=display_text,
         agent=event.agent,
         model=_coerce_model_for_prompt_request(event.model),
@@ -3166,6 +3718,13 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "time": {"start": asst_now, "end": asst_now},
             }
         })
+        await _publish_context_usage_update(
+            publish_event,
+            sessionID,
+            session=session,
+            provider_id="builtin",
+            model_id="command",
+        )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
         request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
@@ -3201,6 +3760,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             auto=False,
             event_publish_callback=publish_event,
             focus_instruction=focus_instruction,
+            working_directory=working_directory,
         )
         return True
 
@@ -3211,7 +3771,18 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         session_control=_run_session_control,
         clear_history=_clear_history,
     )
-    await dispatch_user_input(event, sink)
+    result = await dispatch_user_input(event, sink)
+    if result.command_name == "goal" and result.action == "llm":
+        from flocks.session.goal import GoalManager
+
+        state = await GoalManager.get(sessionID)
+        if state is not None:
+            await publish_event("session.goal.updated", {
+                "sessionID": sessionID,
+                "status": state.status,
+                "objective": state.objective,
+                "reason": state.last_reason,
+            })
 
 
 class PromptQueueUpdateRequest(BaseModel):
@@ -3224,6 +3795,7 @@ async def _enqueue_prompt_request(
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
+    await _require_agent_usable_for_chat(request.agent)
     model = request.model.model_dump(by_alias=True) if request.model else None
     parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
     return await InteractionQueue.enqueue(
@@ -3232,6 +3804,7 @@ async def _enqueue_prompt_request(
         agent=request.agent,
         model=model,
         variant=request.variant,
+        display_text=request.display_text,
         message_id=request.messageID,
         no_reply=request.noReply,
         mock_reply=request.mockReply,
@@ -3273,6 +3846,7 @@ async def enqueue_prompt(sessionID: str, request: PromptRequest) -> Dict[str, An
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    await _require_agent_usable_for_chat(request.agent)
     try:
         item = await _enqueue_prompt_request(sessionID, request)
     except QueueFullError as exc:
@@ -3341,7 +3915,7 @@ async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, A
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     try:
         await InteractionQueue.promote(sessionID, queueID)
     except QueueItemNotFoundError as exc:
@@ -3365,7 +3939,7 @@ async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, A
 async def send_session_message_async(
     sessionID: str,
     request: PromptRequest,
-    http_request: Request,
+    http_request: Request = None,
 ):
     """Send message asynchronously - returns 202 immediately, response via SSE"""
     import os
@@ -3379,10 +3953,12 @@ async def send_session_message_async(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    current_user = require_user(http_request)
-    _require_session_write_access(session, current_user)
+    if http_request is not None:
+        current_user = require_user(http_request)
+        _require_session_write_access(session, current_user)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
+    await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
         "sessionID": sessionID,
@@ -3397,7 +3973,7 @@ async def send_session_message_async(
         agent=request.agent,
         model=request.model.model_dump(by_alias=True) if request.model else None,
         variant=request.variant,
-        display_text=None,
+        display_text=request.display_text,
         messageID=request.messageID,
         noReply=request.noReply,
         mockReply=request.mockReply,
@@ -3432,6 +4008,7 @@ class CommandRequest(BaseModel):
     
     command: str = Field(..., description="Command name")
     arguments: str = Field("", description="Command arguments")
+    arguments_json: Optional[Any] = Field(None, alias="argumentsJson", description="Structured command arguments")
     messageID: Optional[str] = Field(None, description="Message ID")
     agent: Optional[str] = Field(None, description="Agent name")
     model: Optional[str] = Field(None, description="Model string (provider/model)")
@@ -3454,7 +4031,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
     Side-effecting direct commands like /clear run without creating a chat
     message and instead update session state via callbacks.
 
-    LLM-based commands (/plan, /ask, /init, /compact, ...) are routed through
+    LLM-based commands (/init, /compact, ...) are routed through
     the normal session-loop pipeline.
 
     In both cases the user message (showing the raw slash command text, e.g.
@@ -3477,12 +4054,19 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
+    await _require_agent_usable_for_chat(request.agent)
+    raw_arguments = request.arguments
+    if not raw_arguments and request.arguments_json is not None:
+        raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)
+    command_metadata: Dict[str, Any] = {}
+    if request.arguments_json is not None:
+        command_metadata["commandArgumentsJson"] = request.arguments_json
 
     # The text the user typed, shown verbatim in the chat bubble
     slash_text = f"/{request.command}"
-    if request.arguments:
-        slash_text += f" {request.arguments}"
+    if raw_arguments:
+        slash_text += f" {raw_arguments}"
 
     # ── Background task ──────────────────────────────────────────────────────
     async def _handle_command() -> None:
@@ -3494,6 +4078,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
             agent=request.agent,
             model=request.model,
             variant=request.variant,
+            metadata=command_metadata,
             display_text=slash_text,
             messageID=request.messageID,
             working_directory=working_directory,
@@ -3731,11 +4316,16 @@ async def get_session_statistics(sessionID: str):
     - Model usage
     """
     try:
-        # Get session
-        session = await Session.load(sessionID)
-        
-        # Get messages
-        messages = await session.get_messages()
+        session = await _get_session_by_id_unfiltered(sessionID)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session {sessionID} not found",
+            )
+
+        from flocks.session.message import Message
+
+        messages = await Message.list_with_parts(sessionID, include_archived=True)
         
         # Calculate statistics
         message_count = len(messages)
@@ -3743,26 +4333,27 @@ async def get_session_statistics(sessionID: str):
         tool_call_count = 0
         model_usage = {}
         
-        for msg in messages:
+        for message_with_parts in messages:
+            msg = message_with_parts.info
+
             # Count tokens (approximate from parts)
-            for part in msg.parts:
-                if hasattr(part, 'text') and part.text:
+            for part in message_with_parts.parts:
+                if hasattr(part, "text") and part.text:
                     token_count += len(part.text.split())  # Rough approximation
                 
                 # Count tool calls
-                if hasattr(part, 'toolCall') and part.toolCall:
+                if getattr(part, "type", None) == "tool":
                     tool_call_count += 1
             
             # Track model usage
-            if msg.model:
-                model_usage[msg.model] = model_usage.get(msg.model, 0) + 1
-        
-        # Get session info
-        info = await session.get_info()
+            model = getattr(msg, "model", None)
+            if model:
+                model_key = model if isinstance(model, str) else json.dumps(model, sort_keys=True, default=str)
+                model_usage[model_key] = model_usage.get(model_key, 0) + 1
         
         # Calculate duration
-        created_ms = info.time.created
-        updated_ms = info.time.updated
+        created_ms = session.time.created
+        updated_ms = session.time.updated
         duration_ms = updated_ms - created_ms
         duration_seconds = duration_ms / 1000
         
@@ -3779,6 +4370,8 @@ async def get_session_statistics(sessionID: str):
         
         log.info("session.statistics", {"sessionID": sessionID, "messages": message_count})
         return stats
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("session.statistics.error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get session statistics: {str(e)}")
@@ -3794,11 +4387,13 @@ async def _clear_session_history(sessionID: str) -> int:
         )
 
     from flocks.server.routes.event import publish_event
+    from flocks.session.goal import GoalManager
     from flocks.session.interaction_queue import InteractionQueue
     from flocks.session.message import Message
 
     await abort_session(sessionID)
     await InteractionQueue.clear(sessionID)
+    await GoalManager.clear(sessionID)
     try:
         await _publish_prompt_queue(sessionID)
     except Exception as exc:
@@ -3847,5 +4442,3 @@ async def clear_session(sessionID: str, http_request: Request):
     except Exception as e:
         log.error("session.clear.error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to clear session: {str(e)}")
-
-

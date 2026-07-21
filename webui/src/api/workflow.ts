@@ -18,6 +18,8 @@ export interface WorkflowNode {
   select_key?: string;
   join?: boolean;
   join_mode?: 'flat' | 'namespace';
+  join_conflict?: 'overwrite' | 'error';
+  join_namespace_key?: string;
   // tool node
   tool_name?: string;
   tool_args?: Record<string, unknown>;
@@ -65,20 +67,117 @@ export interface WorkflowMetadata {
   [key: string]: any;
 }
 
+export type WorkflowTriggerType =
+  | 'manual'
+  | 'schedule'
+  | 'webhook'
+  | 'syslog'
+  | 'kafka'
+  | 'internal_event'
+  | 'custom_webhook'
+  | 'custom_adapter'
+  | 'plugin';
+
+export interface WorkflowTriggerAuth {
+  type?: string;
+  secretRef?: string;
+  headerName?: string;
+  queryParam?: string;
+  apiKey?: string;
+  [key: string]: any;
+}
+
+export interface WorkflowTriggerFilter {
+  expr?: string;
+  mode?: string;
+  path?: string;
+  equals?: unknown;
+  [key: string]: any;
+}
+
+export interface WorkflowTriggerConcurrency {
+  policy?: 'allow' | 'no_overlap' | 'queue' | 'drop_oldest' | 'drop_newest';
+  maxParallel?: number;
+  queueSize?: number;
+  [key: string]: any;
+}
+
+export interface WorkflowTriggerSample {
+  name: string;
+  payload?: unknown;
+  headers?: Record<string, any>;
+  query?: Record<string, any>;
+  [key: string]: any;
+}
+
+export interface WorkflowTrigger {
+  id: string;
+  name?: string;
+  type: WorkflowTriggerType;
+  enabled?: boolean;
+  description?: string;
+  source?: Record<string, any>;
+  auth?: WorkflowTriggerAuth;
+  filter?: WorkflowTriggerFilter;
+  mapping?: Record<string, string>;
+  inputs?: Record<string, any>;
+  concurrency?: WorkflowTriggerConcurrency;
+  runtime?: Record<string, any>;
+  testSamples?: WorkflowTriggerSample[];
+  updatedAt?: number;
+  [key: string]: any;
+}
+
+export interface WorkflowTriggerStatus {
+  workflowId?: string;
+  triggerId?: string;
+  triggerType?: WorkflowTriggerType | string;
+  state: string;
+  error?: string | null;
+  [key: string]: any;
+}
+
+export interface WorkflowTriggerRecord {
+  trigger: WorkflowTrigger;
+  status?: WorkflowTriggerStatus;
+}
+
+export interface WorkflowTriggerPreview {
+  triggerId: string;
+  triggerType: string;
+  matched: boolean;
+  inputs: Record<string, any>;
+  filterError?: string | null;
+}
+
+export interface WorkflowTriggerPlugin {
+  id: string;
+  name: string;
+  description?: string;
+  root?: string;
+  manifestPath?: string;
+  handlerPath?: string;
+  manifest?: Record<string, any>;
+}
+
 export interface WorkflowJSON {
   version?: string;
   name?: string;
+  nameI18n?: Record<string, string>;
   start: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  triggers?: WorkflowTrigger[];
   metadata?: WorkflowMetadata;
 }
 
 export interface Workflow {
   id: string;
   name: string;
+  nameI18n?: Record<string, string>;
   description?: string;
   markdownContent?: string;
+  editMarkdownContent?: string;
   category: string;
   workflowJson: WorkflowJSON;
   status: 'draft' | 'active' | 'archived';
@@ -120,10 +219,27 @@ export interface WorkflowExecution {
   duration?: number;
   executionLog: WorkflowExecutionStep[];
   errorMessage?: string;
+  triggerId?: string;
+  triggerType?: string;
+  deliveryId?: string;
+  attempt?: number;
+  triggerSource?: string;
   currentNodeId?: string;
   currentNodeType?: string;
   currentPhase?: string;
   currentStepIndex?: number;
+  stepCount?: number;
+  stepLogOffset?: number;
+  stepLogLimit?: number;
+  stepLogTotal?: number;
+  loopProgress?: {
+    loop_node_id?: string;
+    iteration?: number;
+    total_iterations?: number;
+    current_item?: string;
+    current_inner_node_id?: string;
+    global_step_index?: number;
+  };
 }
 
 export interface WorkflowNodeExecution {
@@ -149,6 +265,35 @@ export interface WorkflowService {
 }
 
 export type WorkflowServiceDriver = 'local' | 'docker';
+
+export interface WorkflowIntegrationConfig {
+  version: number;
+  kind: string;
+  workflow: {
+    id: string;
+    name?: string;
+    category?: string;
+    source?: string;
+  };
+  updatedAt: number;
+  publish: Record<string, any>;
+  triggers: WorkflowTrigger[];
+  [key: string]: any;
+}
+
+export interface WorkflowIntegrationConfigResponse {
+  ok?: boolean;
+  exists?: boolean;
+  path: string;
+  storageKey?: string;
+  source?: 'storage' | 'file_migrated' | 'generated' | string;
+  config: WorkflowIntegrationConfig;
+  runtime?: {
+    publish?: Record<string, any>;
+    triggers?: WorkflowTriggerRecord[];
+    [key: string]: any;
+  };
+}
 
 /** Saved syslog listener config (per workflow). */
 export interface SyslogConfig {
@@ -202,6 +347,7 @@ export interface WorkflowPollerConfig {
   workflowId?: string;
   enabled?: boolean;
   intervalSeconds?: number;
+  cronExpression?: string | null;
   timeoutSeconds?: number;
   noOverlap?: boolean;
   inputs?: Record<string, any>;
@@ -214,6 +360,7 @@ export interface WorkflowPollerStatus {
   error?: string | null;
   enabled?: boolean;
   intervalSeconds?: number;
+  cronExpression?: string | null;
   timeoutSeconds?: number;
   noOverlap?: boolean;
   activeRuns?: number;
@@ -251,6 +398,8 @@ export const workflowAPI = {
     description?: string;
     category?: string;
     workflowJson?: WorkflowJSON;
+    markdownContent?: string;
+    editMarkdownContent?: string;
     status?: 'draft' | 'active' | 'archived';
   }) =>
     client.put<Workflow>(`/api/workflow/${id}`, data),
@@ -268,11 +417,15 @@ export const workflowAPI = {
   validate: (id: string) =>
     client.post<{ valid: boolean; issues: any[] }>(`/api/workflow/${id}/validate`),
   
-  getHistory: (id: string, params?: { limit?: number }) =>
+  getHistory: (id: string, params?: { limit?: number; triggerId?: string; triggerType?: string }) =>
     client.get<WorkflowExecution[]>(`/api/workflow/${id}/history`, { params }),
   
-  getExecution: (workflowId: string, execId: string) =>
-    client.get<WorkflowExecution>(`/api/workflow/${workflowId}/history/${execId}`),
+  getExecution: (
+    workflowId: string,
+    execId: string,
+    params?: { stepOffset?: number; stepLimit?: number },
+  ) =>
+    client.get<WorkflowExecution>(`/api/workflow/${workflowId}/history/${execId}`, { params }),
 
   cancelExecution: (workflowId: string, execId: string) =>
     client.post<{ status: string; message: string; executionId: string }>(
@@ -292,7 +445,7 @@ export const workflowAPI = {
     client.get<WorkflowJSON>(`/api/workflow/${id}/export`),
 
   publish: (id: string, data?: { driver?: WorkflowServiceDriver }) =>
-    client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 300000 }),
+    client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 600000 }),
 
   unpublish: (id: string) =>
     client.post<{ ok: boolean }>(`/api/workflow/${id}/unpublish`),
@@ -300,8 +453,58 @@ export const workflowAPI = {
   getService: (id: string) =>
     client.get<WorkflowService | null>(`/api/workflow/${id}/service`),
 
+  deleteService: (id: string) =>
+    client.delete<{ ok: boolean; workflowId: string }>(`/api/workflow/${id}/service`),
+
+  getConfig: (id: string) =>
+    client.get<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`),
+
+  updateConfig: (id: string, config: WorkflowIntegrationConfig) =>
+    client.put<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`, config),
+
+  syncConfig: (id: string) =>
+    client.post<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config/sync`),
+
   listServices: () =>
     client.get<WorkflowService[]>('/api/workflow-services'),
+
+  getTriggers: (id: string) =>
+    client.get<WorkflowTriggerRecord[]>(`/api/workflow/${id}/triggers`),
+
+  createTrigger: (id: string, trigger: WorkflowTrigger) =>
+    client.post<{ trigger: WorkflowTrigger; status?: WorkflowTriggerStatus }>(
+      `/api/workflow/${id}/triggers`,
+      trigger,
+    ),
+
+  updateTrigger: (id: string, triggerId: string, trigger: WorkflowTrigger) =>
+    client.put<{ trigger: WorkflowTrigger; status?: WorkflowTriggerStatus }>(
+      `/api/workflow/${id}/triggers/${triggerId}`,
+      trigger,
+    ),
+
+  deleteTrigger: (id: string, triggerId: string) =>
+    client.delete<{ ok: boolean; triggerId: string }>(`/api/workflow/${id}/triggers/${triggerId}`),
+
+  getTriggerStatus: (id: string, triggerId: string) =>
+    client.get<WorkflowTriggerStatus>(`/api/workflow/${id}/triggers/${triggerId}/status`),
+
+  previewTriggerMapping: (
+    id: string,
+    triggerId: string,
+    payload: { body?: unknown; headers?: Record<string, any>; query?: Record<string, any>; pathParams?: Record<string, any> },
+  ) =>
+    client.post<WorkflowTriggerPreview>(`/api/workflow/${id}/triggers/${triggerId}/preview-mapping`, payload),
+
+  testTrigger: (
+    id: string,
+    triggerId: string,
+    payload: { body?: unknown; headers?: Record<string, any>; query?: Record<string, any>; pathParams?: Record<string, any> },
+  ) =>
+    client.post<Record<string, any>>(`/api/workflow/${id}/triggers/${triggerId}/test`, payload),
+
+  listTriggerPlugins: () =>
+    client.get<WorkflowTriggerPlugin[]>('/api/workflow-trigger-plugins'),
 
   saveKafkaConfig: (id: string, config: {
     enabled?: boolean;
@@ -368,3 +571,43 @@ export const workflowAPI = {
   saveSampleInputs: (id: string, sampleInputs: Record<string, any>) =>
     client.post<{ ok: boolean }>(`/api/workflow/${id}/sample-inputs`, { sampleInputs }),
 };
+
+export function workflowAPIEndpoints(id: string, triggerId = '{triggerId}') {
+  const workflowBase = `/api/workflow/${id}`;
+  const triggerBase = `${workflowBase}/triggers`;
+  const triggerRecord = `${triggerBase}/${triggerId}`;
+
+  return {
+    config: {
+      read: `GET ${workflowBase}/config`,
+      write: `PUT ${workflowBase}/config`,
+      syncFallback: `POST ${workflowBase}/config/sync`,
+    },
+    apiService: {
+      read: `GET ${workflowBase}/service`,
+      publish: `POST ${workflowBase}/publish`,
+      unpublish: `POST ${workflowBase}/unpublish`,
+      delete: `DELETE ${workflowBase}/service`,
+    },
+    triggers: {
+      list: `GET ${triggerBase}`,
+      create: `POST ${triggerBase}`,
+      update: `PUT ${triggerRecord}`,
+      delete: `DELETE ${triggerRecord}`,
+      status: `GET ${triggerRecord}/status`,
+      previewMapping: `POST ${triggerRecord}/preview-mapping`,
+      test: `POST ${triggerRecord}/test`,
+      invokeWebhook: `/webhook/workflows/${id}/${triggerId}`,
+      plugins: 'GET /api/workflow-trigger-plugins',
+    },
+    legacyAdapters: {
+      kafkaConfig: `GET/POST ${workflowBase}/kafka-config`,
+      kafkaStatus: `GET ${workflowBase}/kafka-status`,
+      pollerConfig: `GET/POST ${workflowBase}/poller-config`,
+      pollerStatus: `GET ${workflowBase}/poller-status`,
+      pollerRunOnce: `POST ${workflowBase}/poller-run-once`,
+      syslogConfig: `GET/POST ${workflowBase}/syslog-config`,
+      syslogStatus: `GET ${workflowBase}/syslog-status`,
+    },
+  };
+}

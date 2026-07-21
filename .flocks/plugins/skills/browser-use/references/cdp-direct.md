@@ -32,6 +32,179 @@ flocks browser --doctor
 
 通过`flocks browser -c '...'` 操作浏览器
 
+## 基础操作速查
+
+这些操作对应本地 `browser-use` skill 的常用能力。这里仅提供命令模板；执行顺序和选择原则见“主流程”。
+
+### 打开页面或复用目标 tab
+
+```bash
+flocks browser -c '
+tid = open_or_attach_tab("https://example.com", activate=True)
+wait_for_load()
+print({"targetId": tid, "page": page_info()})
+'
+```
+
+如果用户说页面已经在浏览器或侧边栏打开，先列出非内部页并选择目标 tab；不要直接新开 headless：
+
+```bash
+flocks browser -c '
+for tab in list_tabs(include_chrome=False):
+    print(tab)
+'
+```
+
+确认目标后：
+
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(page_info())
+'
+```
+
+### 观察页面状态
+
+```bash
+flocks browser -c '
+print(page_info())
+print(js("document.body.innerText.slice(0, 4000)"))
+'
+```
+
+查找可点击元素：
+
+```bash
+flocks browser -c '
+items = js("""
+Array.from(document.querySelectorAll("a,button,input,textarea,select,[role=button],[onclick]"))
+  .slice(0, 80)
+  .map((el, i) => ({
+    i,
+    tag: el.tagName,
+    text: (el.innerText || el.value || el.getAttribute("aria-label") || el.title || "").trim().slice(0, 120),
+    selector: el.id ? "#" + el.id : el.name ? el.tagName.toLowerCase() + "[name=" + JSON.stringify(el.name) + "]" : null,
+    disabled: !!el.disabled,
+    rect: (() => { const r = el.getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; })()
+  }))
+""")
+print(items)
+'
+```
+
+### 点击、输入与按键
+
+优先用稳定 DOM 操作：
+
+```bash
+flocks browser -c '
+js("document.querySelector(\"button[type=submit]\")?.click()")
+wait(0.5)
+print(page_info())
+'
+```
+
+输入字段必须触发 `input` / `change` 事件：
+
+```bash
+flocks browser -c '
+js("""
+const el = document.querySelector("input[name=q], textarea[name=q]");
+el.value = "search text";
+el.dispatchEvent(new Event("input", {bubbles: true}));
+el.dispatchEvent(new Event("change", {bubbles: true}));
+""")
+press_key("Enter")
+wait(0.5)
+print(page_info())
+'
+```
+
+只有 DOM 难以稳定定位时，才退到坐标：
+
+```bash
+flocks browser -c '
+click_at_xy(420, 315)
+type_text("text")
+press_key("Enter")
+wait(0.5)
+print(page_info())
+'
+```
+
+### 滚动、等待与截图
+
+```bash
+flocks browser -c '
+scroll(500, 500, dy=-800)
+wait(0.5)
+print(page_info())
+'
+```
+
+等待指定文本或选择器时，用短轮询，避免盲等：
+
+```bash
+flocks browser -c '
+import time
+deadline = time.time() + 10
+while time.time() < deadline:
+    if js("document.body.innerText.includes(\"Success\")"):
+        print("found")
+        break
+    wait(0.5)
+else:
+    print("not found")
+'
+```
+
+截图只在需要视觉证据或调试时保存：
+
+```bash
+flocks browser -c '
+print(capture_screenshot("/tmp/browser-use-shot.png", full=False, max_dim=1800))
+'
+```
+
+### 提取数据
+
+提取文本、HTML、链接或结构化数据时，优先在页面内组装 JSON：
+
+```bash
+flocks browser -c '
+print(js("document.title"))
+print(js("location.href"))
+print(js("document.body.innerText.slice(0, 8000)"))
+'
+```
+
+```bash
+flocks browser -c '
+rows = js("""
+Array.from(document.querySelectorAll("a[href]")).map(a => ({
+  text: a.innerText.trim(),
+  href: a.href
+})).filter(x => x.text || x.href).slice(0, 200)
+""")
+print(rows)
+'
+```
+
+静态资源或接口可直接访问时，优先 `http_get(url)`，不要浪费浏览器上下文。
+
+### 关闭当前任务资源
+
+只关闭自己创建或确认属于本任务的 tab：
+
+```bash
+flocks browser -c '
+close_tab("<TARGET_ID>", activate_next=False)
+'
+```
+
+不确定是否是用户原有 tab 时，保留 tab 并说明原因。
+
 ## 语法说明
 
 - `flocks browser -c '...'` 执行的是一段 Python 代码，不是交互式 REPL；如果希望看到结果，必须显式 `print(...)`。
@@ -58,59 +231,20 @@ print(page_info())
 flocks browser -c (Get-Content -Raw "$env:TEMP\flocks-browser-cmd.py")
 ```
 
-## 核心操作循环
-> 打开页面 -> 观察当前状态 -> 执行动作 -> 再观察验证
+## 主流程
 
-1. 新建或打开已打开 tab
-2. 用 `page_info()` / `js(...)` 观察当前页面、URL、文本、结构和阻塞状态
-3. 选择当前最稳妥的动作方式
-4. 动作后重新观察，确认页面是否真的变化
-5. 如果未达成目标，先解释当前卡点，再换一种方式继续
+按同一个循环执行：准备目标 tab -> 观察页面 -> 选择动作 -> 执行 -> 再观察验证。不要凭旧状态继续操作。
 
+1. 如果是具体网站/产品任务，先搜索已存在的 skill，看 `<产品>-use` skill 下是否存在浏览器相关操作；如果没有，再自己探索。
+2. 创建自己的 tab，或在用户明确要求继续当前页面时先列出并 attach 目标 tab。保存 `targetId`，等待加载，并读取页面基础状态。后续步骤继续使用同一个 tab 时，优先 `attach_tab(target_id)`，不要反复 `switch_tab(...)` 抢用户焦点。
 
-## 标准工作流
+3. 先用 `page_info()` 看 URL、标题、滚动位置、页面尺寸和对话框阻塞状态，再用 `js(...)` 读取文本、DOM 结构、元素状态或业务字段。
+4. 能稳定定位 DOM 时，优先直接在页面内执行 JS 或 raw CDP；只有 DOM 难以稳定定位，或需要操作 compositor 级控件时，才退到坐标点击。iframe / 特殊 target 场景，再考虑 `iframe_target(...)` 配合 `js(..., target_id=...)`。
 
-1. 如果是具体网站/产品任务，先搜索已存在的skill，看 `<产品>-use` skill 下是否存在浏览器相关操作；如果没有，再自己探索。
-2. 创建自己的 tab，保存 `targetId`，等待加载，并先读取页面基础状态：
-
-```bash
-flocks browser -c '
-tid = new_tab("https://example.com", activate=True)
-wait_for_load()
-print(page_info())
-'
-```
-
-如需进一步观察页面结构、文本或候选交互元素，再按当前站点实际情况用 `js(...)` 做针对性提取；
-
-后续步骤继续使用同一个 tab 时，先恢复它：
-
-```bash
-flocks browser -c '
-attach_tab("<TARGET_ID>")
-print(page_info())
-'
-```
-
-3. 执行动作并验证。能稳定定位 DOM 时，优先用 `js(...)`；必须操作可见但 DOM 难以稳定定位的控件时，再使用 `click_at_xy(...)`、`type_text(...)`、`press_key(...)`：
-
-```bash
-flocks browser -c '
-js("document.querySelector(\"button[type=submit]\")?.click()")
-wait(0.5)
-print(page_info())
-'
-```
-
-4. 需要提取数据时用 `js(...)` 或 `http_get(...)`。静态页面/接口批量抓取优先 `http_get`，不要浪费浏览器。
-5. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明；如果当前任务还临时拉起了专用 headless 浏览器实例，tab 清理完后再按 `references/cdp-headless.md` 的约定决定是否关闭整个浏览器进程。
-
-注意：
-
-- 每次点击、输入、提交、弹窗处理、导航、滚动或重渲染后，都重新调用 `page_info()` 或 `js(...)`。
-- 页面变化后，之前读取到的元素状态、坐标和文本都可能过期，必须重新观察。
-- 提取大量结构化数据时，优先在页面内用 `js(...)` 组装 JSON 后返回。
-- 判断内容是否已在 DOM 中，不要只依赖当前可见区域；懒加载或虚拟列表再配合 `scroll(...)` 分段读取。
+5. 坐标点击前用 DOM 布局信息确认目标位置，例如 `getBoundingClientRect()`。坐标点击不稳定、目标不可见或需要隐藏 input 时，改用 DOM、iframe target 或 raw CDP。
+6. 需要提取数据时用 `js(...)` 或 `http_get(...)`。提取大量结构化数据时，优先在页面内用 `js(...)` 组装 JSON 后返回；静态页面/接口批量抓取优先 `http_get`，不要浪费浏览器。
+7. 判断内容是否已在 DOM 中，不要只依赖当前可见区域；懒加载或虚拟列表再配合 `scroll(...)` 分段读取。
+8. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明；如果当前任务还临时拉起了专用 headless 浏览器实例，tab 清理完后再按 `references/cdp-headless.md` 的约定决定是否关闭整个浏览器进程。
 
 
 ## Tab 与可见性
@@ -126,46 +260,16 @@ print(page_info())
 - 忽略 `chrome://omnibox-popup.top-chrome/` 这类假 page target。页面 `w=0 h=0` 时通常是 attach 到了错误 target。
 - 当当前 session stale、内部页或不可见，并且确实要恢复到某个用户页面时，先 `ensure_real_tab()`；它会先 attach 到非内部页而不是主动激活浏览器 UI。
 
-## 读取、定位与执行
+## 表单填充与点击操作模式
 
-本节的核心不是罗列所有操作方式，而是确定优先级：先读清楚，再选最稳的执行方式。
+### 字段类型（js 优先）
 
-默认先用 `page_info()` 与 `js(...)` 观察页面，不依赖截图：
-
-```python
-print(page_info())
-print(js("document.body.innerText.slice(0, 2000)"))
-```
-
-推荐顺序：
-
-1. 先用 `page_info()` 看 URL、标题、滚动位置、页面尺寸，以及是否被原生对话框阻塞
-2. 再用 `js(...)` 读取文本、DOM 结构、元素状态、业务字段
-3. 能稳定定位 DOM 时，优先直接在页面内执行 JS 或 raw CDP
-4. 只有 DOM 难以稳定定位，或需要操作 compositor 级控件时，才退到坐标点击
-5. iframe / 特殊 target 场景，再考虑 `iframe_target(...)` 配合 `js(..., target_id=...)`
-
-能稳定定位 DOM 时，优先通过页面内 JS 或 selector 相关能力操作；需要穿过 iframe、shadow DOM、cross-origin 或自定义控件时，再使用 compositor 级坐标点击：
-
-```python
-click_at_xy(x, y)
-```
-
-坐标点击前尽量用 DOM 布局信息确认目标位置，例如 `getBoundingClientRect()`。坐标点击不稳定、目标不可见或需要隐藏 input 时，改用 DOM、iframe target 或 raw CDP。
-
-截图仅作为可选调试产物：
-
-```python
-capture_screenshot("<workspace_dir>/tmp/shot.png", max_dim=1800)
-```
-
-如果启用点击调试：
-
-```bash
-flocks browser --debug-clicks -c '
-click_at_xy(420, 315)
-'
-```
+| 字段 | 推荐 | 备注 |
+|---|---|---|
+| text / email / tel / password / textarea | `js("el=document.querySelector('[name=x]');el.value='...';el.dispatchEvent(new Event('input'))")` | **必须** dispatchEvent |
+| radio / checkbox | `js("document.querySelector('[name=size][value=small]').click()")` | `click_at_xy` 不可靠 |
+| select | `js("el=document.querySelector('[name=size]');el.value='small';el.dispatchEvent(new Event('change'))")` | 必须 dispatch change |
+| file | `upload_file('input[type=file]', '/abs/path')` | 唯一方式 |
 
 ## 对话框与阻塞状态
 
@@ -244,19 +348,21 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 
 如果 `flocks browser` 不可用或连接失败：
 
-1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和浏览器状态。
-2. 首次安装或冷启动优先运行 `flocks browser --setup`。
-3. Chrome / Chromium / Edge 未运行时只启动浏览器，再重试；不要直接让用户改设置。
-4. 只有在明确提示 remote debugging 未启用或 `DevToolsActivePort` 缺失时，才让用户打开对应浏览器的 inspect 页面（例如 `chrome://inspect/#remote-debugging` 或 `edge://inspect/#remote-debugging`）并勾选 Allow remote debugging。
-5. 用户刚开启 remote debugging 时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
-6. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是浏览器正在启动，轮询等待，不要重启。
-7. stale websocket / stale socket 时执行一次：
+1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和浏览器状态；不要只看退出码，优先读 `next action`，再看 `browser running`、`daemon alive`、`active browser connections`。
+2. `next action` 为 `attach`，或 `daemon alive` ok 但 `active browser connections` 为 0 时，不要先反复 `--setup`。先用一次实际命令触发连接/观察：`flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'`。
+3. 如果上一步失败或仍无连接，再执行 `flocks browser --reload` 清旧 daemon，然后执行 `flocks browser --setup`；setup 可能需要多次，因为用户可能需要完成浏览器 inspect/Allow 授权，或浏览器需要时间写入 remote debugging 状态。
+4. 首次安装、冷启动、daemon 不存在/不通，且浏览器已经运行或配置了 `BU_CDP_URL` / `BU_CDP_WS` 时，优先运行 `flocks browser --setup`。
+5. Chrome / Chromium / Edge 未运行且没有显式 CDP endpoint 时，只提示用户启动浏览器或提供 endpoint；不要直接让用户改设置。
+6. 只有在明确提示 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake、remote-debugging page 或 not live yet 时，才让用户打开对应浏览器的 inspect 页面（例如 `chrome://inspect/#remote-debugging` 或 `edge://inspect/#remote-debugging`）并勾选 Allow remote debugging。
+7. 用户刚开启 remote debugging 时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
+8. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是浏览器正在启动，轮询等待，不要重启。
+9. stale websocket / stale socket 时执行一次：
 
 ```bash
 flocks browser -c 'restart_daemon()'
 ```
 
-8. 页面操作异常但连接本身正常时，优先回到上面的“页面操作排障”，不要把所有问题都归因为浏览器没连上。
+10. 页面操作异常但连接本身正常时，优先回到上面的“页面操作排障”，不要把所有问题都归因为浏览器没连上。
 
 ## The self-heal loop 自修复/扩展 循环
 

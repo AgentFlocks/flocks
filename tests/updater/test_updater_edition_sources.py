@@ -10,7 +10,8 @@ async def test_installed_pro_bundle_marker_without_active_license_keeps_oss_sour
     marker.parent.mkdir(parents=True)
     marker.write_text(
         """{
-  "installed_version": "v2026.5.23",
+  "bundle_version": "v2026.5.23",
+  "core_version": "v2026.5.23",
   "flockspro_component_version": "pro-v2026-05-23"
 }""",
         encoding="utf-8",
@@ -48,6 +49,24 @@ async def test_console_session_does_not_change_oss_sources(monkeypatch, tmp_path
     await Storage.set("console:session", {"console_session_token": "token_abc"}, "json")
 
     sources = await _resolve_sources_for_edition(["github", "gitee"])
+    assert sources == ["github", "gitee"]
+
+
+@pytest.mark.asyncio
+async def test_console_manifest_only_config_is_filtered_from_oss_sources(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    sources = await _resolve_sources_for_edition(["console-manifest"])
+
+    assert sources == []
+
+
+@pytest.mark.asyncio
+async def test_console_manifest_mixed_config_is_filtered_from_oss_sources(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    sources = await _resolve_sources_for_edition(["github", "console-manifest", "gitee"])
+
     assert sources == ["github", "gitee"]
 
 

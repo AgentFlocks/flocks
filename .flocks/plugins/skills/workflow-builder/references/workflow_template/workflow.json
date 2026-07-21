@@ -1,0 +1,39 @@
+{
+  "id": "workflow_template",
+  "name": "workflow_template",
+  "nameI18n": {
+    "zh-CN": "工作流模板",
+    "en-US": "Workflow Template"
+  },
+  "description": "Hidden template for workflow.json, workflow.md, and config.json.",
+  "start": "template_entry",
+  "nodes": [
+    {
+      "id": "template_entry",
+      "type": "python",
+      "description": "Template placeholder. Copy this directory and replace the workflow before use.",
+      "code": "outputs['templateOnly'] = True\noutputs['message'] = 'Hidden workflow template; copy before use.'"
+    }
+  ],
+  "edges": [],
+  "metadata": {
+    "hidden": true,
+    "templateOnly": true,
+    "visibility": "hidden",
+    "excludeFromUI": true,
+    "excludeFromPrompt": true,
+    "templateVersion": 1,
+    "requiredFiles": [
+      "workflow.json",
+      "workflow.md",
+      "config.json",
+      "meta.json"
+    ],
+    "publishConfigContract": {
+      "api": "When config.publish.type is api_service, the publish page shows only API publish controls.",
+      "syslog": "When config.triggers only contains syslog, the publish page shows only syslog listener start/stop controls.",
+      "kafka": "When config.triggers only contains kafka, the publish page shows only kafka consumer start/stop controls.",
+      "schedule": "When config.triggers only contains schedule, the publish page shows only schedule start/stop controls."
+    }
+  }
+}

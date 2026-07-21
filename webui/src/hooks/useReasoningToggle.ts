@@ -11,10 +11,20 @@ import { useState, useMemo } from 'react';
  * - Once reasoning is done (text or tool part exists, or message finished) → collapsed by default
  * - User can manually toggle (collapse/expand) each reasoning block independently
  */
+interface ReasoningToggleOptions {
+  /** Expand active reasoning before the assistant has produced text/tool output. */
+  expandWhileActive?: boolean;
+  /** Default expanded state after reasoning is complete. */
+  defaultExpanded?: boolean;
+}
+
 export function useReasoningToggle(
   parts: any[],
   messageFinish?: any,
+  options: ReasoningToggleOptions = {},
 ) {
+  const expandWhileActive = options.expandWhileActive ?? true;
+  const defaultExpanded = options.defaultExpanded ?? false;
   // Check if a text part already exists → reasoning is done
   const hasTextPart = useMemo(
     () => parts.some((p: any) => p.type === 'text' && p.text),
@@ -40,23 +50,21 @@ export function useReasoningToggle(
   /**
    * Get the display state for a specific reasoning part.
    * - reasoning in progress → expanded (true)
-   * - reasoning done → expanded by default, user can collapse manually
+   * - reasoning done → collapsed by default, user can expand manually
    */
   const getPartExpanded = (partKey: string): boolean => {
-    if (!isReasoningDone) return true;
+    const fallback = isReasoningDone ? defaultExpanded : expandWhileActive;
     // 思考结束后默认折叠，用户可手动展开
-    return expandedByKey[partKey] ?? false;
+    return expandedByKey[partKey] ?? fallback;
   };
 
   /**
    * Toggle a specific reasoning part's expanded state.
-   * Only works after reasoning is done.
    */
   const togglePart = (partKey: string) => {
-    if (!isReasoningDone) return;
     setExpandedByKey((prev) => ({
       ...prev,
-      [partKey]: !(prev[partKey] ?? true),
+      [partKey]: !(prev[partKey] ?? (isReasoningDone ? defaultExpanded : expandWhileActive)),
     }));
   };
 

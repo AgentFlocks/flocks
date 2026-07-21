@@ -6,7 +6,7 @@ import pytest
 import json
 from pathlib import Path
 
-from flocks.config.config import Config, GlobalConfig, ConfigInfo
+from flocks.config.config import Config, GlobalConfig, ConfigInfo, PermissionAction, PermissionConfig
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +68,74 @@ def test_local_mcp_config_accepts_legacy_env_alias():
         "command": ["python", "-m", "demo"],
         "environment": {"DEMO_TOKEN": "secret"},
     }
+
+
+def test_legacy_todo_permission_names_migrate_to_todo():
+    permission = PermissionConfig.model_validate({
+        "todowrite": "deny",
+        "todoread": "allow",
+        "bash": "ask",
+    })
+
+    dumped = permission.model_dump(exclude_none=True)
+    assert dumped["todo"] == PermissionAction.DENY
+    assert "todowrite" not in dumped
+    assert "todoread" not in dumped
+    assert dumped["bash"] == PermissionAction.ASK
+
+
+def test_legacy_todo_tool_flags_migrate_to_todo_permission():
+    config = ConfigInfo.model_validate({
+        "tools": {
+            "todowrite": False,
+            "todoread": True,
+        },
+        "agent": {
+            "worker": {
+                "tools": {
+                    "todowrite": False,
+                    "bash": True,
+                },
+            },
+        },
+    })
+
+    assert isinstance(config.permission, dict)
+    assert config.permission["todo"] == PermissionAction.DENY
+    assert "todowrite" not in config.permission
+    assert "todoread" not in config.permission
+
+    worker = config.agent["worker"]
+    assert isinstance(worker.permission, dict)
+    assert worker.permission["todo"] == PermissionAction.DENY
+    assert worker.permission["bash"] == PermissionAction.ALLOW
+
+
+def test_ui_config_normalizes_and_dumps_aliases():
+    config = ConfigInfo.model_validate({
+        "ui": {
+            "displayName": "  Acme SOC  ",
+            "faviconPath": "assets/favicon.png",
+        }
+    })
+
+    assert config.ui is not None
+    assert config.ui.display_name == "Acme SOC"
+    assert config.ui.favicon_path == "assets/favicon.png"
+    assert config.model_dump(by_alias=True, exclude_none=True)["ui"] == {
+        "displayName": "Acme SOC",
+        "faviconPath": "assets/favicon.png",
+    }
+
+
+def test_ui_display_name_rejects_control_characters():
+    with pytest.raises(ValueError):
+        ConfigInfo.model_validate({"ui": {"displayName": "Acme\nSOC"}})
+
+
+def test_ui_favicon_path_rejects_unsafe_paths():
+    with pytest.raises(ValueError):
+        ConfigInfo.model_validate({"ui": {"faviconPath": "../favicon.svg"}})
 
 
 @pytest.mark.asyncio

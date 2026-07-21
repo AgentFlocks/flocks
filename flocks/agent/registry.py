@@ -160,6 +160,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
 
     return AgentInfo(
         name=name,
+        name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description"),
         description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
         prompt=agent_data.get("prompt"),
@@ -251,7 +252,7 @@ class Agent:
         from flocks.tool.registry import ToolRegistry
 
         cfg = await Config.get()
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
 
         # ── ① Collect context ─────────────────────────────────────────────
         available_tools = [t.name for t in ToolRegistry.list_tools() if t.enabled]
@@ -302,7 +303,7 @@ class Agent:
             log.warn("agent.logic.deprecated", {"message": "non-rex agent logic is deprecated; using rex"})
 
         # ── ② YAML agents ─────────────────────────────────────────────────
-        result = scan_and_load()
+        result = await asyncio.to_thread(scan_and_load)
 
         # Apply global base permissions on top of per-agent YAML permissions.
         # For agents with explicit tool lists, their deny-all baseline is kept;
@@ -332,7 +333,8 @@ class Agent:
             consumer=_consume_agents,
             yaml_item_factory=_yaml_to_agent_info,
         ))
-        PluginLoader.load_all(
+        PluginLoader.load_extension(
+            "AGENTS",
             extra_sources=cfg.plugin or [],
             project_dir=Path.cwd(),
         )
@@ -873,8 +875,6 @@ def _build_base_permissions(user_perms, cli_overrides):
             f"{Truncate.GLOB}": "allow",
         },
         "question": "deny",
-        "plan_enter": "deny",
-        "plan_exit": "deny",
         "read": {
             "*": "allow",
             "*.env": "ask",

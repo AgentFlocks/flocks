@@ -2,13 +2,15 @@ import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Handle, Position, NodeProps } from '@xyflow/react';
 import { GitBranch, Info } from 'lucide-react';
+import type { WorkflowGraphOutputHandle } from '@/utils/workflowGraphLayout';
 
 interface BranchNodeData {
   label?: string;
   description?: string;
   select_key?: string;
-  join?: string;
+  join?: boolean;
   join_mode?: string;
+  outputHandles?: WorkflowGraphOutputHandle[];
   bg?: string;
   border?: string;
   text?: string;
@@ -17,14 +19,21 @@ interface BranchNodeData {
 export default memo(function BranchNode({ data, selected }: NodeProps) {
   const { t } = useTranslation('workflow');
   const nodeData = data as BranchNodeData;
+  const outputHandles =
+    nodeData.outputHandles && nodeData.outputHandles.length > 0
+      ? nodeData.outputHandles
+      : [
+          { id: 'branch-0', label: 'out 1', left: 33 },
+          { id: 'branch-1', label: 'out 2', left: 66 },
+        ];
   
   return (
     <div
       className={`
-        px-4 py-3 rounded-lg border-2 shadow-md min-w-[180px]
+        relative px-4 py-3 rounded-xl border-2 shadow-sm min-w-[220px]
         ${nodeData.bg || ''} ${nodeData.border || ''}
         ${selected ? 'ring-2 ring-yellow-400 ring-offset-2' : ''}
-        transition-all duration-200
+        transition-all duration-200 hover:shadow-md
       `}
     >
       {/* Input Handle */}
@@ -68,21 +77,35 @@ export default memo(function BranchNode({ data, selected }: NodeProps) {
         </div>
       )}
 
+      {outputHandles.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {outputHandles.slice(0, 4).map((handle) => (
+            <span
+              key={handle.id}
+              className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700"
+            >
+              {handle.label}
+            </span>
+          ))}
+          {outputHandles.length > 4 && (
+            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-medium text-gray-500">
+              +{outputHandles.length - 4}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Multiple Output Handles for branches */}
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="branch-1"
-        className="w-3 h-3 !bg-yellow-500 !border-2 !border-white"
-        style={{ left: '33%' }}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="branch-2"
-        className="w-3 h-3 !bg-yellow-500 !border-2 !border-white"
-        style={{ left: '66%' }}
-      />
+      {outputHandles.map((handle) => (
+        <Handle
+          key={handle.id}
+          type="source"
+          position={Position.Bottom}
+          id={handle.id}
+          className="w-3 h-3 !bg-yellow-500 !border-2 !border-white"
+          style={{ left: `${handle.left}%` }}
+        />
+      ))}
     </div>
   );
 });

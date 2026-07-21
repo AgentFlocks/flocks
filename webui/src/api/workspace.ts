@@ -30,6 +30,14 @@ export interface UploadResult {
   error?: string;
 }
 
+export interface WorkspaceFileContentResponse {
+  path: string;
+  content: string;
+  truncated?: boolean;
+  size?: number;
+  preview_limit_bytes?: number;
+}
+
 export type UploadPurpose = 'chat';
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -66,7 +74,7 @@ export const workspaceAPI = {
   },
 
   readFile: (path: string) =>
-    client.get<{ path: string; content: string }>('/api/workspace/file', { params: { path } }),
+    client.get<WorkspaceFileContentResponse>('/api/workspace/file', { params: { path } }),
 
   writeFile: (path: string, content: string) =>
     client.put<{ path: string; written: boolean }>('/api/workspace/file', { path, content }),
@@ -76,6 +84,9 @@ export const workspaceAPI = {
 
   downloadUrl: (path: string) =>
     `${client.defaults.baseURL ?? ''}/api/workspace/download?path=${encodeURIComponent(path)}`,
+
+  previewUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/preview?path=${encodeURIComponent(path)}`,
 
   downloadZip: (paths: string[], archiveName = 'workspace_files.zip') =>
     client.post(
@@ -87,12 +98,24 @@ export const workspaceAPI = {
   move: (src: string, dst: string) =>
     client.post<{ src: string; dst: string; moved: boolean }>('/api/workspace/move', { src, dst }),
 
+  reveal: (path: string) =>
+    client.post<{ path: string; opened: boolean; target: 'file' | 'directory'; mode: string }>(
+      '/api/workspace/reveal',
+      { path },
+    ),
+
   // Memory (read-only)
   listMemory: () =>
     client.get<WorkspaceNode[]>('/api/workspace/memory/list'),
 
   readMemoryFile: (path: string) =>
-    client.get<{ path: string; content: string }>('/api/workspace/memory/file', { params: { path } }),
+    client.get<WorkspaceFileContentResponse>('/api/workspace/memory/file', { params: { path } }),
+
+  memoryDownloadUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/memory/download?path=${encodeURIComponent(path)}`,
+
+  memoryPreviewUrl: (path: string) =>
+    `${client.defaults.baseURL ?? ''}/api/workspace/memory/preview?path=${encodeURIComponent(path)}`,
 
   // Stats
   stats: () =>
@@ -118,7 +141,7 @@ export function fileIcon(node: WorkspaceNode): string {
   if (node.type === 'directory') return '📁';
   const ext = node.name.split('.').pop()?.toLowerCase() ?? '';
   const map: Record<string, string> = {
-    md: '📝', txt: '📄', log: '📋', json: '🔧', yaml: '🔧', yml: '🔧',
+    md: '📝', txt: '📄', log: '📋', json: '🔧', jsonl: '🔧', yaml: '🔧', yml: '🔧',
     py: '🐍', js: '🟨', ts: '🔷', tsx: '🔷', jsx: '🟨',
     sh: '⚙️', bash: '⚙️', csv: '📊', pdf: '📕', png: '🖼️',
     jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', zip: '🗜️', tar: '🗜️', gz: '🗜️',

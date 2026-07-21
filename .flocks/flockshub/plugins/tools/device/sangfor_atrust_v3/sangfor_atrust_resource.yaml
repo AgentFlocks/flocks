@@ -1,0 +1,82 @@
+name: sangfor_atrust_resource
+description: Sangfor aTrust OpenAPI V3 application, application-group, and authorization read-only queries.
+description_cn: 深信服 aTrust OpenAPI V3 应用、应用分类和授权关系只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_atrust
+version: "3"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - resource_list
+        - resource_by_id
+        - resource_by_name
+        - resource_group_list
+        - resource_assignment_by_id
+        - resource_assignment_by_name
+        - resource_group_assignment_by_id
+        - resource_group_assignment_by_name
+        - node_group_list
+        - test
+      description: |
+        应用类只读动作：
+        - resource_list: GET /api/v3/resource/queryAll，查询应用列表。
+        - resource_by_id/name: GET /api/v3/resource/queryBy*，查询应用详情。
+        - resource_group_list: GET /api/v3/resourceGroup/queryAll，查询应用分类列表。
+        - resource_assignment_by_id/name: POST /api/v3/resourceAssign/queryBy*，查询应用授权。
+        - resource_group_assignment_by_id/name: POST /api/v3/resourceGroupAssign/queryBy*，查询应用分类授权。
+        - node_group_list: GET /api/v1/nodeGroup/queryAll，查询代理网关节点区域。
+    id:
+      type: string
+      description: 应用、应用分类或授权对象 ID。
+    name:
+      type: string
+      description: 应用或应用分类名称。
+    groupId:
+      type: string
+      description: 应用分类 ID。
+    groupName:
+      type: string
+      description: 应用分类名称。
+    pageSize:
+      type: integer
+      description: 分页大小。
+    pageIndex:
+      type: integer
+      description: 分页页码。
+    filter:
+      type: string
+      description: 过滤字段。
+    searchValue:
+      type: string
+      description: 搜索关键字。
+    sortBy:
+      type: string
+      description: 排序字段。
+    asc:
+      type: integer
+      description: 是否升序，1 为升序，0 为降序。
+    isPaged:
+      type: integer
+      description: 是否分页，1 分页，0 不分页。
+    entityType:
+      type: array
+      items:
+        type: string
+      description: 授权对象类型，如 user、group、band。
+    query:
+      type: object
+      description: GET query string 参数。
+    body:
+      type: object
+      description: POST JSON body；传入后会优先使用该对象。
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_atrust.handler.py
+  function: resource

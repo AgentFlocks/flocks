@@ -92,6 +92,132 @@
     "testDetail": "测试 / 详情"
   },
 
+  "create": {
+    "mcp": {
+      "emptyStateTitle": "暂无接入对话",
+      "guidePanelTitle": "Rex 辅助接入",
+      "guidePanelDesc": "选择一个引导或案例，Rex 会先确认服务类型、连接方式、凭证和启动命令，再帮你生成可测试的 MCP 配置。",
+      "guideSectionTitle": "接入引导",
+      "caseSectionTitle": "接入案例",
+      "guideActions": [
+        {
+          "label": "如何接入 MCP",
+          "description": "从服务名称、stdio/SSE、命令参数、认证方式和连通性测试开始。",
+          "prompt": "请引导我接入一个 MCP 服务。先不要写配置，先用 question 工具一次只问一个最关键问题，帮我确认服务名称、连接方式（stdio 或远程 HTTP/SSE）、启动命令或 URL、认证方式、凭证保存方式、需要暴露的工具和连通性测试步骤；我确认后再生成配置并测试。"
+        },
+        {
+          "label": "本地 stdio 服务",
+          "description": "适合 npx、uvx、python 等本地进程型 MCP Server。",
+          "prompt": "请帮我接入本地 stdio MCP 服务。请先确认服务名称、启动命令、每个命令参数、需要的环境变量或 secret、工作目录和测试方式；确认前不要写配置。"
+        },
+        {
+          "label": "远程 SSE/HTTP 服务",
+          "description": "适合已经部署的远程 MCP 服务，重点确认 URL、传输协议和认证。",
+          "prompt": "请帮我接入远程 MCP 服务。请先确认服务 URL、传输协议（自动/SSE/Streamable HTTP）、认证方式、请求头或 token、是否需要 secret 管理和健康检查方式；确认前不要写配置。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "GitHub MCP",
+          "description": "接入 GitHub 仓库、Issue、PR 等工具能力。",
+          "prompt": "我想接入 GitHub MCP 服务，用于仓库、Issue 和 PR 操作。请引导我确认服务名称、启动命令、GITHUB_TOKEN 的 secret 保存方式、权限范围和测试步骤。"
+        },
+        {
+          "label": "Filesystem MCP",
+          "description": "接入一个受限目录的文件读取或管理能力。",
+          "prompt": "我想接入 Filesystem MCP 服务，只允许访问指定目录。请引导我确认目录范围、读写权限、启动参数、安全限制和测试步骤。"
+        },
+        {
+          "label": "远程业务 MCP",
+          "description": "接入企业内部已经部署好的远程 MCP 服务。",
+          "prompt": "我想接入一个企业内部远程 MCP 服务。请引导我确认 URL、认证方式、凭证管理、网络可达性、工具列表检查和上线前验证步骤。"
+        }
+      ]
+    },
+    "api": {
+      "emptyStateTitle": "暂无接入对话",
+      "guidePanelTitle": "Rex 辅助接入",
+      "guidePanelDesc": "选择一个引导或案例，Rex 会加载 tool-builder skill，确认 API 文档、认证和输出格式后生成 YAML 工具。",
+      "guideSectionTitle": "接入引导",
+      "caseSectionTitle": "接入案例",
+      "guideActions": [
+        {
+          "label": "如何接入 API",
+          "description": "从 Base URL、认证、接口列表、输入输出和测试样例开始。",
+          "prompt": "请按 .flocks/plugins/skills/tool-builder skill 引导我接入一个外部 API 作为 Flocks 工具。先不要写文件，先用 question 工具一次只问一个最关键问题，确认 API 名称、Base URL、认证方式、核心接口、输入参数、输出字段、错误处理、secret 保存和冒烟测试；我确认后再生成 ~/.flocks/plugins/tools/api/ 下的 YAML 工具。"
+        },
+        {
+          "label": "整理 API 文档",
+          "description": "把文档、示例请求和响应转换为工具定义草稿。",
+          "prompt": "请帮我整理 API 文档并形成工具创建说明。请先询问文档链接或文档内容，然后提取接口路径、方法、认证、请求参数、响应字段、分页/限流、错误码和测试样例；在我确认前不要写文件。"
+        },
+        {
+          "label": "设计鉴权与 Secret",
+          "description": "确认 API Key、Bearer、Header、Query 等凭证保存方式。",
+          "prompt": "请帮我设计 API 工具的鉴权和 secret 管理。请先确认认证类型、密钥名称、是否支持 {secret:...}、是否需要默认环境变量、失败提示和测试方式；不要在代码或配置里硬编码真实凭证。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "威胁情报 API",
+          "description": "接入 IOC 查询、信誉评分或情报摘要接口。",
+          "prompt": "我想接入一个威胁情报 API，用于查询 IP、域名、URL 或哈希信誉。请按 tool-builder skill 引导我确认接口文档、认证方式、输入输出字段、错误处理和冒烟测试。"
+        },
+        {
+          "label": "告警平台 API",
+          "description": "接入告警查询、详情拉取或状态更新接口。",
+          "prompt": "我想接入一个告警平台 API，用于查询告警列表、拉取详情或更新处置状态。请按 tool-builder skill 引导我确认接口范围、分页、认证、输出结构和测试数据。"
+        },
+        {
+          "label": "资产查询 API",
+          "description": "接入资产、主机、漏洞或标签查询接口。",
+          "prompt": "我想接入一个资产查询 API，用于按 IP、主机名或标签查询资产信息。请按 tool-builder skill 引导我确认 API 文档、参数、响应字段、secret 管理和验证方式。"
+        }
+      ]
+    },
+    "local": {
+      "emptyStateTitle": "暂无创建对话",
+      "guidePanelTitle": "Rex 辅助创建",
+      "guidePanelDesc": "选择一个引导或案例，Rex 会加载 tool-builder skill，确认工具输入输出、实现方式和冒烟测试后生成本地 Python 工具。",
+      "guideSectionTitle": "创建引导",
+      "caseSectionTitle": "创建案例",
+      "guideActions": [
+        {
+          "label": "如何创建本地工具",
+          "description": "从工具名、参数 schema、返回格式、权限和测试样例开始。",
+          "prompt": "请按 .flocks/plugins/skills/tool-builder skill 引导我创建一个 Flocks 本地 Python 工具。先不要写文件，先用 question 工具一次只问一个最关键问题，确认工具名称、功能、输入参数 schema、返回格式、是否需要文件/命令/网络访问、错误处理和冒烟测试；我确认后再生成 ~/.flocks/plugins/tools/python/ 下的工具文件。"
+        },
+        {
+          "label": "设计输入输出",
+          "description": "把自然语言需求转换成明确参数、类型和返回 JSON。",
+          "prompt": "请帮我设计本地工具的输入输出。请先确认使用者、输入字段、字段类型、必填项、默认值、返回 JSON 结构、错误对象和一条最小测试样例；确认前不要写文件。"
+        },
+        {
+          "label": "规划测试样例",
+          "description": "生成最小可用样例、边界样例和失败样例。",
+          "prompt": "请按 tool-builder skill 帮我规划本地工具的测试样例。请先确认正常输入、边界输入、错误输入、预期输出和执行方式；写文件前先给出测试计划。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "文本解析工具",
+          "description": "从日志、告警文本或报告中提取结构化字段。",
+          "prompt": "我想创建一个文本解析本地工具，用于从日志、告警文本或报告中提取结构化字段。请按 tool-builder skill 引导我确认输入格式、字段 schema、解析规则和测试样例。"
+        },
+        {
+          "label": "JSON 转换工具",
+          "description": "清洗、重命名或合并 JSON 字段。",
+          "prompt": "我想创建一个 JSON 转换本地工具，用于清洗、重命名、合并或规范化 JSON 字段。请按 tool-builder skill 引导我确认输入输出 schema、转换规则和测试样例。"
+        },
+        {
+          "label": "报告生成工具",
+          "description": "把结构化数据生成 Markdown 或摘要报告。",
+          "prompt": "我想创建一个报告生成本地工具，用于把结构化分析结果转换成 Markdown 摘要报告。请按 tool-builder skill 引导我确认输入字段、报告模板、输出格式和冒烟测试。"
+        }
+      ]
+    }
+  },
+
   "addMCP": {
     "title": "添加 MCP 服务",
     "subtitle": "通过表单或对话配置并添加 MCP 服务",
@@ -436,6 +562,9 @@
 
   "alert": {
     "refreshFailed": "刷新失败: {{error}}",
+    "refreshFailedTitle": "工具刷新失败",
+    "refreshPartialTitle": "工具刷新完成，但存在警告",
+    "refreshPartialDefault": "部分刷新阶段出现错误，当前可用工具列表已更新。",
     "mcpAddSuccess": "MCP 服务添加成功",
     "addFailed": "添加失败: {{error}}",
     "mcpNameRequired": "请输入 MCP 服务名称",
@@ -447,6 +576,7 @@
     "confirmDeleteCred": "确定要删除凭证吗？",
     "credDeleted": "凭证已删除",
     "deleteFailed": "删除失败: {{error}}",
+    "deletePartialTitle": "工具已删除，但清理过程存在警告",
     "unknownError": "未知错误",
     "fillAllRequired": "请填写所有必填字段",
     "configFailed": "配置失败: {{error}}",
@@ -494,9 +624,9 @@
     "toolCountLabel": "工具数",
     "resourceCountLabel": "资源数",
     "generateIntro": "通过 AI 对话生成工具",
-    "generateDesc": "切换到「AI 编辑」标签页，描述你需要的工具，Rex 将自动生成 Python 工具代码并完成接入。",
+    "generateDesc": "切换到「工作台」标签页，描述你需要的工具，Rex 将自动生成 Python 工具代码并完成接入。",
     "doneLabel": "完成",
-    "mcpHintDesc": "不确定怎么填？切换到「AI 编辑」标签页，告诉 Rex 你想接入什么 MCP 服务，它会帮你自动完成配置。",
+    "mcpHintDesc": "不确定怎么填？切换到「工作台」标签页，告诉 Rex 你想接入什么 MCP 服务，它会帮你自动完成配置。",
     "connSuccess": "连接成功",
     "connFailed": "连接失败",
     "addFailedTitle": "添加失败"

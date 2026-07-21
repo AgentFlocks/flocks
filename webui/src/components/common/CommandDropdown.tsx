@@ -87,7 +87,7 @@ export default function CommandDropdown({
 
 /**
  * 从输入文本中解析 slash 命令的名称和参数
- * 例如 "/plan create a feature" → { command: "plan", args: "create a feature" }
+ * 例如 "/bug describe issue" → { command: "bug", args: "describe issue" }
  */
 export function isSlashCommandName(command: string): boolean {
   return command.length > 0 && !/[\\/]/.test(command);

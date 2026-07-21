@@ -75,6 +75,13 @@ function makeSkill(name: string) {
   };
 }
 
+function makeUiHiddenSkill(name: string) {
+  return {
+    ...makeSkill(name),
+    ui_hidden: true,
+  };
+}
+
 describe('SkillPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -104,5 +111,19 @@ describe('SkillPage', () => {
 
     expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).not.toHaveBeenCalled();
+  });
+
+  it('does not render UI-hidden internal skills', async () => {
+    statusMock.mockResolvedValue({
+      data: [makeSkill('visible-skill'), makeUiHiddenSkill('workflow-config-guide')],
+    });
+
+    render(<SkillPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('visible-skill')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('workflow-config-guide')).not.toBeInTheDocument();
   });
 });

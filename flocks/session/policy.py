@@ -52,6 +52,42 @@ class SessionPolicy:
         return bool(metadata.get("shared_local"))
 
     @staticmethod
+    def _has_no_owner(session: "SessionInfo") -> bool:
+        return not session.owner_user_id and not session.owner_username
+
+    @classmethod
+    def is_shared(
+        cls,
+        session: "SessionInfo",
+        shared_project_ids: Optional[set[str]] = None,
+    ) -> bool:
+        """Whether the session is explicitly shared to all local users.
+
+        Ownerless sessions are a legacy / unauthenticated compatibility state,
+        not a sharing state. The UI badge should only reflect explicit sharing.
+        """
+        return cls.is_local_shared(session) or cls.is_project_shared(
+            session,
+            shared_project_ids,
+        )
+
+    @staticmethod
+    def is_project_shared(
+        session: "SessionInfo",
+        shared_project_ids: Optional[set[str]] = None,
+    ) -> bool:
+        """Whether the session belongs to a locally shared project."""
+
+        if shared_project_ids is not None:
+            return session.project_id in shared_project_ids
+        try:
+            from flocks.project.project import Project
+
+            return Project.is_local_shared(session.owner_user_id, session.project_id)
+        except Exception:
+            return False
+
+    @staticmethod
     def _shared_read_user_ids(session: "SessionInfo") -> set[str]:
         metadata = getattr(session, "metadata", None)
         if not isinstance(metadata, dict):
@@ -62,45 +98,71 @@ class SessionPolicy:
         return {str(item) for item in raw if item}
 
     @classmethod
-    def is_shared_read_only(cls, session: "SessionInfo", user: Optional["AuthUser"]) -> bool:
+    def is_shared_read_only(
+        cls,
+        session: "SessionInfo",
+        user: Optional["AuthUser"],
+        shared_project_ids: Optional[set[str]] = None,
+    ) -> bool:
         if user is None:
             return False
         if cls.is_owner(session, user):
             return False
-        if cls.is_local_shared(session):
+        if cls.is_local_shared(session) or cls.is_project_shared(
+            session,
+            shared_project_ids,
+        ):
             return True
         return user.id in cls._shared_read_user_ids(session)
 
     @classmethod
-    def can_read(cls, session: "SessionInfo", user: Optional["AuthUser"] = None) -> bool:
+    def can_read(
+        cls,
+        session: "SessionInfo",
+        user: Optional["AuthUser"] = None,
+        *,
+        shared_project_ids: Optional[set[str]] = None,
+    ) -> bool:
         """
         Whether the session should be visible in listings / fetch.
 
         - No auth context (CLI/internal runtime): keep legacy permissive behaviour.
-        - Logged-in users: owner or local-shared readers.
+        - Logged-in users: owner, local-shared readers, shared readers, or admins
+          managing ownerless legacy/channel sessions.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return True
         if cls.is_owner(session, resolved):
             return True
-        return cls.is_shared_read_only(session, resolved)
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
+            return True
+        return cls.is_shared_read_only(session, resolved, shared_project_ids)
 
     @classmethod
     def can_write(cls, session: "SessionInfo", user: Optional["AuthUser"] = None) -> bool:
         """
         Session write permission.
 
-        Shared users are read-only. Only owner can write.
+        Owner can always write. Admins may repair/manage ownerless sessions
+        accumulated before local ownership was available.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
-        return cls.is_owner(session, resolved)
+        if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
+            return True
+        return False
 
     @classmethod
     def can_delete(cls, session: "SessionInfo", user: Optional["AuthUser"]) -> bool:
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
-        return cls.is_owner(session, resolved)
+        if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
+            return True
+        return False

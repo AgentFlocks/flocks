@@ -111,7 +111,7 @@ class ModelCapabilities(BaseModel):
     supports_streaming: bool = True
     supports_tools: bool = True
     supports_vision: bool = False
-    supports_reasoning: bool = False
+    supports_reasoning: bool = True
     interleaved: Optional[Dict[str, Any]] = None
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
@@ -389,6 +389,7 @@ class Provider:
                             # not enforce auth; let _get_client() fall back to a
                             # sentinel key instead of raising.
                             ALLOW_NO_API_KEY = True
+                            PREFER_MAX_COMPLETION_TOKENS = True
                             
                             def __init__(self):
                                 super().__init__(
@@ -848,7 +849,7 @@ class Provider:
                                     supports_streaming=model_dict.get("supports_streaming", True),
                                     supports_tools=model_dict.get("supports_tools", True),
                                     supports_vision=model_dict.get("supports_vision", False),
-                                    supports_reasoning=model_dict.get("supports_reasoning", False),
+                                    supports_reasoning=model_dict.get("supports_reasoning", True),
                                     interleaved=model_dict.get("interleaved"),
                                     max_tokens=model_dict.get("max_output_tokens") or model_dict.get("max_tokens"),
                                     context_window=model_dict.get("context_window"),
@@ -1216,7 +1217,7 @@ class BaseProvider:
                 supports_streaming=model.capabilities.supports_streaming,
                 supports_tools=model.capabilities.supports_tools,
                 supports_vision=model.capabilities.supports_vision,
-                supports_reasoning=getattr(model.capabilities, "supports_reasoning", False),
+                supports_reasoning=getattr(model.capabilities, "supports_reasoning", True),
                 interleaved=getattr(model.capabilities, "interleaved", None),
             ),
             limits=ModelLimits(
@@ -1250,7 +1251,7 @@ class BaseProvider:
         never touched keep their richer catalog values.  This avoids e.g. a catalog
         ``supports_reasoning=True`` being silently reset to ``False`` by a default.
         """
-        from flocks.provider.types import PriceConfig
+        from flocks.provider.types import ModelFeature, PriceConfig
 
         overridden = catalog_def.model_copy(deep=True)
         keys = getattr(model, "_explicit_keys", set())
@@ -1267,9 +1268,19 @@ class BaseProvider:
         if "supports_vision" in keys:
             overridden.capabilities.supports_vision = model.capabilities.supports_vision
         if "supports_reasoning" in keys:
-            overridden.capabilities.supports_reasoning = getattr(
-                model.capabilities, "supports_reasoning", False
+            supports_reasoning = getattr(
+                model.capabilities, "supports_reasoning", True
             )
+            overridden.capabilities.supports_reasoning = supports_reasoning
+            if supports_reasoning:
+                if ModelFeature.REASONING not in overridden.capabilities.features:
+                    overridden.capabilities.features.append(ModelFeature.REASONING)
+            else:
+                overridden.capabilities.features = [
+                    feature
+                    for feature in overridden.capabilities.features
+                    if feature != ModelFeature.REASONING and feature != ModelFeature.REASONING.value
+                ]
         if "interleaved" in keys:
             overridden.capabilities.interleaved = getattr(
                 model.capabilities, "interleaved", None

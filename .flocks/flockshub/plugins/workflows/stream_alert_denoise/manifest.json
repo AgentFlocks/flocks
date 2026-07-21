@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "stream_alert_denoise",
+  "type": "workflow",
+  "name": "Stream Alert Denoise",
+  "nameCn": "流式HTTP降噪工作流",
+  "description": "Streaming alert denoise and deduplication pipeline with Syslog/API input.",
+  "descriptionCn": "流式告警降噪与去重工作流，支持 Syslog 和 API 输入。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "web-security"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow",
+    "scheduled-task"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/workflows/stream_alert_denoise"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": []
+  },
+  "entrypoints": [
+    "workflow.json",
+    "workflow.md",
+    "guide.md",
+    "config.json"
+  ],
+  "components": [],
+  "checksums": {}
+}

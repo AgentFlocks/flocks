@@ -13,6 +13,7 @@ Ported from original SessionPrompt.loop() pattern.
 """
 
 import asyncio
+import inspect
 import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from flocks.session.lifecycle.compaction import (
 from flocks.session.lifecycle.compaction.compaction import _get_compaction_history
 from flocks.session.prompt import SessionPrompt
 from flocks.provider.provider import Provider
+from flocks.session.goal import GoalManager
 
 
 log = Log.create(service="session.loop")
@@ -160,7 +162,7 @@ class SessionLoop:
         """Abort all child loops whose session.parent_id matches, recursively."""
         aborted = 0
         child_ids = [
-            sid for sid, ctx in cls._active_loops.items()
+            sid for sid, ctx in list(cls._active_loops.items())
             if getattr(ctx.session, 'parent_id', None) == parent_session_id
         ]
         for sid in child_ids:
@@ -185,6 +187,49 @@ class SessionLoop:
         except Exception as exc:
             log.debug("loop.runtime_event.publish_failed", {
                 "event": event_name,
+                "error": str(exc),
+            })
+
+    @classmethod
+    async def _publish_turn_stopped(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        *,
+        step: int,
+        stop_reason: str,
+    ) -> None:
+        turn_state = set_turn_state(
+            session_id,
+            step=step,
+            status="stopped",
+            stop_reason=stop_reason,
+            queued_message_detected=False,
+        )
+        await cls._publish_runtime_event(
+            callbacks,
+            "turn.stopped",
+            turn_state.model_dump(by_alias=True),
+        )
+
+    @classmethod
+    async def _publish_session_status(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        status: str,
+    ) -> None:
+        if not callbacks.event_publish_callback:
+            return
+        try:
+            await callbacks.event_publish_callback("session.status", {
+                "sessionID": session_id,
+                "status": {"type": status},
+            })
+        except Exception as exc:
+            log.debug("loop.session_status.publish_failed", {
+                "session_id": session_id,
+                "status": status,
                 "error": str(exc),
             })
 
@@ -252,6 +297,7 @@ class SessionLoop:
         model_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
     ) -> LoopResult:
         """
         Run session loop
@@ -294,6 +340,8 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} not found",
             )
+        if working_directory:
+            session = session.model_copy(update={"directory": working_directory})
         
         # Resolve model when not explicitly provided
         if not provider_id or not model_id:
@@ -341,11 +389,14 @@ class SessionLoop:
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())
+        await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
         
         # Mark orphaned running tool parts as error (e.g. from server restart).
         # Wrapped in try/except so cleanup failures never block the session loop.
         try:
-            await cls._abort_orphan_running_parts(session_id)
+            from flocks.session.orphan_tools import abort_orphan_running_parts
+
+            await abort_orphan_running_parts(session_id)
         except Exception as exc:
             log.warn("loop.orphan_cleanup_failed", {
                 "session_id": session_id,
@@ -382,6 +433,7 @@ class SessionLoop:
             
             # Set status to idle
             SessionStatus.set(session_id, SessionStatusIdle())
+            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
             
             # Touch session (update timestamp)
             await Session.touch(session.project_id, session_id)
@@ -394,57 +446,6 @@ class SessionLoop:
             except Exception as exc:
                 log.warn("loop.idle.event_error", {"error": str(exc)})
     
-    @classmethod
-    async def _abort_orphan_running_parts(cls, session_id: str) -> None:
-        """Mark any tool parts stuck in 'running' status as error.
-
-        When the server restarts while a synchronous tool (e.g. delegate_task)
-        is executing, the tool part stays 'running' in storage forever.  On the
-        next session loop start we know nothing is actually executing yet, so
-        any 'running' parts are orphans.
-        """
-        import time as _time
-        from flocks.session.message import (
-            ToolPart, ToolStateError,
-        )
-
-        messages = await Message.list(session_id)
-        now_ms = int(_time.time() * 1000)
-        repaired = 0
-
-        for msg in messages:
-            parts = await Message.parts(msg.id, session_id)
-            for part in parts:
-                if not isinstance(part, ToolPart):
-                    continue
-                state = part.state
-                if getattr(state, "status", None) != "running":
-                    continue
-
-                time_info = getattr(state, "time", {}) or {}
-                start_ms = time_info.get("start", now_ms)
-
-                error_state = ToolStateError(
-                    status="error",
-                    input=getattr(state, "input", {}),
-                    error="Interrupted by server restart",
-                    time={"start": start_ms, "end": now_ms},
-                )
-                # Preserve metadata (e.g. sessionId) so the card still works
-                meta = getattr(state, "metadata", None)
-                if meta:
-                    error_state.metadata = meta
-
-                part.state = error_state
-                await Message.store_part(session_id, msg.id, part)
-                repaired += 1
-
-        if repaired:
-            log.info("loop.orphan_parts_aborted", {
-                "session_id": session_id,
-                "count": repaired,
-            })
-
     @staticmethod
     async def _resolve_model(
         session: Any,
@@ -616,6 +617,12 @@ class SessionLoop:
             })
             if not messages:
                 log.info("loop.no_messages", {"session_id": ctx.session.id})
+                await cls._publish_turn_stopped(
+                    callbacks,
+                    ctx.session.id,
+                    step=ctx.step,
+                    stop_reason="no_messages",
+                )
                 break
             
             # Analyze messages (matching TUI lines 277-292)
@@ -659,7 +666,17 @@ class SessionLoop:
             
             # Check if we have a user message
             if not last_user:
-                log.error("loop.no_user_message", {"session_id": ctx.session.id})
+                log.info("loop.no_user_message", {
+                    "session_id": ctx.session.id,
+                    "message_count": len(messages),
+                    "roles": [str(getattr(msg, "role", "")) for msg in messages[-5:]],
+                })
+                await cls._publish_turn_stopped(
+                    callbacks,
+                    ctx.session.id,
+                    step=ctx.step,
+                    stop_reason="no_user_message",
+                )
                 break
             
             last_assistant_parts = (
@@ -1277,6 +1294,86 @@ class SessionLoop:
                         "last_assistant_id": last_message.id if last_message else None,
                     })
                     continue
+
+                if not step_result.error and last_message is not None:
+                    try:
+                        content_result = Message.get_text_content(last_message)
+                        last_response = (
+                            await content_result
+                            if inspect.isawaitable(content_result)
+                            else content_result
+                        )
+                    except Exception as exc:
+                        log.warn("goal.last_response.error", {
+                            "session_id": ctx.session.id,
+                            "message_id": getattr(last_message, "id", None),
+                            "error": str(exc),
+                        })
+                        last_response = getattr(last_message, "content", "") or ""
+                    pending_user_input = False
+                    try:
+                        from flocks.server.routes.question import has_pending_questions
+
+                        pending_user_input = has_pending_questions(ctx.session.id)
+                    except Exception as exc:
+                        log.warn("goal.pending_question_check.error", {
+                            "session_id": ctx.session.id,
+                            "error": str(exc),
+                        })
+                    goal_decision = await GoalManager.evaluate_after_turn(
+                        ctx.session.id,
+                        str(last_response or ""),
+                        pending_user_input=pending_user_input,
+                        provider_id=ctx.provider_id,
+                        model_id=ctx.model_id,
+                    )
+                    if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
+                        await cls._publish_runtime_event(callbacks, "session.goal.updated", {
+                            "sessionID": ctx.session.id,
+                            "status": goal_decision.status,
+                            "objective": goal_decision.objective,
+                            "reason": goal_decision.reason,
+                        })
+                    if goal_decision.should_continue and goal_decision.continuation_prompt:
+                        # Hermes-style goal continuation: append a user-role
+                        # prompt to history so the model continues, while
+                        # marking the part synthetic so UIs do not treat it as
+                        # user-authored text.
+                        goal_user = await Message.create(
+                            session_id=ctx.session.id,
+                            role=MessageRole.USER,
+                            content=goal_decision.continuation_prompt,
+                            agent=last_user.agent if hasattr(last_user, "agent") else ctx.agent_name,
+                            model=last_user.model if hasattr(last_user, "model") else {
+                                "providerID": ctx.provider_id,
+                                "modelID": ctx.model_id,
+                            },
+                            provider=last_user.provider if hasattr(last_user, "provider") else ctx.provider_id,
+                            synthetic=True,
+                            part_metadata={
+                                "goalContinuation": True,
+                                "goalVerdict": goal_decision.verdict,
+                                "goalReason": goal_decision.reason,
+                            },
+                        )
+                        turn_state = set_turn_state(
+                            ctx.session.id,
+                            step=ctx.step,
+                            status="continued",
+                            continue_reason="goal",
+                            queued_message_detected=False,
+                        )
+                        await cls._publish_runtime_event(callbacks, "turn.continued", {
+                            **turn_state.model_dump(by_alias=True),
+                            "goalMessageID": goal_user.id,
+                            "goalVerdict": goal_decision.verdict,
+                        })
+                        log.info("loop.continuing_for_goal", {
+                            "session_id": ctx.session.id,
+                            "goal_message_id": goal_user.id,
+                            "reason": goal_decision.reason,
+                        })
+                        continue
 
                 stop_reason = step_result.error or (getattr(last_message, "finish", None) if last_message else None) or "stop"
                 turn_state = set_turn_state(

@@ -1,0 +1,51 @@
+name: onesig_strategy_api_ops
+description: >
+  OneSIG Strategy API mutation grouped tool. Uses ApiKey + Secret HMAC-SHA1
+  signing and calls /api/v3 mutation endpoints for assets, policies,
+  whitelist, blacklist, banned whitelist, and HTTP blacklist operations.
+description_cn: >
+  OneSIG 策略 API 写操作分组工具。使用 ApiKey + Secret HMAC-SHA1 签名，
+  调用资产、策略、白名单、黑名单、封禁白名单和 HTTP 防护相关写接口。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesig_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - asset_group_create
+        - asset_group_update
+        - asset_group_delete
+        - asset_create
+        - asset_update
+        - asset_delete
+        - protection_policy_update
+        - protection_policy_delete
+        - whitelist_create
+        - whitelist_update
+        - whitelist_delete
+        - whitelist_remove
+        - blacklist_create
+        - blacklist_update
+        - blacklist_delete
+        - blacklist_remove
+        - banned_whitelist_create
+        - banned_whitelist_update
+        - banned_whitelist_delete
+        - http_blacklist_create
+        - http_blacklist_update
+        - http_blacklist_enable
+        - http_blacklist_delete
+      description: 写操作动作名。调用前必须确认影响范围。
+    body:
+      type: object
+      description: 请求体，按 api-onesig-2.5.3 文档传入对应字段。
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig_strategy_api.handler.py
+  function: ops

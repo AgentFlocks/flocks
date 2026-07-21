@@ -29,7 +29,7 @@ log = Log.create(service="provider.openai_base")
 # change covers all three providers. Granular values (instead of a flat
 # timeout) let small control-plane requests fail fast while multimodal
 # (image) uploads get the headroom they need on slow links.
-DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=180.0, write=1800.0, pool=60.0)
 
 
 # Canonical OpenAI-style content translation, shared by every provider that
@@ -348,6 +348,97 @@ def _supports_include_usage_fallback(exc: Exception) -> bool:
             "extra fields not permitted",
         )
     )
+
+
+def _supports_max_completion_tokens_fallback(exc: Exception) -> bool:
+    """Return True when the provider rejects ``max_completion_tokens``."""
+    message = str(exc).lower()
+    return "max_completion_tokens" in message and any(
+        marker in message
+        for marker in (
+            "unsupported parameter",
+            "unknown parameter",
+            "unrecognized parameter",
+            "extra inputs are not permitted",
+            "extra fields not permitted",
+            "not permitted",
+        )
+    )
+
+
+def resolve_openai_token_limit(kwargs: Dict[str, Any]) -> Optional[int]:
+    """Resolve output token limits from either OpenAI naming variant."""
+    max_completion_tokens = kwargs.get("max_completion_tokens")
+    if max_completion_tokens is not None:
+        return max_completion_tokens
+    return kwargs.get("max_tokens")
+
+
+def apply_openai_token_limit(
+    params: Dict[str, Any],
+    max_tokens: Optional[int],
+    *,
+    prefer_completion_tokens: bool = False,
+    completion_tokens_explicit: bool = False,
+) -> None:
+    """Apply the preferred token-limit field to an OpenAI-style payload."""
+    if max_tokens is None:
+        return
+    if completion_tokens_explicit or prefer_completion_tokens:
+        params["max_completion_tokens"] = max_tokens
+    else:
+        params["max_tokens"] = max_tokens
+
+
+async def create_chat_completion_with_fallbacks(
+    create_call,
+    params: Dict[str, Any],
+    *,
+    max_tokens: Optional[int],
+    logger: Any,
+    log_prefix: str,
+) -> Any:
+    """Execute a chat completion request with transport compatibility fallbacks."""
+    current_params = dict(params)
+    include_usage_retried = False
+    max_completion_tokens_retried = False
+
+    while True:
+        try:
+            return await create_call(**current_params)
+        except Exception as exc:
+            if (
+                not max_completion_tokens_retried
+                and max_tokens is not None
+                and "max_completion_tokens" in current_params
+                and "max_tokens" not in current_params
+                and _supports_max_completion_tokens_fallback(exc)
+            ):
+                max_completion_tokens_retried = True
+                logger.warn(f"{log_prefix}.max_completion_tokens_unsupported", {
+                    "model": current_params.get("model"),
+                    "error": str(exc),
+                })
+                current_params = dict(current_params)
+                current_params.pop("max_completion_tokens", None)
+                current_params["max_tokens"] = max_tokens
+                continue
+
+            if (
+                not include_usage_retried
+                and "stream_options" in current_params
+                and _supports_include_usage_fallback(exc)
+            ):
+                include_usage_retried = True
+                logger.warn(f"{log_prefix}.stream.include_usage_unsupported", {
+                    "model": current_params.get("model"),
+                    "error": str(exc),
+                })
+                current_params = dict(current_params)
+                current_params.pop("stream_options", None)
+                continue
+
+            raise
 
 
 class ThinkTagExtractor:
@@ -698,6 +789,7 @@ class OpenAIBaseProvider(BaseProvider):
     ENV_BASE_URL: str = ""
     CATALOG_ID: str = ""
     ALLOW_NO_API_KEY: bool = False
+    PREFER_MAX_COMPLETION_TOKENS: bool = False
     NO_API_KEY_PLACEHOLDER: str = "not-needed"
 
     def __init__(self, provider_id: str, name: str):
@@ -821,6 +913,8 @@ class OpenAIBaseProvider(BaseProvider):
         openai_messages = self._format_messages(messages)
 
         thinking = kwargs.get("thinking")
+        max_tokens = resolve_openai_token_limit(kwargs)
+        max_completion_tokens_explicit = kwargs.get("max_completion_tokens") is not None
 
         params: Dict[str, Any] = {
             "model": model_id,
@@ -837,8 +931,12 @@ class OpenAIBaseProvider(BaseProvider):
         if extra_body:
             params["extra_body"] = extra_body
 
-        if kwargs.get("max_tokens"):
-            params["max_tokens"] = kwargs["max_tokens"]
+        apply_openai_token_limit(
+            params,
+            max_tokens,
+            prefer_completion_tokens=self.PREFER_MAX_COMPLETION_TOKENS,
+            completion_tokens_explicit=max_completion_tokens_explicit,
+        )
         if kwargs.get("tools"):
             params["tools"] = kwargs["tools"]
 
@@ -850,12 +948,18 @@ class OpenAIBaseProvider(BaseProvider):
             "thinking_enabled": bool(thinking),
             "has_extra_body": "extra_body" in params,
             "has_tools": bool(kwargs.get("tools")),
-            "max_tokens": kwargs.get("max_tokens"),
+            "max_tokens": max_tokens,
             "has_temperature": "temperature" in params,
             "message_summary": _summarise_messages(openai_messages),
         })
 
-        response = await client.chat.completions.create(**params)
+        response = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            params,
+            max_tokens=max_tokens,
+            logger=log,
+            log_prefix="openai_base",
+        )
         if not response.choices:
             extra = getattr(response, "model_extra", {}) or {}
             err_detail = extra.get("error") or extra.get("message") or str(extra) or "no choices returned"
@@ -894,6 +998,8 @@ class OpenAIBaseProvider(BaseProvider):
         openai_messages = self._format_messages(messages)
 
         thinking = kwargs.get("thinking")
+        max_tokens = resolve_openai_token_limit(kwargs)
+        max_completion_tokens_explicit = kwargs.get("max_completion_tokens") is not None
 
         params: Dict[str, Any] = {
             "model": model_id,
@@ -912,8 +1018,12 @@ class OpenAIBaseProvider(BaseProvider):
         if extra_body:
             params["extra_body"] = extra_body
 
-        if kwargs.get("max_tokens"):
-            params["max_tokens"] = kwargs["max_tokens"]
+        apply_openai_token_limit(
+            params,
+            max_tokens,
+            prefer_completion_tokens=self.PREFER_MAX_COMPLETION_TOKENS,
+            completion_tokens_explicit=max_completion_tokens_explicit,
+        )
         if kwargs.get("tools"):
             params["tools"] = kwargs["tools"]
 
@@ -924,24 +1034,19 @@ class OpenAIBaseProvider(BaseProvider):
             "thinking_enabled": bool(thinking),
             "has_extra_body": "extra_body" in params,
             "has_tools": bool(kwargs.get("tools")),
-            "max_tokens": kwargs.get("max_tokens"),
+            "max_tokens": max_tokens,
             "has_temperature": "temperature" in params,
             "include_usage": True,
             "message_summary": _summarise_messages(openai_messages),
         })
 
-        try:
-            stream = await client.chat.completions.create(**params)
-        except Exception as exc:
-            if not _supports_include_usage_fallback(exc):
-                raise
-            log.warn("openai_base.stream.include_usage_unsupported", {
-                "model": model_id,
-                "error": str(exc),
-            })
-            params_without_usage = dict(params)
-            params_without_usage.pop("stream_options", None)
-            stream = await client.chat.completions.create(**params_without_usage)
+        stream = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            params,
+            max_tokens=max_tokens,
+            logger=log,
+            log_prefix="openai_base",
+        )
         tool_calls: Dict[int, Dict[str, Any]] = {}
         emitted_substantive_chunk = False
         stream_usage: Optional[Dict[str, int]] = None

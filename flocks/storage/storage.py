@@ -6,6 +6,9 @@ Provides SQLite-based storage similar to Flocks's Storage namespace
 
 import asyncio
 import os
+import shutil
+import subprocess
+import uuid
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,15 +24,19 @@ from flocks.config.config import Config
 
 
 T = TypeVar("T", bound=BaseModel)
+DDLScript = str | Callable[[aiosqlite.Connection], Awaitable[None]]
+R = TypeVar("R")
 
 
 class NotFoundError(Exception):
     """Raised when a resource is not found"""
+
     pass
 
 
 class StorageError(Exception):
     """Base storage error"""
+
     pass
 
 
@@ -44,10 +51,7 @@ class CheckpointBusyError(StorageError):
     """
 
     def __init__(self, mode: str, log_pages: int, checkpointed_pages: int) -> None:
-        super().__init__(
-            f"wal_checkpoint({mode}) busy: "
-            f"log_pages={log_pages}, checkpointed_pages={checkpointed_pages}"
-        )
+        super().__init__(f"wal_checkpoint({mode}) busy: log_pages={log_pages}, checkpointed_pages={checkpointed_pages}")
         self.mode = mode
         self.log_pages = log_pages
         self.checkpointed_pages = checkpointed_pages
@@ -56,25 +60,26 @@ class CheckpointBusyError(StorageError):
 class Storage:
     """
     Storage namespace for persistent data operations
-    
+
     Similar to Flocks's Storage namespace.
     Provides both TypeScript-compatible API (key arrays) and Python API (key strings).
     """
-    
+
     NotFoundError = NotFoundError
     StorageError = StorageError
     CheckpointBusyError = CheckpointBusyError
-    
+
     _log = Log.create(service="storage")
     _db_path: Optional[Path] = None
     _initialized = False
+    _db_identity: Optional[Tuple[int, int]] = None
     # PID of the process that called ``init()``.  Used by ``_ensure_init`` to
     # detect ``fork()`` (uvicorn ``--reload`` / multiprocessing workers) and
     # re-initialise per-process state so the parent's open SQLite file
     # descriptors and ``_initialized=True`` flag are never silently inherited
     # — a known SQLite corruption vector.
     _init_pid: Optional[int] = None
-    _extension_ddls: List[str] = []
+    _extension_ddls: List[DDLScript] = []
     _sqlite_timeout_s = 5.0
     _sqlite_busy_timeout_ms = 5000
     _sqlite_journal_mode = "WAL"
@@ -93,6 +98,11 @@ class Storage:
     _sqlite_synchronous = "NORMAL"
     _sqlite_write_retry_attempts = 6
     _sqlite_write_retry_base_delay_s = 0.05
+    _multi_db_migration_marker_key = "storage.migration.multi_db.v1"
+    _multi_db_migration_batch_size = 500
+    _corruption_recovery_lock = asyncio.Lock()
+    _corruption_recovery_generation = 0
+    _sqlite_recover_timeout_s = 30.0
 
     # Substrings that mark an SQLite file as unrecoverably damaged at open
     # time.  We deliberately keep this list short and English-only because
@@ -104,20 +114,31 @@ class Storage:
     )
 
     @classmethod
-    def _invalidate_runtime_caches(cls) -> None:
-        """Clear higher-level caches that depend on the active storage DB."""
-        try:
-            from flocks.session.session import Session
-            Session.invalidate_cache()
-        except Exception:
-            pass
+    def _prefix_matches_runtime_cache(cls, prefix: Optional[str], roots: tuple[str, ...]) -> bool:
+        if prefix is None:
+            return True
+        normalized = str(prefix)
+        return any(normalized == root.rstrip(":/") or normalized.startswith(root) for root in roots)
 
-        try:
-            from flocks.session.message import Message
-            Message.invalidate_cache()
-        except Exception:
-            pass
-    
+    @classmethod
+    def _invalidate_runtime_caches(cls, prefix: Optional[str] = None) -> None:
+        """Clear higher-level caches that depend on the active storage DB."""
+        if cls._prefix_matches_runtime_cache(prefix, ("session:",)):
+            try:
+                from flocks.session.session import Session
+
+                Session.invalidate_cache()
+            except Exception:
+                pass
+
+        if cls._prefix_matches_runtime_cache(prefix, ("message:", "message_parts:")):
+            try:
+                from flocks.session.message import Message
+
+                Message.invalidate_cache()
+            except Exception:
+                pass
+
     @classmethod
     def get_db_path(cls) -> Path:
         """Return the resolved database file path.
@@ -130,17 +151,56 @@ class Storage:
         data_dir = Config.get_data_path()
         return data_dir / "flocks.db"
 
+    @staticmethod
+    def _file_identity(db_path: Path) -> Optional[Tuple[int, int]]:
+        """Return the filesystem identity used to detect an online DB replacement."""
+
+        try:
+            stat_result = db_path.stat()
+        except OSError:
+            return None
+        return stat_result.st_dev, stat_result.st_ino
+
     @classmethod
-    async def configure_connection(
-        cls, conn: aiosqlite.Connection
-    ) -> aiosqlite.Connection:
+    def _assert_active_db_identity(cls, db_path: Path) -> None:
+        """Reject direct connections after the active primary DB was moved or replaced."""
+
+        if (
+            not cls._initialized
+            or cls._init_pid != os.getpid()
+            or cls._db_path is None
+            or cls._db_identity is None
+            or db_path.resolve() != cls._db_path.resolve()
+        ):
+            return
+        if cls._file_identity(db_path) != cls._db_identity:
+            raise StorageError(
+                f"The active SQLite database changed on disk: {db_path}. "
+                "Refusing to open a connection to a different file identity; restart Flocks."
+            )
+
+    @classmethod
+    def get_workflow_db_path(cls) -> Path:
+        """Return the SQLite database path for workflow-domain KV data."""
+        return cls.get_db_path().with_name("workflow.db")
+
+    @classmethod
+    def route_db_path_for_key(cls, key: str) -> Path:
+        """Return the storage DB path that owns *key*."""
+        return cls.get_db_path()
+
+    @classmethod
+    def route_db_path_for_prefix(cls, prefix: Optional[str]) -> Path:
+        """Return the storage DB path for a prefix-scoped KV operation."""
+        return cls.get_db_path()
+
+    @classmethod
+    async def configure_connection(cls, conn: aiosqlite.Connection) -> aiosqlite.Connection:
         """Apply the runtime SQLite contract to an async connection."""
         await conn.execute(f"PRAGMA journal_mode={cls._sqlite_journal_mode}")
         await conn.execute(f"PRAGMA synchronous={cls._sqlite_synchronous}")
         await conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")
-        await conn.execute(
-            f"PRAGMA wal_autocheckpoint={cls._sqlite_wal_autocheckpoint_pages}"
-        )
+        await conn.execute(f"PRAGMA wal_autocheckpoint={cls._sqlite_wal_autocheckpoint_pages}")
         await conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
@@ -150,9 +210,7 @@ class Storage:
         conn.execute(f"PRAGMA journal_mode={cls._sqlite_journal_mode}")
         conn.execute(f"PRAGMA synchronous={cls._sqlite_synchronous}")
         conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")
-        conn.execute(
-            f"PRAGMA wal_autocheckpoint={cls._sqlite_wal_autocheckpoint_pages}"
-        )
+        conn.execute(f"PRAGMA wal_autocheckpoint={cls._sqlite_wal_autocheckpoint_pages}")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
@@ -236,57 +294,500 @@ class Storage:
 
         Returns the new location of the main file so callers can surface it
         in logs or recovery instructions.  Returns ``None`` when there was
-        nothing to quarantine (no main file present), or when the rename
-        failed — in which case the caller must propagate the original error
-        because we cannot safely recreate the file in place.
+        nothing to quarantine (no main file present), or when the main file
+        and its data-bearing WAL cannot be kept together. In that case the
+        caller must propagate the original error because recovery without the
+        matching WAL could silently omit committed transactions.
         """
         db_path = Path(db_path)
         if not db_path.exists():
             return None
 
         from datetime import UTC
+
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         suffix = f".corrupt.{timestamp}"
+        sidecar_suffixes = ("-wal", "-shm")
 
         new_main = db_path.with_name(db_path.name + suffix)
         # Avoid collision if multiple corruptions happen within the same
-        # second — fall back to a counter suffix.
+        # second — fall back to a counter suffix.  Reserve the paired WAL/SHM
+        # names as well so every quarantined main file keeps the exact sidecar
+        # names SQLite expects: ``<quarantined-main>-wal`` and ``-shm``.
         counter = 1
-        while new_main.exists():
+        while new_main.exists() or any(
+            new_main.with_name(new_main.name + sidecar_suffix).exists()
+            for sidecar_suffix in sidecar_suffixes
+        ):
             new_main = db_path.with_name(f"{db_path.name}{suffix}.{counter}")
             counter += 1
 
         try:
             db_path.rename(new_main)
         except OSError as exc:
-            cls._log.error("storage.quarantine.rename_failed", {
-                "path": str(db_path),
-                "error": str(exc),
-            })
+            cls._log.error(
+                "storage.quarantine.rename_failed",
+                {
+                    "path": str(db_path),
+                    "error": str(exc),
+                },
+            )
             return None
 
-        for sidecar_name in (f"{db_path.name}-wal", f"{db_path.name}-shm"):
-            side_path = db_path.with_name(sidecar_name)
+        for sidecar_suffix in sidecar_suffixes:
+            side_path = db_path.with_name(db_path.name + sidecar_suffix)
             if not side_path.exists():
                 continue
             try:
-                side_path.rename(side_path.with_name(sidecar_name + suffix))
+                side_path.rename(new_main.with_name(new_main.name + sidecar_suffix))
             except OSError as exc:
-                cls._log.warn("storage.quarantine.sidecar_rename_failed", {
-                    "path": str(side_path),
-                    "error": str(exc),
-                })
+                log_method = cls._log.error if sidecar_suffix == "-wal" else cls._log.warn
+                log_method(
+                    "storage.quarantine.sidecar_rename_failed",
+                    {
+                        "path": str(side_path),
+                        "error": str(exc),
+                    },
+                )
+                if sidecar_suffix == "-wal":
+                    try:
+                        new_main.rename(db_path)
+                    except OSError as rollback_exc:
+                        cls._log.error(
+                            "storage.quarantine.rollback_failed",
+                            {
+                                "original_path": str(db_path),
+                                "quarantined_path": str(new_main),
+                                "error": str(rollback_exc),
+                            },
+                        )
+                    return None
 
-        cls._log.error("storage.corruption.quarantined", {
-            "original_path": str(db_path),
-            "quarantined_path": str(new_main),
-            "hint": (
-                "Server is starting with a fresh empty database. "
-                "Run scripts/recover_raw_flocks_db.py against the "
-                "quarantined file to attempt data recovery."
-            ),
-        })
+        cls._log.error(
+            "storage.corruption.quarantined",
+            {
+                "original_path": str(db_path),
+                "quarantined_path": str(new_main),
+                "hint": (
+                    "Server will attempt sqlite3 .recover against the "
+                    "quarantined file before falling back to a fresh "
+                    "empty database."
+                ),
+            },
+        )
         return new_main
+
+    @classmethod
+    def _integrity_check_sync(cls, db_path: Path) -> tuple[bool, str]:
+        """Return whether SQLite can read *db_path* and reports integrity OK."""
+        try:
+            conn = sqlite3.connect(db_path, timeout=cls._sqlite_timeout_s)
+            try:
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            return False, str(exc)
+        if row is None:
+            return False, "integrity_check returned no rows"
+        result = str(row[0])
+        return result.lower() == "ok", result
+
+    @classmethod
+    async def _assert_integrity_check_ok(cls, db_path: Path) -> None:
+        """Raise a corruption-looking SQLite error when integrity check fails."""
+        ok, detail = await asyncio.to_thread(cls._integrity_check_sync, db_path)
+        if ok:
+            return
+        raise sqlite3.DatabaseError(
+            "database disk image is malformed: "
+            f"PRAGMA integrity_check failed for {db_path}: {detail}"
+        )
+
+    @classmethod
+    def _sqlite_recover_capability_sync(cls, sqlite_bin: str) -> tuple[bool, str]:
+        """Return whether *sqlite_bin* was built with support for ``.recover``."""
+
+        try:
+            completed = subprocess.run(
+                [
+                    sqlite_bin,
+                    ":memory:",
+                    "SELECT sqlite_compileoption_used('ENABLE_DBPAGE_VTAB');",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=cls._sqlite_recover_timeout_s,
+            )
+        except Exception as exc:
+            return False, str(exc)
+
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            return False, detail or f"capability probe exited with {completed.returncode}"
+        if completed.stdout.strip() != "1":
+            return False, "SQLite CLI was built without SQLITE_ENABLE_DBPAGE_VTAB"
+        return True, ""
+
+    @classmethod
+    def _try_sqlite_recover_sync(cls, quarantined_path: Path, target_path: Path) -> Optional[Path]:
+        """Recover from an isolated copy without allowing SQLite to mutate evidence."""
+
+        sqlite_bin = shutil.which("sqlite3")
+        if sqlite_bin is None:
+            cls._log.warn(
+                "storage.corruption.recovery.skipped",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "reason": "sqlite3 CLI not found",
+                },
+            )
+            return None
+
+        supported, reason = cls._sqlite_recover_capability_sync(sqlite_bin)
+        if not supported:
+            cls._log.warn(
+                "storage.corruption.recovery.skipped",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "reason": f"sqlite3 .recover is unavailable: {reason}",
+                },
+            )
+            return None
+
+        working_path = quarantined_path.with_name(
+            f".{quarantined_path.name}.recovery-source-{uuid.uuid4().hex}"
+        )
+        working_files = [
+            working_path,
+            working_path.with_name(working_path.name + "-wal"),
+            working_path.with_name(working_path.name + "-shm"),
+            working_path.with_name(working_path.name + "-journal"),
+        ]
+        try:
+            shutil.copy2(quarantined_path, working_path)
+            working_path.chmod(0o600)
+            for suffix in ("-wal", "-shm"):
+                evidence_sidecar = quarantined_path.with_name(quarantined_path.name + suffix)
+                if not evidence_sidecar.exists():
+                    continue
+                working_sidecar = working_path.with_name(working_path.name + suffix)
+                shutil.copy2(evidence_sidecar, working_sidecar)
+                working_sidecar.chmod(0o600)
+            return cls._try_sqlite_recover_working_copy_sync(
+                working_path,
+                quarantined_path,
+                target_path,
+                sqlite_bin,
+            )
+        except OSError as exc:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "copy_evidence",
+                    "error": str(exc),
+                },
+            )
+            return None
+        finally:
+            for path in working_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    cls._log.warn(
+                        "storage.corruption.recovery.temp_cleanup_failed",
+                        {"path": str(path), "error": str(exc)},
+                    )
+
+    @classmethod
+    def _try_sqlite_recover_working_copy_sync(
+        cls,
+        working_path: Path,
+        quarantined_path: Path,
+        target_path: Path,
+        sqlite_bin: str,
+    ) -> Optional[Path]:
+        """Try SQLite's lightweight `.recover` and install the recovered DB.
+
+        This intentionally avoids the heavier raw-page/WAL reconstruction script.
+        It handles the common case where SQLite can still scan a malformed DB
+        enough to emit recoverable SQL.  Failure is non-fatal; callers fall back
+        to bootstrapping an empty database.
+        """
+        recovered_path = target_path.with_name(target_path.name + ".recovered")
+        sql_path = target_path.with_name(target_path.name + ".recover.sql")
+        for path in (recovered_path, sql_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+        try:
+            lost_and_found_table = f"flocks_recovery_lost_{uuid.uuid4().hex}"
+            completed = subprocess.run(
+                [
+                    sqlite_bin,
+                    str(working_path),
+                    f".recover --lost-and-found {lost_and_found_table}",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=cls._sqlite_recover_timeout_s,
+            )
+        except Exception as exc:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "recover",
+                    "error": str(exc),
+                },
+            )
+            return None
+
+        recover_sql = completed.stdout or ""
+        sql_path.write_text(recover_sql, encoding="utf-8")
+        if completed.returncode != 0:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "recover",
+                    "error": completed.stderr.strip() or str(completed.returncode),
+                },
+            )
+            return None
+
+        try:
+            materialized = subprocess.run(
+                [sqlite_bin, str(recovered_path)],
+                input=recover_sql,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=cls._sqlite_recover_timeout_s,
+            )
+        except Exception as exc:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "materialize",
+                    "error": str(exc),
+                },
+            )
+            return None
+
+        if materialized.returncode != 0:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "materialize",
+                    "error": materialized.stderr.strip() or str(materialized.returncode),
+                    "recover_sql": str(sql_path),
+                },
+            )
+            return None
+
+        ok, detail = cls._integrity_check_sync(recovered_path)
+        if not ok:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "integrity_check",
+                    "error": detail,
+                    "recovered_path": str(recovered_path),
+                    "recover_sql": str(sql_path),
+                },
+            )
+            return None
+
+        try:
+            recovered_path.replace(target_path)
+        except OSError as exc:
+            cls._log.warn(
+                "storage.corruption.recovery.failed",
+                {
+                    "db_path": str(target_path),
+                    "quarantined_path": str(quarantined_path),
+                    "stage": "install",
+                    "error": str(exc),
+                    "recovered_path": str(recovered_path),
+                    "recover_sql": str(sql_path),
+                },
+            )
+            return None
+
+        cls._log.warn(
+            "storage.corruption.recovery.succeeded",
+            {
+                "db_path": str(target_path),
+                "quarantined_path": str(quarantined_path),
+                "recover_sql": str(sql_path),
+            },
+        )
+        return target_path
+
+    @staticmethod
+    async def _wait_for_recovery_worker_on_cancel(
+        worker: "asyncio.Task[Optional[Path]]",
+    ) -> Optional[Path]:
+        """Do not let a cancelled coroutine leave a recovery thread mutating files."""
+
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if worker.done() and not worker.cancelled():
+                try:
+                    worker.result()
+                except BaseException:
+                    pass
+            raise cancelled
+
+    @classmethod
+    async def _run_sqlite_recover_async(
+        cls,
+        quarantined_path: Path,
+        target_path: Path,
+    ) -> Optional[Path]:
+        """Run blocking sqlite recovery without outliving a cancelled startup task."""
+
+        worker = asyncio.create_task(
+            asyncio.to_thread(cls._try_sqlite_recover_sync, quarantined_path, target_path)
+        )
+        return await cls._wait_for_recovery_worker_on_cancel(worker)
+
+    @classmethod
+    async def recover_corrupt_db(
+        cls,
+        db_path: Path,
+        *,
+        action: str,
+        exc: BaseException,
+        generation: Optional[int] = None,
+        reinitialize: Optional[Callable[[], Awaitable[Any]]] = None,
+    ) -> bool:
+        """Quarantine a corrupt SQLite DB and rebuild it once.
+
+        Returns ``True`` when recovery completed and callers should retry the
+        failed operation.  Returns ``False`` when another task already completed
+        recovery while this caller was waiting for the lock, in which case a
+        retry is still appropriate.
+        """
+        db_path = Path(db_path)
+        async with cls._corruption_recovery_lock:
+            if generation is not None and generation != cls._corruption_recovery_generation:
+                return False
+
+            is_primary_db = cls._db_path == db_path or db_path.name == "flocks.db"
+            is_live_process = (
+                cls._initialized
+                and cls._init_pid is not None
+                and cls._init_pid == os.getpid()
+            )
+            if is_primary_db and is_live_process:
+                cls._log.error(
+                    "storage.corruption.online_recovery_refused",
+                    {
+                        "db_path": str(db_path),
+                        "action": action,
+                        "hint": "Restart Flocks so recovery runs before request connections open.",
+                    },
+                )
+                raise StorageError(
+                    "Refusing to replace the primary SQLite database while Flocks is running; "
+                    "restart Flocks to recover it safely."
+                ) from exc
+
+            cls._log.error(
+                "storage.corruption.detected",
+                {
+                    "db_path": str(db_path),
+                    "action": action,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            quarantined = cls._quarantine_corrupt_db(db_path)
+            if quarantined is None:
+                raise exc
+            await cls._run_sqlite_recover_async(quarantined, db_path)
+
+            if cls._db_path == db_path:
+                cls._initialized = False
+                cls._init_pid = None
+                cls._db_identity = None
+
+            if reinitialize is not None:
+                await reinitialize()
+            elif is_primary_db:
+                await cls.init(db_path)
+
+            cls._corruption_recovery_generation += 1
+            cls._log.warn(
+                "storage.corruption.recovered",
+                {
+                    "db_path": str(db_path),
+                    "quarantined_path": str(quarantined),
+                    "action": action,
+                },
+            )
+            return True
+
+    @classmethod
+    async def _run_with_corruption_recovery(
+        cls,
+        operation: Callable[[], Awaitable[R]],
+        *,
+        db_path: Path,
+        action: str,
+    ) -> R:
+        """Run a request operation without replacing its SQLite file in-place.
+
+        Runtime corruption is deliberately deferred to the next process start,
+        where no request handlers or persistent connections can still reference
+        the old inode. Primary-DB online recovery is explicitly refused.
+        """
+
+        try:
+            return await operation()
+        except Exception as exc:
+            if not cls._is_db_corruption_error(exc):
+                raise
+            cls._log.error(
+                "storage.corruption.deferred_to_restart",
+                {
+                    "db_path": str(db_path),
+                    "action": action,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "hint": "Restart Flocks to run startup database recovery safely.",
+                },
+            )
+            raise
 
     @classmethod
     def _is_sqlite_busy_error(cls, exc: Exception) -> bool:
@@ -362,14 +863,17 @@ class Storage:
                     raise
                 last_exc = exc
                 sleep_s = delay_s * (2 ** (attempt - 1))
-                cls._log.warn("storage.sqlite_write_retry", {
-                    "action": action,
-                    "target": target,
-                    "attempt": attempt,
-                    "max_attempts": attempts,
-                    "sleep_s": round(sleep_s, 3),
-                    "error": str(exc),
-                })
+                cls._log.warn(
+                    "storage.sqlite_write_retry",
+                    {
+                        "action": action,
+                        "target": target,
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "sleep_s": round(sleep_s, 3),
+                        "error": str(exc),
+                    },
+                )
                 await asyncio.sleep(sleep_s)
 
         assert last_exc is not None
@@ -377,14 +881,14 @@ class Storage:
 
     @classmethod
     @asynccontextmanager
-    async def connect(
-        cls, db_path: Optional[Path] = None
-    ) -> AsyncIterator[aiosqlite.Connection]:
+    async def connect(cls, db_path: Optional[Path] = None) -> AsyncIterator[aiosqlite.Connection]:
         """Open a configured async SQLite connection for the active storage DB."""
         target = Path(db_path) if db_path is not None else cls.get_db_path()
+        cls._assert_active_db_identity(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(target, timeout=cls._sqlite_timeout_s)
         try:
+            cls._assert_active_db_identity(target)
             await cls.configure_connection(conn)
             yield conn
         finally:
@@ -394,13 +898,19 @@ class Storage:
     def connect_sync(cls, db_path: Optional[Path] = None) -> sqlite3.Connection:
         """Open a configured sync SQLite connection for the active storage DB."""
         target = Path(db_path) if db_path is not None else cls.get_db_path()
+        cls._assert_active_db_identity(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(target, timeout=cls._sqlite_timeout_s)
-        conn.row_factory = sqlite3.Row
-        return cls.configure_sync_connection(conn)
+        try:
+            cls._assert_active_db_identity(target)
+            conn.row_factory = sqlite3.Row
+            return cls.configure_sync_connection(conn)
+        except BaseException:
+            conn.close()
+            raise
 
     @classmethod
-    def register_ddl(cls, ddl: str) -> None:
+    def register_ddl(cls, ddl: DDLScript) -> None:
         """Register an extension DDL script to be executed during ``init()``.
 
         If init() has already completed the DDL is executed immediately
@@ -412,21 +922,111 @@ class Storage:
     def _resolve_key(key: List[str] | str) -> str:
         """
         Convert key to string format
-        
+
         Matches TypeScript's resolve() function:
         - Array keys: ["session", "proj1", "ses1"] -> "session/proj1/ses1"
         - String keys: passed through unchanged
-        
+
         Args:
             key: Key as list or string
-            
+
         Returns:
             Key as string
         """
         if isinstance(key, list):
             return "/".join(key)
         return key
-    
+
+    @classmethod
+    def _like_prefix_pattern(cls, prefix: str) -> str:
+        """Return a SQLite LIKE pattern that treats prefix chars literally."""
+        return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    @classmethod
+    def _like_prefix_clause(cls, column: str = "key") -> str:
+        return f"{column} LIKE ? ESCAPE '\\'"
+
+    @staticmethod
+    def _marker_row_count(marker: Dict[str, Any], key: str) -> int:
+        try:
+            return int(marker.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _read_multi_db_migration_marker_sync(cls) -> Dict[str, Any]:
+        if cls._db_path is None or not cls._db_path.exists():
+            return {}
+        try:
+            conn = cls.connect_sync(cls._db_path)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM storage WHERE key = ?",
+                    (cls._multi_db_migration_marker_key,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                return {}
+            value = json.loads(row["value"])
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    @classmethod
+    def _write_multi_db_migration_marker_sync(cls, marker: Dict[str, Any]) -> None:
+        if cls._db_path is None:
+            raise StorageError("Storage DB path is not initialized")
+        from datetime import UTC
+
+        now = datetime.now(UTC).isoformat()
+        serialized = json.dumps(marker)
+        conn = cls.connect_sync(cls._db_path)
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
+                VALUES (?, ?, ?,
+                    COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
+                    ?)
+                """,
+                (
+                    cls._multi_db_migration_marker_key,
+                    serialized,
+                    "json",
+                    cls._multi_db_migration_marker_key,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
+    async def _ensure_storage_table(cls, db_path: Path) -> None:
+        """Ensure the generic KV storage table exists in *db_path*."""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        async def _create_storage_table() -> None:
+            async with cls.connect(db_path) as db:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS storage (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                await db.commit()
+
+        await cls._run_write_with_retry(
+            _create_storage_table,
+            action="init.create_storage_table",
+            target=str(db_path),
+        )
+
     @classmethod
     async def init(cls, db_path: Optional[Path] = None) -> None:
         """
@@ -441,13 +1041,59 @@ class Storage:
             db_path = data_dir / "flocks.db"
 
         db_path = Path(db_path)
+        current_pid = os.getpid()
+        same_process = cls._init_pid is None or cls._init_pid == current_pid
+        if cls._initialized and same_process and cls._db_path is not None:
+            if cls._db_path != db_path:
+                # An explicit path switch is allowed for tests and embedded
+                # callers, but the process-owned persistent binding handle
+                # must not silently remain attached to the previous DB.
+                from flocks.channel.inbound.session_binding import close_binding_db
+
+                await close_binding_db()
+                cls._initialized = False
+                cls._init_pid = None
+                cls._db_identity = None
+            elif not db_path.exists():
+                from flocks.channel.inbound.session_binding import close_binding_db
+
+                await close_binding_db()
+                cls._log.error(
+                    "storage.live_path_disappeared",
+                    {
+                        "db_path": str(db_path),
+                        "hint": "Restart Flocks after restoring or recovering the database file.",
+                    },
+                )
+                raise StorageError(
+                    f"The active SQLite database disappeared: {db_path}. "
+                    "Refusing to create a second database while existing handles may reference "
+                    "the old file; restart Flocks."
+                )
+            elif (
+                cls._db_identity is not None
+                and cls._file_identity(db_path) != cls._db_identity
+            ):
+                from flocks.channel.inbound.session_binding import close_binding_db
+
+                await close_binding_db()
+                cls._log.error(
+                    "storage.live_path_replaced",
+                    {
+                        "db_path": str(db_path),
+                        "hint": "Restart Flocks; never replace SQLite files while it is running.",
+                    },
+                )
+                raise StorageError(
+                    f"The active SQLite database was replaced on disk: {db_path}. "
+                    "Refusing to mix connections to different file identities; restart Flocks."
+                )
+
         # Tests and short-lived processes may initialize Storage against a
         # temporary database that later disappears.  We also force a
         # reinit after ``fork()`` (detected via PID mismatch) to avoid the
         # child silently reusing the parent's open SQLite handle.
-        current_pid = os.getpid()
         same_path = cls._db_path == db_path and db_path.exists()
-        same_process = cls._init_pid is None or cls._init_pid == current_pid
         if cls._initialized and same_path and same_process:
             return
 
@@ -460,10 +1106,13 @@ class Storage:
         # SQLite never gets a chance to delete adjacent WAL/SHM sidecars
         # — those sidecars are what the offline recovery script reads.
         if cls._file_has_invalid_sqlite_header(cls._db_path):
-            cls._log.error("storage.corruption.invalid_header", {
-                "db_path": str(cls._db_path),
-                "size": cls._db_path.stat().st_size,
-            })
+            cls._log.error(
+                "storage.corruption.invalid_header",
+                {
+                    "db_path": str(cls._db_path),
+                    "size": cls._db_path.stat().st_size,
+                },
+            )
             quarantined = cls._quarantine_corrupt_db(cls._db_path)
             if quarantined is None:
                 # The pre-flight check confirmed the file is not SQLite,
@@ -491,14 +1140,18 @@ class Storage:
         except Exception as exc:
             if not cls._is_db_corruption_error(exc):
                 raise
-            cls._log.error("storage.corruption.detected_on_init", {
-                "db_path": str(cls._db_path),
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            })
+            cls._log.error(
+                "storage.corruption.detected_on_init",
+                {
+                    "db_path": str(cls._db_path),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
             quarantined = cls._quarantine_corrupt_db(cls._db_path)
             if quarantined is None:
                 raise
+            await cls._run_sqlite_recover_async(quarantined, cls._db_path)
             await cls._bootstrap_schema()
 
         # Drain any residual WAL frames left by the previous process so the
@@ -512,11 +1165,15 @@ class Storage:
             cls._log.warn("storage.startup_checkpoint.failed", {"error": str(exc)})
 
         cls._init_pid = os.getpid()
+        cls._db_identity = cls._file_identity(cls._db_path)
         cls._initialized = True
-        cls._log.info("storage.initialized", {
-            "db_path": str(db_path),
-            "pid": cls._init_pid,
-        })
+        cls._log.info(
+            "storage.initialized",
+            {
+                "db_path": str(db_path),
+                "pid": cls._init_pid,
+            },
+        )
 
     @classmethod
     async def _checkpoint(cls, *, mode: str = "TRUNCATE") -> tuple[int, int, int]:
@@ -546,9 +1203,7 @@ class Storage:
         if mode_normalised not in valid_modes:
             raise ValueError(f"invalid checkpoint mode: {mode!r}")
         async with cls.connect(cls._db_path) as db:
-            cursor = await db.execute(
-                f"PRAGMA wal_checkpoint({mode_normalised})"
-            )
+            cursor = await db.execute(f"PRAGMA wal_checkpoint({mode_normalised})")
             row = await cursor.fetchone()
             await db.commit()
 
@@ -563,9 +1218,7 @@ class Storage:
         log_pages = int(row[1])
         checkpointed_pages = int(row[2])
         if busy != 0:
-            raise CheckpointBusyError(
-                mode_normalised, log_pages, checkpointed_pages
-            )
+            raise CheckpointBusyError(mode_normalised, log_pages, checkpointed_pages)
         return (busy, log_pages, checkpointed_pages)
 
     # Tunables for the shutdown WAL drain.  Kept as class attributes so
@@ -599,6 +1252,19 @@ class Storage:
         """
         if not cls._initialized:
             return
+        if (
+            cls._db_path is not None
+            and cls._db_identity is not None
+            and cls._file_identity(cls._db_path) != cls._db_identity
+        ):
+            cls._log.warn(
+                "storage.shutdown.checkpoint.skipped_replaced_path",
+                {"db_path": str(cls._db_path)},
+            )
+            cls._initialized = False
+            cls._init_pid = None
+            cls._db_identity = None
+            return
 
         attempts = max(int(cls._shutdown_checkpoint_attempts), 1)
         backoff = max(float(cls._shutdown_checkpoint_backoff_s), 0.0)
@@ -608,54 +1274,65 @@ class Storage:
         try:
             for attempt in range(1, attempts + 1):
                 try:
-                    _, log_pages, checkpointed = await cls._checkpoint(
-                        mode="TRUNCATE"
+                    _, log_pages, checkpointed = await cls._checkpoint(mode="TRUNCATE")
+                    cls._log.info(
+                        "storage.shutdown.checkpoint.done",
+                        {
+                            "db_path": str(cls._db_path) if cls._db_path else None,
+                            "log_pages": log_pages,
+                            "checkpointed_pages": checkpointed,
+                            "attempts": attempt,
+                        },
                     )
-                    cls._log.info("storage.shutdown.checkpoint.done", {
-                        "db_path": str(cls._db_path) if cls._db_path else None,
-                        "log_pages": log_pages,
-                        "checkpointed_pages": checkpointed,
-                        "attempts": attempt,
-                    })
                     return
                 except CheckpointBusyError as exc:
                     last_busy = exc
-                    cls._log.warn("storage.shutdown.checkpoint.busy", {
-                        "attempt": attempt,
-                        "max_attempts": attempts,
-                        "mode": exc.mode,
-                        "log_pages": exc.log_pages,
-                        "checkpointed_pages": exc.checkpointed_pages,
-                    })
+                    cls._log.warn(
+                        "storage.shutdown.checkpoint.busy",
+                        {
+                            "attempt": attempt,
+                            "max_attempts": attempts,
+                            "mode": exc.mode,
+                            "log_pages": exc.log_pages,
+                            "checkpointed_pages": exc.checkpointed_pages,
+                        },
+                    )
                     if attempt < attempts:
                         await asyncio.sleep(backoff * attempt)
                 except Exception as exc:
                     last_failure = exc
-                    cls._log.warn("storage.shutdown.checkpoint.failed", {
-                        "db_path": str(cls._db_path) if cls._db_path else None,
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                    })
+                    cls._log.warn(
+                        "storage.shutdown.checkpoint.failed",
+                        {
+                            "db_path": str(cls._db_path) if cls._db_path else None,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
                     break
 
             # Reached only on persistent busy or fatal failure.  Do NOT
             # log "done" — that would mask the residual-WAL risk this
             # whole method exists to prevent.
-            cls._log.warn("storage.shutdown.checkpoint.unfinished", {
-                "db_path": str(cls._db_path) if cls._db_path else None,
-                "busy": last_busy is not None,
-                "log_pages": getattr(last_busy, "log_pages", None),
-                "checkpointed_pages": getattr(last_busy, "checkpointed_pages", None),
-                "fatal_error": str(last_failure) if last_failure else None,
-                "hint": (
-                    "WAL was not truncated; next startup will run WAL "
-                    "recovery and remains at risk of header corruption if "
-                    "killed mid-recovery."
-                ),
-            })
+            cls._log.warn(
+                "storage.shutdown.checkpoint.unfinished",
+                {
+                    "db_path": str(cls._db_path) if cls._db_path else None,
+                    "busy": last_busy is not None,
+                    "log_pages": getattr(last_busy, "log_pages", None),
+                    "checkpointed_pages": getattr(last_busy, "checkpointed_pages", None),
+                    "fatal_error": str(last_failure) if last_failure else None,
+                    "hint": (
+                        "WAL was not truncated; next startup will run WAL "
+                        "recovery and remains at risk of header corruption if "
+                        "killed mid-recovery."
+                    ),
+                },
+            )
         finally:
             cls._initialized = False
             cls._init_pid = None
+            cls._db_identity = None
 
     @classmethod
     async def _bootstrap_schema(cls) -> None:
@@ -666,28 +1343,12 @@ class Storage:
         first call surfaces the corruption, and the second call (after the
         rename) bootstraps a fresh database in its place.
         """
-        async def _create_storage_table() -> None:
-            async with cls.connect(cls._db_path) as db:
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS storage (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL,
-                        type TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                """)
-                await db.commit()
-
-        await cls._run_write_with_retry(
-            _create_storage_table,
-            action="init.create_storage_table",
-            target=str(cls._db_path),
-        )
+        await cls._ensure_storage_table(cls._db_path)
 
         # Initialize vector storage tables (for memory system)
         try:
             from flocks.storage.vector import ensure_vector_tables
+
             vector_status = await ensure_vector_tables(cls._db_path)
             cls._log.info("storage.vector.initialized", vector_status)
         except Exception as e:
@@ -699,9 +1360,13 @@ class Storage:
         # Run extension DDLs registered before init
         for ddl in cls._extension_ddls:
             try:
+
                 async def _run_extension_ddl() -> None:
                     async with cls.connect(cls._db_path) as db:
-                        await db.executescript(ddl)
+                        if isinstance(ddl, str):
+                            await db.executescript(ddl)
+                        else:
+                            await ddl(db)
                         await db.commit()
 
                 await cls._run_write_with_retry(
@@ -712,6 +1377,8 @@ class Storage:
             except Exception as e:
                 cls._log.warn("storage.extension_ddl.failed", {"error": str(e)})
 
+        await cls._assert_integrity_check_ok(cls._db_path)
+
     @classmethod
     async def _create_model_management_tables(cls) -> None:
         """Create dynamic data tables (idempotent).
@@ -720,6 +1387,7 @@ class Storage:
         (credentials, model settings, default models, custom providers)
         is stored in flocks.json / .secret.json.
         """
+
         async def _create_tables() -> None:
             async with cls.connect(cls._db_path) as db:
                 await db.executescript("""
@@ -753,7 +1421,10 @@ class Storage:
 
                 schema_additions = [
                     ("message_id", "ALTER TABLE usage_records ADD COLUMN message_id TEXT"),
-                    ("cache_write_tokens", "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
+                    (
+                        "cache_write_tokens",
+                        "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
+                    ),
                     ("source", "ALTER TABLE usage_records ADD COLUMN source TEXT NOT NULL DEFAULT 'live'"),
                     ("backfilled_at", "ALTER TABLE usage_records ADD COLUMN backfilled_at TEXT"),
                 ]
@@ -783,7 +1454,7 @@ class Storage:
             target=str(cls._db_path),
         )
         cls._log.info("storage.model_management_tables_ready")
-    
+
     @classmethod
     async def _ensure_init(cls) -> None:
         """Ensure storage is initialized for the *current* process.
@@ -801,141 +1472,220 @@ class Storage:
         whenever the current PID differs.
         """
         current_pid = os.getpid()
-        forked = (
-            cls._initialized
-            and cls._init_pid is not None
-            and cls._init_pid != current_pid
-        )
+        forked = cls._initialized and cls._init_pid is not None and cls._init_pid != current_pid
         if forked:
-            cls._log.warn("storage.fork_detected", {
-                "parent_pid": cls._init_pid,
-                "child_pid": current_pid,
-                "hint": "Reinitialising Storage to avoid sharing SQLite "
-                        "file descriptors across processes.",
-            })
+            cls._log.warn(
+                "storage.fork_detected",
+                {
+                    "parent_pid": cls._init_pid,
+                    "child_pid": current_pid,
+                    "hint": "Reinitialising Storage to avoid sharing SQLite file descriptors across processes.",
+                },
+            )
             cls._initialized = False
             cls._init_pid = None
+            cls._db_identity = None
 
-        if not cls._initialized or cls._db_path is None or not cls._db_path.exists():
+        identity_changed = (
+            cls._initialized
+            and cls._db_path is not None
+            and cls._db_identity is not None
+            and cls._file_identity(cls._db_path) != cls._db_identity
+        )
+        if (
+            not cls._initialized
+            or cls._db_path is None
+            or not cls._db_path.exists()
+            or identity_changed
+        ):
             await cls.init(cls._db_path)
-    
+
     @classmethod
     async def set(cls, key: str, value: Any, value_type: str = "json") -> None:
         """
         Store a value
-        
+
         Args:
             key: Storage key
             value: Value to store (will be JSON serialized)
             value_type: Type identifier for the value
         """
         await cls._ensure_init()
-        
+        db_path = cls.route_db_path_for_key(key)
+
         if isinstance(value, BaseModel):
             serialized = value.model_dump_json()
         else:
             serialized = json.dumps(value)
-        
+
         from datetime import UTC
+
         now = datetime.now(UTC).isoformat()
-        
+
         async def _write() -> None:
-            async with cls.connect(cls._db_path) as db:
-                await db.execute("""
+            async with cls.connect(db_path) as db:
+                await db.execute(
+                    """
                     INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
                     VALUES (?, ?, ?, 
                         COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
                         ?)
-                """, (key, serialized, value_type, key, now, now))
+                """,
+                    (key, serialized, value_type, key, now, now),
+                )
                 await db.commit()
 
-        await cls._run_write_with_retry(_write, action="set", target=key)
-        
+        await cls._run_with_corruption_recovery(
+            lambda: cls._run_write_with_retry(_write, action="set", target=key),
+            db_path=db_path,
+            action=f"set:{key}",
+        )
+
         cls._log.debug("storage.set", {"key": key, "type": value_type})
-    
+
     @classmethod
     async def get(cls, key: str, model: Optional[Type[T]] = None) -> Optional[T | Any]:
         """
         Retrieve a value
-        
+
         Args:
             key: Storage key
             model: Optional Pydantic model class to deserialize into
-            
+
         Returns:
             Stored value or None if not found
         """
         await cls._ensure_init()
-        
-        async with cls.connect(cls._db_path) as db:
-            async with db.execute(
-                "SELECT value, type FROM storage WHERE key = ?", (key,)
-            ) as cursor:
-                row = await cursor.fetchone()
-        
+        db_path = cls.route_db_path_for_key(key)
+
+        async def _read() -> Optional[Tuple[str, str]]:
+            async with cls.connect(db_path) as db:
+                async with db.execute("SELECT value, type FROM storage WHERE key = ?", (key,)) as cursor:
+                    return await cursor.fetchone()
+
+        row = await cls._run_with_corruption_recovery(
+            _read,
+            db_path=db_path,
+            action=f"get:{key}",
+        )
+
         if row is None:
             return None
-        
+
         value_str, value_type = row
-        
+
         if model is not None and hasattr(model, "model_validate_json"):
             return model.model_validate_json(value_str)
         # Fall back to a plain JSON decode when no Pydantic model is supplied
         # (or when callers accidentally pass a builtin container type such as
         # ``dict``/``list``, which is not a Pydantic model).
         return json.loads(value_str)
-    
+
     @classmethod
     async def delete(cls, key: str) -> bool:
         """
         Delete a value
-        
+
         Args:
             key: Storage key
-            
+
         Returns:
             True if deleted, False if not found
         """
         await cls._ensure_init()
-        
+        db_path = cls.route_db_path_for_key(key)
+
         async def _delete() -> bool:
-            async with cls.connect(cls._db_path) as db:
+            async with cls.connect(db_path) as db:
                 cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
                 await db.commit()
                 return cursor.rowcount > 0
 
-        deleted = await cls._run_write_with_retry(_delete, action="delete", target=key)
-        
+        deleted = await cls._run_with_corruption_recovery(
+            lambda: cls._run_write_with_retry(_delete, action="delete", target=key),
+            db_path=db_path,
+            action=f"delete:{key}",
+        )
+
         if deleted:
             cls._log.debug("storage.delete", {"key": key})
-        
+
         return deleted
-    
+
     @classmethod
     async def list_keys(cls, prefix: Optional[str] = None) -> List[str]:
         """
         List all keys, optionally filtered by prefix
-        
+
         Args:
             prefix: Optional key prefix to filter by
-            
+
         Returns:
             List of matching keys
         """
         await cls._ensure_init()
-        
-        async with cls.connect(cls._db_path) as db:
-            if prefix:
-                query = "SELECT key FROM storage WHERE key LIKE ?"
-                params = (f"{prefix}%",)
-            else:
-                query = "SELECT key FROM storage"
-                params = ()
-            
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-        
-        return [row[0] for row in rows]
+        if prefix is None:
+            db_paths = (cls.get_db_path(),)
+        else:
+            db_paths = (cls.route_db_path_for_prefix(prefix),)
+
+        keys: set[str] = set()
+        for db_path in db_paths:
+            async def _read_keys(db_path: Path = db_path):
+                async with cls.connect(db_path) as db:
+                    if prefix:
+                        query = f"SELECT key FROM storage WHERE {cls._like_prefix_clause()}"
+                        params = (cls._like_prefix_pattern(prefix),)
+                    else:
+                        query = "SELECT key FROM storage"
+                        params = ()
+
+                    async with db.execute(query, params) as cursor:
+                        return await cursor.fetchall()
+
+            rows = await cls._run_with_corruption_recovery(
+                _read_keys,
+                db_path=db_path,
+                action=f"list_keys:{prefix or '<all>'}",
+            )
+            keys.update(row[0] for row in rows)
+
+        return sorted(keys)
+
+    @classmethod
+    async def _list_entry_rows(
+        cls,
+        *,
+        prefix: Optional[str],
+    ) -> List[Tuple[str, str]]:
+        if prefix is None:
+            db_paths = (cls.get_db_path(),)
+        else:
+            db_paths = (cls.route_db_path_for_prefix(prefix),)
+
+        rows_by_key: dict[str, str] = {}
+        for db_path in db_paths:
+            async def _read_rows(db_path: Path = db_path):
+                async with cls.connect(db_path) as db:
+                    if prefix:
+                        query = f"SELECT key, value FROM storage WHERE {cls._like_prefix_clause()}"
+                        params = (cls._like_prefix_pattern(prefix),)
+                    else:
+                        query = "SELECT key, value FROM storage"
+                        params = ()
+
+                    async with db.execute(query, params) as cursor:
+                        return await cursor.fetchall()
+
+            rows = await cls._run_with_corruption_recovery(
+                _read_rows,
+                db_path=db_path,
+                action=f"list_entries:{prefix or '<all>'}",
+            )
+            for key, value in rows:
+                rows_by_key[key] = value
+
+        return sorted(rows_by_key.items(), key=lambda item: item[0])
 
     @classmethod
     async def list_entries(
@@ -957,17 +1707,7 @@ class Storage:
             List of ``(key, value)`` tuples
         """
         await cls._ensure_init()
-
-        async with cls.connect(cls._db_path) as db:
-            if prefix:
-                query = "SELECT key, value FROM storage WHERE key LIKE ?"
-                params = (f"{prefix}%",)
-            else:
-                query = "SELECT key, value FROM storage"
-                params = ()
-
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
+        rows = await cls._list_entry_rows(prefix=prefix)
 
         entries: List[Tuple[str, T | Any]] = []
         for key, value_str in rows:
@@ -977,6 +1717,62 @@ class Storage:
                 value = json.loads(value_str)
             entries.append((key, value))
         return entries
+
+    @classmethod
+    async def list_entries_page(
+        cls,
+        prefix: str,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        model: Optional[Type[T]] = None,
+    ) -> tuple[List[Tuple[str, T | Any]], int]:
+        """List one page of entries for a prefix, plus total matching rows."""
+        await cls._ensure_init()
+        db_path = cls.route_db_path_for_prefix(prefix)
+
+        safe_offset = max(int(offset), 0)
+        safe_limit = max(int(limit), 0)
+        params = (cls._like_prefix_pattern(prefix),)
+
+        async def _read_page():
+            async with cls.connect(db_path) as db:
+                async with db.execute(
+                    f"SELECT COUNT(*) FROM storage WHERE {cls._like_prefix_clause()}",
+                    params,
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    total = int(row[0]) if row else 0
+
+                if safe_limit == 0:
+                    return [], total
+
+                async with db.execute(
+                    f"""
+                    SELECT key, value FROM storage
+                    WHERE {cls._like_prefix_clause()}
+                    ORDER BY key
+                    LIMIT ? OFFSET ?
+                    """,
+                    (cls._like_prefix_pattern(prefix), safe_limit, safe_offset),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                return rows, total
+
+        rows, total = await cls._run_with_corruption_recovery(
+            _read_page,
+            db_path=db_path,
+            action=f"list_entries_page:{prefix}",
+        )
+
+        entries: List[Tuple[str, T | Any]] = []
+        for key, value_str in rows:
+            if model is not None and hasattr(model, "model_validate_json"):
+                value = model.model_validate_json(value_str)
+            else:
+                value = json.loads(value_str)
+            entries.append((key, value))
+        return entries, total
 
     @classmethod
     async def list_raw(
@@ -992,139 +1788,148 @@ class Storage:
         Compatible with all SQLite versions (no ``json_extract`` required).
         """
         await cls._ensure_init()
-
-        if prefix:
-            query = "SELECT key, value FROM storage WHERE key LIKE ?"
-            params: tuple = (f"{prefix}%",)
-        else:
-            query = "SELECT key, value FROM storage"
-            params = ()
-
-        async with cls.connect(cls._db_path) as db:
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-
-        return [(row[0], row[1]) for row in rows]
+        return await cls._list_entry_rows(prefix=prefix)
 
     @classmethod
     async def exists(cls, key: str) -> bool:
         """
         Check if a key exists
-        
+
         Args:
             key: Storage key
-            
+
         Returns:
             True if exists, False otherwise
         """
         await cls._ensure_init()
-        
-        async with cls.connect(cls._db_path) as db:
-            async with db.execute(
-                "SELECT 1 FROM storage WHERE key = ?", (key,)
-            ) as cursor:
-                row = await cursor.fetchone()
-        
+        db_path = cls.route_db_path_for_key(key)
+
+        async def _exists():
+            async with cls.connect(db_path) as db:
+                async with db.execute("SELECT 1 FROM storage WHERE key = ?", (key,)) as cursor:
+                    return await cursor.fetchone()
+
+        row = await cls._run_with_corruption_recovery(
+            _exists,
+            db_path=db_path,
+            action=f"exists:{key}",
+        )
+
         return row is not None
-    
+
     @classmethod
     async def clear(cls, prefix: Optional[str] = None) -> int:
         """
         Clear storage, optionally filtered by prefix
-        
+
         Args:
             prefix: Optional key prefix to filter by
-            
+
         Returns:
             Number of deleted entries
         """
         await cls._ensure_init()
-        
-        async def _clear() -> int:
-            async with cls.connect(cls._db_path) as db:
-                if prefix:
-                    query = "DELETE FROM storage WHERE key LIKE ?"
-                    params = (f"{prefix}%",)
-                else:
-                    query = "DELETE FROM storage"
-                    params = ()
+        if prefix is None:
+            db_paths = (cls.get_db_path(),)
+        else:
+            db_paths = (cls.route_db_path_for_prefix(prefix),)
 
-                cursor = await db.execute(query, params)
+        async def _clear_db(db_path: Path) -> int:
+            async with cls.connect(db_path) as db:
+                if prefix:
+                    query = f"DELETE FROM storage WHERE {cls._like_prefix_clause()}"
+                    params = (cls._like_prefix_pattern(prefix),)
+                    cursor = await db.execute(query, params)
+                else:
+                    query = "DELETE FROM storage WHERE key != ?"
+                    params = (cls._multi_db_migration_marker_key,)
+                    cursor = await db.execute(query, params)
+                    await db.execute(
+                        "DELETE FROM storage WHERE key = ?",
+                        (cls._multi_db_migration_marker_key,),
+                    )
+
                 await db.commit()
                 return cursor.rowcount
 
-        deleted = await cls._run_write_with_retry(
-            _clear,
-            action="clear",
-            target=prefix or "<all>",
-        )
-        
+        deleted = 0
+        for db_path in db_paths:
+            deleted += await cls._run_with_corruption_recovery(
+                lambda db_path=db_path: cls._run_write_with_retry(
+                    lambda db_path=db_path: _clear_db(db_path),
+                    action="clear",
+                    target=f"{prefix or '<all>'}@{db_path}",
+                ),
+                db_path=db_path,
+                action=f"clear:{prefix or '<all>'}",
+            )
+
         cls._log.info("storage.clear", {"prefix": prefix, "deleted": deleted})
-        cls._invalidate_runtime_caches()
+        cls._invalidate_runtime_caches(prefix)
         return deleted
-    
+
     # ==================== TypeScript-compatible API ====================
-    
+
     @classmethod
     async def read(cls, key: List[str] | str, model: Optional[Type[T]] = None) -> Optional[T | Any]:
         """
         Read a value (TypeScript-compatible API)
-        
+
         Matches TypeScript: Storage.read<T>(key: string[])
-        
+
         Args:
             key: Storage key as list or string
             model: Optional Pydantic model class
-            
+
         Returns:
             Stored value or None if not found
-            
+
         Raises:
             NotFoundError: If key not found (when strict mode needed)
         """
         resolved_key = cls._resolve_key(key)
         return await cls.get(resolved_key, model)
-    
+
     @classmethod
     async def write(cls, key: List[str] | str, content: Any) -> None:
         """
         Write a value (TypeScript-compatible API)
-        
+
         Matches TypeScript: Storage.write<T>(key: string[], content: T)
-        
+
         Args:
             key: Storage key as list or string
             content: Content to store
         """
         resolved_key = cls._resolve_key(key)
         await cls.set(resolved_key, content)
-    
+
     @classmethod
     async def update(cls, key: List[str] | str, fn: callable, model: Optional[Type[T]] = None) -> Optional[T | Any]:
         """
         Update a value in place (TypeScript-compatible API)
-        
+
         Matches TypeScript: Storage.update<T>(key: string[], fn: (draft: T) => void)
-        
+
         Args:
             key: Storage key as list or string
             fn: Function that modifies the content in place
             model: Optional Pydantic model class
-            
+
         Returns:
             Updated value
-            
+
         Raises:
             NotFoundError: If key not found
         """
         resolved_key = cls._resolve_key(key)
-        
+
         # Read current value
         content = await cls.get(resolved_key, model)
-        
+
         if content is None:
             raise NotFoundError(f"Key not found: {resolved_key}")
-        
+
         # If it's a dict, apply function
         if isinstance(content, dict):
             fn(content)
@@ -1137,43 +1942,43 @@ class Storage:
             else:
                 # For other types, try to call fn on it
                 fn(content)
-        
+
         # Write back
         await cls.set(resolved_key, content)
-        
+
         return content
-    
+
     @classmethod
     async def remove(cls, key: List[str] | str) -> bool:
         """
         Remove a value (TypeScript-compatible API)
-        
+
         Matches TypeScript: Storage.remove(key: string[])
-        
+
         Args:
             key: Storage key as list or string
-            
+
         Returns:
             True if deleted, False if not found
         """
         resolved_key = cls._resolve_key(key)
         return await cls.delete(resolved_key)
-    
+
     @classmethod
     async def list(cls, prefix: List[str] | str | None = None) -> List[List[str]]:
         """
         List keys (TypeScript-compatible API)
-        
+
         Matches TypeScript: Storage.list(prefix: string[])
-        
+
         Args:
             prefix: Optional key prefix as list or string
-            
+
         Returns:
             List of keys as lists (e.g., [["session", "proj1", "ses1"], ...])
         """
         prefix_str = cls._resolve_key(prefix) if prefix else None
         keys = await cls.list_keys(prefix_str)
-        
+
         # Convert string keys back to list format
         return [key.split("/") for key in keys]

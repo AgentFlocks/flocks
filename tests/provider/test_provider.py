@@ -132,6 +132,31 @@ def test_resolve_model_prefers_provider_specific_runtime_model(monkeypatch):
     assert resolved.capabilities.interleaved["field"] == "reasoning_content"
 
 
+def test_dynamic_openai_compatible_provider_prefers_max_completion_tokens(monkeypatch):
+    monkeypatch.setattr(Provider, "_providers", {})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    monkeypatch.setattr(
+        "flocks.config.config_writer.ConfigWriter.get_all_providers",
+        lambda: {
+            "custom-gpt5": {
+                "name": "Custom GPT5",
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": "https://example.test/v1"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "flocks.provider.credential.get_api_key",
+        lambda _provider_id: "test-key",
+    )
+
+    Provider._load_dynamic_providers()
+
+    provider = Provider._providers["custom-gpt5"]
+    assert provider.PREFER_MAX_COMPLETION_TOKENS is True
+
+
 def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model(monkeypatch):
     provider_model = SimpleNamespace(
         id="qwen3-max",
@@ -159,22 +184,33 @@ def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model
 
 
 def test_resolve_model_does_not_infer_interleaved_for_non_reasoning_model(monkeypatch):
+    """A model whose id does NOT match any series token in
+    ``infer_interleaved_capability`` and has no catalog ``interleaved`` should
+    stay non-reasoning — the series-token inference must not fabricate a
+    capability for it.
+
+    Uses ``gpt-4-turbo`` as the model id: it is not in any of the
+    ``_PROMOTE_REASONING_CONTENT_TOKENS`` / ``_STRICT_REASONING_CONTENT_TOKENS``
+    lists, the provider id ``custom-demo`` does not match any of the
+    special-case provider prefixes, and the base_url does not match any of
+    the provider-hosting hints.
+    """
     provider_model = SimpleNamespace(
-        id="deepseek-chat",
+        id="gpt-4-turbo",
         capabilities=SimpleNamespace(interleaved=None),
     )
     fake_provider = SimpleNamespace(
         get_model_definitions=lambda: [provider_model],
         get_models=lambda: [],
         _config_models=[],
-        _config=SimpleNamespace(base_url="https://api.deepseek.com/v1"),
+        _config=SimpleNamespace(base_url="https://api.openai.com/v1"),
     )
 
     monkeypatch.setattr(Provider, "_initialized", True)
     monkeypatch.setattr(Provider, "_providers", {"custom-demo": fake_provider})
     monkeypatch.setattr(Provider, "_models", {})
 
-    resolved = Provider.resolve_model("custom-demo", "deepseek-chat")
+    resolved = Provider.resolve_model("custom-demo", "gpt-4-turbo")
 
     assert resolved is provider_model
     assert resolved.capabilities.interleaved is None

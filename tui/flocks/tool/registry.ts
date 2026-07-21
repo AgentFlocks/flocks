@@ -5,7 +5,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
-import { TodoWriteTool, TodoReadTool } from "./todo"
+import { TodoTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
@@ -23,7 +23,6 @@ import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { LspTool } from "./lsp"
 import { Truncate } from "./truncation"
-import { PlanExitTool, PlanEnterTool } from "./plan"
 import { ApplyPatchTool } from "./apply_patch"
 
 export namespace ToolRegistry {
@@ -102,13 +101,11 @@ export namespace ToolRegistry {
       WriteTool,
       TaskTool,
       WebFetchTool,
-      TodoWriteTool,
-      TodoReadTool,
+      TodoTool,
       WebSearchTool,
       SkillTool,
       ApplyPatchTool,
       ...(Flag.FLOCKS_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
-      ...(Flag.FLOCKS_EXPERIMENTAL_PLAN_MODE && Flag.FLOCKS_CLIENT === "cli" ? [PlanExitTool, PlanEnterTool] : []),
       ...custom,
     ]
   }
@@ -140,7 +137,7 @@ export namespace ToolRegistry {
           if (t.id === "edit" || t.id === "write") return !usePatch
 
           // omit todo tools for openai models
-          if (t.id === "todoread" || t.id === "todowrite") {
+          if (t.id === "todo") {
             if (model.modelID.includes("gpt-")) return false
           }
 

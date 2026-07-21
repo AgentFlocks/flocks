@@ -1,6 +1,6 @@
-import client from './client';
+import client, { getApiBase } from './client';
 
-export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow';
+export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
 export type HubPluginState =
   | 'available'
   | 'installed'
@@ -13,6 +13,7 @@ export interface HubCatalogEntry {
   id: string;
   type: HubPluginType;
   name: string;
+  nameCn?: string;
   description: string;
   descriptionCn?: string;
   version: string;
@@ -37,6 +38,11 @@ export interface HubManifest extends HubCatalogEntry {
   author?: string;
   license?: string;
   homepage?: string;
+  components?: Array<{
+    type: HubPluginType;
+    id: string;
+    optional?: boolean;
+  }>;
   dependencies: Record<string, string[]>;
   permissions: {
     tools: string[];
@@ -50,6 +56,31 @@ export interface HubManifest extends HubCatalogEntry {
   };
   entrypoints: string[];
   checksums: Record<string, string>;
+}
+
+export type HubInstallProgressStatus = 'pending' | 'installing' | 'installed' | 'skipped' | 'failed' | 'completed';
+
+export interface HubInstallProgressItem {
+  type: HubPluginType;
+  id: string;
+  name?: string;
+  nameCn?: string;
+  optional?: boolean;
+  status: HubInstallProgressStatus;
+  message?: string;
+}
+
+export interface HubInstallProgressEvent {
+  event: 'start' | 'item' | 'complete' | 'error';
+  id: string;
+  type: HubPluginType;
+  name: string;
+  nameCn?: string;
+  total: number;
+  item?: HubInstallProgressItem;
+  items?: HubInstallProgressItem[];
+  record?: unknown;
+  message?: string;
 }
 
 export interface HubFileNode {
@@ -81,12 +112,40 @@ export interface HubCatalogParams {
   q?: string;
 }
 
+export interface HubCatalogPageParams extends HubCatalogParams {
+  offset?: number;
+  limit?: number;
+}
+
+export interface HubCatalogFacets {
+  type: Record<string, number>;
+  category: Record<string, number>;
+  tags: Record<string, number>;
+  useCases: Record<string, number>;
+  state: Record<string, number>;
+  trust: Record<string, number>;
+  riskLevel: Record<string, number>;
+}
+
+export interface HubCatalogPageResponse {
+  items: HubCatalogEntry[];
+  total: number;
+  offset: number;
+  limit: number;
+  facets: HubCatalogFacets;
+}
+
 export const hubAPI = {
   catalog: (params?: HubCatalogParams) =>
     client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
 
-  categories: () =>
-    client.get('/api/hub/categories'),
+  catalogPage: (params?: HubCatalogPageParams) =>
+    client.get<HubCatalogPageResponse>('/api/hub/catalog', { params }),
+
+  categories: (params?: { includeCounts?: boolean }) =>
+    client.get('/api/hub/categories', {
+      params: params ? { include_counts: params.includeCounts } : undefined,
+    }),
 
   get: (type: HubPluginType, id: string) =>
     client.get<HubManifest>(`/api/hub/plugins/${type}/${id}`),
@@ -99,6 +158,63 @@ export const hubAPI = {
 
   install: (type: HubPluginType, id: string, scope = 'global') =>
     client.post(`/api/hub/plugins/${type}/${id}/install`, { scope }),
+
+  installStream: (
+    type: HubPluginType,
+    id: string,
+    onProgress: (progress: HubInstallProgressEvent) => void,
+    scope = 'global',
+  ): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      fetch(`${getApiBase()}/api/hub/plugins/${type}/${id}/install/stream`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      })
+        .then((res) => {
+          if (!res.ok || !res.body) {
+            reject(new Error(`HTTP ${res.status}`));
+            return;
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          const pump = (): Promise<void> =>
+            reader.read().then(({ done, value }) => {
+              if (done) {
+                resolve();
+                return;
+              }
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() ?? '';
+
+              for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                  const progress = JSON.parse(line.slice(6)) as HubInstallProgressEvent;
+                  onProgress(progress);
+                  if (progress.event === 'error') {
+                    reject(new Error(progress.message || 'Install failed'));
+                    return;
+                  }
+                } catch {
+                  // Ignore malformed SSE frames.
+                }
+              }
+
+              return pump();
+            });
+
+          pump().catch(reject);
+        })
+        .catch(reject);
+    });
+  },
 
   update: (type: HubPluginType, id: string, scope = 'global') =>
     client.post(`/api/hub/plugins/${type}/${id}/update`, { scope }),

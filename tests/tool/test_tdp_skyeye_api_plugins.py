@@ -28,23 +28,23 @@ def _built_json_payload(mock_run):
     return api_name, path, body_builder(body)
 
 
-async def test_tdp_incident_timeline_requires_incident_id():
+async def test_tdp_attack_timeline_requires_incident_id():
     module = _load_module("test_tdp_handler_incident", _TDP_HANDLER)
 
-    result = await module.incident_list(_ctx(), action="timeline")
+    result = await module.incident_list(_ctx(), action="attack_timeline")
 
     assert result.success is False
     assert "incident_id" in result.error
 
 
-async def test_tdp_incident_timeline_defaults_show_attack_true():
+async def test_tdp_attack_timeline_defaults_show_attack_true():
     module = _load_module("test_tdp_handler_incident_timeline_show_attack", _TDP_HANDLER)
     mock_result = ToolResult(success=True, output={"status": 200})
 
     with patch.object(module, "_run_action_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
         result = await module.incident_list(
             _ctx(),
-            action="timeline",
+            action="attack_timeline",
             incident_id="incident-1",
             time_from=1700000000,
             time_to=1700003600,
@@ -56,30 +56,30 @@ async def test_tdp_incident_timeline_defaults_show_attack_true():
     assert body["show_attack"] is True
 
 
-async def test_tdp_incident_alert_search_requires_page():
+async def test_tdp_attack_alert_list_requires_page():
     module = _load_module("test_tdp_handler_incident_alert_page", _TDP_HANDLER)
 
-    result = await module.incident_list(_ctx(), action="alert_search", alert_ids=["alert-1"])
+    result = await module.incident_list(_ctx(), action="attack_alert_list", alert_ids=["alert-1"])
 
     assert result.success is False
     assert "page" in result.error
 
 
-async def test_tdp_alert_host_events_requires_asset_machine():
+async def test_tdp_host_threat_list_requires_asset_machine():
     module = _load_module("test_tdp_handler_alert_host", _TDP_HANDLER)
 
-    result = await module.threat_host_list(_ctx(), action="events", condition={})
+    result = await module.threat_host_list(_ctx(), action="host_threat_list", condition={})
 
     assert result.success is False
     assert "condition.asset_machine" in result.error
 
 
-async def test_tdp_alert_host_summary_uses_all_threat_types_defaults():
-    module = _load_module("test_tdp_handler_alert_host_summary_defaults", _TDP_HANDLER)
+async def test_tdp_alert_host_list_uses_all_threat_types_defaults():
+    module = _load_module("test_tdp_handler_alert_host_list_defaults", _TDP_HANDLER)
     mock_result = ToolResult(success=True, output={"status": 200})
 
     with patch.object(module, "_run_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
-        result = await module.threat_host_list(_ctx(), action="summary")
+        result = await module.threat_host_list(_ctx(), action="alert_host_list")
 
     assert result.success is True
     mock_run.assert_awaited_once()
@@ -137,6 +137,89 @@ async def test_tdp_platform_config_exposes_disposal_log_list():
 
     assert result.success is True
     assert mock_run.await_args.kwargs["action"] == "disposal_log_list"
+
+
+async def test_tdp_threat_monitor_rejects_partial_or_oversized_time_ranges():
+    module = _load_module("test_tdp_handler_threat_monitor_time_range", _TDP_HANDLER)
+
+    partial = await module.threat_monitor_list(_ctx(), time_from=1700000000)
+    oversized = await module.threat_monitor_list(
+        _ctx(),
+        time_from=1700000000,
+        time_to=1700000000 + 24 * 60 * 60 + 1,
+    )
+
+    assert partial.success is False
+    assert "together" in partial.error
+    assert oversized.success is False
+    assert "24 hours" in oversized.error
+
+
+async def test_tdp_threat_monitor_maps_semantic_filters():
+    module = _load_module("test_tdp_handler_threat_monitor_mapping", _TDP_HANDLER)
+    mock_result = ToolResult(success=True, output={"status": 200})
+
+    with patch.object(module, "_run_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
+        result = await module.threat_monitor_list(
+            _ctx(),
+            time_from=1700000000,
+            time_to=1700003600,
+            sql="threat.type = 'c2'",
+            size=50,
+            assets_group=[1],
+            net_data_type=["attack"],
+            refresh_rate=10,
+            cur_page=3,
+            page_size=25,
+        )
+
+    assert result.success is True
+    api_name, path, payload = _built_json_payload(mock_run)
+    assert api_name == "threat_monitor_list"
+    assert path == "/api/v1/monitor/threat/list"
+    assert payload["condition"] == {
+        "time_from": 1700000000,
+        "time_to": 1700003600,
+        "sql": "threat.type = 'c2'",
+        "size": 50,
+        "assets_group": [1],
+        "net_data_type": ["attack"],
+        "refresh_rate": 10,
+    }
+    assert payload["page"] == {"cur_page": 3, "page_size": 25}
+
+
+async def test_tdp_platform_custom_rule_write_validation():
+    module = _load_module("test_tdp_handler_platform_custom_rule_validation", _TDP_HANDLER)
+
+    missing_add_fields = await module.platform_config(
+        _ctx(),
+        action="custom_rule_add",
+        custom_rule={"threat_name": "Incomplete rule"},
+    )
+    missing_update_suuid = await module.platform_config(
+        _ctx(),
+        action="custom_rule_update",
+        custom_rule={
+            "threat_name": "Rule",
+            "threat_msg": "Message",
+            "threat_severity": 3,
+            "threat_type": "exploit",
+            "threat_result": "success",
+            "directions": ["in"],
+            "body": [{"field": "http.uri", "method": "GET", "content": "/api"}],
+            "attacker": "src",
+            "status": 1,
+        },
+    )
+    missing_delete_ids = await module.platform_config(_ctx(), action="custom_rule_delete")
+
+    assert missing_add_fields.success is False
+    assert "threat_msg" in missing_add_fields.error
+    assert missing_update_suuid.success is False
+    assert "suuid" in missing_update_suuid.error
+    assert missing_delete_ids.success is False
+    assert "suuid list" in missing_delete_ids.error
 
 
 async def test_tdp_policy_ip_reputation_delete_requires_non_empty_ids():
@@ -221,14 +304,14 @@ async def test_tdp_policy_resolve_host_requires_assets_machine_status_and_sub_st
     assert "sub_status" in result_missing_sub_status.error
 
 
-async def test_tdp_incident_alert_search_maps_explicit_params_to_condition():
+async def test_tdp_attack_alert_list_maps_explicit_params_to_condition():
     module = _load_module("test_tdp_handler_incident_mapping", _TDP_HANDLER)
     mock_result = ToolResult(success=True, output={"status": 200})
 
     with patch.object(module, "_run_action_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
         result = await module.incident_list(
             _ctx(),
-            action="alert_search",
+            action="attack_alert_list",
             alert_ids=["alert-1"],
             include_risk=True,
             include_action=False,
@@ -242,8 +325,8 @@ async def test_tdp_incident_alert_search_maps_explicit_params_to_condition():
     default_action = mock_run.await_args.kwargs["default_action"]
     action = mock_run.await_args.kwargs["action"]
     body = mock_run.await_args.kwargs["body"]
-    assert default_action == "search"
-    assert action == "alert_search"
+    assert default_action == "incident_search"
+    assert action == "attack_alert_list"
     assert body["condition"]["id"] == ["alert-1"]
     assert body["condition"]["include_risk"] is True
     assert body["condition"]["include_action"] is False
@@ -669,7 +752,7 @@ async def test_tdp_medium_query_tools_map_semantic_filters():
         mock_run.reset_mock()
         result = await module.incident_list(
             _ctx(),
-            action="search",
+            action="incident_search",
             severity=[4],
             phase=["exploit"],
             result=["success"],
@@ -738,13 +821,50 @@ async def test_skyeye_alarm_list_forwards_extended_filters():
     assert params["limit"] == 10
 
 
-def test_tdp_incident_yaml_loads_with_provider():
-    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/device/tdp_v3_3_10/tdp_incident_list.yaml"
-    raw = _read_yaml_raw(yaml_path)
-    tool = yaml_to_tool(raw, yaml_path)
+def test_tdp_threat_tool_names_match_document_feature_groups():
+    tool_dir = _WORKSPACE_ROOT / ".flocks/plugins/tools/device/tdp_v3_3_10"
+    expected_names = [
+        "tdp_threat_alert_host",
+        "tdp_threat_monitor_list",
+        "tdp_threat_external_attack",
+        "tdp_threat_intelligent_aggregation",
+    ]
+    for expected_name in expected_names:
+        yaml_path = tool_dir / f"{expected_name}.yaml"
+        raw = _read_yaml_raw(yaml_path)
+        tool = yaml_to_tool(raw, yaml_path)
+        assert tool.info.name == expected_name
+        assert tool.info.provider == "tdp_api_v3_3_10"
 
-    assert tool.info.name == "tdp_incident_list"
-    assert tool.info.provider == "tdp_api_v3_3_10"
+
+def test_tdp_threat_action_names_describe_returned_data():
+    tool_dir = _WORKSPACE_ROOT / ".flocks/plugins/tools/device/tdp_v3_3_10"
+    alert_host = _read_yaml_raw(tool_dir / "tdp_threat_alert_host.yaml")
+    intelligent_aggregation = _read_yaml_raw(tool_dir / "tdp_threat_intelligent_aggregation.yaml")
+
+    assert alert_host["inputSchema"]["properties"]["action"]["enum"] == [
+        "alert_host_list",
+        "host_threat_list",
+    ]
+    assert intelligent_aggregation["inputSchema"]["properties"]["action"]["enum"] == [
+        "incident_search",
+        "top_attacked_entity",
+        "attack_success",
+        "attack_timeline",
+        "attack_alert_list",
+        "attack_result_distribution",
+        "attacker_ip_list",
+        "attacker_ip_detail",
+    ]
+
+
+def test_tdp_threat_intelligent_aggregation_promotes_semantic_fields():
+    yaml_path = (
+        _WORKSPACE_ROOT
+        / ".flocks/plugins/tools/device/tdp_v3_3_10/tdp_threat_intelligent_aggregation.yaml"
+    )
+    raw = _read_yaml_raw(yaml_path)
+
     assert "body" not in raw["inputSchema"]["properties"]
     assert "condition" in raw["inputSchema"]["properties"]
     assert "severity" in raw["inputSchema"]["properties"]
@@ -754,14 +874,15 @@ def test_tdp_incident_yaml_loads_with_provider():
 
 def test_tdp_query_yaml_promotes_semantic_top_level_fields():
     expected_fields = {
-        "tdp_host_threat_list.yaml": {"severity", "threat_characters", "keyword", "cur_page"},
+        "tdp_threat_alert_host.yaml": {"severity", "threat_characters", "keyword", "cur_page"},
         "tdp_vulnerability_list.yaml": {"severity", "status", "keyword", "sort_by"},
         "tdp_interface_list.yaml": {"host", "methods", "privacy_tags", "keyword"},
         "tdp_interface_risk_list.yaml": {"api_risk_type", "keyword", "sort_by"},
         "tdp_login_weakpwd_list.yaml": {"data", "result", "app_class", "keyword"},
         "tdp_assets_domain_list.yaml": {"domain_name_or_ip", "has_login_api", "second_level_domain"},
         "tdp_privacy_diagram.yaml": {"itag", "methods", "fuzzy_url_host"},
-        "tdp_threat_inbound_attack.yaml": {"severity", "result_list", "keyword"},
+        "tdp_threat_external_attack.yaml": {"severity", "result_list", "keyword"},
+        "tdp_threat_monitor_list.yaml": {"time_from", "time_to", "sql", "assets_group", "cur_page"},
         "tdp_machine_asset_list.yaml": {"time_from", "time_to", "service", "service_class", "application", "keyword"},
         "tdp_mdr_alert_list.yaml": {"section_list", "threat_severity", "keyword"},
         "tdp_cloud_facilities.yaml": {"cloud_vendor", "cloud_instance", "keyword"},
@@ -789,6 +910,9 @@ def test_tdp_platform_yaml_uses_keyword_and_requires_confirmation():
     assert "keyword" in raw["inputSchema"]["properties"]
     assert "device_id" not in raw["inputSchema"]["properties"]
     assert "disposal_log_list" in raw["inputSchema"]["properties"]["action"]["enum"]
+    assert "custom_rule_list" in raw["inputSchema"]["properties"]["action"]["enum"]
+    assert "custom_rule" in raw["inputSchema"]["properties"]
+    assert "custom_rule_ids" in raw["inputSchema"]["properties"]
 
 
 def test_tdp_policy_yaml_requires_confirmation_and_uses_object_ioc_list():
@@ -831,6 +955,15 @@ def test_skyeye_verify_ssl_defaults_false_when_unset():
     assert module._verify_ssl({"custom_settings": {}}) is False
     assert module._verify_ssl({"verify_ssl": True}) is True
     assert module._verify_ssl({"verify_ssl": False}) is False
+
+
+def test_skyeye_base_url_appends_skyeye_suffix_once():
+    module = _load_module("test_skyeye_handler_base_url", _SKYEYE_HANDLER)
+
+    assert module._ensure_skyeye_base_path("https://skyeye.local") == "https://skyeye.local/skyeye"
+    assert module._ensure_skyeye_base_path("https://skyeye.local/") == "https://skyeye.local/skyeye"
+    assert module._ensure_skyeye_base_path("https://skyeye.local/skyeye") == "https://skyeye.local/skyeye"
+    assert module._ensure_skyeye_base_path("https://skyeye.local/skyeye/") == "https://skyeye.local/skyeye"
 
 
 def test_tdp_resolve_verify_ssl_defaults_false_when_unset():

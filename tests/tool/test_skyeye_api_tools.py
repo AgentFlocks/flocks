@@ -1,3 +1,5 @@
+import base64
+import gzip
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -98,7 +100,7 @@ async def test_skyeye_dashboard_view_tool_uses_custom_login_flow():
 
     method, auth_url, auth_kwargs = fake_session.calls[0]
     assert method == "POST"
-    assert auth_url == "https://skyeye.local/api/v1/admin/auth"
+    assert auth_url == "https://skyeye.local/skyeye/api/v1/admin/auth"
     assert auth_kwargs["data"] == {
         "client_id": auth_kwargs["data"]["client_id"],
         "username": "tapadmin",
@@ -108,7 +110,7 @@ async def test_skyeye_dashboard_view_tool_uses_custom_login_flow():
 
     method, request_url, request_kwargs = fake_session.calls[2]
     assert method == "GET"
-    assert request_url == "https://skyeye.local/api/v1/monitor-center/dashboard/view"
+    assert request_url == "https://skyeye.local/skyeye/api/v1/monitor-center/dashboard/view"
     assert request_kwargs["params"]["name"] == "overall_view"
     assert request_kwargs["params"]["interval_time"] == 7
     assert request_kwargs["params"]["csrf_token"] == "abcdef1234567890"
@@ -142,11 +144,11 @@ async def test_skyeye_alarm_params_tool_can_use_secret_host_and_login_key():
 
     method, auth_url, _ = fake_session.calls[0]
     assert method == "POST"
-    assert auth_url == "https://skyeye.internal:443/v1/admin/auth"
+    assert auth_url == "https://skyeye.internal:443/skyeye/v1/admin/auth"
 
     method, request_url, request_kwargs = fake_session.calls[2]
     assert method == "GET"
-    assert request_url == "https://skyeye.internal:443/v1/alarm/alarm/alarm-params"
+    assert request_url == "https://skyeye.internal:443/skyeye/v1/alarm/alarm/alarm-params"
     assert request_kwargs["params"]["data_source"] == 0
     assert request_kwargs["params"]["csrf_token"] == "1234567890abcdef"
 
@@ -202,9 +204,48 @@ async def test_skyeye_alarm_list_accepts_legacy_threat_level_alias():
     assert result.success is True
     method, request_url, request_kwargs = fake_session.calls[2]
     assert method == "GET"
-    assert request_url == "https://skyeye.local/api/v1/alarm/alarm/list"
+    assert request_url == "https://skyeye.local/skyeye/api/v1/alarm/alarm/list"
     assert request_kwargs["params"]["hazard_level"] == "3"
     assert "threat_level" not in request_kwargs["params"]
+
+
+@pytest.mark.asyncio
+async def test_skyeye_alarm_list_encodes_ip_filters_without_affecting_other_params():
+    tool = _load_tool("skyeye_alarm_list.yaml")
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.side_effect = lambda key: {
+        "skyeye_api_key": "login-key-123",
+    }.get(key)
+    fake_session = _FakeSession([
+        _FakeResponse(json_payload={"access_token": "token-123", "status": 200}),
+        _FakeResponse(text_payload='<html><meta name="csrf-token" content="abcdef1234567890"></html>'),
+        _FakeResponse(json_payload={"data": {"items": [], "total": 0}, "status": 1000, "message": "ok"}),
+    ])
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:skyeye_api_key}",
+                "base_url": "https://skyeye.local",
+            },
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            alarm_sip="10.105.249.255",
+            attack_sip="10.61.116.134",
+            limit=3,
+        )
+
+    assert result.success is True
+    _, _, request_kwargs = fake_session.calls[2]
+    params = request_kwargs["params"]
+    assert gzip.decompress(base64.b64decode(params["alarm_sip"])).decode() == "10.105.249.255"
+    assert gzip.decompress(base64.b64decode(params["attack_sip"])).decode() == "10.61.116.134"
+    assert params["limit"] == 3
 
 
 @pytest.mark.asyncio

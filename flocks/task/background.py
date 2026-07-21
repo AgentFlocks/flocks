@@ -35,6 +35,7 @@ class BackgroundTask:
     agent: str
     parent_session_id: Optional[str] = None
     parent_message_id: Optional[str] = None
+    parent_call_id: Optional[str] = None
     parent_agent: Optional[str] = None
     parent_model: Optional[dict] = None
     model: Optional[dict] = None
@@ -47,6 +48,9 @@ class BackgroundTask:
     completed_at: Optional[int] = None
     last_activity_at: Optional[int] = None  # 最近一次有交互的时间戳（ms），用于不活跃超时检测
     allow_user_questions: bool = True
+    provider_id: Optional[str] = None
+    model_id: Optional[str] = None
+    completion_injected: bool = False
 
 
 @dataclass
@@ -57,6 +61,7 @@ class LaunchInput:
     parent_session_id: Optional[str]
     parent_message_id: Optional[str]
     parent_agent: Optional[str]
+    parent_call_id: Optional[str] = None
     parent_model: Optional[dict] = None
     model: Optional[dict] = None
     model_pinned: bool = False
@@ -72,6 +77,7 @@ class ResumeInput:
     parent_session_id: Optional[str]
     parent_message_id: Optional[str]
     parent_agent: Optional[str]
+    parent_call_id: Optional[str] = None
     parent_model: Optional[dict] = None
 
 
@@ -97,6 +103,7 @@ class BackgroundManager:
             agent=input_data.agent,
             parent_session_id=input_data.parent_session_id,
             parent_message_id=input_data.parent_message_id,
+            parent_call_id=input_data.parent_call_id,
             parent_agent=input_data.parent_agent,
             parent_model=input_data.parent_model,
             model=input_data.model,
@@ -117,6 +124,7 @@ class BackgroundManager:
             agent="continue",
             parent_session_id=input_data.parent_session_id,
             parent_message_id=input_data.parent_message_id,
+            parent_call_id=input_data.parent_call_id,
             parent_agent=input_data.parent_agent,
             parent_model=input_data.parent_model,
             session_id=input_data.session_id,
@@ -133,6 +141,13 @@ class BackgroundManager:
         agent: str,
         *,
         allow_user_questions: bool = True,
+        parent_session_id: Optional[str] = None,
+        parent_message_id: Optional[str] = None,
+        parent_call_id: Optional[str] = None,
+        parent_agent: Optional[str] = None,
+        parent_model: Optional[dict] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
     ) -> BackgroundTask:
         """Run the session loop on an already-created session.
 
@@ -147,8 +162,15 @@ class BackgroundManager:
             description=description,
             prompt="",
             agent=agent,
+            parent_session_id=parent_session_id,
+            parent_message_id=parent_message_id,
+            parent_call_id=parent_call_id,
+            parent_agent=parent_agent,
+            parent_model=parent_model,
             session_id=session_id,
             allow_user_questions=allow_user_questions,
+            provider_id=provider_id,
+            model_id=model_id,
         )
         self._tasks[task_id] = task
         handle = asyncio.create_task(self._run_existing_session(task, session_id))
@@ -167,6 +189,8 @@ class BackgroundManager:
                     session_id,
                     callbacks,
                     allow_user_questions=task.allow_user_questions,
+                    provider_id=task.provider_id,
+                    model_id=task.model_id,
                 )
                 output = ""
                 if result.last_message:
@@ -174,15 +198,175 @@ class BackgroundManager:
                 task.output = output
                 task.status = "completed"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
             except asyncio.CancelledError:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
                 raise
             except Exception as exc:
                 log.error("background.existing_session.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
                 task.status = "error"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
+
+    async def _inject_parent_completion(self, task: BackgroundTask) -> None:
+        """Inject completed background task output into the parent context."""
+        if task.completion_injected or not task.parent_session_id:
+            return
+
+        state = task.status
+        if state == "completed":
+            body_tag = "task_result"
+            body = task.output or "(no output)"
+            summary = f"Background task completed: {task.description}"
+        elif state == "cancelled":
+            body_tag = "task_error"
+            body = task.error or "Task was cancelled."
+            summary = f"Background task cancelled: {task.description}"
+        else:
+            body_tag = "task_error"
+            body = task.error or "Task failed without an error message."
+            summary = f"Background task failed: {task.description}"
+
+        content = (
+            f'<task id="{task.id}" session_id="{task.session_id or ""}" state="{state}">\n'
+            f"  <summary>{summary}</summary>\n"
+            f"  <{body_tag}>{body}</{body_tag}>\n"
+            "</task>"
+        )
+        try:
+            await Message.create(
+                session_id=task.parent_session_id,
+                role=MessageRole.USER,
+                content=content,
+                agent=task.parent_agent or "rex",
+                model=task.parent_model,
+                synthetic=True,
+                part_metadata={
+                    "kind": "background_task_result",
+                    "task_id": task.id,
+                    "session_id": task.session_id,
+                    "status": state,
+                },
+            )
+            await self._update_parent_tool_part(task)
+            task.completion_injected = True
+            self._schedule_parent_resume(task)
+        except Exception as exc:
+            log.warn("background.inject_completion_failed", {
+                "task_id": task.id,
+                "parent_session_id": task.parent_session_id,
+                "error": str(exc),
+            })
+
+    def _schedule_parent_resume(self, task: BackgroundTask) -> None:
+        """Kick the parent session so Rex consumes injected background results."""
+        if not task.parent_session_id:
+            return
+        if task.status not in ("completed", "error"):
+            return
+        if SessionLoop.is_running(task.parent_session_id):
+            log.info("background.parent_resume.already_running", {
+                "task_id": task.id,
+                "parent_session_id": task.parent_session_id,
+            })
+            return
+
+        async def _run_parent() -> None:
+            try:
+                from flocks.server.routes.event import publish_event
+                from flocks.session.session_loop import LoopCallbacks
+
+                model = task.parent_model or {}
+                result = await SessionLoop.run(
+                    session_id=task.parent_session_id,
+                    provider_id=model.get("providerID"),
+                    model_id=model.get("modelID"),
+                    agent_name=task.parent_agent,
+                    callbacks=LoopCallbacks(event_publish_callback=publish_event),
+                )
+                log.info("background.parent_resume.completed", {
+                    "task_id": task.id,
+                    "parent_session_id": task.parent_session_id,
+                    "result_action": result.action,
+                })
+            except Exception as exc:
+                log.warn("background.parent_resume.failed", {
+                    "task_id": task.id,
+                    "parent_session_id": task.parent_session_id,
+                    "error": str(exc),
+                })
+
+        asyncio.create_task(_run_parent())
+
+    async def _update_parent_tool_part(self, task: BackgroundTask) -> None:
+        """Mark the original background launch tool part with child completion."""
+        if not task.parent_session_id or not task.parent_message_id or not task.parent_call_id:
+            return
+
+        try:
+            from flocks.session.message import ToolPart, ToolStateCompleted, ToolStateError
+
+            parts = await Message.parts(task.parent_message_id, task.parent_session_id)
+            target = next(
+                (
+                    part for part in parts
+                    if isinstance(part, ToolPart)
+                    and getattr(part, "callID", None) == task.parent_call_id
+                ),
+                None,
+            )
+            if target is None:
+                return
+
+            previous_state = getattr(target, "state", None)
+            previous_input = getattr(previous_state, "input", {}) or {}
+            previous_metadata = dict(getattr(previous_state, "metadata", {}) or {})
+            previous_metadata.update({
+                "sessionId": task.session_id,
+                "taskId": task.id,
+                "status": task.status,
+                "background": True,
+            })
+            start_time = None
+            previous_time = getattr(previous_state, "time", None)
+            if isinstance(previous_time, dict):
+                start_time = previous_time.get("start")
+            end_time = int(datetime.now().timestamp() * 1000)
+
+            if task.status == "completed":
+                state = ToolStateCompleted(
+                    status="completed",
+                    input=previous_input,
+                    output=task.output or "",
+                    title=task.description,
+                    metadata=previous_metadata,
+                    time={"start": start_time or end_time, "end": end_time},
+                )
+            else:
+                state = ToolStateError(
+                    status="error",
+                    input=previous_input,
+                    error=task.error or f"Background task {task.status}",
+                    metadata=previous_metadata,
+                    time={"start": start_time or end_time, "end": end_time},
+                )
+
+            await Message.update_part(
+                session_id=task.parent_session_id,
+                message_id=task.parent_message_id,
+                part_id=target.id,
+                state=state,
+            )
+        except Exception as exc:
+            log.warn("background.update_parent_tool_part_failed", {
+                "task_id": task.id,
+                "parent_session_id": task.parent_session_id,
+                "parent_message_id": task.parent_message_id,
+                "error": str(exc),
+            })
 
     async def wait_for(self, task_id: str, timeout_ms: Optional[int] = None) -> Optional[BackgroundTask]:
         handle = self._task_handles.get(task_id)
@@ -414,15 +598,18 @@ class BackgroundManager:
                 task.output = output
                 task.status = "completed"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
             except asyncio.CancelledError:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
                 raise
             except Exception as exc:
                 log.error("background.task.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
                 task.status = "error"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
 
     async def _run_resume(self, task: BackgroundTask, input_data: ResumeInput) -> None:
         async with self._semaphore:
@@ -451,15 +638,18 @@ class BackgroundManager:
                 task.output = output
                 task.status = "completed"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
             except asyncio.CancelledError:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
                 raise
             except Exception as exc:
                 log.error("background.resume.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
                 task.status = "error"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._inject_parent_completion(task)
 
 
 def _create_manager() -> BackgroundManager:

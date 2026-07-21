@@ -50,6 +50,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.testRun': '测试运行',
         'detail.run.stopRun': '停止运行',
         'detail.run.stopping': '停止中...',
+        'detail.run.cancelRequested': '已请求停止，正在等待当前步骤响应取消',
         'detail.run.outputResults': '输出结果',
         'detail.run.savingSampleInputs': '正在保存输入',
         'detail.run.sampleInputsSaved': '输入已保存',
@@ -186,6 +187,10 @@ describe('RunTab', () => {
     await waitFor(() => {
       expect(workflowAPI.cancelExecution).toHaveBeenCalledWith('wf-1', 'exec-1');
     });
+
+    expect(await screen.findByRole('button', { name: '停止中...' })).toBeDisabled();
+    expect(screen.getByText('cancelling')).toBeInTheDocument();
+    expect(screen.getByText('已请求停止，正在等待当前步骤响应取消')).toBeInTheDocument();
   });
 
   it('keeps the running execution visible when history is temporarily empty', async () => {
@@ -239,6 +244,51 @@ describe('RunTab', () => {
       const copyButtons = screen.getAllByTestId('copy-button');
       expect(copyButtons.some((button) => button.getAttribute('aria-label') === 'copy:{\n  "result": "ok"\n}')).toBe(true);
     });
+  });
+
+  it('expands history execution details directly under the clicked item', async () => {
+    const user = userEvent.setup();
+    const executions = [
+      {
+        id: 'exec-first',
+        workflowId: 'wf-1',
+        inputParams: {},
+        outputResults: { marker: 'first' },
+        status: 'success' as const,
+        startedAt: new Date('2026-01-01T00:00:00Z').getTime(),
+        duration: 1,
+        executionLog: [],
+      },
+      {
+        id: 'exec-second',
+        workflowId: 'wf-1',
+        inputParams: {},
+        outputResults: { marker: 'second' },
+        status: 'success' as const,
+        startedAt: new Date('2026-01-02T00:00:00Z').getTime(),
+        duration: 2,
+        executionLog: [],
+      },
+    ];
+    workflowAPI.getHistory.mockResolvedValue({ data: executions });
+
+    render(
+      <RunTab
+        workflow={baseWorkflow}
+        latestExecution={null}
+        sections={['history']}
+      />,
+    );
+
+    const firstHistoryButton = (await screen.findByText('1.0s')).closest('button');
+    const secondHistoryButton = (await screen.findByText('2.0s')).closest('button');
+    expect(firstHistoryButton).not.toBeNull();
+    expect(secondHistoryButton).not.toBeNull();
+
+    await user.click(firstHistoryButton!);
+
+    const firstDetail = screen.getByText(/"marker": "first"/);
+    expect(firstDetail.compareDocumentPosition(secondHistoryButton!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
 });

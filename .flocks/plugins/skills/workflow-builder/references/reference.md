@@ -69,8 +69,24 @@
 ```
 出边示例：
 ```json
-{ "from": "check_risk", "to": "handle_high_risk", "label": "High" },
-{ "from": "check_risk", "to": "handle_normal", "label": "" }
+{
+  "from": "check_risk",
+  "to": "handle_high_risk",
+  "label": "High",
+  "mapping": {
+    "case_id": "case_id",
+    "risk_level": "risk_level"
+  }
+},
+{
+  "from": "check_risk",
+  "to": "handle_normal",
+  "label": "",
+  "mapping": {
+    "case_id": "case_id",
+    "risk_level": "risk_level"
+  }
+}
 ```
 
 ### Join 节点
@@ -95,15 +111,23 @@
 - **点路径支持**：`mapping: { "user_id": "data.user.id" }`
 - **根路径引用**：`mapping: { "full_data": "$" }`
 
-### 何时写 mapping
+### 新建 workflow 的强制规则
 
-- 下游只需上游 payload 的一部分字段
-- 字段需要重命名（上游 key 与下游期望 key 不一致）
-- 下游要 `tool.run(..., **inputs)`，需把 inputs 规整到匹配工具参数形状
+- **每条 edge 都必须写非空 `mapping` 对象**。新建 workflow 默认启用 strict edge mapping；无 `mapping` 的 edge 会被创建/运行校验拒绝。
+- `const` 只能补充常量，不能替代 `mapping`。即使只需要常量参数，也要映射一个确定存在的小字段作为显式数据契约。
+- 默认只映射下游节点实际读取的字段，不要用 `$` 传递完整 payload，除非下游确实需要完整对象且该对象已经是上游刻意裁剪过的小对象。
+- 字段需要重命名时，用 `mapping` 把下游 key 映射到上游 payload 路径。
+- 下游要 `tool.run(..., **inputs)` 时，用 `edge.mapping`/`edge.const` 把 inputs 规整到工具参数形状。
+- 控制流边如果下游不需要业务字段，也必须映射一个确定存在的小字段（如 `case_id`、`has_results`、`status`）；如果没有合适字段，让上游节点写出 `outputs["_edge_context"] = True`，并映射 `{ "_edge_context": "_edge_context" }`。
+- `branch`/`loop` 出边同样必须写 `mapping`。映射源可以来自分支节点收到的输入 payload，例如 `{ "search_text": "search_text" }`。
 
-### 何时不写 mapping
+### 禁止生成的 edge
 
-- 下游可直接消费完整 payload（引擎浅合并 `payload = {**inputs, **outputs}`），且不会造成字段冲突
+```json
+{ "from": "step_1", "to": "step_2" }
+```
+
+上面这种无 `mapping` 的 edge 禁止出现在新建 workflow 中。
 
 ### 避免脆弱映射
 
@@ -195,6 +219,10 @@
 ```json
 {
   "name": "my_workflow",
+  "nameI18n": {
+    "zh-CN": "我的工作流",
+    "en-US": "My Workflow"
+  },
   "description": "工作流用途说明（可选）",
   "start": "step_1",
   "nodes": [
@@ -224,9 +252,30 @@
     }
   ],
   "edges": [
-    { "from": "step_1", "to": "check_results" },
-    { "from": "check_results", "to": "summarize", "label": "true" },
-    { "from": "check_results", "to": "fallback", "label": "false" }
+    {
+      "from": "step_1",
+      "to": "check_results",
+      "mapping": {
+        "search_text": "search_text",
+        "has_results": "has_results"
+      }
+    },
+    {
+      "from": "check_results",
+      "to": "summarize",
+      "label": "true",
+      "mapping": {
+        "search_text": "search_text"
+      }
+    },
+    {
+      "from": "check_results",
+      "to": "fallback",
+      "label": "false",
+      "mapping": {
+        "has_results": "has_results"
+      }
+    }
   ]
 }
 ```
@@ -294,7 +343,7 @@ else:
 ### 工具参数对齐最佳实践
 
 1. 在 `workflow.md` 的输入中直接使用工具参数名
-2. 用 `edge.mapping` 完成上游字段到工具参数名的转换
+2. 每条 edge 都写非空 `edge.mapping`，完成上游字段到下游节点或工具参数名的转换
 3. python 节点中 `result = tool.run_safe("xxx", **inputs)` 或按需取参数
 4. 仅快速原型时使用 `logic` 节点
 5. **默认用 `result["text"]` 取结果**，仅在明确需要结构化数据且已做类型检查时才用 `result["obj"]`

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, X, XCircle } from 'lucide-react';
+import { ArrowDownCircle, ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, X, XCircle } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -11,8 +11,10 @@ import {
   type UpgradeRequestCreatePayload,
   type UpgradeRequestStatus,
 } from '@/api/consoleUpgrade';
+import { useProductName } from '@/contexts/ProductNameContext';
 import { type UpdateProgress } from '@/api/update';
 import { extractErrorMessage } from '@/utils/error';
+import { checkRestartReadiness } from '@/utils/restartPolling';
 
 interface UpgradeApplyFormState {
   product: string;
@@ -40,6 +42,7 @@ interface FlocksproLicenseStatus {
   max_members?: number | null;
   fingerprint?: string | null;
   install_id?: string | null;
+  bundle_version?: string | null;
   [key: string]: string | number | boolean | null | undefined;
 }
 
@@ -54,7 +57,6 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
   notes: '',
 };
 
-const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
 const DISMISSED_REJECTED_REQUESTS_KEY = 'flockspro-dismissed-rejected-requests';
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
@@ -125,6 +127,19 @@ function proPackageStatusToLicenseStatus(status: ProPackageStatus): FlocksproLic
 function formatProVersion(version?: string | null): string {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
   return normalized ? `pro-v${normalized}` : 'pro-v...';
+}
+
+function firstVersionValue(...values: Array<string | number | boolean | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 function formatDateTimeValue(value?: string | number | null): string {
@@ -288,6 +303,7 @@ function requestDurationDays(item: UpgradeRequestStatus): number | null {
 
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
+  const { proProductName } = useProductName();
   const [searchParams, setSearchParams] = useSearchParams();
   const [consoleLoginStatus, setConsoleLoginStatus] = useState<ConsoleLoginSessionStatus | null>(null);
   const [consoleLoginLoading, setConsoleLoginLoading] = useState(false);
@@ -295,6 +311,7 @@ export default function FlocksproUpgradePage() {
   const [consoleLoginSuccess, setConsoleLoginSuccess] = useState<string | null>(null);
   const [requests, setRequests] = useState<UpgradeRequestStatus[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [licenseSyncWarning, setLicenseSyncWarning] = useState<string | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [showApplyDialog, setShowApplyDialog] = useState(false);
   const [submittingApply, setSubmittingApply] = useState(false);
@@ -305,6 +322,9 @@ export default function FlocksproUpgradePage() {
   const [upgradeError, setUpgradeError] = useState<string | null>(null);
   const [proUpgrading, setProUpgrading] = useState(false);
   const [proRestarting, setProRestarting] = useState(false);
+  const [proDowngrading, setProDowngrading] = useState(false);
+  const [updateMode, setUpdateMode] = useState<'upgrade' | 'downgrade'>('upgrade');
+  const [showDowngradeDialog, setShowDowngradeDialog] = useState(false);
   const [refreshingInstalled, setRefreshingInstalled] = useState(false);
   const [showLicenseDetails, setShowLicenseDetails] = useState(false);
   const [licenseStatus, setLicenseStatus] = useState<FlocksproLicenseStatus | null>(null);
@@ -316,6 +336,9 @@ export default function FlocksproUpgradePage() {
   const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
   const currentConsoleAccountKey = consoleLoginStatus?.logged_in ? consoleAccountName.toLowerCase() : '';
   const isProPackageInstalled = proPackageStatus?.installed === true;
+  const isProRuntimeInstalled =
+    proPackageStatus?.runtime_importable === true ||
+    (proPackageStatus?.runtime_importable == null && proPackageStatus?.installed === true);
   const licenseReapplyAllowed =
     licenseStatus?.reapply_allowed === true ||
     ['revoked', 'expired'].includes(String(licenseStatus?.license_status || '').toLowerCase());
@@ -346,7 +369,7 @@ export default function FlocksproUpgradePage() {
   const currentIssuedRequestLicenseId = currentIssuedRequest ? requestLicenseId(currentIssuedRequest) : '';
   const canInstallProPackageFromRequest = useCallback(
     (item: UpgradeRequestStatus) => {
-      if (!isProPackageInstalled && requestCanInstallProPackage(item) && item.request_id === currentIssuedRequest?.request_id) {
+      if (!isProRuntimeInstalled && requestCanInstallProPackage(item) && item.request_id === currentIssuedRequest?.request_id) {
         if (!runtimeLicenseId) {
           return true;
         }
@@ -357,7 +380,7 @@ export default function FlocksproUpgradePage() {
     [
       currentIssuedRequest?.request_id,
       currentIssuedRequestLicenseId,
-      isProPackageInstalled,
+      isProRuntimeInstalled,
       runtimeLicenseId,
       runtimeLicenseInvalid,
     ],
@@ -399,22 +422,20 @@ export default function FlocksproUpgradePage() {
     [requests],
   );
 
-  const proComponentVersion =
-    latestActivatedRequest?.details?.auto_install_pro_version ||
-    latestActivatedRequest?.details?.flockspro_component_version;
-  const proVersion = formatProVersion(
-    proComponentVersion ||
-      proPackageStatus?.flockspro_component_version ||
-      proPackageStatus?.installed_version ||
-      latestActivatedRequest?.details?.auto_install_version ||
-      latestActivatedRequest?.details?.auto_install_target,
-  );
-  const isProRuntimeActive = licenseStatus?.pro_enabled === true || proPackageStatus?.pro_enabled === true;
-  const canUseProFeatures = isProPackageInstalled && isProRuntimeActive;
+  const isProRuntimeActive =
+    licenseStatus?.pro_enabled === true ||
+    licenseStatus?.active === true ||
+    proPackageStatus?.pro_enabled === true;
+  const hasProInstallSignal =
+    isProPackageInstalled ||
+    isProRuntimeInstalled ||
+    proPackageStatus?.install_marker_present === true ||
+    licenseStatus?.active === true;
+  const canUseProFeatures = hasProInstallSignal && isProRuntimeActive;
   const isProLoaded = canUseProFeatures;
   const hasRuntimeLicense = Boolean(licenseStatus?.license_id);
   const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
-  const preferRequestLicense = Boolean(currentIssuedRequest) && !runtimeLicenseUsable;
+  const preferRequestLicense = Boolean(currentIssuedRequest) && !hasRuntimeLicense;
   const currentDisplayLicenseId = preferRequestLicense
     ? currentIssuedRequestLicenseId
     : runtimeLicenseUsable
@@ -423,6 +444,24 @@ export default function FlocksproUpgradePage() {
   const currentDisplayLicenseRequest = currentDisplayLicenseId
     ? accountScopedRequests.find((item) => requestLicenseId(item) === currentDisplayLicenseId)
     : null;
+  const bundleVersion = firstVersionValue(
+    proPackageStatus?.bundle_version,
+    licenseStatus?.bundle_version,
+    currentDisplayLicenseRequest?.details?.auto_install_bundle_version,
+    latestActivatedRequest?.details?.auto_install_bundle_version,
+    currentDisplayLicenseRequest?.details?.bundle_version_update_to,
+    latestActivatedRequest?.details?.bundle_version_update_to,
+  );
+  const proComponentVersion = firstVersionValue(
+    latestActivatedRequest?.details?.auto_install_pro_component_version,
+    latestActivatedRequest?.details?.auto_install_pro_version,
+    latestActivatedRequest?.details?.flockspro_component_version,
+    proPackageStatus?.flockspro_component_version,
+    proPackageStatus?.installed_version,
+    latestActivatedRequest?.details?.auto_install_version,
+    latestActivatedRequest?.details?.auto_install_target,
+  );
+  const proVersion = bundleVersion || formatProVersion(proComponentVersion);
   const showCurrentLicenseCard = Boolean(currentDisplayLicenseId);
   const displayedLicenseStatus = (preferRequestLicense
     ? requestLicenseStatus(currentIssuedRequest as UpgradeRequestStatus)
@@ -447,9 +486,9 @@ export default function FlocksproUpgradePage() {
   const displayedLastSyncedAt =
     preferRequestLicense && currentIssuedRequest
       ? currentIssuedRequest.details?.license_refreshed_at || currentIssuedRequest.updated_at
-      : licenseStatus?.last_sync_at ||
-        currentDisplayLicenseRequest?.details?.license_refreshed_at ||
+      : currentDisplayLicenseRequest?.details?.license_refreshed_at ||
         currentDisplayLicenseRequest?.updated_at ||
+        licenseStatus?.last_sync_at ||
         licenseStatus?.last_heartbeat_ok_at ||
         latestActivatedRequest?.details?.license_refreshed_at ||
         latestActivatedRequest?.updated_at;
@@ -700,9 +739,42 @@ export default function FlocksproUpgradePage() {
   const refreshInstalledStatus = useCallback(async () => {
     setRefreshingInstalled(true);
     setRequestError(null);
+    setLicenseSyncWarning(null);
     try {
-      await consoleUpgradeApi.syncRevocations().catch(() => undefined);
-      await refreshRequests();
+      const targetRequestIds = [
+        currentDisplayLicenseRequest?.request_id,
+        currentIssuedRequest?.request_id,
+        activeRequest?.request_id,
+      ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+
+      let consoleWarning: string | null = null;
+      for (const requestId of targetRequestIds) {
+        try {
+          const latest = await consoleUpgradeApi.refreshRequest(requestId);
+          setRequests((prev) => {
+            const exists = prev.some((item) => item.request_id === latest.request_id);
+            return exists
+              ? prev.map((item) => (item.request_id === latest.request_id ? latest : item))
+              : [latest, ...prev];
+          });
+        } catch (err) {
+          consoleWarning = extractErrorMessage(err, t('errors.refreshRequest'));
+        }
+      }
+
+      try {
+        await refreshRequests();
+      } catch (err) {
+        consoleWarning = extractErrorMessage(err, t('errors.fetchRequests'));
+      }
+
+      if (consoleWarning) {
+        setLicenseSyncWarning(
+          t('upgrade.consoleSyncWarning', {
+            message: consoleWarning,
+          }),
+        );
+      }
       const packageStatus = await consoleUpgradeApi.getProPackageStatus();
       setProPackageStatus(packageStatus);
       if (!packageStatus.installed) {
@@ -718,7 +790,7 @@ export default function FlocksproUpgradePage() {
     } finally {
       setRefreshingInstalled(false);
     }
-  }, [refreshRequests, t]);
+  }, [activeRequest?.request_id, currentDisplayLicenseRequest?.request_id, currentIssuedRequest?.request_id, refreshRequests, t]);
 
   useEffect(() => {
     if (autoSyncTriggeredRef.current) {
@@ -738,7 +810,7 @@ export default function FlocksproUpgradePage() {
   ]);
 
   const cancelActiveRequest = async () => {
-    if (!activeRequest) {
+    if (!activeRequest || proUpgrading || proRestarting) {
       return;
     }
     try {
@@ -765,27 +837,23 @@ export default function FlocksproUpgradePage() {
 
   const pollUntilReady = () => {
     const startedAt = Date.now();
+    let lastPollFailure = '';
     const poll = async () => {
       if (Date.now() - startedAt > HEALTH_POLL_TIMEOUT) {
-        setUpgradeError(t('upgrade.restartTimeout'));
+        setUpgradeError(lastPollFailure ? `${t('upgrade.restartTimeout')} ${lastPollFailure}` : t('upgrade.restartTimeout'));
         setProRestarting(false);
         setProUpgrading(false);
+        setProDowngrading(false);
         return;
       }
-      try {
-        const healthResponse = await fetch('/api/health', { cache: 'no-store' });
-        if (healthResponse.ok) {
-          const rootResponse = await fetch('/', { cache: 'no-store' });
-          const rootHtml = await rootResponse.text();
-          const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
-          if (rootResponse.ok && !stillShowingUpgradePage) {
-            window.location.assign(`${window.location.pathname}${window.location.search}`);
-            return;
-          }
-        }
-      } catch {
-        // Backend may be restarting.
+
+      const readiness = await checkRestartReadiness();
+      if (readiness.ready) {
+        window.location.reload();
+        return;
       }
+      lastPollFailure = readiness.reason || lastPollFailure;
+
       setTimeout(() => {
         void poll();
       }, HEALTH_POLL_INTERVAL);
@@ -799,8 +867,10 @@ export default function FlocksproUpgradePage() {
     if (!activeRequest) {
       return;
     }
+    setUpdateMode('upgrade');
     setShowUpdateModal(true);
     setProUpgrading(true);
+    setProDowngrading(false);
     setProRestarting(false);
     setUpgradeError(null);
     setUpgradeSteps([]);
@@ -832,7 +902,44 @@ export default function FlocksproUpgradePage() {
     }
   };
 
+  const startProDowngrade = async () => {
+    setUpdateMode('downgrade');
+    setShowDowngradeDialog(false);
+    setShowUpdateModal(true);
+    setProDowngrading(true);
+    setProUpgrading(false);
+    setProRestarting(false);
+    setUpgradeError(null);
+    setUpgradeSteps([]);
+    let sawRestarting = false;
+    try {
+      await consoleUpgradeApi.downgradeProPackage('user_requested', (progress) => {
+        upsertUpgradeStep(progress);
+        if (progress.stage === 'restarting') {
+          sawRestarting = true;
+          setProDowngrading(false);
+          setProRestarting(true);
+          pollUntilReady();
+        }
+      });
+      if (!sawRestarting) {
+        setProDowngrading(false);
+        await refreshRequests();
+        const packageStatus = await consoleUpgradeApi.getProPackageStatus();
+        setProPackageStatus(packageStatus);
+        setLicenseStatus(proPackageStatusToLicenseStatus(packageStatus));
+        window.dispatchEvent(new Event('flockspro-license-status-changed'));
+      }
+    } catch (err) {
+      if (!sawRestarting) {
+        setUpgradeError(extractErrorMessage(err, t('errors.downgradeProPackage')));
+        setProDowngrading(false);
+      }
+    }
+  };
+
   const canApplyUpgrade = consoleLoginStatus?.logged_in === true;
+  const upgradeInProgress = proUpgrading || proRestarting || proDowngrading;
   const hasOpenRequest = accountScopedRequests.some((item) => {
     const status = (item.status || '').toLowerCase();
     if (['pending', 'reviewing'].includes(status)) {
@@ -843,19 +950,22 @@ export default function FlocksproUpgradePage() {
       canInstallProPackageFromRequest(item)
     );
   });
-  const canOpenApplyDialog = canApplyUpgrade && !hasOpenRequest;
+  const canOpenApplyDialog = canApplyUpgrade && !hasOpenRequest && !upgradeInProgress;
   const showApprovedActions = Boolean(activeRequest && canInstallProPackageFromRequest(activeRequest));
   const showRejectedFeedback = activeRequest?.status === 'rejected';
   const canCancel =
-    activeRequest?.status === 'pending' ||
-    activeRequest?.status === 'reviewing' ||
-    activeRequest?.status === 'approved';
+    !upgradeInProgress &&
+    (
+      activeRequest?.status === 'pending' ||
+      activeRequest?.status === 'reviewing' ||
+      activeRequest?.status === 'approved'
+    );
   const primaryActionLabel = t('upgrade.applyNewLicenseAction');
   const activeRequestIsCurrentLicense =
     Boolean(activeRequest && currentIssuedRequest) &&
     activeRequest?.request_id === currentIssuedRequest?.request_id &&
     showCurrentLicenseCard;
-  const showActiveRequestCard = Boolean(activeRequest) && !(activeRequestIsCurrentLicense && isProPackageInstalled);
+  const showActiveRequestCard = Boolean(activeRequest) && !(activeRequestIsCurrentLicense && isProRuntimeInstalled);
   const historyRequests = accountScopedRequests.filter((item) => {
     if (item.request_id === currentIssuedRequest?.request_id) {
       return false;
@@ -883,8 +993,8 @@ export default function FlocksproUpgradePage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t('title')}
-        description={t('description')}
+        title={t('title', { productName: proProductName })}
+        description={t('description', { productName: proProductName })}
         icon={<ArrowUpCircle className="w-8 h-8" />}
       />
 
@@ -941,14 +1051,27 @@ export default function FlocksproUpgradePage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">
-              {isProLoaded ? t('upgrade.installedTitle', { version: proVersion }) : t('upgrade.title')}
+              {isProLoaded
+                ? t('upgrade.installedTitle', { productName: proProductName, version: proVersion })
+                : t('upgrade.title', { productName: proProductName })}
             </h2>
             <p className="text-sm text-gray-500 mt-1">
-              {isProLoaded ? t('upgrade.installedDescription') : t('upgrade.description')}
+              {isProLoaded
+                ? t('upgrade.installedDescription', { productName: proProductName })
+                : t('upgrade.description', { productName: proProductName })}
             </p>
           </div>
           {isProLoaded ? (
             <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDowngradeDialog(true)}
+                disabled={upgradeInProgress}
+                className="inline-flex items-center gap-2 rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
+              >
+                <ArrowDownCircle className="h-4 w-4" />
+                {t('upgrade.downgradeToOssAction')}
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -998,6 +1121,11 @@ export default function FlocksproUpgradePage() {
         {!canApplyUpgrade && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {t('upgrade.loginFirst')}
+          </div>
+        )}
+        {licenseSyncWarning && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {licenseSyncWarning}
           </div>
         )}
         {requestError && (
@@ -1103,7 +1231,7 @@ export default function FlocksproUpgradePage() {
           >
             {currentLicenseInvalid && (
               <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800">
-                {t('upgrade.revokedOrExpiredHint')}
+                {t('upgrade.revokedOrExpiredHint', { productName: proProductName })}
               </div>
             )}
             <div className={`flex flex-wrap items-center justify-between gap-3 border-b pb-3 ${
@@ -1265,12 +1393,12 @@ export default function FlocksproUpgradePage() {
       {showApplyDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
           <div className="w-full max-w-lg rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
-            <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.applyDialogTitle')}</h3>
+            <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.applyDialogTitle', { productName: proProductName })}</h3>
             <div className="space-y-3">
               <div className="space-y-1">
                 <div className="text-sm text-gray-600">{t('upgrade.productLabel')}</div>
                 <input
-                  value={applyForm.product}
+                  value={proProductName}
                   readOnly
                   className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700"
                 />
@@ -1355,23 +1483,68 @@ export default function FlocksproUpgradePage() {
         </div>
       )}
 
+      {showDowngradeDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+          <div className="w-full max-w-md rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="rounded-lg bg-red-50 p-2 text-red-700">
+                <ArrowDownCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.downgradeDialogTitle')}</h3>
+                <p className="mt-1 text-sm text-gray-600">{t('upgrade.downgradeDialogDescription', { productName: proProductName })}</p>
+              </div>
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              {t('upgrade.downgradeConsoleSyncHint')}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDowngradeDialog(false)}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                {t('actions.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void startProDowngrade()}
+                disabled={upgradeInProgress}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                {t('upgrade.confirmDowngradeAction')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showUpdateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
           <div className="w-full max-w-md rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.startUpgrade')}</h3>
-              <button
-                type="button"
-                onClick={() => setShowUpdateModal(false)}
-                disabled={proUpgrading || proRestarting}
-                className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
-                aria-label={t('actions.cancel')}
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <h3 className="text-lg font-semibold text-gray-900">
+                {updateMode === 'downgrade' ? t('upgrade.downgradeTitle') : t('upgrade.startUpgrade')}
+              </h3>
+              {!upgradeInProgress && (
+                <button
+                  type="button"
+                  onClick={() => setShowUpdateModal(false)}
+                  className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                  aria-label={t('actions.cancel')}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
             <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-              {proRestarting ? t('upgrade.waitingRestart') : t('upgrade.installingHint')}
+              {proRestarting
+                ? updateMode === 'downgrade'
+                  ? t('upgrade.waitingDowngradeRestart')
+                  : t('upgrade.waitingRestart')
+                : updateMode === 'downgrade'
+                ? t('upgrade.downgradingHint', { productName: proProductName })
+                : t('upgrade.installingHint', { productName: proProductName })}
             </div>
             {upgradeSteps.length > 0 && (
               <div className="space-y-2">
@@ -1391,7 +1564,7 @@ export default function FlocksproUpgradePage() {
                       )}
                       <div className="min-w-0">
                         <div className={isError ? 'font-medium text-red-700' : 'font-medium text-gray-800'}>
-                          {t(`upgrade.stageLabels.${step.stage}`, { defaultValue: step.stage })}
+                          {t(`upgrade.stageLabels.${step.stage}`, { defaultValue: step.stage, productName: proProductName })}
                         </div>
                         <div className={isError ? 'text-xs text-red-600' : 'text-xs text-gray-500'}>
                           {step.message}
@@ -1445,7 +1618,7 @@ export default function FlocksproUpgradePage() {
               </div>
             )}
             <div className="flex justify-end gap-2">
-              {!proUpgrading && !proRestarting && (
+              {!upgradeInProgress && (
                 <button
                   type="button"
                   onClick={() => setShowUpdateModal(false)}
@@ -1461,4 +1634,3 @@ export default function FlocksproUpgradePage() {
     </div>
   );
 }
-

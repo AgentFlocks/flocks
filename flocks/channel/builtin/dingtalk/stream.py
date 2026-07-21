@@ -34,6 +34,8 @@ import json
 import platform
 import re
 import time
+from types import MethodType
+from urllib.parse import quote_plus
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
@@ -72,6 +74,7 @@ _CONVERSATION_TYPE_GROUP = "2"
 # us distinguish "wrong key/secret" from "transient network blip".
 _GATEWAY_OPEN_URL = "https://api.dingtalk.com/v1.0/gateway/connections/open"
 _GATEWAY_PREFLIGHT_TIMEOUT = 10.0
+_SDK_OPEN_CONNECTION_TIMEOUT = 10.0
 
 # DingTalk error codes that mean "the credentials / app are not valid"
 # — retrying with the same secret will never succeed.  Codes are
@@ -232,6 +235,81 @@ async def _preflight_open_connection(
     )
 
 
+def _safe_get_host_ip(client: Any) -> str:
+    """Best-effort host IP for the SDK gateway payload."""
+    getter = getattr(client, "get_host_ip", None)
+    if getter is None:
+        return ""
+    try:
+        return str(getter() or "")
+    except Exception:
+        return ""
+
+
+def _install_bounded_open_connection(client: Any) -> None:
+    """Patch the SDK's blocking gateway open call with a finite timeout.
+
+    dingtalk-stream 0.24.x exposes an async ``start()``, but it calls a
+    synchronous ``requests.post`` without a timeout inside
+    ``open_connection``.  Keeping the patch on the client instance avoids
+    changing global SDK behavior while guaranteeing this runner cannot
+    park forever on a gateway TCP read.
+    """
+
+    def _open_connection_with_timeout(self: Any) -> Optional[dict]:
+        import requests
+
+        api = getattr(type(self), "OPEN_CONNECTION_API", _GATEWAY_OPEN_URL)
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            logger.info("open connection, url=%s", api)
+
+        request_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": (
+                f"FlocksDingTalkStream/1.0 Python/{platform.python_version()}"
+            ),
+        }
+        topics = []
+        if getattr(self, "_is_event_required", False):
+            topics.append({"type": "EVENT", "topic": "*"})
+        callback_map = getattr(self, "callback_handler_map", {}) or {}
+        for topic in callback_map.keys():
+            topics.append({"type": "CALLBACK", "topic": topic})
+
+        credential = getattr(self, "credential", None)
+        request_body = json.dumps({
+            "clientId": getattr(credential, "client_id", ""),
+            "clientSecret": getattr(credential, "client_secret", ""),
+            "subscriptions": topics,
+            "ua": "flocks-dingtalk-stream/1.0",
+            "localIp": _safe_get_host_ip(self),
+        }).encode("utf-8")
+
+        response_text = ""
+        try:
+            response = requests.post(
+                api,
+                headers=request_headers,
+                data=request_body,
+                timeout=_SDK_OPEN_CONNECTION_TIMEOUT,
+            )
+            response_text = response.text
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            if logger is not None:
+                logger.error(
+                    "open connection failed, error=%s, response.text=%s",
+                    exc,
+                    response_text,
+                )
+            return None
+
+    client.open_connection = MethodType(_open_connection_with_timeout, client)
+
+
 # ---------------------------------------------------------------------------
 # Gating helpers (mirrors hermes-agent's DingTalkAdapter logic)
 # ---------------------------------------------------------------------------
@@ -336,6 +414,17 @@ def _extract_media_url(message: Any) -> Optional[str]:
         if code:
             return str(code)
 
+    content = _extract_content_dict(message)
+    if content:
+        code = (
+            content.get("downloadCode")
+            or content.get("download_code")
+            or content.get("pictureDownloadCode")
+            or content.get("picture_download_code")
+        )
+        if code:
+            return str(code)
+
     rich_text = getattr(message, "rich_text_content", None) or getattr(
         message, "rich_text", None
     )
@@ -352,6 +441,42 @@ def _extract_media_url(message: Any) -> Optional[str]:
                     if code:
                         return str(code)
     return None
+
+
+def _extract_content_dict(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        content = message.get("content")
+        return content if isinstance(content, dict) else {}
+
+    content = getattr(message, "content", None)
+    if isinstance(content, dict):
+        return content
+
+    extensions = getattr(message, "extensions", None)
+    if isinstance(extensions, dict):
+        content = extensions.get("content")
+        if isinstance(content, dict):
+            return content
+
+    file_content = getattr(message, "file_content", None)
+    if isinstance(file_content, dict):
+        return file_content
+    if file_content is not None:
+        result: dict[str, Any] = {}
+        for key in (
+            "downloadCode",
+            "download_code",
+            "fileName",
+            "filename",
+            "name",
+            "fileId",
+        ):
+            value = getattr(file_content, key, None)
+            if value:
+                result[key] = value
+        return result
+
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +657,7 @@ class DingTalkStreamRunner:
         self._stream_client: Any = None
         self._stream_task: Optional[asyncio.Task] = None
         self._running = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # ── R3: bounded inbound dispatch queue + worker pool ─────────
         # Both knobs are tunable per-account so noisy tenants can lift
@@ -589,6 +715,7 @@ class DingTalkStreamRunner:
 
         credential = dingtalk_stream.Credential(self.client_id, self.client_secret)
         self._stream_client = dingtalk_stream.DingTalkStreamClient(credential)
+        _install_bounded_open_connection(self._stream_client)
 
         handler = _IncomingHandler(self)
         self._stream_client.register_callback_handler(
@@ -613,6 +740,7 @@ class DingTalkStreamRunner:
         })
 
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._stream_task = asyncio.create_task(self._run_with_reconnect())
         try:
             if abort_event is None:
@@ -639,6 +767,52 @@ class DingTalkStreamRunner:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
+    async def _start_stream_client_session(self) -> None:
+        """Open one DingTalk websocket session under Flocks cancellation rules.
+
+        The official SDK's ``start()`` has its own forever loop and performs a
+        synchronous no-timeout gateway request on the caller's event loop.  We
+        keep using the SDK's credential, callback, keepalive, and message
+        background-task helpers, but drive one connection attempt ourselves so
+        a slow DingTalk gateway cannot block FastAPI and shutdown can cancel
+        promptly.
+        """
+        import websockets
+
+        client = self._stream_client
+        if client is None:
+            raise RuntimeError("DingTalk stream client is not initialised")
+
+        client.pre_start()
+        connection = await asyncio.to_thread(client.open_connection)
+        if not self._running:
+            return
+        if not connection:
+            raise RuntimeError("DingTalk SDK open_connection failed")
+
+        endpoint = connection.get("endpoint")
+        ticket = connection.get("ticket")
+        if not endpoint or not ticket:
+            raise RuntimeError("DingTalk SDK open_connection returned no endpoint")
+
+        uri = f"{endpoint}?ticket={quote_plus(str(ticket))}"
+        keepalive_task: Optional[asyncio.Task] = None
+        async with websockets.connect(uri) as websocket:
+            client.websocket = websocket
+            keepalive_task = asyncio.create_task(client.keepalive(websocket))
+            try:
+                async for raw_message in websocket:
+                    if not self._running:
+                        return
+                    json_message = json.loads(raw_message)
+                    asyncio.create_task(client.background_task(json_message))
+            finally:
+                if keepalive_task is not None:
+                    keepalive_task.cancel()
+                    await asyncio.gather(keepalive_task, return_exceptions=True)
+                if getattr(client, "websocket", None) is websocket:
+                    client.websocket = None
+
     async def _run_with_reconnect(self) -> None:
         backoff_idx = 0
         while self._running:
@@ -664,15 +838,15 @@ class DingTalkStreamRunner:
                 return
             except Exception as exc:
                 # Transient pre-flight failure (network blip, 5xx, …) —
-                # log and fall through to the SDK, which will re-attempt
-                # ``open_connection`` with its own loop.
+                # log and still attempt one bounded SDK gateway open; the
+                # outer reconnect loop applies normal backoff afterwards.
                 log.warning("dingtalk.stream.preflight_transient_error", {
                     "account": self.account_id, "error": str(exc),
                 })
 
             # ── R1: stall accounting ─────────────────────────────────
-            # Snapshot inbound counters around the SDK's ``start()`` so
-            # we can later tell apart:
+            # Snapshot inbound counters around one stream session so we
+            # can later tell apart:
             #   (a) healthy long-lived connection (duration ≫ threshold)
             #   (b) connection torn down by an exception → backoff path
             #   (c) silent gateway rejection (clean return, < threshold,
@@ -687,7 +861,7 @@ class DingTalkStreamRunner:
             # tried to open a websocket.
             try:
                 log.info("dingtalk.stream.starting", {"account": self.account_id})
-                await self._stream_client.start()
+                await self._start_stream_client_session()
                 clean_return = True
             except asyncio.CancelledError:
                 return
@@ -828,6 +1002,7 @@ class DingTalkStreamRunner:
         self._dispatch_queue = None
 
         self._stream_client = None
+        self._loop = None
 
     # -- inbound dispatch ------------------------------------------------
 
@@ -908,6 +1083,28 @@ class DingTalkStreamRunner:
         path.  Burst load (group floods) sheds gracefully instead of
         spinning unbounded background tasks (R3).
         """
+        owner_loop = self._loop
+        if owner_loop is not None:
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is not owner_loop:
+                try:
+                    owner_loop.call_soon_threadsafe(
+                        self._enqueue_dispatch_on_owner_loop,
+                        chatbot_msg,
+                    )
+                except RuntimeError:
+                    log.warning("dingtalk.stream.dispatch_loop_unavailable", {
+                        "account": self.account_id,
+                    })
+                return
+
+        self._enqueue_dispatch_on_owner_loop(chatbot_msg)
+
+    def _enqueue_dispatch_on_owner_loop(self, chatbot_msg: Any) -> None:
+        """Enqueue on the loop that owns the asyncio.Queue."""
         # ``_messages_received`` powers the stall-detection counter
         # (R1); count what the SDK actually delivered, even if we end
         # up shedding the message due to back-pressure.

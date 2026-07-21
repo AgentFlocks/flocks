@@ -4,8 +4,11 @@ File operation routes
 Routes for file reading, searching, and listing
 """
 
+import mimetypes
+from pathlib import Path
 from typing import List, Optional, Dict
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from flocks.config.config import Config
@@ -56,6 +59,31 @@ async def read_file(path: str = Query(..., description="File path")):
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.read.error", {"error": str(e), "path": path})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/download", summary="Download file")
+async def download_file(path: str = Query(..., description="File path")):
+    try:
+        cfg = await Config.get()
+        safe_path = await resolve_path_for_http_file_access(path, cfg)
+        target = Path(safe_path)
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+        return FileResponse(
+            path=str(target),
+            filename=target.name,
+            media_type=mimetypes.guess_type(str(target))[0] or "application/octet-stream",
+        )
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError:
+        log.warning("http_file.download.denied", {"path": path})
+        raise HTTPException(status_code=403, detail="Access denied")
+    except Exception as e:
+        log.error("file.download.error", {"error": str(e), "path": path})
         raise HTTPException(status_code=500, detail=str(e))
 
 

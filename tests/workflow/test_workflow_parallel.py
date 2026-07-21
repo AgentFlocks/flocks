@@ -91,7 +91,7 @@ class TestParallelExecution:
             max_parallel_workers=4,
         )
         t0 = time.perf_counter()
-        result = engine.run()
+        result = engine.run(retain_history=True)
         elapsed = time.perf_counter() - t0
 
         assert result.steps >= 5  # start + 3 workers + end
@@ -108,7 +108,7 @@ class TestParallelExecution:
             max_parallel_workers=1,
         )
         t0 = time.perf_counter()
-        result = engine.run()
+        result = engine.run(retain_history=True)
         elapsed = time.perf_counter() - t0
 
         assert result.steps >= 5
@@ -123,7 +123,7 @@ class TestParallelExecution:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         worker_steps = [s for s in result.history if s.node_id.startswith("worker_")]
         assert len(worker_steps) == 4
@@ -139,7 +139,7 @@ class TestParallelExecution:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         end_steps = [s for s in result.history if s.node_id == "end"]
         assert len(end_steps) == 1
@@ -165,7 +165,7 @@ class TestParallelExecution:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         assert result.steps == 3
         last = result.history[-1]
@@ -201,7 +201,7 @@ class TestParallelErrorHandling:
         )
         from flocks.workflow.errors import NodeExecutionError
         with pytest.raises(NodeExecutionError, match="boom"):
-            engine.run()
+            engine.run(retain_history=True)
 
     def test_parallel_one_node_fails_continue(self):
         """When stop_on_error=False, other siblings still complete."""
@@ -226,7 +226,7 @@ class TestParallelErrorHandling:
             max_parallel_workers=4,
             stop_on_error=False,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         ok_steps = [s for s in result.history if s.error is None and s.node_id.startswith("ok_")]
         assert len(ok_steps) == 2
@@ -344,7 +344,7 @@ class TestParallelToolExecution:
                     wf,
                     runtime=PythonExecRuntime(),
                     max_parallel_workers=4,
-                ).run()
+                ).run(retain_history=True)
 
             worker_steps = [step for step in result.history if step.node_id.startswith("worker_")]
             assert len(worker_steps) == 3
@@ -383,8 +383,9 @@ class TestParallelDedup:
             wf,
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
+            history_mode="full",
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
         b_steps = [s for s in result.history if s.node_id == "b"]
         assert len(b_steps) == 1
 
@@ -419,7 +420,7 @@ class TestParallelTimeout:
             stop_on_error=False,
         )
         t0 = time.perf_counter()
-        result = engine.run()
+        result = engine.run(retain_history=True)
         elapsed = time.perf_counter() - t0
 
         # Should complete near the timeout, not wait for the 5s sleep.
@@ -460,7 +461,7 @@ class TestParallelTimeout:
             stop_on_error=True,
         )
         # Should NOT raise even though stop_on_error=True, because timeout is non-fatal.
-        result = engine.run()
+        result = engine.run(retain_history=True)
         errors = [s for s in result.history if s.error is not None]
         assert len(errors) == 1
         assert "超时" in errors[0].error
@@ -495,7 +496,7 @@ class TestParallelBranch:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         executed_ids = [s.node_id for s in result.history]
         assert "a" in executed_ids

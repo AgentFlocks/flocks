@@ -18,8 +18,8 @@ from .store import list_all_device_tool_settings, list_devices, list_groups
 log = Log.create(service="tool.device.prompt")
 
 
-async def build_device_context_section() -> Optional[str]:
-    """Return a Markdown block describing the device asset context.
+async def build_device_manage_list_section() -> Optional[str]:
+    """Return a Markdown block describing the device inventory.
 
     Returns None when no devices are registered, so the caller can skip injection.
 
@@ -71,6 +71,8 @@ async def build_device_context_section() -> Optional[str]:
 
     lines: List[str] = [
         "<DeviceAssetContext>",
+        "设备不存在时，请提醒用户前往设备接入页面添加设备。",
+        "",
     ]
 
     # --- Section 1: device list (references tool_set_id only) ---

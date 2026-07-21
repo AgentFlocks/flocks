@@ -1,0 +1,120 @@
+name: 360_fw_objects
+description: >
+  360 FW v5.5 对象工具。覆盖地址、服务、域名、DNS、时间、应用和安全对象等
+  文档中非跳过对象接口。写操作需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 对象操作名称。
+      enum:
+        - fw_addressobj_list
+        - fw_addressobj_get
+        - fw_addressobj_create
+        - fw_addressobj_update
+        - fw_addressobj_delete
+        - fw_addressgroup_list
+        - fw_addressgroup_get
+        - fw_addressgroup_create
+        - fw_addressgroup_update
+        - fw_addressgroup_delete
+        - fw_serviceobj_list
+        - fw_serviceobj_get
+        - fw_serviceobj_create
+        - fw_serviceobj_update
+        - fw_serviceobj_delete
+        - fw_servicegroup_list
+        - fw_servicegroup_get
+        - fw_servicegroup_create
+        - fw_servicegroup_update
+        - fw_servicegroup_delete
+        - fw_predefined_service_list
+        - fw_dom_obj_list
+        - fw_dom_obj_create
+        - fw_dom_obj_delete
+        - fw_dns_custom_list
+        - fw_dns_custom_get
+        - fw_dns_custom_create
+        - fw_dns_custom_update
+        - fw_dns_custom_delete
+        - fw_dns_group_list
+        - fw_dns_group_get
+        - fw_dns_group_create
+        - fw_dns_group_update
+        - fw_dns_group_delete
+        - fw_timeabsobj_list
+        - fw_timeabsobj_get
+        - fw_timeabsobj_create
+        - fw_timeabsobj_delete
+        - fw_timecycobj_list
+        - fw_timecycobj_get
+        - fw_timecycobj_create
+        - fw_timecycobj_update
+        - fw_timecycobj_delete
+        - fw_app_obj_list
+        - fw_app_obj_get
+        - fw_app_obj_create
+        - fw_app_obj_update
+        - fw_app_obj_delete
+        - fw_app_group_list
+        - fw_app_group_get
+        - fw_app_group_create
+        - fw_app_group_delete
+        - fw_get_app_list
+        - fw_get_app_detail
+        - fw_blackList_group_list
+        - fw_blackList_group_create
+        - fw_blackList_group_delete
+        - fw_blackListGroup_rename
+        - fw_xml_av_profile_list
+        - fw_xml_av_profile_create
+        - fw_xml_av_profile_update
+        - fw_xml_av_profile_delete
+        - fw_signature_set_list
+        - fw_signature_set_create
+        - fw_signature_set_update
+        - fw_signature_set_delete
+        - fw_object_call
+        - test
+    name:
+      type: string
+      description: 对象名称。
+    new_name:
+      type: string
+      description: 重命名后的对象名称。
+    type:
+      type: integer
+      description: 地址对象、名单或时间对象类型。
+    addr:
+      type: string
+      description: 地址对象 IP、网段或域名。
+    desc:
+      type: string
+      description: 描述。
+    sev_str:
+      type: string
+      description: 服务对象字符串，例如 TCP/1-65535:80。
+    path:
+      type: string
+      description: fw_object_call 使用的 /API 相对路径。
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE]
+      description: fw_object_call 使用的 HTTP 方法。
+    query:
+      type: object
+      description: 查询参数对象。
+    body:
+      type: string
+      description: 写操作完整 JSON payload 字符串；不传时部分动作会按参数生成常用 payload。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: objects
