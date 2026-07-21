@@ -189,7 +189,15 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
         raise HTTPException(status_code=400, detail="No project roots are available")
 
     try:
-        current = Path(path).expanduser().resolve(strict=True) if path else Path(default_project.worktree).resolve(strict=True)
+        if path:
+            current = Path(path).expanduser().resolve(strict=True)
+        else:
+            home = Path.home().resolve(strict=True)
+            current = (
+                home
+                if any(home == root or home.is_relative_to(root) for root in roots)
+                else roots[0]
+            )
     except (OSError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail="Directory does not exist") from exc
     if not current.is_dir():

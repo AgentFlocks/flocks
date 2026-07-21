@@ -1097,15 +1097,13 @@ export default function SessionPage() {
   }, [renameValue, sessions, t, toast, updateSessionTitle]);
 
   const handleOpenCreateProject = useCallback(() => {
-    const defaultProject = projects.find((project) => project.isDefault)
-      ?? projects.find((project) => project.id === defaultProjectId);
     setProjectDialogMode('create');
     setEditingProjectId(null);
-    setProjectWorktreeValue(defaultProject?.worktree ?? '');
-    setProjectNameValue(defaultProject?.worktree ? getPathBasename(defaultProject.worktree) : '');
+    setProjectWorktreeValue('');
+    setProjectNameValue('');
     setProjectNameManuallyEdited(false);
     setFolderBrowser(null);
-  }, [defaultProjectId, projects]);
+  }, []);
 
   const handleOpenRenameProject = useCallback((project: ProjectSessionGroup) => {
     const persistedName = projects.find((item) => item.id === project.id)?.name?.trim();
@@ -2152,37 +2150,30 @@ export default function SessionPage() {
                 <>
                   {!folderBrowser && (
                     <>
-                      <div className="flex items-center justify-between pt-1">
-                    <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
-                      {t('projectDialog.folderLabel')}
-                    </label>
-                    <span className="max-w-64 truncate text-[11px] text-zinc-400 dark:text-zinc-600" title={projects.find((project) => project.isDefault)?.worktree}>
-                      {t('projectDialog.defaultFolder', {
-                        path: projects.find((project) => project.isDefault)?.worktree ?? '',
-                      })}
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      id="session-project-worktree"
-                      value={projectWorktreeValue}
-                      onChange={(event) => {
-                        setProjectWorktreeValue(event.target.value);
-                        if (!projectNameManuallyEdited) {
-                          setProjectNameValue(getPathBasename(event.target.value));
-                        }
-                      }}
-                      disabled={projectSubmitting}
-                      placeholder={t('projectDialog.folderPlaceholder')}
-                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void loadFolderBrowser(projectWorktreeValue)}
-                      disabled={projectSubmitting || folderBrowserLoading}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
-                    >
-                      {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                      <label className="block pt-1 text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
+                        {t('projectDialog.folderLabel')}
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          id="session-project-worktree"
+                          value={projectWorktreeValue}
+                          onChange={(event) => {
+                            setProjectWorktreeValue(event.target.value);
+                            if (!projectNameManuallyEdited) {
+                              setProjectNameValue(getPathBasename(event.target.value));
+                            }
+                          }}
+                          disabled={projectSubmitting}
+                          placeholder={t('projectDialog.folderPlaceholder')}
+                          className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void loadFolderBrowser(projectWorktreeValue)}
+                          disabled={projectSubmitting || folderBrowserLoading}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                        >
+                          {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
                           {t('projectDialog.chooseFolder')}
                         </button>
                       </div>
@@ -2252,7 +2243,7 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={handleCloseProjectDialog}
-                disabled={projectSubmitting || (projectDialogMode === 'create' && !projectWorktreeValue.trim())}
+                disabled={projectSubmitting}
                 className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
               >
                 {t('cancel')}

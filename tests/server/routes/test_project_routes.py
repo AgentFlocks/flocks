@@ -87,6 +87,20 @@ async def test_duplicate_project_directory_returns_existing_project(
 
 
 @pytest.mark.asyncio
+async def test_folder_browser_starts_at_home_when_path_is_omitted(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    home = Path.home().resolve()
+    monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(home))
+
+    response = await client.get("/api/project/folders")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["path"] == str(home)
+
+
+@pytest.mark.asyncio
 async def test_folder_browser_lists_directories_and_blocks_outside_root(
     client: AsyncClient,
     tmp_path: Path,

@@ -601,8 +601,8 @@ describe('SessionPage session actions menu', () => {
     client.get.mockImplementation((url: string) => Promise.resolve({
       data: url === '/api/project/folders'
         ? {
-            path: '/tmp/project/child',
-            parent: '/tmp/project',
+            path: '/home/test-user',
+            parent: null,
             roots: [],
             entries: [],
           }
@@ -612,13 +612,19 @@ describe('SessionPage session actions menu', () => {
     renderSessionPage();
 
     await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    expect(screen.getByLabelText('projectDialog.folderLabel')).toHaveValue('/tmp/project');
+    expect(screen.getByLabelText('projectDialog.nameLabel')).toHaveValue('');
+    expect(screen.getByLabelText('projectDialog.folderLabel')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'cancel' })).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
 
-    expect(await screen.findByText('/tmp/project/child')).toBeInTheDocument();
+    expect(await screen.findByText('/home/test-user')).toBeInTheDocument();
+    expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
+      params: { path: undefined },
+    });
     expect(screen.queryByLabelText('projectDialog.folderLabel')).not.toBeInTheDocument();
   });
+
   it('shows the backend detail when project creation fails', async () => {
     const user = userEvent.setup();
     client.post.mockRejectedValue({

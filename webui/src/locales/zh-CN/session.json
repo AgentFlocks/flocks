@@ -296,7 +296,6 @@
     "folderLabel": "项目文件夹",
     "folderPlaceholder": "输入项目文件夹的绝对路径",
     "folderEmpty": "请选择项目文件夹",
-    "defaultFolder": "默认：{{path}}",
     "chooseFolder": "选择",
     "parentFolder": "上一级目录",
     "selectCurrentFolder": "选择此文件夹",
