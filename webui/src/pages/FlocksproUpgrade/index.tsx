@@ -303,7 +303,7 @@ function requestDurationDays(item: UpgradeRequestStatus): number | null {
 
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
-  const { productName } = useProductName();
+  const { proProductName } = useProductName();
   const [searchParams, setSearchParams] = useSearchParams();
   const [consoleLoginStatus, setConsoleLoginStatus] = useState<ConsoleLoginSessionStatus | null>(null);
   const [consoleLoginLoading, setConsoleLoginLoading] = useState(false);
@@ -993,8 +993,8 @@ export default function FlocksproUpgradePage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t('title', { productName })}
-        description={t('description', { productName })}
+        title={t('title', { productName: proProductName })}
+        description={t('description', { productName: proProductName })}
         icon={<ArrowUpCircle className="w-8 h-8" />}
       />
 
@@ -1052,13 +1052,13 @@ export default function FlocksproUpgradePage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">
               {isProLoaded
-                ? t('upgrade.installedTitle', { productName, version: proVersion })
-                : t('upgrade.title', { productName })}
+                ? t('upgrade.installedTitle', { productName: proProductName, version: proVersion })
+                : t('upgrade.title', { productName: proProductName })}
             </h2>
             <p className="text-sm text-gray-500 mt-1">
               {isProLoaded
-                ? t('upgrade.installedDescription', { productName })
-                : t('upgrade.description', { productName })}
+                ? t('upgrade.installedDescription', { productName: proProductName })
+                : t('upgrade.description', { productName: proProductName })}
             </p>
           </div>
           {isProLoaded ? (
@@ -1231,7 +1231,7 @@ export default function FlocksproUpgradePage() {
           >
             {currentLicenseInvalid && (
               <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800">
-                {t('upgrade.revokedOrExpiredHint', { productName })}
+                {t('upgrade.revokedOrExpiredHint', { productName: proProductName })}
               </div>
             )}
             <div className={`flex flex-wrap items-center justify-between gap-3 border-b pb-3 ${
@@ -1393,12 +1393,12 @@ export default function FlocksproUpgradePage() {
       {showApplyDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
           <div className="w-full max-w-lg rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
-            <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.applyDialogTitle', { productName })}</h3>
+            <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.applyDialogTitle', { productName: proProductName })}</h3>
             <div className="space-y-3">
               <div className="space-y-1">
                 <div className="text-sm text-gray-600">{t('upgrade.productLabel')}</div>
                 <input
-                  value={productName}
+                  value={proProductName}
                   readOnly
                   className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700"
                 />
@@ -1492,7 +1492,7 @@ export default function FlocksproUpgradePage() {
               </div>
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.downgradeDialogTitle')}</h3>
-                <p className="mt-1 text-sm text-gray-600">{t('upgrade.downgradeDialogDescription', { productName })}</p>
+                <p className="mt-1 text-sm text-gray-600">{t('upgrade.downgradeDialogDescription', { productName: proProductName })}</p>
               </div>
             </div>
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -1543,8 +1543,8 @@ export default function FlocksproUpgradePage() {
                   ? t('upgrade.waitingDowngradeRestart')
                   : t('upgrade.waitingRestart')
                 : updateMode === 'downgrade'
-                ? t('upgrade.downgradingHint', { productName })
-                : t('upgrade.installingHint', { productName })}
+                ? t('upgrade.downgradingHint', { productName: proProductName })
+                : t('upgrade.installingHint', { productName: proProductName })}
             </div>
             {upgradeSteps.length > 0 && (
               <div className="space-y-2">
@@ -1564,7 +1564,7 @@ export default function FlocksproUpgradePage() {
                       )}
                       <div className="min-w-0">
                         <div className={isError ? 'font-medium text-red-700' : 'font-medium text-gray-800'}>
-                          {t(`upgrade.stageLabels.${step.stage}`, { defaultValue: step.stage, productName })}
+                          {t(`upgrade.stageLabels.${step.stage}`, { defaultValue: step.stage, productName: proProductName })}
                         </div>
                         <div className={isError ? 'text-xs text-red-600' : 'text-xs text-gray-500'}>
                           {step.message}

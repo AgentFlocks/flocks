@@ -395,7 +395,7 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const { t } = useTranslation('nav');
   const { user } = useAuth();
-  const { productName } = useProductName();
+  const { proProductName } = useProductName();
   const isAdmin = user?.role === 'admin';
   const sectionId = params.sectionId;
   const [flocksproCapabilityReady, setFlocksproCapabilityReady] = useState(false);
@@ -455,11 +455,11 @@ export default function SettingsPage() {
           { id: 'account', name: t('accountManagement'), icon: UserCog },
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
           { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
-          { id: 'flockspro', name: productName, icon: ArrowUpCircle, adminOnly: true },
+          { id: 'flockspro', name: proProductName, icon: ArrowUpCircle, adminOnly: true },
         ],
       },
     ],
-    [productName, t],
+    [proProductName, t],
   );
 
   const visibleGroups = groups

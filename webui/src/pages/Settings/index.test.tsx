@@ -196,7 +196,7 @@ describe('SettingsPage', () => {
     renderSettings('/settings/flockspro');
 
     expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
   });
 });
