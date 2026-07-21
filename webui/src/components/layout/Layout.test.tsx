@@ -481,7 +481,7 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
     await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
 
     const sidebarShell = container.querySelector('aside > div');
@@ -537,7 +537,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
@@ -608,7 +608,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
