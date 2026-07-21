@@ -1,4 +1,5 @@
 import base64
+import gzip
 import hashlib
 import json
 import random
@@ -187,6 +188,12 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
             continue
         cleaned[key] = value
     return cleaned
+
+
+def _encode_ip_param(value: str | None) -> str | None:
+    if value is None or not value.strip() or value.startswith("H4sI"):
+        return value
+    return base64.b64encode(gzip.compress(value.encode("utf-8"))).decode("ascii")
 
 
 def _payload_error(payload: Any) -> str | None:
@@ -498,8 +505,8 @@ async def alarm_list(
             "status": status,
             "serial_num": serial_num,
             "data_source": data_source,
-            "alarm_sip": alarm_sip,
-            "attack_sip": attack_sip,
+            "alarm_sip": _encode_ip_param(alarm_sip),
+            "attack_sip": _encode_ip_param(attack_sip),
             "ioc": ioc,
             "threat_name": threat_name,
             "host": host,
