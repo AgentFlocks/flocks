@@ -95,6 +95,14 @@ def test_markdown_to_slack_mrkdwn_preserves_code_and_links():
     assert "```py\n**not bold**\n```" in rendered
 
 
+def test_markdown_to_slack_mrkdwn_keeps_escaped_special_mentions():
+    rendered = markdown_to_slack_mrkdwn("safe &lt;!channel&gt; and &amp;")
+
+    assert "&lt;!channel&gt;" in rendered
+    assert "<!channel>" not in rendered
+    assert "&amp;" in rendered
+
+
 def test_build_inbound_direct_message():
     msg = build_inbound_message(
         {
@@ -418,10 +426,52 @@ async def test_send_text_posts_thread_reply_and_remembers_thread():
 
 
 @pytest.mark.asyncio
+async def test_known_thread_roots_are_persisted_and_restored(monkeypatch):
+    stored: dict[str, list[str]] = {}
+
+    class FakeStorage:
+        @staticmethod
+        async def get(key):
+            return stored.get(key)
+
+        @staticmethod
+        async def set(key, value, value_type="json"):
+            stored[key] = value
+
+    monkeypatch.setattr(slack_mod, "Storage", FakeStorage)
+
+    plugin = SlackChannel()
+    plugin._remember_thread("171.2")
+    await plugin._persist_known_threads()
+
+    restarted = SlackChannel()
+    await restarted._load_known_threads()
+    msg = build_inbound_message(
+        {
+            "channel": "C123",
+            "channel_type": "channel",
+            "user": "U123",
+            "ts": "171.3",
+            "thread_ts": "171.2",
+            "parent_user_id": "U123",
+            "text": "continue after process restart",
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(restarted._known_thread_ids.keys()),
+    )
+
+    assert msg is not None
+    assert msg.mentioned is True
+    assert msg.mention_text == "continue after process restart"
+
+
+@pytest.mark.asyncio
 async def test_connect_socket_mode_marks_connected_after_connect(monkeypatch):
     plugin = SlackChannel()
     plugin._config = {"socketConnectTimeoutSeconds": 1}
     plugin._app = SimpleNamespace()
+    plugin._verify_app_token = AsyncMock()
 
     class FakeHandler:
         def __init__(self, app, token):
@@ -448,6 +498,7 @@ async def test_connect_socket_mode_failure_marks_disconnected(monkeypatch):
     plugin = SlackChannel()
     plugin._config = {"socketConnectTimeoutSeconds": 1}
     plugin._app = SimpleNamespace()
+    plugin._verify_app_token = AsyncMock()
 
     class FakeHandler:
         def __init__(self, app, token):
@@ -471,6 +522,7 @@ async def test_connect_socket_mode_slack_response_error_is_actionable(monkeypatc
     plugin = SlackChannel()
     plugin._config = {"socketConnectTimeoutSeconds": 1}
     plugin._app = SimpleNamespace()
+    plugin._verify_app_token = AsyncMock()
 
     class FakeSlackError(Exception):
         def __init__(self):
@@ -497,6 +549,7 @@ async def test_connect_socket_mode_timeout_marks_disconnected(monkeypatch):
     plugin = SlackChannel()
     plugin._config = {"socketConnectTimeoutSeconds": 1}
     plugin._app = SimpleNamespace()
+    plugin._verify_app_token = AsyncMock()
 
     class FakeHandler:
         def __init__(self, app, token):
@@ -512,6 +565,38 @@ async def test_connect_socket_mode_timeout_marks_disconnected(monkeypatch):
 
     assert plugin.status.connected is False
     assert "timed out" in (plugin.status.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_connect_socket_mode_preflights_app_token_before_handler(monkeypatch):
+    plugin = SlackChannel()
+    plugin._config = {"socketConnectTimeoutSeconds": 1}
+    plugin._app = SimpleNamespace()
+
+    class FakeSlackError(Exception):
+        def __init__(self):
+            super().__init__("Slack API error")
+            self.response = SimpleNamespace(data={"error": "invalid_auth"})
+
+    class FakeWebClient:
+        def __init__(self, token):
+            self.token = token
+
+        async def apps_connections_open(self):
+            raise FakeSlackError()
+
+    class FakeHandler:
+        def __init__(self, app, token):
+            raise AssertionError("handler should not start for invalid app token")
+
+    monkeypatch.setattr(slack_mod, "AsyncWebClient", FakeWebClient)
+    monkeypatch.setattr(slack_mod, "AsyncSocketModeHandler", FakeHandler)
+
+    with pytest.raises(NonRetryableChannelError):
+        await plugin._connect_socket_mode("xapp-bad")
+
+    assert "Slack App Token" in (plugin.status.last_error or "")
+    assert "xapp-" in (plugin.status.last_error or "")
 
 
 @pytest.mark.asyncio

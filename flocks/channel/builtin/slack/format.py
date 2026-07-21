@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import re
 
 
@@ -23,7 +22,6 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
     result = re.sub(r"```.*?```", protect, text, flags=re.DOTALL)
     result = re.sub(r"`[^`\n]+`", protect, result)
 
-    result = html.unescape(result)
     result = _LINK_RE.sub(r"<\2|\1>", result)
     result = re.sub(r"\*\*(.+?)\*\*", r"*\1*", result, flags=re.DOTALL)
     result = re.sub(r"__([^_\n]+)__", r"*\1*", result)

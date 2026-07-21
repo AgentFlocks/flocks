@@ -1372,7 +1372,13 @@ class Config:
         return None
 
     @classmethod
-    async def update(cls, config: ConfigInfo, project_dir: Optional[Path] = None) -> None:
+    async def update(
+        cls,
+        config: ConfigInfo,
+        project_dir: Optional[Path] = None,
+        *,
+        channel_allow_from_deletions: Optional[set[str]] = None,
+    ) -> None:
         """
         Update configuration
         
@@ -1380,6 +1386,9 @@ class Config:
             config: New configuration
             project_dir: Deprecated and ignored. Config is always written to
                 the unified user config directory.
+            channel_allow_from_deletions: Channel IDs whose persisted
+                allowFrom field should be removed after a successful full
+                config validation and merge.
         """
         _ = project_dir
 
@@ -1396,6 +1405,13 @@ class Config:
         
         # Write
         config_data = merged.model_dump(by_alias=True, exclude_none=True, mode="json")
+        if channel_allow_from_deletions:
+            channels = config_data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channel_allow_from_deletions:
+                    channel_cfg = channels.get(channel_id)
+                    if isinstance(channel_cfg, dict):
+                        channel_cfg.pop("allowFrom", None)
         config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
         
         # Clear cache

@@ -16,6 +16,7 @@ from flocks.channel.base import (
     NonRetryableChannelError,
     OutboundContext,
 )
+from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 from .config import (
@@ -32,15 +33,19 @@ from .inbound import build_inbound_message
 try:
     from slack_bolt.async_app import AsyncApp
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+    from slack_sdk.web.async_client import AsyncWebClient
 
     SLACK_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised by validate_config tests
     AsyncApp = None  # type: ignore[assignment]
     AsyncSocketModeHandler = None  # type: ignore[assignment]
+    AsyncWebClient = None  # type: ignore[assignment]
     SLACK_AVAILABLE = False
 
 
 log = Log.create(service="channel.slack")
+
+_KNOWN_THREADS_STORAGE_KEY = "channel:slack:known_threads"
 
 
 _PERMANENT_SLACK_ERROR_CODES = {
@@ -228,6 +233,7 @@ class SlackChannel(ChannelPlugin):
                 self.mark_disconnected(message)
                 raise NonRetryableChannelError(message)
             team_id = _slack_response_get(auth, "team_id", "default")
+            await self._load_known_threads()
 
             self._register_handlers()
             await self._connect_socket_mode(app_token)
@@ -249,6 +255,7 @@ class SlackChannel(ChannelPlugin):
     async def _connect_socket_mode(self, app_token: str) -> None:
         """Connect Socket Mode once and mark connected only after success."""
         assert AsyncSocketModeHandler is not None
+        await self._verify_app_token(app_token)
         self._handler = AsyncSocketModeHandler(self._app, app_token)
         timeout_seconds = float(self._config.get("socketConnectTimeoutSeconds") or 15.0)
         try:
@@ -267,6 +274,19 @@ class SlackChannel(ChannelPlugin):
                 raise NonRetryableChannelError(message) from exc
             raise RuntimeError(message) from exc
         self.mark_connected()
+
+    async def _verify_app_token(self, app_token: str) -> None:
+        """Validate the app-level token once before Socket Mode's retry loop."""
+        assert AsyncWebClient is not None
+        client = AsyncWebClient(token=app_token)
+        try:
+            await client.apps_connections_open()
+        except Exception as exc:
+            message = _format_slack_start_error(exc, phase="socket_mode")
+            self.mark_disconnected(message)
+            if _is_permanent_slack_error(exc):
+                raise NonRetryableChannelError(message) from exc
+            raise RuntimeError(message) from exc
 
     async def stop(self) -> None:
         handler = self._handler
@@ -327,6 +347,7 @@ class SlackChannel(ChannelPlugin):
                 self._remember_thread(message_id)
             if thread_ts:
                 self._remember_thread(thread_ts)
+            await self._persist_known_threads()
             self.record_message()
             return DeliveryResult(
                 channel_id="slack",
@@ -386,3 +407,26 @@ class SlackChannel(ChannelPlugin):
         if len(self._known_thread_ids) > self._known_thread_ids_max:
             while len(self._known_thread_ids) > self._known_thread_ids_max // 2:
                 self._known_thread_ids.popitem(last=False)
+
+    async def _load_known_threads(self) -> None:
+        try:
+            stored = await Storage.get(_KNOWN_THREADS_STORAGE_KEY)
+        except Exception as exc:
+            log.warning("slack.known_threads.load_failed", {"error": str(exc)})
+            return
+        if not isinstance(stored, list):
+            return
+        for thread_ts in stored[-self._known_thread_ids_max:]:
+            if isinstance(thread_ts, str) and thread_ts:
+                self._known_thread_ids[thread_ts] = None
+        while len(self._known_thread_ids) > self._known_thread_ids_max:
+            self._known_thread_ids.popitem(last=False)
+
+    async def _persist_known_threads(self) -> None:
+        try:
+            await Storage.set(
+                _KNOWN_THREADS_STORAGE_KEY,
+                list(self._known_thread_ids.keys()),
+            )
+        except Exception as exc:
+            log.warning("slack.known_threads.persist_failed", {"error": str(exc)})

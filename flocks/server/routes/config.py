@@ -16,7 +16,6 @@ Flocks TUI expects Config format:
 }
 """
 
-import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -36,49 +35,19 @@ router = APIRouter()
 log = Log.create(service="routes.config")
 
 
-def _apply_channel_allow_from_deletions(config_data: Dict[str, Any]) -> None:
-    """Remove persisted channel allowFrom when PATCH explicitly sends null."""
+def _channel_allow_from_deletion_ids(config_data: Dict[str, Any]) -> set[str]:
+    """Return channel IDs whose PATCH explicitly removes allowFrom."""
     channels = config_data.get("channels")
     if not isinstance(channels, dict):
-        return
+        return set()
 
-    channel_ids = [
+    return {
         channel_id
         for channel_id, channel_cfg in channels.items()
         if isinstance(channel_cfg, dict)
         and "allowFrom" in channel_cfg
         and channel_cfg.get("allowFrom") is None
-    ]
-    if not channel_ids:
-        return
-
-    config_file = Config.get_config_file()
-    if not config_file.exists():
-        return
-
-    try:
-        raw_config = json.loads(config_file.read_text(encoding="utf-8"))
-    except Exception as exc:
-        log.warning("config.channel_allow_from_delete_failed", {"error": str(exc)})
-        return
-
-    raw_channels = raw_config.get("channels")
-    if not isinstance(raw_channels, dict):
-        return
-
-    changed = False
-    for channel_id in channel_ids:
-        raw_channel = raw_channels.get(channel_id)
-        if isinstance(raw_channel, dict) and "allowFrom" in raw_channel:
-            del raw_channel["allowFrom"]
-            changed = True
-
-    if changed:
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        config_file.write_text(
-            json.dumps(raw_config, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    }
 
 
 def _build_model_from_config(
@@ -600,7 +569,7 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     flocks.json, so that plaintext secrets never land in that file.
     """
     try:
-        _apply_channel_allow_from_deletions(config_data)
+        channel_allow_from_deletions = _channel_allow_from_deletion_ids(config_data)
 
         # Extract channel sensitive fields into .secret.json before persisting
         if "channels" in config_data and isinstance(config_data.get("channels"), dict):
@@ -611,7 +580,10 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         config = ConfigInfoModel.model_validate(config_data)
         
         # Update project config
-        await Config.update(config)
+        await Config.update(
+            config,
+            channel_allow_from_deletions=channel_allow_from_deletions,
+        )
         
         # Clear cache to reload
         Config.clear_cache()
