@@ -267,10 +267,10 @@ async def _request(
             if resp.status >= 400:
                 return ToolResult(
                     success=False,
-                    data=resp_json,
+                    output=resp_json,
                     error=f"HTTP {resp.status}: {resp_text[:300]}",
                 )
-            return ToolResult(success=True, data=resp_json)
+            return ToolResult(success=True, output=resp_json)
 
 
 def _pick(params: dict[str, Any], *keys: str) -> dict[str, Any]:
@@ -291,10 +291,9 @@ def _page_query(params: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def host(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def host(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     cfg = _load_config(params.get("enterprise_project_id"))
     pid = cfg.project_id
-    action = params.get("action", "")
 
     if action == "host_list":
         q = _page_query(params)
@@ -360,10 +359,9 @@ async def host(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
-async def policy(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def policy(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     cfg = _load_config(params.get("enterprise_project_id"))
     pid = cfg.project_id
-    action = params.get("action", "")
 
     if action == "policy_list":
         q = _page_query(params)
@@ -400,7 +398,9 @@ async def policy(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     if action == "cc_rule_create":
         pol_id = params["policy_id"]
-        body = _pick(params, "url", "limit_num", "limit_period", "lock_time", "tag_type", "action")
+        body = _pick(params, "url", "limit_num", "limit_period", "lock_time", "tag_type")
+        if params.get("rule_action") is not None:
+            body["action"] = params["rule_action"]
         return await _request(cfg, "POST", f"/v1/{pid}/waf/policy/{pol_id}/cc", body=body)
 
     if action == "cc_rule_delete":
@@ -415,7 +415,9 @@ async def policy(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     if action == "custom_rule_create":
         pol_id = params["policy_id"]
-        body = _pick(params, "name", "conditions", "action", "priority", "description")
+        body = _pick(params, "name", "conditions", "priority", "description")
+        if params.get("rule_action") is not None:
+            body["action"] = params["rule_action"]
         return await _request(cfg, "POST", f"/v1/{pid}/waf/policy/{pol_id}/custom", body=body)
 
     if action == "custom_rule_delete":
@@ -446,16 +448,17 @@ async def policy(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
-async def event(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def event(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     cfg = _load_config(params.get("enterprise_project_id"))
     pid = cfg.project_id
-    action = params.get("action", "")
 
     if action == "event_list":
         q = _page_query(params)
-        for k in ("from", "to", "hosts", "attacks", "action"):
+        for k in ("from", "to", "hosts", "attacks"):
             if params.get(k) is not None:
                 q[k] = params[k]
+        if params.get("event_action") is not None:
+            q["action"] = params["event_action"]
         return await _request(cfg, "GET", f"/v1/{pid}/waf/event/attack/logs", query=q)
 
     if action == "event_show":
@@ -471,9 +474,11 @@ async def event(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     if action == "event_export_job":
         body = {}
-        for k in ("from", "to", "hosts", "attacks", "action"):
+        for k in ("from", "to", "hosts", "attacks"):
             if params.get(k) is not None:
                 body[k] = params[k]
+        if params.get("event_action") is not None:
+            body["action"] = params["event_action"]
         return await _request(cfg, "POST", f"/v1/{pid}/waf/event/attack/log/job", body=body)
 
     if action == "threat_distribution":
@@ -500,10 +505,9 @@ async def event(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
-async def overview(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+async def overview(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     cfg = _load_config(params.get("enterprise_project_id"))
     pid = cfg.project_id
-    action = params.get("action", "")
 
     def _time_query() -> dict[str, Any]:
         q: dict[str, Any] = {}
