@@ -19,13 +19,14 @@ inputSchema:
   properties:
     action:
       type: string
-      enum: [status_auth_state, ensure_auth_state, validate_auth_state, refresh_auth_state]
+      enum: [status_auth_state, ensure_auth_state, validate_auth_state, refresh_auth_state, complete_manual_login]
       default: ensure_auth_state
       description: >
         Authentication action. status_auth_state returns non-sensitive saved
         state/credential availability; ensure_auth_state reuses existing state
         when it appears valid and refreshes when needed; validate_auth_state
-        checks only; refresh_auth_state always performs CDP-assisted browser login.
+        checks only; refresh_auth_state always performs CDP-assisted browser login;
+        complete_manual_login validates a user-completed login and saves its browser state.
     captcha_code:
       type: string
       description: Optional manual captcha code. When omitted, OCR is used if enabled.

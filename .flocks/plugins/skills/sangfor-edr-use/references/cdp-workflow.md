@@ -52,9 +52,9 @@ chromium --remote-debugging-port=9222
 
 1. 调用 `sangfor_edr_auth`，`action=status_auth_state`，确认固定 state 是否存在、是否可用，以及是否已有可自动刷新的账密配置。
 2. 如果返回的 `validation.valid` 为 `true`，直接复用已保存 state。
-3. 如果 state 不存在或失效，但 `can_auto_refresh` 为 `true`，调用 `sangfor_edr_auth`，`action=ensure_auth_state`，通过 browser daemon / CDP 驱动真实 EDR 登录页自动登录。验证码图片在浏览器会话中获取，OCR 识别后填入页面；登录成功后保存浏览器 state。
+3. 如果 state 不存在或失效，但 `can_auto_refresh` 为 `true`，调用 `sangfor_edr_auth`，`action=ensure_auth_state`，通过 browser daemon / CDP 驱动真实 EDR 登录页自动登录。验证码图片在浏览器会话中获取，OCR 识别后填入页面；登录成功后保存 browser state，并从 `launch_login.php` 响应捕获 `data.token` 到 Secret Manager（`sangfor_edr_token`）。
 4. 如果没有可用 state，也没有保存账密配置，再询问用户：提供 EDR 地址、用户名、密码后自动登录并保存，或不提供账密改走手动登录。
-5. 用户不提供账密、自动登录失败、MFA/验证码/OCR/DOM 选择器异常时，由用户在 Chrome 中手动登录 EDR（如需 MFA，完成认证），登录成功后保存浏览器 state。
+5. 用户不提供账密、自动登录失败、MFA/验证码/OCR/DOM 选择器异常时，由用户在已打开的 Chrome 中完成登录，再调用 `action=complete_manual_login` 自动校验并保存 browser state。
 
 ---
 
@@ -86,11 +86,11 @@ flocks browser --setup
 
 推荐先调用工具做状态检查：
 
-- `action=status_auth_state`：返回 `auth_state_exists`、`validation.valid`、`can_auto_refresh` 等非敏感状态。
+- `action=status_auth_state`：返回 `auth_state_exists`、`validation.valid`、`can_auto_refresh`、`has_saved_token` 等非敏感状态。
 - `validation.valid=true`：直接继续 Step 4。
 - `validation.valid=false` 且 `can_auto_refresh=true`：调用 `action=ensure_auth_state` 自动打开真实登录页、识别验证码、填入账密并保存新的 state。
 - `validation.valid=false` 且 `can_auto_refresh=false`：再询问用户是提供账密自动登录并保存，还是手动登录。
-- 用户拒绝提供账密或自动登录失败：提示用户在 Chrome 中手动登录，登录成功后执行 `flocks browser state save ~/.flocks/browser/sangfor-edr/auth-state.json`。
+- 用户拒绝提供账密或自动登录失败：提示用户在已打开的 Chrome 中完成登录，然后调用 `action=complete_manual_login`；成功后继续原任务。
 
 ### Step 4：打开目标页面
 用户或工具在 Chrome 中打开：
@@ -204,7 +204,7 @@ print(text_result["result"]["result"]["value"])
 | EDR tab 未找到 | 页面未打开或 URL 不匹配 | 确保 Chrome 中打开了 EDR 首页 |
 | 页面数据为空 | EDR 内容在跨域 iframe 中 | 用 CDP direct 方式 attach 到 EDR tab，在正确 frame context 执行 JS |
 | 页面显示登录框 | 会话已失效 | 若已保存账密，调用 `sangfor_edr_auth` 自动刷新 state；否则提示用户手动登录 EDR |
-| 自动登录失败 | 验证码识别失败、MFA、页面选择器变化或登录成功检测失败 | 回退到浏览器手动登录，登录后保存 state |
+| 自动登录失败 | 验证码识别失败、MFA、页面选择器变化或登录成功检测失败 | 在已打开的浏览器中完成登录，再调用 `action=complete_manual_login` |
 | `browser_daemon_not_ready` | daemon 无法启动或连接 Chrome | 执行 `flocks browser --setup` 和 `flocks browser --doctor`，然后重试；不要修改 `bu.port` |
 
 ---
