@@ -66,7 +66,7 @@ class SessionMemory:
                 memory_config_dict = config.memory if hasattr(config, 'memory') and config.memory else None
                 
                 if not memory_config_dict:
-                    log.warn("session.memory.no_config", {"session_id": self.session_id})
+                    log.info("session.memory.no_config", {"session_id": self.session_id})
                     memory_config = MemoryConfig(enabled=True)
                 else:
                     if isinstance(memory_config_dict, dict):

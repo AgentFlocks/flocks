@@ -26,6 +26,95 @@ from flocks.workflow.triggers.models import TriggerDefinition
 
 
 @pytest.mark.asyncio
+async def test_start_all_skips_stale_workflow_config_as_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "removed-workflow"
+    config = {
+        "enabled": True,
+        "inputBroker": "",
+        "inputTopic": "",
+    }
+    info_events: list[tuple[str, dict]] = []
+    warning_events: list[str] = []
+
+    async def _list_configs(*, kind: str):  # noqa: ANN202
+        assert kind == "workflow_kafka_config"
+        return [(workflow_id, config)]
+
+    async def _get_config(_workflow_id: str, *, kind: str) -> dict:
+        assert kind == "workflow_kafka_config"
+        return config
+
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "list_configs", _list_configs)
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _get_config)
+    monkeypatch.setattr(kafka_manager, "read_workflow_from_fs", lambda _workflow_id: None)
+    monkeypatch.setattr(
+        kafka_manager.log,
+        "info",
+        lambda event, data=None: info_events.append((event, data)),
+    )
+    monkeypatch.setattr(
+        kafka_manager.log,
+        "warning",
+        lambda event, _data=None: warning_events.append(event),
+    )
+
+    manager = kafka_manager.KafkaManager()
+    await manager.start_all()
+
+    assert manager.get_consumer_status(workflow_id) == {
+        "state": "stopped",
+        "error": "workflow_not_found",
+    }
+    assert info_events == [
+        (
+            "kafka.workflow_not_found_on_start",
+            {"workflow_id": workflow_id, "action": "stale_config_skipped"},
+        )
+    ]
+    assert warning_events == []
+
+
+@pytest.mark.asyncio
+async def test_start_all_continues_after_one_workflow_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restarted: list[str] = []
+    warning_events: list[tuple[str, dict]] = []
+
+    async def _list_configs(*, kind: str):  # noqa: ANN202
+        assert kind == "workflow_kafka_config"
+        return [
+            ("broken-workflow", {"enabled": True}),
+            ("healthy-workflow", {"enabled": True}),
+        ]
+
+    async def _restart(workflow_id: str, *, startup: bool = False) -> dict:
+        assert startup is True
+        restarted.append(workflow_id)
+        if workflow_id == "broken-workflow":
+            raise ValueError("invalid config")
+        return {"state": "running", "error": None}
+
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "list_configs", _list_configs)
+    monkeypatch.setattr(kafka_manager.log, "warning", lambda event, data: warning_events.append((event, data)))
+
+    manager = kafka_manager.KafkaManager()
+    monkeypatch.setattr(manager, "restart_workflow", _restart)
+
+    await manager.start_all()
+
+    assert restarted == ["broken-workflow", "healthy-workflow"]
+    assert warning_events == [
+        (
+            "kafka.start_failed",
+            {"workflow_id": "broken-workflow", "error": "invalid config"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fixed worker pool must cap concurrent ``_trigger_workflow`` calls."""
 
@@ -190,6 +279,11 @@ async def test_restart_missing_broker_reports_failed(monkeypatch: pytest.MonkeyP
         return {"enabled": True, "inputBroker": "", "inputTopic": ""}
 
     monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", _fake_get_config)
+    monkeypatch.setattr(
+        kafka_manager,
+        "read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": {}},
+    )
 
     status = await manager.restart_workflow("wf-no-broker")
     assert status["state"] == "failed"

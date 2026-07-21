@@ -13,6 +13,52 @@ from flocks.workflow.runner import RunWorkflowResult
 
 
 @pytest.mark.asyncio
+async def test_start_all_skips_stale_workflow_config_as_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "removed-workflow"
+    config = {"enabled": True, "intervalSeconds": "not-a-number"}
+    info_events: list[tuple[str, dict]] = []
+    warning_events: list[str] = []
+
+    async def _list_configs(*, kind: str):  # noqa: ANN202
+        assert kind == "workflow_poller_config"
+        return [(workflow_id, config)]
+
+    async def _get_config(_workflow_id: str, *, kind: str) -> dict[str, Any]:
+        assert kind == "workflow_poller_config"
+        return config
+
+    monkeypatch.setattr(poller_manager.WorkflowStore, "list_configs", _list_configs)
+    monkeypatch.setattr(poller_manager.WorkflowStore, "get_config", _get_config)
+    monkeypatch.setattr(poller_manager, "read_workflow_from_fs", lambda _workflow_id: None)
+    monkeypatch.setattr(
+        poller_manager.log,
+        "info",
+        lambda event, data=None: info_events.append((event, data)),
+    )
+    monkeypatch.setattr(
+        poller_manager.log,
+        "warning",
+        lambda event, _data=None: warning_events.append(event),
+    )
+
+    manager = poller_manager.WorkflowPollerManager()
+    await manager.start_all()
+
+    status = manager.get_status(workflow_id)
+    assert status["state"] == "stopped"
+    assert status["error"] == "workflow_not_found"
+    assert info_events == [
+        (
+            "poller.workflow_not_found_on_start",
+            {"workflow_id": workflow_id, "action": "stale_config_skipped"},
+        )
+    ]
+    assert warning_events == []
+
+
+@pytest.mark.asyncio
 async def test_restart_disabled_config_reports_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = poller_manager.WorkflowPollerManager()
 
@@ -411,22 +457,42 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
 async def test_start_all_only_restarts_enabled_configs(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = poller_manager.WorkflowPollerManager()
     restarted: list[str] = []
+    warning_events: list[tuple[str, dict[str, str]]] = []
 
     async def _fake_list_configs(*, kind: str) -> list[tuple[str, dict[str, Any]]]:
         return [
+            ("wf-broken", {"enabled": True}),
             ("wf-enabled", {"enabled": True}),
             ("wf-disabled", {"enabled": False}),
         ]
 
-    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+    async def _fake_restart(
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> dict[str, Any]:
+        assert startup is True
         restarted.append(workflow_id)
+        if workflow_id == "wf-broken":
+            raise ValueError("invalid config")
         return {"workflowId": workflow_id, "state": "running"}
 
     monkeypatch.setattr(poller_manager.WorkflowStore, "list_configs", _fake_list_configs)
     monkeypatch.setattr(manager, "restart_workflow", _fake_restart)
+    monkeypatch.setattr(
+        poller_manager.log,
+        "warning",
+        lambda event, data: warning_events.append((event, data)),
+    )
 
     await manager.start_all()
-    assert restarted == ["wf-enabled"]
+    assert restarted == ["wf-broken", "wf-enabled"]
+    assert warning_events == [
+        (
+            "poller.start_failed",
+            {"workflow_id": "wf-broken", "error": "invalid config"},
+        )
+    ]
 
 
 @pytest.mark.asyncio

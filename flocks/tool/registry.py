@@ -376,6 +376,13 @@ def _normalize_param_key(name: str) -> str:
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
+def _api_service_storage_key(provider: str) -> str:
+    """Resolve the single persisted key used for an API-like provider."""
+    from flocks.config.api_versioning import versioned_storage_key_for
+
+    return versioned_storage_key_for(provider) or provider
+
+
 _SCOPED_SCHEMA_ALIASES: Dict[str, Dict[str, str]] = {
     # SkyEye historically surfaced "威胁级别", which some callers guessed as
     # threat_level. Keep the schema canonical on hazard_level, but accept the
@@ -516,7 +523,7 @@ class Tool:
             # Validate required parameters
             for required_param in schema.required:
                 if required_param not in effective_kwargs:
-                    log.error("tool.execute.missing_param", {
+                    log.warn("tool.execute.missing_param", {
                         "tool": self.info.name,
                         "missing": required_param,
                         "provided": list(effective_kwargs.keys()),
@@ -1192,7 +1199,7 @@ class ToolRegistry:
                 or not info.enabled
             ):
                 continue
-            provider = info.provider
+            provider = _api_service_storage_key(info.provider)
             if provider in seen_providers:
                 continue
             seen_providers.add(provider)
@@ -1244,9 +1251,10 @@ class ToolRegistry:
         disabled_count = 0
         restored_count = 0
         for tool in cls._tools.values():
-            provider = tool.info.provider
-            if not provider:
+            configured_provider = tool.info.provider
+            if not configured_provider:
                 continue
+            provider = _api_service_storage_key(configured_provider)
             svc = api_services.get(provider, {})
             svc_enabled = svc.get("enabled", False)
             if not svc_enabled:

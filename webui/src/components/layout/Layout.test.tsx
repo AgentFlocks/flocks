@@ -482,7 +482,10 @@ describe('Layout onboarding entry', () => {
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
-    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(getActiveNotifications).toHaveBeenCalledWith('zh-CN');
+    });
 
     const sidebarShell = container.querySelector('aside > div');
     const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
@@ -844,6 +847,33 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('Token 免费期已延长')).toBeInTheDocument();
     expect(screen.getByText('Flocks v2026.04.28 更新内容')).toBeInTheDocument();
+  });
+
+  it('loads backend notifications without waiting for the update check', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const updateCheck = deferred<{
+      has_update: boolean;
+      latest_version: null;
+      current_version: string;
+      error: null;
+    }>();
+    checkUpdate.mockReturnValue(updateCheck.promise);
+
+    renderHomeWithLayout();
+
+    await waitFor(() => {
+      expect(getActiveNotifications).toHaveBeenCalledWith('zh-CN');
+    });
+    expect(getNotificationAckStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      updateCheck.resolve({
+        has_update: false,
+        latest_version: null,
+        current_version: '0.2.0',
+        error: null,
+      });
+    });
   });
 });
 

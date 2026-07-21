@@ -186,7 +186,17 @@ class SyslogManager:
             if not workflow_id:
                 continue
             if isinstance(data, dict) and data.get("enabled"):
-                await self.restart_workflow(workflow_id)
+                try:
+                    await self.restart_workflow(workflow_id, startup=True)
+                except Exception as exc:
+                    self._listener_status[workflow_id] = {
+                        "state": "failed",
+                        "error": str(exc),
+                    }
+                    log.warning(
+                        "syslog.start_failed",
+                        {"workflow_id": workflow_id, "error": str(exc)},
+                    )
 
     async def stop_all(self) -> None:
         for workflow_id in list(self._tasks.keys()):
@@ -245,7 +255,12 @@ class SyslogManager:
         if workflow_id in self._listener_status:
             self._listener_status[workflow_id] = {"state": "stopped", "error": None}
 
-    async def restart_workflow(self, workflow_id: str) -> Dict[str, Any]:
+    async def restart_workflow(
+        self,
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> Dict[str, Any]:
         """Restart the listener and return its post-bind runtime status.
 
         This call blocks until the underlying socket either binds successfully,
@@ -268,8 +283,15 @@ class SyslogManager:
         wf_data = read_workflow_from_fs(workflow_id)
         if not wf_data:
             err = "workflow_not_found"
+            if startup:
+                self._listener_status[workflow_id] = {"state": "stopped", "error": err}
+                log.info("syslog.workflow_not_found_on_start", {
+                    "workflow_id": workflow_id,
+                    "action": "stale_config_skipped",
+                })
+                return {"state": "stopped", "error": err}
             self._listener_status[workflow_id] = {"state": "failed", "error": err}
-            log.warning("syslog.workflow_not_found_on_start", {"workflow_id": workflow_id})
+            log.warning("syslog.workflow_not_found", {"workflow_id": workflow_id})
             return {"state": "failed", "error": err}
         workflow_json = wf_data.get("workflowJson")
         if not workflow_json:
@@ -286,6 +308,10 @@ class SyslogManager:
             self._listener_status[workflow_id] = {"state": "failed", "error": err}
             log.warning("syslog.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return self.get_listener_status(workflow_id)
+
+        host = str(data.get("host") or "0.0.0.0")
+        port = int(data.get("port") or 5140)
+        protocol = str(data.get("protocol") or "udp").lower()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
 
@@ -295,9 +321,6 @@ class SyslogManager:
         ready = asyncio.Event()
         self._listener_ready[workflow_id] = ready
 
-        host = str(data.get("host") or "0.0.0.0")
-        port = int(data.get("port") or 5140)
-        protocol = str(data.get("protocol") or "udp").lower()
         self._listener_status[workflow_id] = {
             "state": "binding",
             "error": None,

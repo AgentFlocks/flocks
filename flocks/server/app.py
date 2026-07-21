@@ -1101,7 +1101,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Handle HTTP exceptions"""
-    log.error("http.error", {
+    http_log = log.warn if 400 <= exc.status_code < 500 else log.error
+    http_log("http.error", {
         "path": request.url.path,
         "status": exc.status_code,
         "detail": exc.detail,

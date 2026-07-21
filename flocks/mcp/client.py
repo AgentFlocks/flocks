@@ -703,15 +703,7 @@ class McpClient:
         Raises:
             RuntimeError: If not connected
         """
-        try:
-            result = await self._submit_command("list_resources")
-            return result
-        except Exception as exc:
-            log.error("mcp.client.list_resources_error", {
-                "server": self.name,
-                "error": str(exc),
-            })
-            raise
+        return await self._submit_command("list_resources")
     
     async def read_resource(self, uri: str) -> Any:
         """
