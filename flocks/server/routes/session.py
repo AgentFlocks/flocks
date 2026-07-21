@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
@@ -186,6 +187,7 @@ class SessionCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     
     parentID: Optional[str] = Field(None, alias="parent_id", description="Parent session ID")
+    projectID: Optional[str] = Field(None, alias="project_id", description="Project ID")
     title: Optional[str] = Field(None, description="Session title")
     permission: Optional[List[PermissionRule]] = Field(None, description="Permission rules")
     category: Optional[str] = Field(None, description="Session category (e.g. 'user', 'workflow')")
@@ -232,6 +234,7 @@ class SessionResponse(BaseModel):
     id: str = Field(..., description="Session ID")
     slug: str = Field("", description="Session slug")
     projectID: str = Field(..., description="Project ID")
+    effectiveProjectID: str = Field(..., description="Project used for session manager grouping")
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
@@ -257,6 +260,9 @@ class SessionListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
 
     id: str
+    projectID: str
+    effectiveProjectID: str
+    directory: str
     title: str
     time: SessionTime
     category: str = "user"
@@ -269,19 +275,31 @@ class SessionListItem(BaseModel):
     isShared: bool = False
 
 
-def _session_to_response(session: SessionModel) -> SessionResponse:
+def _session_to_response(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
     """
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_shared(session)
+    is_shared = SessionPolicy.is_shared(session, shared_project_ids)
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
 
     return SessionResponse(
         id=session.id,
         slug=session.slug,
         projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
         directory=session.directory,
         title=session.title,
         version=session.version,
@@ -307,11 +325,25 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     )
 
 
-def _session_to_list_item(session: SessionModel) -> SessionListItem:
+def _session_to_list_item(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
     return SessionListItem(
         id=session.id,
+        projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
+        directory=session.directory,
         title=session.title,
         time=SessionTime(
             created=session.time.created,
@@ -326,13 +358,17 @@ def _session_to_list_item(session: SessionModel) -> SessionListItem:
         model_pinned=session.model_pinned,
         canWrite=SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
-        isShared=SessionPolicy.is_shared(session),
+        isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
 
 
-async def _session_to_response_with_goal(session: SessionModel) -> SessionResponse:
+async def _session_to_response_with_goal(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """Convert SessionModel to SessionResponse and attach persisted goal state."""
-    response = _session_to_response(session)
+    response = _session_to_response(session, effective_project_id, shared_project_ids)
     try:
         from flocks.session.goal import GoalManager
 
@@ -420,6 +456,56 @@ async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionMode
         reset_current_auth_user(token)
 
 
+async def _resolve_session_working_directory(session: SessionModel) -> str:
+    """Keep a valid historical cwd, otherwise use the user's default project."""
+
+    if session.directory:
+        directory = Path(session.directory).expanduser()
+        if directory.is_dir() and os.access(directory, os.R_OK | os.X_OK):
+            return str(directory.resolve())
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+
+    current_user = get_current_auth_user()
+    owner_id = current_user.id if current_user else API_TOKEN_SERVICE_USER_ID
+    default_project = await Project.get(
+        DEFAULT_PROJECT_ID,
+        owner_id=owner_id,
+        default_worktree=Project.default_worktree_candidate(),
+    )
+    if default_project is None or default_project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The session directory and default project directory are unavailable",
+        )
+    log.warn(
+        "session.directory.fallback",
+        {
+            "sessionID": session.id,
+            "stored_directory": session.directory,
+            "fallback_directory": default_project.worktree,
+        },
+    )
+    try:
+        from flocks.server.routes.event import publish_event
+
+        await publish_event(
+            "session.notice",
+            {
+                "sessionID": session.id,
+                "kind": "directory-fallback",
+                "storedDirectory": session.directory,
+                "fallbackDirectory": default_project.worktree,
+            },
+        )
+    except Exception as exc:
+        log.debug(
+            "session.directory.fallback_notice_failed",
+            {"sessionID": session.id, "error": str(exc)},
+        )
+    return default_project.worktree
+
+
 async def _publish_context_usage_update(
     event_publish_callback,
     session_id: str,
@@ -497,6 +583,7 @@ async def list_sessions(
     view: Optional[Literal["list"]] = Query(None, description="Use lightweight list rows"),
     manager: Optional[bool] = Query(None, description="Apply session-manager visibility filters"),
     directory: Optional[str] = Query(None, description="Filter by project directory"),
+    projectID: Optional[str] = Query(None, description="Filter by effective project ID"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
     search: Optional[str] = Query(None, description="Filter by title (case-insensitive)"),
@@ -506,20 +593,37 @@ async def list_sessions(
 ) -> List[Union[SessionResponse, SessionListItem]]:
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
-    _current_user = require_user(request)
+    current_user = require_user(request)
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
     list_started_at = time.perf_counter()
-    all_sessions = await Session.list_all()
+    all_sessions = await Session.list_all_unfiltered()
     list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
     
     filtered = []
+    effective_project_ids: Dict[str, str] = {}
     term = search.lower() if search else None
     manager_categories = {"user", "workflow", "entity-config"}
     skip_remaining = offset or 0
     
     for session in all_sessions:
+        if not SessionPolicy.can_read(
+            session,
+            current_user,
+            shared_project_ids=shared_project_ids,
+        ):
+            continue
         if _is_hidden_from_session_manager(session):
             continue
         if directory is not None and session.directory != directory:
+            continue
+        effective_project_id = (
+            session.project_id
+            if session.project_id in visible_project_ids
+            else DEFAULT_PROJECT_ID
+        )
+        if projectID is not None and effective_project_id != projectID:
             continue
         if (roots or manager) and session.parent_id:
             continue
@@ -542,12 +646,16 @@ async def list_sessions(
             continue
         
         filtered.append(session)
+        effective_project_ids[session.id] = effective_project_id
         
         if limit is not None and len(filtered) >= limit:
             break
 
     if view == "list":
-        response = [_session_to_list_item(s) for s in filtered]
+        response = [
+            _session_to_list_item(s, effective_project_ids[s.id], shared_project_ids)
+            for s in filtered
+        ]
         log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
             "total": len(all_sessions),
             "count": len(response),
@@ -557,11 +665,19 @@ async def list_sessions(
             "offset": offset,
             "search": bool(search),
             "category": category,
+            "projectID": projectID,
             "list_ms": round(list_elapsed_ms, 2),
         })
         return response
 
-    response = [await _session_to_response_with_goal(s) for s in filtered]
+    response = [
+        await _session_to_response_with_goal(
+            s,
+            effective_project_ids[s.id],
+            shared_project_ids,
+        )
+        for s in filtered
+    ]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
@@ -570,6 +686,7 @@ async def list_sessions(
         "offset": offset,
         "search": bool(search),
         "category": category,
+        "projectID": projectID,
         "list_ms": round(list_elapsed_ms, 2),
     })
     return response
@@ -586,19 +703,28 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     """Create a new session"""
     current_user = require_user(http_request)
     await assert_license_active(feature="session_create")
-    import os
-    
     if request is None:
         request = SessionCreateRequest()
-    
-    # Use Instance context if available, otherwise use cwd
-    from flocks.project.instance import Instance
-    try:
-        directory = Instance.directory
-        project_id = Instance.project.id if hasattr(Instance, 'project') else "default"
-    except Exception:
-        directory = os.getcwd()
-        project_id = "default"
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+
+    project_id = request.projectID or DEFAULT_PROJECT_ID
+    project = await Project.get(
+        project_id,
+        owner_id=current_user.id,
+        default_worktree=Project.default_worktree_candidate(),
+    )
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {project_id} not found",
+        )
+    if project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project directory is {project.path_status}",
+        )
+    directory = project.worktree
     
     # Trigger command:new hook if creating from parent (like /new command)
     if request.parentID:
@@ -654,6 +780,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         owner_username=None if is_api_token_client else current_user.username,
         **({"category": request.category} if request.category else {}),
     )
+    Project.invalidate_session_stats()
 
     log.info("session.created", {"session_id": session.id})
     try:
@@ -837,6 +964,9 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     await _wait_for_sessions_idle([sessionID])
     await _abort_and_wait_descendant_sessions(session.project_id, sessionID)
     await Session.delete(session.project_id, sessionID)
+    from flocks.project.project import Project
+
+    Project.invalidate_session_stats()
 
     # Best-effort cleanup of any image/file uploads materialised for this
     # session via ``_materialize_data_url_part`` (see prompt_async).
@@ -998,11 +1128,7 @@ async def update_session(
 )
 async def share_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1010,11 +1136,15 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=True, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1031,11 +1161,7 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
 )
 async def unshare_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1043,11 +1169,15 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=False, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1273,11 +1403,13 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
         if msg.role == MessageRole.USER:
             current_agent = msg.agent or DEFAULT_AGENT
             break
+
+    working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
         try:
             await Instance.provide(
-                directory=session.directory,
+                directory=working_directory,
                 init=instance_bootstrap,
                 fn=lambda: _run_session_compaction(
                     sessionID,
@@ -1286,6 +1418,7 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
                     explicit_model_id=request.modelID,
                     auto=request.auto,
                     event_publish_callback=publish_event,
+                    working_directory=working_directory,
                 ),
             )
         except Exception as e:
@@ -2058,6 +2191,7 @@ async def _run_existing_user_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     if result.action == "queued":
@@ -2187,7 +2321,7 @@ async def resend_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
@@ -2282,7 +2416,7 @@ async def regenerate_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
@@ -2347,7 +2481,7 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
     current_user = require_user(http_request)
     _require_session_write_access(session, current_user)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     
     log.info("session.message.send.processing", {
         "sessionID": sessionID,
@@ -2531,6 +2665,7 @@ async def _run_session_compaction(
     auto: bool = False,
     event_publish_callback=None,
     focus_instruction: Optional[str] = None,
+    working_directory: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Execute session compaction directly without routing through the LLM loop.
 
@@ -2548,6 +2683,8 @@ async def _run_session_compaction(
     session = await Session.get_by_id(session_id)
     if not session:
         raise ValueError(f"Session {session_id} not found")
+    if working_directory:
+        session = session.model_copy(update={"directory": working_directory})
 
     await SessionRevert.cleanup(session)
     agent_name, provider_id, model_id = await _resolve_compaction_context(
@@ -2942,6 +3079,7 @@ async def _process_session_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
     )
 
     # ------------------------------------------------------------------
@@ -3592,6 +3730,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             auto=False,
             event_publish_callback=publish_event,
             focus_instruction=focus_instruction,
+            working_directory=working_directory,
         )
         return True
 
@@ -3746,7 +3885,7 @@ async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, A
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     try:
         await InteractionQueue.promote(sessionID, queueID)
     except QueueItemNotFoundError as exc:
@@ -3788,7 +3927,7 @@ async def send_session_message_async(
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
@@ -3885,7 +4024,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:

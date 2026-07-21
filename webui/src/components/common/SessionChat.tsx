@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
-import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
+import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
@@ -34,6 +34,7 @@ import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
@@ -821,7 +822,7 @@ export function getMessageBubbleClassName({
       ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
       : 'w-full max-w-full';
 
-    return `${widthClass} px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
         ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
         : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
@@ -832,7 +833,7 @@ export function getMessageBubbleClassName({
     ? (isEditing ? 'w-full' : 'w-auto')
     : 'w-full';
 
-  return `${widthClass} px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
+  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
     isUser
       ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
       : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
@@ -1077,83 +1078,6 @@ export function getUserAvatarContainerClassName(compact: boolean): string {
 
 export function getUserAvatarSpacerClassName(_compact: boolean): string {
   return 'h-0';
-}
-
-function areToolStatesRenderEqual(
-  prevState?: ToolState,
-  nextState?: ToolState,
-): boolean {
-  if (prevState === nextState) return true;
-  if (
-    prevState?.status !== nextState?.status ||
-    prevState?.title !== nextState?.title ||
-    prevState?.error !== nextState?.error ||
-    prevState?.time?.start !== nextState?.time?.start ||
-    prevState?.time?.end !== nextState?.time?.end
-  ) {
-    return false;
-  }
-
-  return (
-    JSON.stringify(prevState?.input) === JSON.stringify(nextState?.input)
-    && JSON.stringify(prevState?.output) === JSON.stringify(nextState?.output)
-    && JSON.stringify(prevState?.metadata) === JSON.stringify(nextState?.metadata)
-  );
-}
-
-function areLegacyToolPayloadsRenderEqual(
-  prevPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
-  nextPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
-): boolean {
-  if (prevPayload === nextPayload) return true;
-  return JSON.stringify(prevPayload) === JSON.stringify(nextPayload);
-}
-
-export function areChatMessagePartsRenderEqual(
-  prevParts?: MessagePart[],
-  nextParts?: MessagePart[],
-): boolean {
-  if (prevParts === nextParts) return true;
-  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
-
-  const total = prevParts?.length ?? 0;
-  for (let i = 0; i < total; i++) {
-    const prevPart = prevParts?.[i];
-    const nextPart = nextParts?.[i];
-
-    if (prevPart === nextPart) continue;
-    if (!prevPart || !nextPart) return false;
-
-    if (
-      prevPart.id !== nextPart.id ||
-      prevPart.type !== nextPart.type ||
-      prevPart.text !== nextPart.text ||
-      prevPart.thinking !== nextPart.thinking ||
-      prevPart.synthetic !== nextPart.synthetic ||
-      prevPart.ignored !== nextPart.ignored ||
-      prevPart.tool !== nextPart.tool ||
-      prevPart.callID !== nextPart.callID ||
-      prevPart.mime !== nextPart.mime ||
-      prevPart.filename !== nextPart.filename ||
-      prevPart.url !== nextPart.url ||
-      prevPart.image?.url !== nextPart.image?.url ||
-      prevPart.image?.alt !== nextPart.image?.alt
-    ) {
-      return false;
-    }
-
-    if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
-      return false;
-    }
-    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) {
-      return false;
-    }
-    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 // ============================================================================
@@ -3546,15 +3470,20 @@ export default function SessionChat({
                       const cursor = e.target.selectionStart ?? val.length;
                       const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
                       const trimmed = val.trimStart();
+                      const slashQuery = trimmed.startsWith('/') ? trimmed.slice(1) : '';
                       if (mention && !trimmed.startsWith('/')) {
                         setMentionRange({ start: mention.start, end: mention.end });
                         setMentionQuery(mention.query);
                         setSelectedMentionIndex(0);
                         setShowCommandDropdown(false);
-                      } else if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
+                      } else if (
+                        trimmed.startsWith('/') &&
+                        !trimmed.includes(' ') &&
+                        (slashQuery === '' || isSlashCommandName(slashQuery)) &&
+                        successfulAttachments.length === 0
+                      ) {
                         void loadCommandsIfNeeded();
-                        const q = trimmed.slice(1);
-                        setCommandQuery(q);
+                        setCommandQuery(slashQuery);
                         setSelectedCommandIndex(0);
                         setShowCommandDropdown(true);
                         setMentionRange(null);

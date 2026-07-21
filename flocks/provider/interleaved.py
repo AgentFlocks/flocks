@@ -38,7 +38,6 @@ _STRICT_REASONING_CONTENT_TOKENS = (
     "deepseek-v4",
     "deepseek-v4-pro",
     "deepseek-v4-flash",
-    "deepseek-reasoner",
     "deepseek-r1",
     "reasoner",
     "r1-0528",

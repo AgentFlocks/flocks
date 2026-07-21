@@ -43,7 +43,10 @@ vi.mock('react-i18next', () => ({
         return options.defaultValue;
       }
       if (key === 'upgrade.installedTitle') {
-        return `Flocks Pro ${options?.version || ''}`;
+        return `${options?.productName || ''} ${options?.version || ''}`;
+      }
+      if (key === 'upgrade.title') {
+        return `Upgrade to ${options?.productName || ''}`;
       }
       return key;
     },
@@ -107,6 +110,25 @@ describe('FlocksproUpgradePage', () => {
 
     await waitFor(() => expect(consoleUpgradeApi.getProPackageStatus).toHaveBeenCalled());
     expect(await screen.findByRole('button', { name: 'upgrade.startUpgrade' })).toBeInTheDocument();
+  });
+
+  it('uses the Pro product name when no custom display name is configured', async () => {
+    consoleUpgradeApi.listRequests.mockResolvedValue([]);
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: false,
+      runtime_importable: false,
+      install_marker_present: false,
+      pro_enabled: false,
+      license_status: 'uninstalled',
+    });
+
+    render(
+      <MemoryRouter>
+        <FlocksproUpgradePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Upgrade to Flocks Pro')).toBeInTheDocument();
   });
 
   it('shows the installed bundle version instead of the Pro component version', async () => {

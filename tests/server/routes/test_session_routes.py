@@ -35,6 +35,42 @@ from flocks.session.session import Session
 # CRUD
 # ===========================================================================
 
+
+@pytest.mark.asyncio
+async def test_missing_session_directory_uses_default_and_publishes_notice(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.project.project import Project
+    from flocks.server.routes import event as event_routes
+    from flocks.server.routes import session as session_routes
+
+    default_project = SimpleNamespace(
+        worktree=str(tmp_path),
+        path_status="available",
+    )
+    monkeypatch.setattr(Project, "get", AsyncMock(return_value=default_project))
+    publish_event = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish_event)
+
+    working_directory = await session_routes._resolve_session_working_directory(
+        SimpleNamespace(
+            id="ses_missing_directory",
+            directory=str(tmp_path / "missing"),
+        ),
+    )
+
+    assert working_directory == str(tmp_path)
+    publish_event.assert_awaited_once_with(
+        "session.notice",
+        {
+            "sessionID": "ses_missing_directory",
+            "kind": "directory-fallback",
+            "storedDirectory": str(tmp_path / "missing"),
+            "fallbackDirectory": str(tmp_path),
+        },
+    )
+
 class TestSessionCRUD:
     """Basic create / read / update / delete for sessions."""
 
@@ -235,6 +271,9 @@ class TestSessionCRUD:
         row = next(item for item in data if item["id"] == user_id)
         assert set(row) == {
             "id",
+            "projectID",
+            "effectiveProjectID",
+            "directory",
             "title",
             "time",
             "category",
@@ -246,8 +285,109 @@ class TestSessionCRUD:
             "canDelete",
             "isShared",
         }
+        assert row["projectID"]
+        assert row["directory"]
         assert "goal" not in row
         assert "summary" not in row
+
+    @pytest.mark.asyncio
+    async def test_create_session_in_user_managed_project(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Session creation can target a user-managed project."""
+        worktree = tmp_path / "labs"
+        worktree.mkdir()
+        monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
+        project_resp = await client.post(
+            "/api/project",
+            json={"name": "Labs", "worktree": str(worktree)},
+        )
+        assert project_resp.status_code == status.HTTP_200_OK
+        project = project_resp.json()
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "Project Session", "projectID": project["id"]},
+        )
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json()["projectID"] == project["id"]
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+        row = next(item for item in list_resp.json() if item["id"] == session_resp.json()["id"])
+        assert row["projectID"] == project["id"]
+        assert row["effectiveProjectID"] == project["id"]
+        assert row["directory"] == project["worktree"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_session_is_grouped_under_default_without_rewrite(
+        self,
+        client: AsyncClient,
+        tmp_path,
+    ):
+        """Legacy project IDs are projected to Default while storage stays unchanged."""
+        legacy = await Session.create(
+            project_id="legacy-git-project",
+            directory=str(tmp_path),
+            title="Legacy Session",
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={
+                "view": "list",
+                "manager": "true",
+                "roots": "true",
+                "projectID": "default",
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == legacy.id)
+        assert row["projectID"] == "legacy-git-project"
+        assert row["effectiveProjectID"] == "default"
+        stored = await Session.get("legacy-git-project", legacy.id)
+        assert stored is not None
+        assert stored.project_id == "legacy-git-project"
+
+    @pytest.mark.asyncio
+    async def test_removed_project_sessions_fall_back_to_default(
+        self,
+        client: AsyncClient,
+        tmp_path,
+    ):
+        """Removing a project keeps its sessions and maps them to Default."""
+        worktree = tmp_path / "removable-project"
+        worktree.mkdir()
+        project_response = await client.post(
+            "/api/project",
+            json={"name": "Removable", "worktree": str(worktree)},
+        )
+        project = project_response.json()
+        session_response = await client.post(
+            "/api/session",
+            json={"title": "Keep Me", "projectID": project["id"]},
+        )
+        session_id = session_response.json()["id"]
+
+        delete_response = await client.delete(f"/api/project/{project['id']}")
+        assert delete_response.status_code == status.HTTP_200_OK
+        assert worktree.exists()
+
+        default_response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "projectID": "default"},
+        )
+        row = next(item for item in default_response.json() if item["id"] == session_id)
+        assert row["projectID"] == project["id"]
+        assert row["effectiveProjectID"] == "default"
+        stored = await Session.get(project["id"], session_id)
+        assert stored is not None
 
     @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):
@@ -803,6 +943,7 @@ class TestSessionLocalSharing:
         create_resp = await client.post("/api/session", json={"title": "share-session"})
         assert create_resp.status_code == status.HTTP_200_OK
         session_id = create_resp.json()["id"]
+        assert await Session.get_by_id(session_id) is not None
 
         share_resp = await client.post(f"/api/session/{session_id}/share-local")
         assert share_resp.status_code == status.HTTP_200_OK

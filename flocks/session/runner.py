@@ -20,6 +20,9 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
 
+import httpcore
+import httpx
+
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
@@ -107,6 +110,13 @@ LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
 # spurious failures in those cases.
 LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
 
+_RETRYABLE_TRANSPORT_EXCEPTIONS = (
+    httpx.TransportError,
+    httpcore.NetworkError,
+    httpcore.ProtocolError,
+    httpcore.TimeoutException,
+)
+
 _WORKFLOW_NODE_REF_RE = re.compile(r"^@@node:([^|\n]+)\|([^\n]+)\n?([\s\S]*)$")
 
 
@@ -173,6 +183,18 @@ async def _iter_with_chunk_timeout(
             await aiter.aclose()
         except Exception:
             pass
+
+
+def _find_retryable_transport_exception(exception: Exception) -> Optional[Exception]:
+    """Return a retryable HTTP transport error from an exception chain."""
+    current: Optional[BaseException] = exception
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _RETRYABLE_TRANSPORT_EXCEPTIONS):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
 
 
 @dataclass
@@ -1341,7 +1363,12 @@ class SessionRunner:
                 
             except Exception as e:
                 error_attempt += 1
-
+                error_log_context = {
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "error_module": type(e).__module__,
+                    "error_repr": repr(e)[:1000],
+                }
                 # Convert exception to error dict for retry check
                 error_dict = self._exception_to_error_dict(e)
 
@@ -1360,7 +1387,7 @@ class SessionRunner:
                     next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
 
                     log.warn("runner.step.retry", {
-                        "error": str(e),
+                        **error_log_context,
                         "attempt": error_attempt,
                         "delay_ms": delay_ms,
                         "reason": retry_message,
@@ -1386,13 +1413,13 @@ class SessionRunner:
                     # Error is not retryable, or retry budget exhausted
                     if retry_message is not None:
                         log.error("runner.step.max_retries_exceeded", {
-                            "error": str(e),
+                            **error_log_context,
                             "attempt": error_attempt,
                             "max_retries": MAX_ERROR_RETRIES,
                         })
                     else:
                         log.error("runner.step.not_retryable", {
-                            "error": str(e),
+                            **error_log_context,
                             "attempt": error_attempt,
                         })
 
@@ -1797,8 +1824,23 @@ class SessionRunner:
             "message": str(exception),
             "data": {
                 "message": str(exception),
+                "exceptionType": type(exception).__name__,
+                "exceptionModule": type(exception).__module__,
             }
         }
+
+        transport_exception = _find_retryable_transport_exception(exception)
+        if transport_exception is not None:
+            transport_type = type(transport_exception).__name__
+            error_dict["name"] = "APIError"
+            error_dict["data"].update({
+                "message": str(exception) or f"Transport connection error ({transport_type})",
+                "isRetryable": True,
+                "isConnectionError": True,
+                "displayMessage": CONNECTION_ERROR_DISPLAY_MESSAGE,
+                "transportExceptionType": transport_type,
+                "transportExceptionModule": type(transport_exception).__module__,
+            })
         
         # Check if it's an API error with specific attributes
         if hasattr(exception, 'status_code'):

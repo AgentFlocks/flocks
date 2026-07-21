@@ -1,10 +1,11 @@
 import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   MessageSquare, Plus, Trash2,
-  ChevronDown, Sparkles, Shield, Search, AlertTriangle,
+  ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
+  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -31,6 +32,7 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2, Session } from '@/types';
+import { useAuth } from '@/contexts/AuthContext';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -47,6 +49,43 @@ const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+type ProjectSummary = {
+  id: string;
+  worktree: string;
+  vcs?: string | null;
+  name?: string | null;
+  isDefault?: boolean;
+  pathStatus?: 'available' | 'missing' | 'unreadable';
+  sessionCount?: number;
+  matchedSessionCount?: number;
+  lastActivityAt?: number | null;
+  ownerUserID?: string | null;
+  canWrite?: boolean;
+  canDelete?: boolean;
+  isShared?: boolean;
+};
+type ProjectDialogMode = 'create' | 'rename';
+type ProjectSessionGroup = {
+  id: string;
+  label: string;
+  worktree: string;
+  sessions: Session[];
+  sessionCount: number;
+  isDefault: boolean;
+  pathStatus: 'available' | 'missing' | 'unreadable';
+  canWrite: boolean;
+  canDelete: boolean;
+  isShared: boolean;
+};
+type FolderEntry = { name: string; path: string };
+type FolderBrowserResponse = {
+  path: string;
+  parent?: string | null;
+  roots: FolderEntry[];
+  entries: FolderEntry[];
+};
+const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
+const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -123,82 +162,22 @@ function makeModelKey(providerID: string, modelID: string): string {
   return `${providerID}::${modelID}`;
 }
 
-export type SessionGroupKey = 'today' | 'yesterday' | 'thisWeek' | 'lastWeek' | 'earlier';
-
-export interface SessionGroup {
-  key: SessionGroupKey;
-  labelKey: string;
-  items: Session[];
+function getPathBasename(path: string): string {
+  const normalized = path.replace(/[\\/]+$/g, '');
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path || 'Project';
 }
 
-const SESSION_GROUP_DEFAULT_LIMIT: Record<SessionGroupKey, number> = {
-  today: Infinity,
-  yesterday: Infinity,
-  thisWeek: 5,
-  lastWeek: 5,
-  earlier: 5,
-};
-
-const SESSION_GROUP_DEFS: Array<Pick<SessionGroup, 'key' | 'labelKey'>> = [
-  { key: 'today', labelKey: 'groupToday' },
-  { key: 'yesterday', labelKey: 'groupYesterday' },
-  { key: 'thisWeek', labelKey: 'groupThisWeek' },
-  { key: 'lastWeek', labelKey: 'groupLastWeek' },
-  { key: 'earlier', labelKey: 'groupEarlier' },
-];
-
-export function groupSessionsByDate(
-  sessions: Session[],
-  searchQuery: string,
-  now = new Date(),
-): SessionGroup[] {
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterdayStart = todayStart - 86400000;
-  const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
-  const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
-  const lastWeekStart = thisWeekStart - 7 * 86400000;
-
-  const q = searchQuery.toLowerCase().trim();
-  const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
-  const buckets: SessionGroup[] = SESSION_GROUP_DEFS.map((group) => ({
-    ...group,
-    items: [],
-  }));
-
-  for (const session of filtered) {
-    const ts = session.time?.updated ?? 0;
-    if (ts >= todayStart) buckets[0].items.push(session);
-    else if (ts >= yesterdayStart) buckets[1].items.push(session);
-    else if (ts >= thisWeekStart) buckets[2].items.push(session);
-    else if (ts >= lastWeekStart) buckets[3].items.push(session);
-    else buckets[4].items.push(session);
-  }
-
-  return buckets.filter(group => group.items.length > 0);
-}
-
-export function getVisibleSessionGroupItems({
-  group,
-  expanded,
-  searching,
-}: {
-  group: SessionGroup;
-  expanded: boolean;
-  searching: boolean;
-}): { visibleItems: Session[]; hiddenCount: number; limit: number } {
-  const limit = searching ? Infinity : SESSION_GROUP_DEFAULT_LIMIT[group.key];
-  const visibleItems = (searching || expanded || group.items.length <= limit)
-    ? group.items
-    : group.items.slice(0, limit);
-  return {
-    visibleItems,
-    hiddenCount: group.items.length - visibleItems.length,
-    limit,
-  };
+function getProjectLabel(project?: ProjectSummary, fallbackDirectory?: string): string {
+  const explicitName = project?.name?.trim();
+  if (explicitName) return explicitName;
+  const directory = project?.worktree || fallbackDirectory || '';
+  return getPathBasename(directory);
 }
 
 interface SessionSidebarItemProps {
   session: Session;
+  nested?: boolean;
   selected: boolean;
   selectMode: boolean;
   checked: boolean;
@@ -218,6 +197,7 @@ interface SessionSidebarItemProps {
 
 function SessionSidebarItemInner({
   session,
+  nested = false,
   selected,
   selectMode,
   checked,
@@ -237,12 +217,16 @@ function SessionSidebarItemInner({
   return (
     <div
       onClick={() => onSelect(session.id)}
-      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+      className={`group relative mb-1 cursor-pointer border px-3 transition-all duration-150 ${
+        nested ? 'ml-7 mr-2 rounded-lg py-2' : 'mx-2 rounded-xl py-2.5'
+      } ${
         !selectMode && selected
-          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          ? 'border-gray-300 bg-gray-100 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
           : selectMode && checked
           ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+          : nested
+            ? 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 dark:border-zinc-800 dark:hover:bg-zinc-900'
+            : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
       }`}
     >
       <div className="flex items-center gap-1.5 min-w-0 pr-7">
@@ -322,6 +306,7 @@ function SessionSidebarItemInner({
 
 const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.session.id === next.session.id &&
+  prev.nested === next.nested &&
   prev.session.title === next.session.title &&
   prev.session.category === next.session.category &&
   prev.session.isShared === next.session.isShared &&
@@ -338,6 +323,10 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
+  const { user } = useAuth();
+  const activeProjectStorageKey = `flocks:sessions:active-project:${user?.id ?? 'anonymous'}`;
+  const collapsedProjectsStorageKey = `flocks:sessions:collapsed-projects:${user?.id ?? 'anonymous'}`;
+  const projectsSectionCollapsedStorageKey = `flocks:sessions:projects-section-collapsed:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -355,6 +344,34 @@ export default function SessionPage() {
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(collapsedProjectsStorageKey) ?? '[]');
+      return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const [projectsSectionCollapsed, setProjectsSectionCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(projectsSectionCollapsedStorageKey) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [projectDialogMode, setProjectDialogMode] = useState<ProjectDialogMode | null>(null);
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const [projectPendingDelete, setProjectPendingDelete] = useState<ProjectSessionGroup | null>(null);
+  const [projectDeleting, setProjectDeleting] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [projectNameValue, setProjectNameValue] = useState('');
+  const [projectWorktreeValue, setProjectWorktreeValue] = useState('');
+  const [projectNameManuallyEdited, setProjectNameManuallyEdited] = useState(false);
+  const [folderBrowser, setFolderBrowser] = useState<FolderBrowserResponse | null>(null);
+  const [folderBrowserLoading, setFolderBrowserLoading] = useState(false);
+  const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
@@ -369,9 +386,17 @@ export default function SessionPage() {
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
+  const projectSubmitInFlightRef = useRef(false);
+  const folderBrowserRequestIdRef = useRef(0);
+  const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
 
+  const sessionProjectIds = useMemo(
+    () => projects.map((project) => project.id),
+    [projects],
+  );
   const {
     sessions,
     loading: loadingSessions,
@@ -380,10 +405,15 @@ export default function SessionPage() {
     removeSession,
     removeSessions,
     addSession,
-    hasMore: hasMoreSessions,
-    loadingMore: loadingMoreSessions,
+    hasMoreByProject = {},
+    loadingMoreProjectIds = new Set<string>(),
     loadMore: loadMoreSessions,
-  } = useSessions(searchQuery);
+  } = useSessions(searchQuery, {
+    projectIds: sessionProjectIds,
+    pageSize: projects.length >= 2
+      ? MULTI_PROJECT_SESSION_PAGE_SIZE
+      : SINGLE_PROJECT_SESSION_PAGE_SIZE,
+  });
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const {
@@ -498,44 +528,172 @@ export default function SessionPage() {
   } = useResolvedDefaultModel(chatModelOptions.length > 0 && !hasPinnedModelOption);
   const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
 
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const toggleGroupExpand = useCallback((key: string) => {
-    setExpandedGroups(prev => {
+  const toggleProjectCollapsed = useCallback((projectId: string) => {
+    setCollapsedProjectIds(prev => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      next.has(projectId) ? next.delete(projectId) : next.add(projectId);
       return next;
     });
   }, []);
 
-  const groupedSessions = useMemo(() => {
-    return groupSessionsByDate(sessions, searchQuery);
-  }, [sessions, searchQuery]);
-  const visibleSessionGroups = useMemo(() => {
-    const searching = searchQuery.trim().length > 0;
-    return groupedSessions.map((group) => ({
-      ...group,
-      ...getVisibleSessionGroupItems({
-        group,
-        expanded: expandedGroups.has(group.key),
-        searching,
-      }),
-      expanded: expandedGroups.has(group.key),
-      searching,
-    }));
-  }, [expandedGroups, groupedSessions, searchQuery]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        collapsedProjectsStorageKey,
+        JSON.stringify(Array.from(collapsedProjectIds)),
+      );
+    } catch {
+      // Project collapse persistence must never block the session manager.
+    }
+  }, [collapsedProjectIds, collapsedProjectsStorageKey]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        projectsSectionCollapsedStorageKey,
+        String(projectsSectionCollapsed),
+      );
+    } catch {
+      // Section collapse persistence must never block the session manager.
+    }
+  }, [projectsSectionCollapsed, projectsSectionCollapsedStorageKey]);
+
+  const defaultProjectId = useMemo(
+    () => projects.find((project) => project.isDefault)?.id ?? projects[0]?.id ?? null,
+    [projects],
+  );
+
+  const projectSessionGroups = useMemo<ProjectSessionGroup[]>(() => {
+    const registeredIds = new Set(projects.map((project) => project.id));
+    const sessionsByProject = new Map<string, Session[]>();
+    sessions.forEach((session) => {
+      const responseProjectId = session.effectiveProjectID || session.projectID;
+      const projectId = registeredIds.has(responseProjectId)
+        ? responseProjectId
+        : defaultProjectId;
+      if (!projectId) return;
+      const groupSessions = sessionsByProject.get(projectId) ?? [];
+      groupSessions.push(session);
+      sessionsByProject.set(projectId, groupSessions);
+    });
+
+    return projects.map((project) => {
+      const isDefault = project.isDefault ?? project.id === defaultProjectId;
+      const projectSessions = sessionsByProject.get(project.id) ?? [];
+      return {
+        id: project.id,
+        label: isDefault ? t('defaultProjectName') : getProjectLabel(project),
+        worktree: project.worktree,
+        sessions: projectSessions,
+        sessionCount: searchQuery.trim()
+          ? project.matchedSessionCount ?? projectSessions.length
+          : project.sessionCount ?? projectSessions.length,
+        isDefault,
+        pathStatus: project.pathStatus ?? 'available',
+        canWrite: project.canWrite ?? true,
+        canDelete: project.canDelete ?? true,
+        isShared: project.isShared ?? false,
+      };
+    })
+      .filter((group) => {
+        if (!searchQuery.trim()) return true;
+        if (group.isDefault) return true;
+        const project = projects.find((item) => item.id === group.id);
+        return (project?.matchedSessionCount ?? group.sessions.length) > 0 || group.id === selectedProjectId;
+      })
+      .sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+        const aLatest = projects.find((project) => project.id === a.id)?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
+        const bLatest = projects.find((project) => project.id === b.id)?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
+        if (aLatest !== bLatest) return bLatest - aLatest;
+        return a.label.localeCompare(b.label);
+      });
+  }, [defaultProjectId, projects, searchQuery, selectedProjectId, sessions, t]);
+
+  const managedProjectSessionGroups = useMemo(
+    () => projectSessionGroups.filter((group) => !group.isDefault),
+    [projectSessionGroups],
+  );
+  const taskSessionGroup = useMemo(
+    () => projectSessionGroups.find((group) => group.isDefault) ?? null,
+    [projectSessionGroups],
+  );
+  const taskGroupCollapsed = taskSessionGroup
+    ? collapsedProjectIds.has(taskSessionGroup.id)
+    : false;
+  const taskGroupSelected = taskSessionGroup?.id === selectedProjectId;
+  const hasMoreTaskSessions = taskSessionGroup
+    ? projects.length >= 2
+      ? taskSessionGroup.sessions.length < taskSessionGroup.sessionCount
+      : hasMoreByProject[taskSessionGroup.id]
+    : false;
+
+  const selectedProjectIDForCreate = selectedProjectId ?? defaultProjectId ?? projectSessionGroups[0]?.id ?? null;
+
+  useEffect(() => {
+    if (projectSessionGroups.length === 0) {
+      setSelectedProjectId(null);
+      return;
+    }
+
+    if (selectedProjectId && projectSessionGroups.some((group) => group.id === selectedProjectId)) {
+      return;
+    }
+
+    let storedProjectId: string | null = null;
+    try {
+      storedProjectId = window.localStorage.getItem(activeProjectStorageKey);
+    } catch {
+      storedProjectId = null;
+    }
+    const fallbackProjectId = storedProjectId && projectSessionGroups.some((group) => group.id === storedProjectId)
+      ? storedProjectId
+      : defaultProjectId && projectSessionGroups.some((group) => group.id === defaultProjectId)
+        ? defaultProjectId
+        : projectSessionGroups[0].id;
+    setSelectedProjectId(fallbackProjectId);
+  }, [activeProjectStorageKey, defaultProjectId, projectSessionGroups, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !projects.some((project) => project.id === selectedProjectId)) return;
+    try {
+      window.localStorage.setItem(activeProjectStorageKey, selectedProjectId);
+    } catch {
+      // Active project persistence must never block the session manager.
+    }
+  }, [activeProjectStorageKey, projects, selectedProjectId]);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
     toast.error(t('chat.error', 'Error'), msg);
   }, [toast, t]);
 
+  const fetchProjects = useCallback(async (ensureProject?: ProjectSummary, query = '') => {
+    const requestSeq = ++projectListRequestSeqRef.current;
+    const listResult = await client.get('/api/project', {
+      params: { search: query.trim() || undefined },
+    });
+    if (requestSeq !== projectListRequestSeqRef.current) return;
+    const nextProjects = Array.isArray(listResult.data) ? listResult.data : [];
+    setProjects((currentProjects) => {
+      if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
+        return nextProjects;
+      }
+      const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
+      return [{ ...currentProject, ...ensureProject }, ...nextProjects];
+    });
+  }, []);
+
   const scheduleSessionListRefetch = useCallback(() => {
     if (sessionUpdateRefetchTimerRef.current !== null) return;
     sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
       sessionUpdateRefetchTimerRef.current = null;
-      void refetchSessions();
+      void Promise.all([
+        refetchSessions(),
+        fetchProjects(undefined, searchQuery),
+      ]);
     }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
-  }, [refetchSessions]);
+  }, [fetchProjects, refetchSessions, searchQuery]);
 
   useEffect(() => () => {
     if (sessionUpdateRefetchTimerRef.current !== null) {
@@ -545,6 +703,15 @@ export default function SessionPage() {
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    if (event.type === 'session.notice' && event.properties?.kind === 'directory-fallback') {
+      toast.warning(
+        t('projectDirectoryFallbackTitle'),
+        t('projectDirectoryFallbackDescription', {
+          path: event.properties.fallbackDirectory,
+        }),
+      );
+      return;
+    }
     if (event.type === 'session.updated' && event.properties?.id) {
       if (event.properties?.title) {
         // Instant local title update so the sidebar reflects the change immediately.
@@ -555,7 +722,18 @@ export default function SessionPage() {
       // those bursts don't turn into a request/re-render storm.
       scheduleSessionListRefetch();
     }
-  }, [scheduleSessionListRefetch, updateSessionTitle]);
+  }, [scheduleSessionListRefetch, t, toast, updateSessionTitle]);
+
+  useEffect(() => {
+    void fetchProjects(undefined, searchQuery);
+  }, [fetchProjects, searchQuery]);
+
+  useEffect(() => {
+    if (!openProjectMenuId) return;
+    const closeMenu = () => setOpenProjectMenuId(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [openProjectMenuId]);
 
   // Keep the selected session in sync with URL query params (e.g. onboarding
   // or other in-app navigation to `/sessions?session=...`). Clear the params
@@ -722,13 +900,26 @@ export default function SessionPage() {
     setRenameValue('');
   }, [selectMode]);
 
-  const handleCreateSession = useCallback(async () => {
+  const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
+    const projectID = projectIdOverride ?? selectedProjectIDForCreate;
     setCreating(true);
     try {
-      const response = await client.post('/api/session', { title: 'New Session' });
+      const response = await client.post('/api/session', {
+        title: 'New Session',
+        ...(projectID ? { projectID } : {}),
+      });
       addSession(response.data);
+      await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
+      if (projectID) {
+        setSelectedProjectId(projectID);
+        setCollapsedProjectIds(prev => {
+          const next = new Set(prev);
+          next.delete(projectID);
+          return next;
+        });
+      }
       setSelectedAgent('rex');
       setSelectedModelKey(null);
       setSelectedSessionId(response.data.id);
@@ -737,7 +928,11 @@ export default function SessionPage() {
     } finally {
       setCreating(false);
     }
-  }, [creating, addSession, toast, t]);
+  }, [creating, selectedProjectIDForCreate, addSession, fetchProjects, searchQuery, toast, t]);
+
+  const handleCreateSessionInProject = useCallback((projectId: string) => {
+    void handleCreateSession(projectId);
+  }, [handleCreateSession]);
 
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     setSelectedModelKey(option.key);
@@ -764,10 +959,14 @@ export default function SessionPage() {
     options?: PromptDisplayOptions,
   ) => {
     try {
-      const response = await client.post('/api/session', { title: 'New Session' });
+      const response = await client.post('/api/session', {
+        title: 'New Session',
+        ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
+      });
       const newSessionId = response.data.id;
 
       addSession(response.data);
+      await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
       setSelectedModelKey(null);
       setSelectedSessionId(newSessionId);
@@ -785,7 +984,7 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, selectedAgent, toast, t]);
+  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedProjectIDForCreate, toast, t]);
 
   const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
@@ -861,10 +1060,11 @@ export default function SessionPage() {
       // No need to refetchSessions — removeSession already keeps the list accurate.
       if (selectedSessionId === sessionId) setSelectedSessionId(null);
       removeSession(sessionId);
+      await fetchProjects(undefined, searchQuery);
     } catch (err: any) {
       toast.error(t('deleteFailed'), err.message);
     }
-  }, [selectedSessionId, removeSession, toast, t]);
+  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
 
   const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
     setOpenMenuSessionId(null);
@@ -907,6 +1107,212 @@ export default function SessionPage() {
       setRenameSubmitting(false);
     }
   }, [renameValue, sessions, t, toast, updateSessionTitle]);
+
+  const handleOpenCreateProject = useCallback(() => {
+    setProjectDialogMode('create');
+    setEditingProjectId(null);
+    setProjectWorktreeValue('');
+    setProjectNameValue('');
+    setProjectNameManuallyEdited(false);
+    setFolderBrowser(null);
+  }, []);
+
+  const handleOpenRenameProject = useCallback((project: ProjectSessionGroup) => {
+    const persistedName = projects.find((item) => item.id === project.id)?.name?.trim();
+    setOpenProjectMenuId(null);
+    setProjectDialogMode('rename');
+    setEditingProjectId(project.id);
+    setProjectNameValue(persistedName && persistedName !== getPathBasename(project.worktree)
+      ? persistedName
+      : project.label);
+    setProjectWorktreeValue(project.worktree);
+    setProjectNameManuallyEdited(true);
+    setFolderBrowser(null);
+  }, [projects]);
+
+  const handleCloseProjectDialog = useCallback(() => {
+    if (projectSubmitting) return;
+    setProjectDialogMode(null);
+    setEditingProjectId(null);
+    setProjectNameValue('');
+    setProjectWorktreeValue('');
+    setProjectNameManuallyEdited(false);
+    setFolderBrowser(null);
+  }, [projectSubmitting]);
+
+  const loadFolderBrowser = useCallback(async (
+    path?: string,
+    options?: { preserveInput?: boolean; silent?: boolean },
+  ) => {
+    const requestId = ++folderBrowserRequestIdRef.current;
+    setFolderBrowserLoading(true);
+    try {
+      const response = await client.get('/api/project/folders', {
+        params: { path: path?.trim() || undefined },
+      });
+      if (requestId !== folderBrowserRequestIdRef.current) return;
+      const browser = response.data as FolderBrowserResponse;
+      setFolderBrowser(browser);
+      if (options?.preserveInput) {
+        folderBrowserInputPathRef.current = path?.trim() || browser.path;
+      } else {
+        folderBrowserInputPathRef.current = browser.path;
+        setProjectWorktreeValue(browser.path);
+      }
+    } catch (err: any) {
+      if (requestId === folderBrowserRequestIdRef.current && !options?.silent) {
+        toast.error(t('projectDialog.folderBrowseFailed'), err.message);
+      }
+    } finally {
+      if (requestId === folderBrowserRequestIdRef.current) {
+        setFolderBrowserLoading(false);
+      }
+    }
+  }, [t, toast]);
+
+  useEffect(() => {
+    if (!folderBrowser) return undefined;
+    const path = projectWorktreeValue.trim();
+    if (
+      !path
+      || path === folderBrowser.path
+      || path === folderBrowserInputPathRef.current
+    ) return undefined;
+
+    const timer = window.setTimeout(() => {
+      void loadFolderBrowser(path, { preserveInput: true, silent: true });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [folderBrowser, loadFolderBrowser, projectWorktreeValue]);
+
+  const handleSelectProjectFolder = useCallback((path: string) => {
+    setProjectWorktreeValue(path);
+    if (!projectNameManuallyEdited) {
+      setProjectNameValue(getPathBasename(path));
+    }
+    setFolderBrowser(null);
+  }, [projectNameManuallyEdited]);
+
+  const handleCopyProjectPath = useCallback(async (project: ProjectSessionGroup) => {
+    setOpenProjectMenuId(null);
+    try {
+      await navigator.clipboard.writeText(project.worktree);
+      toast.success(t('projectDialog.pathCopied'));
+    } catch (err: any) {
+      toast.error(t('projectDialog.copyPathFailed'), err.message);
+    }
+  }, [t, toast]);
+
+  const handleShareProject = useCallback(async (
+    project: ProjectSessionGroup,
+    nextShared: boolean,
+  ) => {
+    setOpenProjectMenuId(null);
+    try {
+      const action = nextShared ? 'share-local' : 'unshare-local';
+      await client.post(`/api/project/${project.id}/${action}`);
+      toast.success(t(nextShared ? 'shareEnabled' : 'shareDisabled'));
+      await Promise.all([
+        fetchProjects(undefined, searchQuery),
+        refetchSessions(),
+      ]);
+    } catch (err: any) {
+      toast.error(t('shareUpdateFailed'), err.message);
+    }
+  }, [fetchProjects, refetchSessions, searchQuery, t, toast]);
+
+  const handleOpenDeleteProject = useCallback((project: ProjectSessionGroup) => {
+    setOpenProjectMenuId(null);
+    setProjectPendingDelete(project);
+  }, []);
+
+  const handleDeleteProject = useCallback(async () => {
+    if (!projectPendingDelete || projectDeleting) return;
+
+    setProjectDeleting(true);
+    try {
+      await client.delete(`/api/project/${projectPendingDelete.id}`);
+      setProjects((current) => current.filter((project) => project.id !== projectPendingDelete.id));
+      setCollapsedProjectIds((current) => {
+        const next = new Set(current);
+        next.delete(projectPendingDelete.id);
+        return next;
+      });
+      setSelectedProjectId((current) => (
+        current === projectPendingDelete.id ? defaultProjectId : current
+      ));
+      setProjectPendingDelete(null);
+      await Promise.all([
+        fetchProjects(undefined, searchQuery),
+        refetchSessions(),
+      ]);
+      toast.success(t('projectDialog.deleteSuccess'));
+    } catch (err: any) {
+      toast.error(t('projectDialog.deleteFailed'), err.message);
+    } finally {
+      setProjectDeleting(false);
+    }
+  }, [defaultProjectId, fetchProjects, projectDeleting, projectPendingDelete, refetchSessions, searchQuery, t, toast]);
+
+  const handleSubmitProject = useCallback(async () => {
+    if (!projectDialogMode || projectSubmitInFlightRef.current) return;
+    const nextWorktree = projectWorktreeValue.trim() || folderBrowser?.path.trim() || '';
+    const nextName = projectNameValue.trim() || (
+      projectDialogMode === 'create' && !projectNameManuallyEdited && nextWorktree
+        ? getPathBasename(nextWorktree)
+        : ''
+    );
+    if (!nextName) {
+      toast.error(t('projectDialog.saveFailed'), t('projectDialog.nameEmpty'));
+      return;
+    }
+    if (projectDialogMode === 'create' && !nextWorktree) {
+      toast.error(t('projectDialog.saveFailed'), t('projectDialog.folderEmpty'));
+      return;
+    }
+
+    projectSubmitInFlightRef.current = true;
+    setProjectSubmitting(true);
+    try {
+      if (projectDialogMode === 'create') {
+        const response = await client.post('/api/project', {
+          name: nextName,
+          worktree: nextWorktree,
+        });
+        const createdProject = response.data as ProjectSummary;
+        setProjects(prev => (
+          prev.some((project) => project.id === createdProject.id)
+            ? prev.map((project) => (project.id === createdProject.id ? createdProject : project))
+            : [createdProject, ...prev]
+        ));
+        setSelectedProjectId(createdProject.id);
+        setCollapsedProjectIds(prev => {
+          const next = new Set(prev);
+          next.delete(createdProject.id);
+          return next;
+        });
+        await fetchProjects(createdProject);
+      } else if (editingProjectId) {
+        const response = await client.patch(`/api/project/${editingProjectId}`, { name: nextName });
+        await fetchProjects(response.data as ProjectSummary);
+      }
+      setProjectDialogMode(null);
+      setEditingProjectId(null);
+      setProjectNameValue('');
+      setProjectWorktreeValue('');
+      setProjectNameManuallyEdited(false);
+      setFolderBrowser(null);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(
+        t('projectDialog.saveFailed'),
+        typeof detail === 'string' ? detail : err?.message,
+      );
+    } finally {
+      projectSubmitInFlightRef.current = false;
+      setProjectSubmitting(false);
+    }
+  }, [editingProjectId, fetchProjects, folderBrowser?.path, projectDialogMode, projectNameManuallyEdited, projectNameValue, projectWorktreeValue, t, toast]);
 
   const handleDownloadSession = useCallback(async (sessionId: string, title: string) => {
     setOpenMenuSessionId(null);
@@ -1011,6 +1417,7 @@ export default function SessionPage() {
     }));
     if (succeeded.length > 0) {
       removeSessions(succeeded);
+      await fetchProjects(undefined, searchQuery);
       if (selectedSessionId && succeeded.includes(selectedSessionId)) {
         setSelectedSessionId(null);
       }
@@ -1023,7 +1430,101 @@ export default function SessionPage() {
       setSelectMode(false);
     }
     setBatchDeleting(false);
-  }, [checkedIds, batchDeleting, removeSessions, selectedSessionId, toast, t]);
+  }, [batchDeleting, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
+
+  const renderSessionListItem = (session: Session) => (
+    <div
+      key={session.id}
+      onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
+      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+        !selectMode && selectedSessionId === session.id
+          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          : selectMode && checkedIds.has(session.id)
+          ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
+          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+      }`}
+    >
+      <div className="flex items-center gap-1.5 min-w-0 pr-7">
+        {selectMode && (
+          <input
+            type="checkbox"
+            checked={checkedIds.has(session.id)}
+            onChange={() => handleToggleCheck(session.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+          />
+        )}
+        {session.category === 'workflow' && (
+          <span title={t('workflowSession')} className="flex-shrink-0">
+            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+          </span>
+        )}
+        {session.category === 'entity-config' && (
+          <span title={t('configSession')} className="flex-shrink-0">
+            <Settings2 className="w-3 h-3 text-purple-400" />
+          </span>
+        )}
+        {renamingSessionId === session.id ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => void handleSubmitRename(session.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void handleSubmitRename(session.id); }
+              if (e.key === 'Escape') { e.preventDefault(); handleCancelRename(); }
+            }}
+            placeholder={t('renamePlaceholder')}
+            disabled={renameSubmitting}
+            className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+            aria-label={t('rename')}
+            data-session-rename-input
+          />
+        ) : (
+          <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+            <span className="truncate">{session.title}</span>
+            {session.isShared && (
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                {t('sharedTag')}
+              </span>
+            )}
+          </h3>
+        )}
+      </div>
+      {session.time?.updated && renamingSessionId !== session.id && (
+        <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
+          {formatSessionDate(session.time.updated)}
+        </p>
+      )}
+
+      {!selectMode && (
+        <div className="absolute right-1.5 top-2" data-session-actions>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (openMenuSessionId === session.id) {
+                setOpenMenuSessionId(null);
+                setMenuAnchor(null);
+              } else {
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                setOpenMenuSessionId(session.id);
+              }
+            }}
+            title={t('moreActions')}
+            aria-label={t('moreActions')}
+            aria-expanded={openMenuSessionId === session.id}
+            className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
+              openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <MoreHorizontal className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
 
   if (loadingSessions) {
     return (
@@ -1048,7 +1549,7 @@ export default function SessionPage() {
               ? <Loader2 className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-gray-400 pointer-events-none" />
               : <Plus className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />}
             <button
-              onClick={handleCreateSession}
+              onClick={() => void handleCreateSession()}
               disabled={creating}
               className="w-full pl-8 pr-3 py-2 text-left bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-800"
             >
@@ -1068,74 +1569,310 @@ export default function SessionPage() {
 
         {/* Session list */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide pb-2">
-          {sessions.length === 0 ? (
+          {sessions.length === 0 && projectSessionGroups.length === 0 ? (
             <div className="text-center py-10 px-4 text-gray-400">
               <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-40" />
               <p className="text-sm">{t('noSessions')}</p>
             </div>
-          ) : groupedSessions.length === 0 ? (
+          ) : projectSessionGroups.length === 0 ? (
             <div className="text-center py-8 px-4 text-gray-400">
               <p className="text-sm">{t('noResults', 'No conversations found')}</p>
             </div>
           ) : (
-            visibleSessionGroups.map(({ key, labelKey, items, visibleItems, hiddenCount, limit, expanded, searching }) => (
-              <div key={key}>
-                <div className="px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
-                  {t(labelKey, labelKey)}
+            <div>
+              <section className="group/projects-section">
+                <div className="flex items-center justify-between px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
+                  <button
+                    type="button"
+                    onClick={() => setProjectsSectionCollapsed((collapsed) => !collapsed)}
+                    className="flex items-center gap-1 rounded text-left transition-colors hover:text-gray-700 dark:hover:text-zinc-300"
+                    aria-label={t('toggleProjects')}
+                  >
+                    <span>{t('projectsSection')}</span>
+                    {projectsSectionCollapsed
+                      ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleOpenCreateProject}
+                    className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                    title={t('projectDialog.createTitle')}
+                    aria-label={t('projectDialog.createTitle')}
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                  </button>
                 </div>
-                {visibleItems.map((session) => (
-                  <SessionSidebarItem
-                    key={session.id}
-                    session={session}
-                    selected={selectedSessionId === session.id}
-                    selectMode={selectMode}
-                    checked={checkedIds.has(session.id)}
-                    menuOpen={openMenuSessionId === session.id}
-                    renaming={renamingSessionId === session.id}
-                    renameValue={renameValue}
-                    renameSubmitting={renameSubmitting}
-                    t={t}
-                    renameInputRef={renameInputRef}
-                    onSelect={handleSelectSessionRow}
-                    onToggleCheck={handleToggleCheck}
-                    onRenameValueChange={setRenameValue}
-                    onSubmitRename={handleSubmitRename}
-                    onCancelRename={handleCancelRename}
-                    onToggleMenu={handleToggleSessionMenu}
-                  />
-                ))}
-                {/* 展开/收起按钮 */}
-                {!searching && hiddenCount > 0 && (
-                  <button
-                    onClick={() => toggleGroupExpand(key)}
-                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
-                  >
-                    <ChevronDown className="w-3 h-3" />
-                    <span>{t('showMore', { count: hiddenCount })}</span>
-                  </button>
+                {!projectsSectionCollapsed && (
+                  <div className="space-y-2">
+                {managedProjectSessionGroups.map((group) => {
+                  const collapsed = collapsedProjectIds.has(group.id);
+                  const isDefaultProject = group.isDefault;
+                  const isSelectedProject = selectedProjectId === group.id;
+                  const hasMoreProjectSessions = projects.length >= 2
+                    ? group.sessions.length < group.sessionCount
+                    : hasMoreByProject[group.id];
+                  const persistedProject = projects.find((project) => project.id === group.id);
+                  return (
+                    <div key={group.id} className="group/project relative">
+                      <div
+                        className={`mx-2 flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm transition-colors ${
+                          isSelectedProject
+                            ? 'bg-gray-100 text-gray-900 dark:bg-zinc-900 dark:text-zinc-100'
+                            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
+                        }`}
+                        title={group.worktree}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedProjectId(group.id);
+                            toggleProjectCollapsed(group.id);
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
+                          aria-label={t('selectProject', { project: group.label })}
+                          aria-expanded={!collapsed}
+                        >
+                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
+                          <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                          {group.isShared && (
+                            <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
+                              {t('sharedTag')}
+                            </span>
+                          )}
+                          {group.pathStatus !== 'available' && (
+                            <AlertTriangle
+                              className="h-3.5 w-3.5 shrink-0 text-amber-500"
+                              aria-label={t('projectPathUnavailable')}
+                            />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleCreateSessionInProject(group.id);
+                          }}
+                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
+                          className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                          title={t('createSessionInProject', { project: group.label })}
+                          aria-label={t('createSessionInProject', { project: group.label })}
+                        >
+                          {creating && isSelectedProject ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+                        </button>
+                        {persistedProject && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setOpenProjectMenuId((current) => current === group.id ? null : group.id);
+                            }}
+                            className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                            title={t('projectActions')}
+                            aria-label={t('projectActions')}
+                            aria-expanded={openProjectMenuId === group.id}
+                          >
+                            <MoreHorizontal className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <span className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] tabular-nums text-gray-400 dark:bg-zinc-800 dark:text-zinc-500">
+                          {group.sessionCount}
+                        </span>
+                      </div>
+                      {persistedProject && openProjectMenuId === group.id && (
+                        <div
+                          className="absolute right-8 top-8 z-30 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                          role="menu"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => void handleCopyProjectPath(group)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            {t('projectDialog.copyPathAction')}
+                          </button>
+                          {!isDefaultProject && group.canWrite && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => void handleShareProject(group, !group.isShared)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <Share2 className="h-3.5 w-3.5" />
+                            {t(group.isShared ? 'unshareAction' : 'shareAction')}
+                          </button>
+                          )}
+                          {!isDefaultProject && group.canWrite && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => handleOpenRenameProject(group)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <PencilLine className="h-3.5 w-3.5" />
+                            {t('projectDialog.renameAction')}
+                          </button>
+                          )}
+                          {!isDefaultProject && group.canDelete && (
+                          <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                          )}
+                          {!isDefaultProject && group.canDelete && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => handleOpenDeleteProject(group)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/40"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t('projectDialog.deleteAction')}
+                          </button>
+                          )}
+                        </div>
+                      )}
+                      {!collapsed && (
+                        <div className="mt-1.5">
+                          {group.sessions.length > 0 ? (
+                            group.sessions.map((session) => (
+                              <SessionSidebarItem
+                                key={session.id}
+                                session={session}
+                                nested
+                                selected={selectedSessionId === session.id}
+                                selectMode={selectMode}
+                                checked={checkedIds.has(session.id)}
+                                menuOpen={openMenuSessionId === session.id}
+                                renaming={renamingSessionId === session.id}
+                                renameValue={renameValue}
+                                renameSubmitting={renameSubmitting}
+                                t={t}
+                                renameInputRef={renameInputRef}
+                                onSelect={handleSelectSessionRow}
+                                onToggleCheck={handleToggleCheck}
+                                onRenameValueChange={setRenameValue}
+                                onSubmitRename={handleSubmitRename}
+                                onCancelRename={handleCancelRename}
+                                onToggleMenu={handleToggleSessionMenu}
+                              />
+                            ))
+                          ) : (
+                            <div className="ml-7 mr-2 rounded-lg px-3 py-2 text-xs text-gray-400 dark:text-zinc-600">
+                              {t('noProjectSessions')}
+                            </div>
+                          )}
+                          {hasMoreProjectSessions && (
+                            <div className="ml-7 mr-2 py-1">
+                              <button
+                                type="button"
+                                onClick={() => void loadMoreSessions(group.id)}
+                                disabled={loadingMoreProjectIds.has(group.id)}
+                                className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                              >
+                                {loadingMoreProjectIds.has(group.id)
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <ChevronDown className="h-3 w-3" />}
+                                {t('loadMore', 'Load more')}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                  </div>
                 )}
-                {!searching && expanded && items.length > limit && (
-                  <button
-                    onClick={() => toggleGroupExpand(key)}
-                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
-                  >
-                    <ChevronDown className="w-3 h-3 rotate-180" />
-                    <span>{t('showLess', 'Show less')}</span>
-                  </button>
-                )}
-              </div>
-            ))
-          )}
-          {hasMoreSessions && (
-            <div className="px-4 py-3">
-              <button
-                onClick={() => void loadMoreSessions()}
-                disabled={loadingMoreSessions}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900"
-              >
-                {loadingMoreSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                <span>{loadingMoreSessions ? t('loading') : t('loadMore', 'Load more')}</span>
-              </button>
+              </section>
+              {taskSessionGroup && (
+                <section className="group/tasks-section mt-3">
+                  <div className="flex items-center gap-1 px-4 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-gray-400 select-none dark:text-zinc-600">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedProjectId(taskSessionGroup.id);
+                        toggleProjectCollapsed(taskSessionGroup.id);
+                      }}
+                      className="min-w-0 truncate rounded text-left transition-colors hover:text-gray-700 dark:hover:text-zinc-300"
+                      aria-label={t('selectTasks')}
+                    >
+                      {t('tasksSection')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleProjectCollapsed(taskSessionGroup.id);
+                      }}
+                      className="mr-auto rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                      aria-label={t('toggleTasks')}
+                    >
+                      {taskGroupCollapsed
+                        ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                        : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleCreateSessionInProject(taskSessionGroup.id);
+                      }}
+                      disabled={creating || taskSessionGroup.pathStatus !== 'available'}
+                      className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                      title={t('createTaskSession')}
+                      aria-label={t('createTaskSession')}
+                    >
+                      {creating && taskGroupSelected
+                        ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : <Plus className="h-3 w-3" />}
+                    </button>
+                    <span className="w-5 shrink-0 text-right tabular-nums">
+                      {taskSessionGroup.sessionCount}
+                    </span>
+                  </div>
+                  {!taskGroupCollapsed && (
+                    <div className="mt-1 space-y-1">
+                      {taskSessionGroup.sessions.map((session) => (
+                        <SessionSidebarItem
+                          key={session.id}
+                          session={session}
+                          selected={selectedSessionId === session.id}
+                          selectMode={selectMode}
+                          checked={checkedIds.has(session.id)}
+                          menuOpen={openMenuSessionId === session.id}
+                          renaming={renamingSessionId === session.id}
+                          renameValue={renameValue}
+                          renameSubmitting={renameSubmitting}
+                          t={t}
+                          renameInputRef={renameInputRef}
+                          onSelect={handleSelectSessionRow}
+                          onToggleCheck={handleToggleCheck}
+                          onRenameValueChange={setRenameValue}
+                          onSubmitRename={handleSubmitRename}
+                          onCancelRename={handleCancelRename}
+                          onToggleMenu={handleToggleSessionMenu}
+                        />
+                      ))}
+                      {hasMoreTaskSessions && (
+                        <div className="mx-4 py-1">
+                          <button
+                            type="button"
+                            onClick={() => void loadMoreSessions(taskSessionGroup.id)}
+                            disabled={loadingMoreProjectIds.has(taskSessionGroup.id)}
+                            className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                          >
+                            {loadingMoreProjectIds.has(taskSessionGroup.id)
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <ChevronDown className="h-3 w-3" />}
+                            {t('loadMore', 'Load more')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
           )}
         </div>
@@ -1457,6 +2194,196 @@ export default function SessionPage() {
         )}
       </div>
 
+      {projectDialogMode && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                {projectDialogMode === 'create' ? t('projectDialog.createTitle') : t('projectDialog.renameTitle')}
+              </h3>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-name">
+                {t('projectDialog.nameLabel')}
+              </label>
+              <input
+                id="session-project-name"
+                value={projectNameValue}
+                onChange={(event) => {
+                  setProjectNameValue(event.target.value);
+                  setProjectNameManuallyEdited(true);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    if (
+                      event.nativeEvent.isComposing
+                      || (projectDialogMode === 'create'
+                        && !projectWorktreeValue.trim()
+                        && !folderBrowser?.path.trim())
+                    ) {
+                      return;
+                    }
+                    void handleSubmitProject();
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    handleCloseProjectDialog();
+                  }
+                }}
+                disabled={projectSubmitting}
+                placeholder={t('projectDialog.namePlaceholder')}
+                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                autoFocus
+              />
+              {projectDialogMode === 'create' && (
+                <>
+                  <label className="block pt-1 text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
+                    {t('projectDialog.folderLabel')}
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id="session-project-worktree"
+                      value={projectWorktreeValue}
+                      onChange={(event) => {
+                        folderBrowserRequestIdRef.current += 1;
+                        folderBrowserInputPathRef.current = null;
+                        setFolderBrowserLoading(false);
+                        setProjectWorktreeValue(event.target.value);
+                        if (!projectNameManuallyEdited) {
+                          setProjectNameValue(getPathBasename(event.target.value));
+                        }
+                      }}
+                      disabled={projectSubmitting}
+                      placeholder={t('projectDialog.folderPlaceholder')}
+                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void loadFolderBrowser(projectWorktreeValue)}
+                      disabled={projectSubmitting || folderBrowserLoading}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                    >
+                      {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                      {t('projectDialog.chooseFolder')}
+                    </button>
+                  </div>
+                  {folderBrowser && (
+                    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+                      <div className="flex items-center gap-1 border-b border-zinc-100 bg-zinc-50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">
+                        <button
+                          type="button"
+                          onClick={() => folderBrowser.parent && void loadFolderBrowser(folderBrowser.parent)}
+                          disabled={!folderBrowser.parent || folderBrowserLoading}
+                          className="rounded p-1 text-zinc-500 hover:bg-zinc-200 disabled:opacity-30 dark:hover:bg-zinc-800"
+                          title={t('projectDialog.parentFolder')}
+                        >
+                          <ArrowUp className="h-3.5 w-3.5" />
+                        </button>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500" title={folderBrowser.path}>
+                          {folderBrowser.path}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectProjectFolder(folderBrowser.path)}
+                          className="rounded bg-zinc-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+                        >
+                          {t('projectDialog.selectCurrentFolder')}
+                        </button>
+                      </div>
+                      <div className="flex gap-1 overflow-x-auto border-b border-zinc-100 px-2 py-1 dark:border-zinc-800">
+                        {folderBrowser.roots.map((root) => (
+                          <button
+                            key={root.path}
+                            type="button"
+                            onClick={() => void loadFolderBrowser(root.path)}
+                            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                            title={root.path}
+                          >
+                            <HardDrive className="h-3 w-3" />
+                            {root.name}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="max-h-48 overflow-y-auto p-1">
+                        {folderBrowser.entries.length > 0 ? folderBrowser.entries.map((entry) => (
+                          <button
+                            key={entry.path}
+                            type="button"
+                            onClick={() => void loadFolderBrowser(entry.path)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                            title={entry.path}
+                          >
+                            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                            <span className="truncate">{entry.name}</span>
+                          </button>
+                        )) : (
+                          <div className="px-2 py-5 text-center text-xs text-zinc-400">
+                            {t('projectDialog.noSubfolders')}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={handleCloseProjectDialog}
+                disabled={projectSubmitting}
+                className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitProject()}
+                disabled={projectSubmitting}
+                className="inline-flex min-w-16 items-center justify-center rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+              >
+                {projectSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : t('save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {projectPendingDelete && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                {t('projectDialog.deleteTitle')}
+              </h3>
+            </div>
+            <div className="px-4 py-4 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+              {t('projectDialog.deleteDescription', { project: projectPendingDelete.label })}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setProjectPendingDelete(null)}
+                disabled={projectDeleting}
+                className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteProject()}
+                disabled={projectDeleting}
+                className="inline-flex min-w-16 items-center justify-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {projectDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                {t('projectDialog.confirmDelete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selectorTooltip && (
         <div
           className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30"
@@ -1487,14 +2414,14 @@ export default function SessionPage() {
         if (!session) return null;
         return (
           <div
-            className="fixed z-50 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
+            className="fixed z-50 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
             style={{ top: menuAnchor.top, right: menuAnchor.right }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <PencilLine className="w-3.5 h-3.5" />
               <span>{t('rename')}</span>
@@ -1502,7 +2429,7 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               disabled={downloadingSessionId === session.id}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
@@ -1510,16 +2437,16 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
               disabled={session.canWrite === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
-            <div className="mx-2.5 my-1 border-t border-gray-100 dark:border-zinc-800" />
+            <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
               disabled={session.canDelete === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>{t('deleteAction')}</span>

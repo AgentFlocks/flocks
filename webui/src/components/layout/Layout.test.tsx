@@ -306,7 +306,7 @@ describe('Layout onboarding entry', () => {
             { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('openai-compatible', 'OpenAI Compatible', []),
-          makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-chat', name: 'DeepSeek V3.2' }]),
+          makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }]),
         ],
       },
     });
@@ -481,7 +481,7 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
     expect(checkUpdate).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(getActiveNotifications).toHaveBeenCalledWith('zh-CN');
@@ -540,7 +540,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
@@ -611,7 +611,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
