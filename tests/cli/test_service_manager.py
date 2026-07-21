@@ -1485,7 +1485,7 @@ def test_build_frontend_env_sets_portal_defaults_when_env_missing(monkeypatch) -
     assert env["FLOCKS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL
     assert (
         env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"]
-        == "127.0.0.1,localhost,portalflocks.threatbook.cn"
+        == service_manager.DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
     )
 
 

@@ -42,7 +42,7 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: { message?: string }) => (options?.message ? `${key}: ${options.message}` : key),
+    t: (key: string) => key,
     i18n: { language: 'zh-CN' },
   }),
 }));
@@ -113,7 +113,7 @@ describe('Home create WebUI contract page entry', () => {
     useStatsMock.mockReturnValue({
       stats: null,
       loading: false,
-      error: new Error('登录状态已失效或 API Token 缺失，无法加载首页统计数据'),
+      error: new Error('authExpired'),
     });
 
     render(
@@ -122,7 +122,7 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText(/stats.loadErrorHint: 登录状态已失效/)).toBeInTheDocument();
+    expect(screen.getByText('stats.loadErrorHint.authExpired')).toBeInTheDocument();
     expect(screen.queryByText(/backend is running/i)).not.toBeInTheDocument();
   });
 });

@@ -26,6 +26,10 @@ export interface SystemStats {
   };
 }
 
+type StatsStatus = SystemStats['system']['status'];
+
+const LEGACY_RESOURCE_ENDPOINT_COUNT = 6;
+
 function shouldCountForAgentPage(agent: any): boolean {
   if (!agent || typeof agent !== 'object') return false;
   if (agent.mode === 'primary') return true;
@@ -51,46 +55,48 @@ type StatsEndpointFailure = {
   error: unknown;
 };
 
+type StatsFailureCode =
+  | 'authExpired'
+  | 'forbidden'
+  | 'notFound'
+  | 'partial'
+  | 'network'
+  | 'unavailable';
+
 function getErrorStatus(error: unknown): number | undefined {
   return (error as { response?: { status?: number } } | undefined)?.response?.status;
 }
 
-function getErrorDetail(error: unknown): string | undefined {
-  const responseData = (error as { response?: { data?: unknown } } | undefined)?.response?.data;
-  if (responseData && typeof responseData === 'object') {
-    const data = responseData as {
-      message?: unknown;
-      detail?: unknown;
-      error?: unknown;
-    };
-    for (const value of [data.message, data.detail, data.error]) {
-      if (typeof value === 'string' && value.trim()) return value.trim();
-    }
-  }
-
-  const message = (error as { message?: unknown } | undefined)?.message;
-  return typeof message === 'string' && message.trim() ? message.trim() : undefined;
-}
-
-function describeStatsFailure(failures: StatsEndpointFailure[]): string {
+function classifyStatsFailure(failures: StatsEndpointFailure[]): StatsFailureCode {
   if (failures.some((failure) => getErrorStatus(failure.error) === 401)) {
-    return '登录状态已失效或 API Token 缺失，无法加载首页统计数据';
+    return 'authExpired';
   }
 
   if (failures.some((failure) => getErrorStatus(failure.error) === 403)) {
-    return '当前账号无权加载首页统计数据';
+    return 'forbidden';
   }
 
   if (failures.some((failure) => getErrorStatus(failure.error) === 404)) {
-    return '统计接口不可用，已尝试兼容旧版接口但仍未成功';
+    return 'notFound';
   }
 
-  const firstDetail = failures.map((failure) => getErrorDetail(failure.error)).find(Boolean);
-  if (firstDetail) {
-    return `首页统计数据加载失败：${firstDetail}`;
+  if (failures.length > 0) {
+    return 'network';
   }
 
-  return '首页统计数据加载失败，请检查登录状态、API 路由或 Host/代理配置';
+  return 'unavailable';
+}
+
+function emptyStats(status: StatsStatus, message: StatsFailureCode): SystemStats {
+  return {
+    tasks: { week: 0, scheduledActive: 0 },
+    agents: { total: 0 },
+    workflows: { total: 0 },
+    skills: { total: 0 },
+    tools: { total: 0 },
+    models: { total: 0 },
+    system: { status, message },
+  };
 }
 
 async function getSystemStatsLegacy(): Promise<SystemStats> {
@@ -130,12 +136,19 @@ async function getSystemStatsLegacy(): Promise<SystemStats> {
   const totalModels = providerAll
     .filter((p: any) => connectedSet.has(p.id))
     .reduce((sum: number, p: any) => sum + Object.keys(p.models ?? {}).length, 0);
-  const allResourceEndpointsFailed = resourceFailures.length === 6;
+  const allResourceEndpointsFailed = resourceFailures.length === LEGACY_RESOURCE_ENDPOINT_COUNT;
+  const hasPartialResourceFailure = resourceFailures.length > 0 && !allResourceEndpointsFailed;
   const healthIsHealthy = health.data.status === 'healthy';
-  const healthMessage = typeof health.data.message === 'string' && health.data.message.trim()
-    ? health.data.message.trim()
-    : undefined;
-  const systemIsHealthy = healthIsHealthy && !allResourceEndpointsFailed;
+  const systemStatus: StatsStatus = !healthIsHealthy || allResourceEndpointsFailed
+    ? 'error'
+    : hasPartialResourceFailure
+      ? 'warning'
+      : 'healthy';
+  const systemMessage: string = systemStatus === 'healthy'
+    ? 'healthy'
+    : hasPartialResourceFailure
+      ? 'partial'
+      : classifyStatsFailure(allResourceEndpointsFailed ? resourceFailures : healthFailures);
 
   return {
     tasks: {
@@ -148,12 +161,8 @@ async function getSystemStatsLegacy(): Promise<SystemStats> {
     tools: { total: toolList.length },
     models: { total: totalModels },
     system: {
-      status: systemIsHealthy ? 'healthy' : 'error',
-      message: systemIsHealthy
-        ? '所有服务运行正常'
-        : allResourceEndpointsFailed
-          ? describeStatsFailure(resourceFailures)
-          : healthMessage ?? describeStatsFailure(healthFailures),
+      status: systemStatus,
+      message: systemMessage,
     },
   };
 }
@@ -167,22 +176,16 @@ export const statsApi = {
       }
       return await getSystemStatsLegacy();
     } catch (error) {
+      const summaryStatus = getErrorStatus(error);
+      if (summaryStatus === 401 || summaryStatus === 403) {
+        return emptyStats('error', classifyStatsFailure([{ endpoint: '/api/stats/summary', error }]));
+      }
+
       try {
         return await getSystemStatsLegacy();
       } catch (fallbackError) {
         console.error('Failed to fetch system stats:', fallbackError || error);
-        return {
-          tasks: { week: 0, scheduledActive: 0 },
-          agents: { total: 0 },
-          workflows: { total: 0 },
-          skills: { total: 0 },
-          tools: { total: 0 },
-          models: { total: 0 },
-          system: {
-            status: 'error',
-            message: describeStatsFailure([{ endpoint: '/api/stats/summary', error: fallbackError || error }]),
-          },
-        };
+        return emptyStats('error', classifyStatsFailure([{ endpoint: '/api/stats/summary', error: fallbackError || error }]));
       }
     }
   },

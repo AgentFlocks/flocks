@@ -97,6 +97,8 @@ describe('statsApi.getSystemStats', () => {
     const { statsApi } = await import('./stats');
     const result = await statsApi.getSystemStats();
     expect(result.skills.total).toBe(0);
+    expect(result.system.status).toBe('warning');
+    expect(result.system.message).toBe('partial');
   });
 
   it('reports an authentication-specific error when all stats resources fail with 401', async () => {
@@ -112,6 +114,23 @@ describe('statsApi.getSystemStats', () => {
     const result = await statsApi.getSystemStats();
 
     expect(result.system.status).toBe('error');
-    expect(result.system.message).toContain('登录状态已失效');
+    expect(result.system.message).toBe('authExpired');
+  });
+
+  it('does not issue legacy fallback requests when the summary endpoint returns 401', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/api/stats/summary') {
+        return Promise.reject({ response: { status: 401 } });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    const { statsApi } = await import('./stats');
+    const result = await statsApi.getSystemStats();
+
+    expect(result.system.status).toBe('error');
+    expect(result.system.message).toBe('authExpired');
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledWith('/api/stats/summary');
   });
 });
