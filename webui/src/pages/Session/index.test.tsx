@@ -637,6 +637,35 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
+  it('does not submit when Enter is pressed before choosing a project folder', async () => {
+    const user = userEvent.setup();
+    client.post.mockResolvedValue({
+      data: { id: 'prj_labs', name: 'Labs', worktree: '/tmp/labs' },
+    });
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
+    const nameInput = screen.getByLabelText('projectDialog.nameLabel');
+    await user.type(nameInput, 'Labs');
+    fireEvent.keyDown(nameInput, { key: 'Enter' });
+
+    expect(client.post).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+
+    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
+    await user.type(folderInput, '/tmp/labs');
+    fireEvent.keyDown(nameInput, { key: 'Enter', isComposing: true });
+    expect(client.post).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(nameInput, { key: 'Enter' });
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/project', {
+        name: 'Labs',
+        worktree: '/tmp/labs',
+      });
+    });
+  });
+
   it('shows the backend detail when project creation fails', async () => {
     const user = userEvent.setup();
     client.post.mockRejectedValue({

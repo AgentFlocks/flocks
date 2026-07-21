@@ -2139,6 +2139,14 @@ export default function SessionPage() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
+                    if (
+                      event.nativeEvent.isComposing
+                      || (projectDialogMode === 'create'
+                        && !projectWorktreeValue.trim()
+                        && !folderBrowser?.path.trim())
+                    ) {
+                      return;
+                    }
                     void handleSubmitProject();
                   }
                   if (event.key === 'Escape') {
